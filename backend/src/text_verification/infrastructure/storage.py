@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-import shutil
+import os
+import stat
 import zipfile
 from dataclasses import dataclass
 from io import BytesIO
@@ -43,9 +44,12 @@ class JobStorage:
     def save_stream(self, job_id: UUID, original_name: str, source: BinaryIO) -> StoredUpload:
         file_type = self._file_type_from_name(original_name)
         job_directory = self.job_directory(job_id)
+        self._ensure_safe_upload_path(job_directory)
+        job_directory.mkdir(parents=True, exist_ok=True)
         uploading_path = job_directory / "source.uploading"
         final_path = job_directory / f"source.{file_type.value}"
-        job_directory.mkdir(parents=True, exist_ok=True)
+        self._ensure_safe_upload_path(uploading_path)
+        self._ensure_safe_upload_path(final_path)
 
         size_bytes = 0
         try:
@@ -54,8 +58,11 @@ class JobStorage:
             if actual_file_type != file_type:
                 raise InvalidUpload("Upload extension does not match content.")
             uploading_path.replace(final_path)
-        except Exception:
-            self._remove_job_directory(job_directory)
+        except Exception as exc:
+            try:
+                self.delete_job(job_id)
+            except Exception as cleanup_error:
+                raise cleanup_error from exc
             raise
 
         return StoredUpload(
@@ -69,7 +76,7 @@ class JobStorage:
         return self.save_stream(job_id, original_name, BytesIO(data))
 
     def delete_job(self, job_id: UUID) -> None:
-        self._remove_job_directory(self.job_directory(job_id))
+        self._delete_job_directory(self.job_directory(job_id))
 
     def delete_expired_directories(self, live_job_ids: set[UUID]) -> list[UUID]:
         if not self._root.exists():
@@ -77,7 +84,7 @@ class JobStorage:
 
         deleted_job_ids: list[UUID] = []
         for directory in sorted(self._root.iterdir(), key=lambda path: path.name):
-            if not directory.is_dir():
+            if not directory.is_dir() and not self._is_reparse_point(directory):
                 continue
             try:
                 job_id = UUID(directory.name)
@@ -85,7 +92,10 @@ class JobStorage:
                 continue
             if str(job_id) != directory.name or job_id in live_job_ids:
                 continue
-            self._remove_job_directory(directory)
+            try:
+                self._delete_job_directory(directory)
+            except Exception:
+                continue
             deleted_job_ids.append(job_id)
         return deleted_job_ids
 
@@ -129,11 +139,24 @@ class JobStorage:
         data = path.read_bytes()
         for encoding in ("utf-8", "utf-16", "gbk"):
             try:
-                data.decode(encoding)
+                text = data.decode(encoding)
             except UnicodeDecodeError:
                 continue
-            return True
+            if self._is_reasonable_text(text):
+                return True
         return False
+
+    def _is_reasonable_text(self, text: str) -> bool:
+        if not text:
+            return True
+
+        printable = 0
+        for char in text:
+            if char == "\x00":
+                return False
+            if char.isprintable() or char in "\r\n\t":
+                printable += 1
+        return printable / len(text) >= 0.85
 
     def _validate_docx(self, path: Path) -> None:
         try:
@@ -178,5 +201,71 @@ class JobStorage:
         parts = PurePosixPath(name).parts
         return any(part in {".", ".."} for part in parts)
 
-    def _remove_job_directory(self, job_directory: Path) -> None:
-        shutil.rmtree(job_directory, ignore_errors=True)
+    def _ensure_safe_upload_path(self, path: Path) -> None:
+        if self._is_reparse_point(path):
+            raise InvalidUpload(f"Upload path is a reparse point: {path}")
+        if not self._is_within_root(path.resolve(strict=False)):
+            raise InvalidUpload(f"Upload path escapes storage root: {path}")
+
+    def _delete_job_directory(self, job_directory: Path) -> None:
+        is_reparse = self._is_reparse_point(job_directory)
+        if not job_directory.exists() and not job_directory.is_symlink() and not is_reparse:
+            return
+
+        if job_directory.is_symlink() or is_reparse:
+            self._remove_directory_entry(job_directory)
+            return
+
+        if not job_directory.is_dir():
+            return
+
+        self._delete_tree_contents(job_directory)
+        job_directory.rmdir()
+
+    def _delete_tree_contents(self, directory: Path) -> None:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                child = Path(entry.path)
+                if entry.is_dir(follow_symlinks=False) and not self._is_reparse_point(child):
+                    self._delete_tree_contents(child)
+                    child.rmdir()
+                else:
+                    self._remove_directory_entry(child)
+
+    def _remove_directory_entry(self, path: Path) -> None:
+        if path.is_dir() and not path.is_symlink() and not self._is_reparse_point(path):
+            path.rmdir()
+            return
+        if os.name == "nt" and self._is_reparse_point(path):
+            os.rmdir(path)
+            return
+        path.unlink()
+
+    def _is_within_root(self, path: Path) -> bool:
+        try:
+            path.relative_to(self._root)
+        except ValueError:
+            return False
+        return True
+
+    def _is_reparse_point(self, path: Path) -> bool:
+        if path.is_symlink():
+            return True
+        if os.name != "nt":
+            return False
+
+        isjunction = getattr(os.path, "isjunction", None)
+        if callable(isjunction):
+            try:
+                if isjunction(path):
+                    return True
+            except OSError:
+                pass
+
+        try:
+            stat_result = path.lstat()
+        except FileNotFoundError:
+            return False
+        return bool(
+            getattr(stat_result, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+        )
