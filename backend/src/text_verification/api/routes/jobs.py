@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import logging
+import ntpath
+import posixpath
 from datetime import UTC, datetime, timedelta
 from importlib import import_module
-from typing import Annotated, BinaryIO
+from typing import Annotated, BinaryIO, NoReturn
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
@@ -16,13 +18,16 @@ from text_verification.infrastructure.storage import (
     InvalidUpload,
     JobStorage,
     UnsupportedFileType,
+    UploadCleanupFailed,
     UploadTooLarge,
 )
 
 logger = logging.getLogger(__name__)
 
 DISPATCH_FAILURE_CODE = "job_dispatch_failed"
+DISPATCH_CLEANUP_FAILURE_CODE = "job_dispatch_cleanup_failed"
 DISPATCH_RECOVERY_FAILURE_CODE = "job_dispatch_recovery_failed"
+JOB_CLEANUP_FAILURE_CODE = "job_cleanup_failed"
 JOB_CREATE_FAILURE_CODE = "job_create_failed"
 INVALID_UPLOAD_CODE = "invalid_upload"
 UNSUPPORTED_FILE_TYPE_CODE = "unsupported_file_type"
@@ -31,10 +36,13 @@ UPLOAD_TOO_LARGE_CODE = "upload_too_large"
 router = APIRouter(tags=["jobs"])
 
 
-def dispatch_process_job(job_id: str) -> None:
-    worker_tasks = import_module("text_verification.worker.tasks")
-    process_job = worker_tasks.process_job
+class JobCleanupFailed(RuntimeError):
+    pass
 
+
+def dispatch_process_job(job_id: str) -> None:
+    worker_tasks = import_module("text_verification.workers.tasks")
+    process_job = worker_tasks.process_job
     process_job.delay(job_id)
 
 
@@ -46,13 +54,13 @@ def create_job(
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> JobRead:
     job_id = uuid4()
-    file_name = file.filename or "upload"
-    file_type_hint = _file_type_hint(file_name)
+    source_name = _normalize_source_name(file.filename or "upload")
+    file_type_hint = _file_type_hint(source_name)
     stored_size: int | None = None
     now = datetime.now(UTC)
 
     try:
-        stored = storage.save_stream(job_id, file_name, _binary_stream(file))
+        stored = storage.save_stream(job_id, source_name, _binary_stream(file))
         stored_size = stored.size_bytes
         file_type_hint = stored.file_type.value
         job = repository.create_job(
@@ -65,44 +73,62 @@ def create_job(
             expires_at=now + timedelta(hours=settings.job_retention_hours),
         )
         repository.commit()
+    except UploadCleanupFailed:
+        repository.rollback()
+        _raise_failure(
+            job_id,
+            file_type_hint,
+            stored_size,
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            JOB_CLEANUP_FAILURE_CODE,
+            "Unable to recover from the failed upload.",
+        )
     except UploadTooLarge:
         repository.rollback()
-        _cleanup_storage(job_id, storage)
-        _log_failure(job_id, file_type_hint, stored_size, UPLOAD_TOO_LARGE_CODE)
-        raise _http_error(
+        _raise_failure_after_cleanup(
+            job_id,
+            storage,
+            file_type_hint,
+            stored_size,
             status.HTTP_413_CONTENT_TOO_LARGE,
             UPLOAD_TOO_LARGE_CODE,
             "Upload exceeds the configured maximum size.",
-        ) from None
+        )
     except UnsupportedFileType:
         repository.rollback()
-        _cleanup_storage(job_id, storage)
-        _log_failure(job_id, file_type_hint, stored_size, UNSUPPORTED_FILE_TYPE_CODE)
-        raise _http_error(
+        _raise_failure_after_cleanup(
+            job_id,
+            storage,
+            file_type_hint,
+            stored_size,
             status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
             UNSUPPORTED_FILE_TYPE_CODE,
             "Upload file type is not supported.",
-        ) from None
+        )
     except InvalidUpload:
         repository.rollback()
-        _cleanup_storage(job_id, storage)
-        _log_failure(job_id, file_type_hint, stored_size, INVALID_UPLOAD_CODE)
-        raise _http_error(
+        _raise_failure_after_cleanup(
+            job_id,
+            storage,
+            file_type_hint,
+            stored_size,
             status.HTTP_400_BAD_REQUEST,
             INVALID_UPLOAD_CODE,
             "Upload content is invalid.",
-        ) from None
+        )
     except HTTPException:
         raise
     except Exception:
         repository.rollback()
-        _cleanup_storage(job_id, storage)
-        _log_failure(job_id, file_type_hint, stored_size, JOB_CREATE_FAILURE_CODE)
-        raise _http_error(
+        _raise_failure_after_cleanup(
+            job_id,
+            storage,
+            file_type_hint,
+            stored_size,
             status.HTTP_500_INTERNAL_SERVER_ERROR,
             JOB_CREATE_FAILURE_CODE,
             "Unable to create the job.",
-        ) from None
+        )
 
     try:
         dispatch_process_job(str(job_id))
@@ -125,7 +151,6 @@ def _recover_from_dispatch_failure(
     file_type_hint: str | None,
     stored_size: int | None,
 ) -> JobRead:
-    recovery_code = DISPATCH_FAILURE_CODE
     try:
         repository.transition(
             job_id,
@@ -136,27 +161,54 @@ def _recover_from_dispatch_failure(
             error_message="Job dispatch failed.",
         )
         repository.commit()
-        _cleanup_storage(job_id, storage)
     except Exception:
         repository.rollback()
-        recovery_code = DISPATCH_RECOVERY_FAILURE_CODE
+        _raise_failure(
+            job_id,
+            file_type_hint,
+            stored_size,
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            DISPATCH_RECOVERY_FAILURE_CODE,
+            "Unable to recover from the dispatch failure.",
+        )
 
-    _log_failure(job_id, file_type_hint, stored_size, recovery_code)
-    raise _http_error(
-        status.HTTP_503_SERVICE_UNAVAILABLE
-        if recovery_code == DISPATCH_FAILURE_CODE
-        else status.HTTP_500_INTERNAL_SERVER_ERROR,
-        recovery_code,
+    try:
+        _cleanup_storage(job_id, storage)
+    except JobCleanupFailed:
+        _raise_failure(
+            job_id,
+            file_type_hint,
+            stored_size,
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            DISPATCH_CLEANUP_FAILURE_CODE,
+            "Unable to clean up the failed dispatched job.",
+        )
+
+    _raise_failure(
+        job_id,
+        file_type_hint,
+        stored_size,
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        DISPATCH_FAILURE_CODE,
         "Unable to dispatch the job for processing.",
-    ) from None
+    )
 
 
 def _cleanup_storage(job_id: UUID, storage: JobStorage) -> None:
-    storage.delete_job(job_id)
+    try:
+        storage.delete_job(job_id)
+    except Exception as cleanup_error:
+        raise JobCleanupFailed("Failed to clean up the uploaded job directory.") from cleanup_error
 
 
 def _binary_stream(file: UploadFile) -> BinaryIO:
     return file.file
+
+
+def _normalize_source_name(file_name: str) -> str:
+    posix_name = posixpath.basename(file_name)
+    normalized = ntpath.basename(posix_name)
+    return normalized or "upload"
 
 
 def _file_type_hint(file_name: str) -> str | None:
@@ -168,6 +220,42 @@ def _file_type_hint(file_name: str) -> str | None:
 
 def _http_error(status_code: int, code: str, message: str) -> HTTPException:
     return HTTPException(status_code=status_code, detail={"code": code, "message": message})
+
+
+def _raise_failure_after_cleanup(
+    job_id: UUID,
+    storage: JobStorage,
+    file_type_hint: str | None,
+    stored_size: int | None,
+    status_code: int,
+    error_code: str,
+    message: str,
+) -> NoReturn:
+    try:
+        _cleanup_storage(job_id, storage)
+    except JobCleanupFailed:
+        _raise_failure(
+            job_id,
+            file_type_hint,
+            stored_size,
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            JOB_CLEANUP_FAILURE_CODE,
+            "Unable to recover from the failed upload.",
+        )
+
+    _raise_failure(job_id, file_type_hint, stored_size, status_code, error_code, message)
+
+
+def _raise_failure(
+    job_id: UUID,
+    file_type: str | None,
+    byte_size: int | None,
+    status_code: int,
+    error_code: str,
+    message: str,
+) -> NoReturn:
+    _log_failure(job_id, file_type, byte_size, error_code)
+    raise _http_error(status_code, error_code, message) from None
 
 
 def _log_failure(

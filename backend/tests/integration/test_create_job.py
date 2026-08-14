@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
@@ -13,8 +14,8 @@ from text_verification.infrastructure.storage import JobStorage
 
 
 class RecordingJobRepository:
-    def __init__(self, *, fail_on_commit_at: int | None = None) -> None:
-        self._fail_on_commit_at = fail_on_commit_at
+    def __init__(self, *, fail_on_commit_calls: set[int] | None = None) -> None:
+        self._fail_on_commit_calls = fail_on_commit_calls or set()
         self._commit_count = 0
         self.rollback_calls = 0
         self._jobs: dict[UUID, JobRead] = {}
@@ -100,7 +101,7 @@ class RecordingJobRepository:
 
     def commit(self) -> None:
         self._commit_count += 1
-        if self._fail_on_commit_at == self._commit_count:
+        if self._commit_count in self._fail_on_commit_calls:
             raise RuntimeError("database unavailable")
         self._jobs = {
             job_id: job.model_copy(deep=True) for job_id, job in self._working_jobs.items()
@@ -171,12 +172,19 @@ def _patch_dispatcher_if_present(monkeypatch, spy: TaskSpy) -> None:
 def repository(request) -> RecordingJobRepository:
     if "failing_repository" in request.fixturenames:
         return request.getfixturevalue("failing_repository")
+    if "recovery_failing_repository" in request.fixturenames:
+        return request.getfixturevalue("recovery_failing_repository")
     return RecordingJobRepository()
 
 
 @pytest.fixture
 def failing_repository() -> RecordingJobRepository:
-    return RecordingJobRepository(fail_on_commit_at=1)
+    return RecordingJobRepository(fail_on_commit_calls={1})
+
+
+@pytest.fixture
+def recovery_failing_repository() -> RecordingJobRepository:
+    return RecordingJobRepository(fail_on_commit_calls={2})
 
 
 @pytest.fixture
@@ -197,17 +205,21 @@ def task_spy(request, monkeypatch) -> TaskSpy:
     if "dispatch_error" in request.fixturenames:
         error = request.getfixturevalue("dispatch_error")
     spy = TaskSpy(error=error)
-    _patch_dispatcher_if_present(monkeypatch, spy)
+    if "client" in request.fixturenames:
+        _patch_dispatcher_if_present(monkeypatch, spy)
     return spy
 
 
 @pytest.fixture(autouse=True)
 def override_dependencies(
+    request,
     app: FastAPI,
     repository: RecordingJobRepository,
     storage: JobStorage,
     task_spy: TaskSpy,
 ) -> None:
+    if "client" not in request.fixturenames:
+        return
     del task_spy
     _override_dependency_if_present(
         app,
@@ -238,6 +250,33 @@ def test_create_txt_job_persists_and_enqueues(client, repository, task_spy) -> N
     assert "storage_key" not in payload
     assert task_spy.calls == [payload["job_id"]]
     assert repository.get_job(UUID(payload["job_id"])) is not None
+
+
+@pytest.mark.parametrize(
+    "client_name",
+    [
+        "../../secret.txt",
+        r"C:\Users\Alice\secret.txt",
+    ],
+)
+def test_create_job_normalizes_source_name_to_basename(
+    client,
+    repository,
+    task_spy,
+    client_name: str,
+) -> None:
+    response = client.post(
+        "/api/v1/jobs",
+        files={"file": (client_name, b"text", "text/plain")},
+    )
+
+    assert response.status_code == 202
+    payload = response.json()
+    assert payload["source_name"] == "secret.txt"
+    assert "/" not in payload["source_name"]
+    assert "\\" not in payload["source_name"]
+    assert task_spy.calls == [payload["job_id"]]
+    assert repository.get_job(UUID(payload["job_id"])).source_name == "secret.txt"
 
 
 def test_create_job_requires_file(client) -> None:
@@ -291,6 +330,31 @@ def test_database_failure_removes_written_job_directory(
     assert list(storage._root.iterdir()) == []
 
 
+def test_database_failure_cleanup_failure_returns_shaped_error(
+    client,
+    failing_repository,
+    storage,
+    monkeypatch,
+) -> None:
+    def failing_delete_job(job_id: UUID) -> None:
+        del job_id
+        raise PermissionError(r"locked C:\jobs\secret.txt")
+
+    monkeypatch.setattr(storage, "delete_job", failing_delete_job)
+
+    response = client.post(
+        "/api/v1/jobs",
+        files={"file": ("sample.txt", b"text", "text/plain")},
+    )
+
+    assert response.status_code == 500
+    assert response.json()["detail"]["code"] == "job_cleanup_failed"
+    assert failing_repository.rollback_calls == 1
+    assert len(list(storage._root.iterdir())) == 1
+    assert "locked" not in response.text.lower()
+    assert str(storage._root).lower() not in response.text.lower()
+
+
 def test_dispatch_failure_marks_job_failed_and_removes_upload(
     client,
     repository,
@@ -310,6 +374,81 @@ def test_dispatch_failure_marks_job_failed_and_removes_upload(
     assert job.error_code == "job_dispatch_failed"
     assert list(storage._root.iterdir()) == []
     assert str(dispatch_error) not in response.text
+
+
+def test_dispatch_failure_cleanup_failure_returns_shaped_error(
+    client,
+    repository,
+    storage,
+    dispatch_error,
+    monkeypatch,
+) -> None:
+    def failing_delete_job(job_id: UUID) -> None:
+        del job_id
+        raise PermissionError(r"locked C:\jobs\secret.txt")
+
+    monkeypatch.setattr(storage, "delete_job", failing_delete_job)
+
+    response = client.post(
+        "/api/v1/jobs",
+        files={"file": ("sample.txt", b"text", "text/plain")},
+    )
+
+    assert response.status_code == 500
+    assert response.json()["detail"]["code"] == "job_dispatch_cleanup_failed"
+    [job] = repository._jobs.values()
+    assert job.status == JobStatus.FAILED
+    assert job.error_code == "job_dispatch_failed"
+    assert repository.rollback_calls == 0
+    assert len(list(storage._root.iterdir())) == 1
+    assert "locked" not in response.text.lower()
+    assert str(storage._root).lower() not in response.text.lower()
+
+
+def test_dispatch_recovery_commit_failure_returns_shaped_error(
+    client,
+    recovery_failing_repository,
+    storage,
+    dispatch_error,
+) -> None:
+    response = client.post(
+        "/api/v1/jobs",
+        files={"file": ("sample.txt", b"text", "text/plain")},
+    )
+
+    assert response.status_code == 500
+    assert response.json()["detail"]["code"] == "job_dispatch_recovery_failed"
+    assert recovery_failing_repository.rollback_calls == 1
+    [job] = recovery_failing_repository._jobs.values()
+    assert job.status == JobStatus.QUEUED
+    assert job.error_code is None
+    assert len(list(storage._root.iterdir())) == 1
+    assert "database unavailable" not in response.text.lower()
+
+
+def test_dispatch_process_job_imports_planned_worker_task(monkeypatch) -> None:
+    task_calls: list[str] = []
+
+    def fake_import_module(module_name: str) -> object:
+        assert module_name == "text_verification.workers.tasks"
+
+        class FakeTask:
+            @staticmethod
+            def delay(job_id: str) -> None:
+                task_calls.append(job_id)
+
+        return SimpleNamespace(process_job=FakeTask())
+
+    monkeypatch.setattr(
+        "text_verification.api.routes.jobs.import_module",
+        fake_import_module,
+    )
+
+    from text_verification.api.routes.jobs import dispatch_process_job
+
+    dispatch_process_job("job-123")
+
+    assert task_calls == ["job-123"]
 
 
 def test_create_job_response_never_exposes_storage_path(client) -> None:

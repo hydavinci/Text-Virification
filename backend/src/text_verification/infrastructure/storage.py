@@ -37,6 +37,10 @@ class UnsupportedFileType(InvalidUpload):
     pass
 
 
+class UploadCleanupFailed(RuntimeError):
+    pass
+
+
 class JobStorage:
     def __init__(self, root: Path, max_upload_bytes: int) -> None:
         self._root = root.expanduser().resolve(strict=False)
@@ -62,11 +66,13 @@ class JobStorage:
             if actual_file_type != file_type:
                 raise InvalidUpload("Upload extension does not match content.")
             uploading_path.replace(final_path)
-        except Exception as exc:
+        except Exception:
             try:
                 self.delete_job(job_id)
             except Exception as cleanup_error:
-                raise cleanup_error from exc
+                raise UploadCleanupFailed(
+                    "Failed to clean up the uploaded job directory."
+                ) from cleanup_error
             raise
 
         return StoredUpload(
