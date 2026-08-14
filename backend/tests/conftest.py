@@ -5,6 +5,7 @@ from uuid import uuid4
 
 import pytest
 from alembic.config import Config
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
@@ -18,8 +19,17 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture
-def client() -> Iterator[TestClient]:
-    with TestClient(create_app()) as test_client:
+def app() -> Iterator[FastAPI]:
+    application = create_app()
+    try:
+        yield application
+    finally:
+        application.dependency_overrides.clear()
+
+
+@pytest.fixture
+def client(app: FastAPI) -> Iterator[TestClient]:
+    with TestClient(app) as test_client:
         yield test_client
 
 

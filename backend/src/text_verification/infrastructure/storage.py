@@ -33,6 +33,10 @@ class UploadTooLarge(InvalidUpload):
     pass
 
 
+class UnsupportedFileType(InvalidUpload):
+    pass
+
+
 class JobStorage:
     def __init__(self, root: Path, max_upload_bytes: int) -> None:
         self._root = root.expanduser().resolve(strict=False)
@@ -115,11 +119,11 @@ class JobStorage:
     def _file_type_from_name(self, original_name: str) -> FileType:
         suffix = Path(original_name).suffix.lower()
         if not suffix:
-            raise InvalidUpload("Upload file name must include a supported extension.")
+            raise UnsupportedFileType("Upload file name must include a supported extension.")
         try:
             return FileType(suffix.removeprefix("."))
         except ValueError as exc:
-            raise InvalidUpload(f"Unsupported upload extension: {suffix}") from exc
+            raise UnsupportedFileType(f"Unsupported upload extension: {suffix}") from exc
 
     def _detect_content_type(self, path: Path) -> FileType:
         if self._looks_like_pdf(path):
