@@ -5,6 +5,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
+from text_verification.domain.documents import FileType
+
 
 class JobStatus(StrEnum):
     QUEUED = "queued"
@@ -33,12 +35,12 @@ class JobRead(BaseModel):
 
     job_id: UUID
     source_name: str
-    file_type: str
+    file_type: FileType
     size_bytes: int
     status: JobStatus
     progress: int
-    error_code: str | None
-    error_message: str | None
+    error_code: str | None = None
+    error_message: str | None = None
     created_at: datetime
     expires_at: datetime
 

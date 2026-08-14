@@ -5,7 +5,7 @@ from pydantic import ValidationError
 
 from text_verification.domain.documents import DocumentModel, FileType, TextBlock
 from text_verification.domain.issues import Issue, IssueSeverity
-from text_verification.domain.jobs import JobStatus
+from text_verification.domain.jobs import JobRead, JobStatus
 
 
 def test_document_owns_block_local_offsets() -> None:
@@ -68,3 +68,33 @@ def test_job_status_contains_all_pipeline_states() -> None:
         "failed",
         "expired",
     }
+
+
+def test_job_read_rejects_unsupported_file_type() -> None:
+    with pytest.raises(ValidationError):
+        JobRead(
+            job_id=uuid4(),
+            source_name="sample.exe",
+            file_type="exe",
+            size_bytes=1,
+            status=JobStatus.QUEUED,
+            progress=0,
+            created_at="2026-08-14T00:00:00Z",
+            expires_at="2026-08-15T00:00:00Z",
+        )
+
+
+def test_job_read_allows_success_shape_without_error_fields() -> None:
+    job = JobRead(
+        job_id=uuid4(),
+        source_name="sample.docx",
+        file_type=FileType.DOCX,
+        size_bytes=1,
+        status=JobStatus.COMPLETED,
+        progress=100,
+        created_at="2026-08-14T00:00:00Z",
+        expires_at="2026-08-15T00:00:00Z",
+    )
+
+    assert job.error_code is None
+    assert job.error_message is None
