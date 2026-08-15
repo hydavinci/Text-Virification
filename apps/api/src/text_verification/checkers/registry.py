@@ -74,7 +74,7 @@ class CheckerRegistry:
                         continue
                     issues.extend(checker.check(document, context))
             except Exception as error:  # pragma: no cover - behavior asserted via public result
-                LOGGER.exception(
+                LOGGER.error(
                     "Checker category %s failed with %s",
                     category.value,
                     error.__class__.__name__,

@@ -4,6 +4,8 @@ x-backend-service: &backend-service
   build:
     context: ..
     dockerfile: apps/api/Dockerfile
+    args:
+      - PIP_INDEX_URL
   image: text-verification-backend:development
   env_file:
     - ../.env

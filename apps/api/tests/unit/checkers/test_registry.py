@@ -67,13 +67,18 @@ def test_registry_runs_only_enabled_categories() -> None:
     assert result.completed_categories == {CheckCategory.SECURITY}
 
 
-def test_registry_logs_exception_type_without_document_text(caplog) -> None:
+def test_registry_logs_only_category_and_exception_type(caplog) -> None:
+    secret = "SECRET-DOC-CONTENT-8472"
     registry = CheckerRegistry(
-        {CheckCategory.SECURITY: ExplodingChecker(RuntimeError("bad dictionary"))}
+        {
+            CheckCategory.SECURITY: ExplodingChecker(
+                RuntimeError(f"boom:{secret}:checker-message")
+            )
+        }
     )
 
     with caplog.at_level(logging.ERROR):
-        registry.run(
+        result = registry.run(
             build_document("绝对领先的正文"),
             CheckContext((), ()),
             CheckOptions(
@@ -82,8 +87,18 @@ def test_registry_logs_exception_type_without_document_text(caplog) -> None:
             ),
         )
 
+    assert result.issues == []
+    assert result.completed_categories == set()
+    assert result.failures == {
+        CheckCategory.SECURITY: CheckerFailure(
+            code="checker_failed",
+            message="安全检查暂时不可用。",
+        )
+    }
     assert "RuntimeError" in caplog.text
     assert "绝对领先的正文" not in caplog.text
+    assert secret not in caplog.text
+    assert "checker-message" not in caplog.text
 
 
 class StaticChecker:
