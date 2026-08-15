@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import logging
 import os
 import stat
 import zipfile
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 from uuid import UUID
 
 from text_verification.domain.documents import FileType
+
+logger = logging.getLogger(__name__)
 
 UPLOAD_CHUNK_BYTES = 1024 * 1024
 MAX_ZIP_ENTRIES = 10_000
@@ -98,23 +102,44 @@ class JobStorage:
     def delete_job(self, job_id: UUID) -> None:
         self._delete_job_directory(self.job_directory(job_id))
 
-    def delete_expired_directories(self, live_job_ids: set[UUID]) -> list[UUID]:
+    def delete_orphaned_directories(
+        self,
+        persisted_job_ids: set[UUID],
+        older_than: datetime,
+    ) -> list[UUID]:
         if not self._root.exists():
             return []
 
         deleted_job_ids: list[UUID] = []
         for directory in sorted(self._root.iterdir(), key=lambda path: path.name):
-            if not directory.is_dir() and not self._is_reparse_point(directory):
+            if self._is_reparse_point(directory) or not directory.is_dir():
                 continue
             try:
                 job_id = UUID(directory.name)
             except ValueError:
                 continue
-            if str(job_id) != directory.name or job_id in live_job_ids:
+            if str(job_id) != directory.name or job_id in persisted_job_ids:
                 continue
             try:
+                modified_at = datetime.fromtimestamp(
+                    directory.stat(follow_symlinks=False).st_mtime,
+                    UTC,
+                )
+                if modified_at >= older_than:
+                    continue
+                if not self._is_within_root(directory.resolve(strict=False)):
+                    continue
+                if self._is_reparse_point(directory):
+                    continue
                 self._delete_job_directory(directory)
-            except Exception:
+            except Exception as error:
+                logger.warning(
+                    "cleanup_orphaned_job_delete_failed",
+                    extra={
+                        "job_id": str(job_id),
+                        "error_type": type(error).__name__,
+                    },
+                )
                 continue
             deleted_job_ids.append(job_id)
         return deleted_job_ids

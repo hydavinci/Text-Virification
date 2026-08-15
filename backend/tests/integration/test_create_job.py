@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import io
+import zipfile
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -11,6 +13,14 @@ from fastapi import FastAPI
 from text_verification.domain.documents import FileType
 from text_verification.domain.jobs import JobEvent, JobRead, JobStatus
 from text_verification.infrastructure.storage import JobStorage
+
+
+def make_docx_bytes() -> bytes:
+    data = io.BytesIO()
+    with zipfile.ZipFile(data, "w") as archive:
+        archive.writestr("[Content_Types].xml", "<Types/>")
+        archive.writestr("word/document.xml", "<w:document/>")
+    return data.getvalue()
 
 
 class RecordingJobRepository:
@@ -250,6 +260,73 @@ def test_create_txt_job_persists_and_enqueues(client, repository, task_spy) -> N
     assert "storage_key" not in payload
     assert task_spy.calls == [payload["job_id"]]
     assert repository.get_job(UUID(payload["job_id"])) is not None
+
+
+@pytest.mark.parametrize(
+    ("name", "payload", "declared_mime"),
+    [
+        ("sample.txt", b"text", "application/pdf"),
+        ("sample.pdf", b"%PDF-1.7\n%%EOF", "text/plain"),
+        (
+            "sample.docx",
+            make_docx_bytes(),
+            "application/pdf",
+        ),
+    ],
+)
+def test_create_job_rejects_explicit_mime_mismatch_without_side_effects(
+    client,
+    repository,
+    storage,
+    task_spy,
+    name: str,
+    payload: bytes,
+    declared_mime: str,
+) -> None:
+    response = client.post(
+        "/api/v1/jobs",
+        files={"file": (name, payload, declared_mime)},
+    )
+
+    assert response.status_code == 415
+    assert response.json()["detail"]["code"] == "unsupported_file_type"
+    assert repository._jobs == {}
+    assert task_spy.calls == []
+    assert list(storage._root.iterdir()) == []
+
+
+@pytest.mark.parametrize("declared_mime", [None, "", "application/octet-stream"])
+def test_create_job_accepts_missing_blank_or_generic_mime(
+    client,
+    repository,
+    task_spy,
+    declared_mime: str | None,
+) -> None:
+    response = client.post(
+        "/api/v1/jobs",
+        files={"file": ("sample.txt", b"text", declared_mime)},
+    )
+
+    assert response.status_code == 202
+    payload = response.json()
+    assert repository.get_job(UUID(payload["job_id"])) is not None
+    assert task_spy.calls == [payload["job_id"]]
+
+
+def test_create_job_normalizes_explicit_mime_case_and_parameters(
+    client,
+    repository,
+    task_spy,
+) -> None:
+    response = client.post(
+        "/api/v1/jobs",
+        files={"file": ("sample.txt", b"text", " Text/Plain ; charset=utf-8 ")},
+    )
+
+    assert response.status_code == 202
+    payload = response.json()
+    assert repository.get_job(UUID(payload["job_id"])) is not None
+    assert task_spy.calls == [payload["job_id"]]
 
 
 @pytest.mark.parametrize(

@@ -108,6 +108,25 @@ def test_repository_expires_jobs_before_cutoff(db_session: Session) -> None:
     ]
 
 
+def test_repository_lists_all_persisted_job_ids(db_session: Session) -> None:
+    repository = JobRepository(db_session)
+    now = datetime.now(UTC)
+    job_ids = [uuid4(), uuid4()]
+    for job_id in job_ids:
+        repository.create_job(
+            job_id=job_id,
+            source_name=f"{job_id}.txt",
+            file_type="txt",
+            size_bytes=32,
+            storage_key=str(job_id),
+            created_at=now,
+            expires_at=now + timedelta(hours=1),
+        )
+    repository.commit()
+
+    assert repository.list_job_ids() == set(job_ids)
+
+
 def test_transition_rejects_stale_non_terminal_update_after_competing_expiry(
     db_session_factory: sessionmaker[Session],
 ) -> None:

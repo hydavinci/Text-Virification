@@ -69,6 +69,9 @@ class JobRepository:
             return None
         return self._to_job_read(row)
 
+    def list_job_ids(self) -> set[UUID]:
+        return set(self._session.scalars(select(JobRow.job_id)).all())
+
     def transition(
         self,
         job_id: UUID,

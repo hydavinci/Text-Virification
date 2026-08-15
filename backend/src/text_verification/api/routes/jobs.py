@@ -43,6 +43,11 @@ UNSUPPORTED_FILE_TYPE_CODE = "unsupported_file_type"
 UPLOAD_TOO_LARGE_CODE = "upload_too_large"
 SSE_KEEPALIVE_SECONDS = 15.0
 SSE_POLL_SECONDS = 0.5
+FILE_TYPE_MIME_TYPES = {
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "pdf": "application/pdf",
+    "txt": "text/plain",
+}
 
 router = APIRouter(tags=["jobs"])
 
@@ -108,6 +113,7 @@ def create_job(
         stored = storage.save_stream(job_id, source_name, _binary_stream(file))
         stored_size = stored.size_bytes
         file_type_hint = stored.file_type.value
+        _validate_declared_mime(file.content_type, stored.file_type.value)
         job = repository.create_job(
             job_id=job_id,
             source_name=stored.original_name,
@@ -248,6 +254,14 @@ def _cleanup_storage(job_id: UUID, storage: JobStorage) -> None:
 
 def _binary_stream(file: UploadFile) -> BinaryIO:
     return file.file
+
+
+def _validate_declared_mime(content_type: str | None, file_type: str) -> None:
+    normalized = (content_type or "").split(";", 1)[0].strip().lower()
+    if not normalized or normalized == "application/octet-stream":
+        return
+    if normalized != FILE_TYPE_MIME_TYPES[file_type]:
+        raise UnsupportedFileType("Declared MIME type does not match upload content.")
 
 
 def _parse_last_event_id(last_event_id: str | None) -> int:

@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, NoReturn, cast
 from uuid import UUID
 
+from celery import Task  # type: ignore[import-untyped]
 from sqlalchemy.orm import Session, sessionmaker
 
 from text_verification.config import get_settings
@@ -30,6 +31,9 @@ SessionFactoryProvider = Callable[[], sessionmaker[Session]]
 StorageFactory = Callable[[], JobStorage]
 RepositoryFactory = Callable[[Session], JobRepository]
 RunnerFactory = Callable[[JobRepository, JobStorage], PipelineRunner]
+PROCESS_JOB_MAX_RETRIES = 2
+PROCESS_JOB_RETRY_BACKOFF_CAP_SECONDS = 4
+
 
 def _get_job_storage() -> JobStorage:
     settings = get_settings()
@@ -42,43 +46,73 @@ REPOSITORY_FACTORY: RepositoryFactory = JobRepository
 RUNNER_FACTORY: RunnerFactory = PipelineRunner
 
 
-def _process_job(job_id: str) -> None:
+def _process_job(task: Task, job_id: str) -> None:
     parsed_job_id = UUID(job_id)
-    session_factory = SESSION_FACTORY_PROVIDER()
-    session = session_factory()
 
     try:
+        _run_process_job_attempt(parsed_job_id)
+    except Exception as error:
+        if task.request.retries < PROCESS_JOB_MAX_RETRIES:
+            raise task.retry(
+                exc=error,
+                countdown=_retry_countdown(task.request.retries),
+            ) from error
+        _persist_exhausted_failure(parsed_job_id, error)
+        _log_original_failure(parsed_job_id, error)
+        _reraise(error)
+
+
+def _run_process_job_attempt(job_id: UUID) -> None:
+    session: Session | None = None
+    repository: JobRepository | None = None
+    try:
+        session_factory = SESSION_FACTORY_PROVIDER()
+        session = session_factory()
         repository = REPOSITORY_FACTORY(session)
-        job = repository.get_job(parsed_job_id)
+        job = repository.get_job(job_id)
         if job is None or job.status in TERMINAL_STATUSES:
             return
 
-        try:
-            storage = STORAGE_FACTORY()
-            runner = RUNNER_FACTORY(repository, storage)
-            runner.run(parsed_job_id)
-        except TerminalJobStateError:
+        storage = STORAGE_FACTORY()
+        runner = RUNNER_FACTORY(repository, storage)
+        runner.run(job_id)
+    except TerminalJobStateError:
+        if repository is not None:
             repository.rollback()
-            return
-        except InvalidUpload as error:
-            _persist_expected_failure(repository, parsed_job_id, error)
-        except Exception as error:
-            _persist_unexpected_failure(repository, parsed_job_id, error)
+    except InvalidUpload as error:
+        if repository is None:
+            raise
+        _persist_expected_failure(repository, job_id, error)
+    except Exception:
+        if repository is not None:
+            repository.rollback()
+        raise
     finally:
-        session.close()
+        if session is not None:
+            session.close()
 
 
-process_job = cast(Any, celery_app.task(name="text_verification.process_job")(_process_job))
+process_job = cast(
+    Any,
+    celery_app.task(
+        bind=True,
+        name="text_verification.process_job",
+        max_retries=PROCESS_JOB_MAX_RETRIES,
+        acks_late=True,
+    )(_process_job),
+)
 
 
 def _cleanup_expired_jobs() -> list[str]:
-    cutoff = datetime.now(UTC)
+    now = datetime.now(UTC)
+    orphan_cutoff = now - timedelta(hours=get_settings().job_retention_hours)
     session_factory = SESSION_FACTORY_PROVIDER()
     session = session_factory()
     repository = REPOSITORY_FACTORY(session)
 
     try:
-        expired_job_ids = repository.expire_jobs_before(cutoff)
+        expired_job_ids = repository.expire_jobs_before(now)
+        persisted_job_ids = repository.list_job_ids()
         repository.commit()
     except Exception:
         repository.rollback()
@@ -104,6 +138,10 @@ def _cleanup_expired_jobs() -> list[str]:
             continue
         if had_directory:
             deleted_job_ids.append(str(job_id))
+    deleted_job_ids.extend(
+        str(job_id)
+        for job_id in storage.delete_orphaned_directories(persisted_job_ids, orphan_cutoff)
+    )
     return deleted_job_ids
 
 
@@ -130,28 +168,33 @@ def _persist_expected_failure(
     except Exception as persist_error:
         repository.rollback()
         _log_failure_persist_error(job_id, error, persist_error)
-        _log_original_failure(job_id, error)
-        _reraise(error)
+        raise
 
 
-def _persist_unexpected_failure(
-    repository: JobRepository,
+def _persist_exhausted_failure(
     job_id: UUID,
     error: Exception,
 ) -> None:
+    session: Session | None = None
+    repository: JobRepository | None = None
     try:
+        session_factory = SESSION_FACTORY_PROVIDER()
+        session = session_factory()
+        repository = REPOSITORY_FACTORY(session)
+        job = repository.get_job(job_id)
+        if job is None or job.status in TERMINAL_STATUSES:
+            return
         _mark_failed_job(repository, job_id, UNEXPECTED_FAILURE_MESSAGE)
     except TerminalJobStateError:
-        repository.rollback()
-        return
+        if repository is not None:
+            repository.rollback()
     except Exception as persist_error:
-        repository.rollback()
+        if repository is not None:
+            repository.rollback()
         _log_failure_persist_error(job_id, error, persist_error)
-        _log_original_failure(job_id, error)
-        _reraise(error)
-
-    _log_original_failure(job_id, error)
-    _reraise(error)
+    finally:
+        if session is not None:
+            session.close()
 
 
 def _mark_failed_job(
@@ -195,6 +238,10 @@ def _log_original_failure(job_id: UUID, error: Exception) -> None:
             "error_type": type(error).__name__,
         },
     )
+
+
+def _retry_countdown(retries: int) -> int:
+    return int(min(2**retries, PROCESS_JOB_RETRY_BACKOFF_CAP_SECONDS))
 
 
 def _reraise(error: Exception) -> NoReturn:

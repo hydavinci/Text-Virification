@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
@@ -51,6 +53,9 @@ class InMemoryCleanupRepository:
 
     def get_job(self, job_id: UUID) -> JobRead | None:
         return self._jobs.get(job_id)
+
+    def list_job_ids(self) -> set[UUID]:
+        return set(self._jobs)
 
     def expire_jobs_before(self, cutoff: datetime) -> list[UUID]:
         expired_job_ids: list[UUID] = []
@@ -120,6 +125,11 @@ def cleanup_dependencies(
     monkeypatch.setattr(worker_tasks, "SESSION_FACTORY_PROVIDER", lambda: session_factory)
     monkeypatch.setattr(worker_tasks, "REPOSITORY_FACTORY", lambda session: repository)
     monkeypatch.setattr(worker_tasks, "STORAGE_FACTORY", lambda: storage)
+    monkeypatch.setattr(
+        worker_tasks,
+        "get_settings",
+        lambda: SimpleNamespace(job_retention_hours=24),
+    )
     return session_factory
 
 
@@ -192,6 +202,33 @@ def test_cleanup_retries_storage_deletion_for_already_expired_jobs(
     ]
     assert caplog.records[0].job_id == str(expired_job.job_id)
     assert caplog.records[0].error_type == "PermissionError"
+
+
+def test_cleanup_sweeps_only_stale_unpersisted_directories(
+    repository: InMemoryCleanupRepository,
+    storage: JobStorage,
+) -> None:
+    from text_verification.workers.tasks import cleanup_expired_jobs
+
+    stale_orphan = uuid4()
+    fresh_orphan = uuid4()
+    persisted = repository.create_job(
+        status=JobStatus.COMPLETED,
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+    storage.save_bytes(stale_orphan, "stale.txt", b"stale")
+    storage.save_bytes(fresh_orphan, "fresh.txt", b"fresh")
+    storage.save_bytes(persisted.job_id, "persisted.txt", b"persisted")
+    stale_timestamp = (datetime.now(UTC) - timedelta(hours=25)).timestamp()
+    os.utime(storage.job_directory(stale_orphan), (stale_timestamp, stale_timestamp))
+    os.utime(storage.job_directory(persisted.job_id), (stale_timestamp, stale_timestamp))
+
+    deleted_job_ids = cleanup_expired_jobs()
+
+    assert deleted_job_ids == [str(stale_orphan)]
+    assert not storage.job_directory(stale_orphan).exists()
+    assert storage.job_directory(fresh_orphan).exists()
+    assert storage.job_directory(persisted.job_id).exists()
 
 
 def test_cleanup_is_scheduled_hourly() -> None:

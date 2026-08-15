@@ -1,5 +1,8 @@
 import io
+import logging
+import os
 import zipfile
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -235,25 +238,86 @@ def test_delete_job_surfaces_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "unlink", real_unlink)
 
 
-def test_delete_expired_directories_reports_only_removed_ids(tmp_path, monkeypatch):
+def test_delete_orphaned_directories_removes_only_stale_canonical_unpersisted_directories(
+    tmp_path,
+):
     storage = JobStorage(tmp_path, max_upload_bytes=1024)
-    failed = uuid4()
-    removed = uuid4()
-    storage.save_bytes(failed, "failed.txt", b"first")
-    storage.save_bytes(removed, "removed.txt", b"second")
+    cutoff = datetime.now(UTC) - timedelta(hours=1)
+    stale_orphan = uuid4()
+    fresh_orphan = uuid4()
+    stale_persisted = uuid4()
+    storage.save_bytes(stale_orphan, "stale.txt", b"stale")
+    storage.save_bytes(fresh_orphan, "fresh.txt", b"fresh")
+    storage.save_bytes(stale_persisted, "persisted.txt", b"persisted")
+    malformed = tmp_path / "not-a-job"
+    malformed.mkdir()
 
-    real_unlink = Path.unlink
+    stale_timestamp = (cutoff - timedelta(minutes=1)).timestamp()
+    os.utime(storage.job_directory(stale_orphan), (stale_timestamp, stale_timestamp))
+    os.utime(storage.job_directory(stale_persisted), (stale_timestamp, stale_timestamp))
+    os.utime(malformed, (stale_timestamp, stale_timestamp))
 
-    def failing_unlink(self, *args, **kwargs):
-        if str(self).endswith("source.txt") and str(failed) in str(self):
+    deleted = storage.delete_orphaned_directories({stale_persisted}, cutoff)
+
+    assert deleted == [stale_orphan]
+    assert not storage.job_directory(stale_orphan).exists()
+    assert storage.job_directory(fresh_orphan).exists()
+    assert storage.job_directory(stale_persisted).exists()
+    assert malformed.exists()
+
+
+def test_delete_orphaned_directories_logs_failure_and_retries_later(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    storage = JobStorage(tmp_path, max_upload_bytes=1024)
+    cutoff = datetime.now(UTC) - timedelta(hours=1)
+    orphan = uuid4()
+    storage.save_bytes(orphan, "orphan.txt", b"orphan")
+    stale_timestamp = (cutoff - timedelta(minutes=1)).timestamp()
+    os.utime(storage.job_directory(orphan), (stale_timestamp, stale_timestamp))
+    real_delete = storage._delete_job_directory
+    attempts = 0
+
+    def flaky_delete(path: Path) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
             raise PermissionError("locked")
-        return real_unlink(self, *args, **kwargs)
+        real_delete(path)
 
-    monkeypatch.setattr(Path, "unlink", failing_unlink)
+    monkeypatch.setattr(storage, "_delete_job_directory", flaky_delete)
 
-    deleted = storage.delete_expired_directories(set())
+    with caplog.at_level(logging.WARNING, logger="text_verification.infrastructure.storage"):
+        first_deleted = storage.delete_orphaned_directories(set(), cutoff)
+        second_deleted = storage.delete_orphaned_directories(set(), cutoff)
 
-    assert set(deleted) == {removed}
-    assert failed not in deleted
-    assert storage.job_directory(failed).exists()
-    assert not storage.job_directory(removed).exists()
+    assert first_deleted == []
+    assert second_deleted == [orphan]
+    assert attempts == 2
+    assert not storage.job_directory(orphan).exists()
+    assert [record.getMessage() for record in caplog.records] == [
+        "cleanup_orphaned_job_delete_failed"
+    ]
+    assert caplog.records[0].job_id == str(orphan)
+    assert caplog.records[0].error_type == "PermissionError"
+
+
+def test_delete_orphaned_directories_preserves_symlink_entry(tmp_path):
+    storage = JobStorage(tmp_path, max_upload_bytes=1024)
+    cutoff = datetime.now(UTC) - timedelta(hours=1)
+    orphan = uuid4()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = storage.job_directory(orphan)
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+
+    deleted = storage.delete_orphaned_directories(set(), cutoff)
+
+    assert deleted == []
+    assert link.is_symlink()
+    assert outside.exists()
