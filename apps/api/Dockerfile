@@ -1,14 +1,16 @@
 FROM python:3.12-slim AS builder
 
+ARG PIP_INDEX_URL
+
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1
 
 WORKDIR /build
 
-COPY pyproject.toml ./
-COPY src ./src
+COPY apps/api/pyproject.toml ./apps/api/pyproject.toml
+COPY apps/api/src ./apps/api/src
 
-RUN python -m pip wheel --wheel-dir /wheels ".[dev]"
+RUN python -m pip wheel --wheel-dir /wheels "./apps/api[dev]"
 
 FROM python:3.12-slim AS runtime
 
@@ -26,9 +28,10 @@ RUN python -m pip install --no-index --find-links=/wheels "text-verification[dev
 
 WORKDIR /app
 
-COPY alembic.ini ./
-COPY alembic ./alembic
-COPY tests ./tests
+COPY apps/api/alembic.ini ./alembic.ini
+COPY apps/api/alembic ./alembic
+COPY apps/api/tests ./tests
+COPY resources ./resources
 
 RUN mkdir -p /var/lib/text-verification/jobs \
     && chown -R app:app /app /var/lib/text-verification

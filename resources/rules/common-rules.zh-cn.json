@@ -1,0 +1,65 @@
+{
+  "version": "2026-08-15",
+  "rules": [
+    {
+      "id": "character-simplified-001",
+      "category": "character",
+      "severity": "warning",
+      "pattern": "祕密",
+      "suggestion": "秘密",
+      "message": "请统一使用简体字。",
+      "scenarios": ["general", "business", "news", "legal", "education", "medical"],
+      "auto_fixable": true
+    },
+    {
+      "id": "vocabulary-tone-001",
+      "category": "vocabulary",
+      "severity": "info",
+      "pattern": "敝司",
+      "suggestion": "本公司",
+      "message": "建议使用更通用的称谓。",
+      "scenarios": ["business", "legal"],
+      "auto_fixable": true
+    },
+    {
+      "id": "sentence-repetition-001",
+      "category": "sentence",
+      "severity": "warning",
+      "pattern": "非常非常",
+      "suggestion": "非常",
+      "message": "避免重复堆叠的句式。",
+      "scenarios": ["general", "business", "news", "education"],
+      "auto_fixable": true
+    },
+    {
+      "id": "format-punctuation-001",
+      "category": "format",
+      "severity": "info",
+      "pattern": "联系电话 :",
+      "suggestion": "联系电话：",
+      "message": "中文语境请使用中文冒号且不要保留多余空格。",
+      "scenarios": ["general", "business", "legal", "medical"],
+      "auto_fixable": true
+    },
+    {
+      "id": "discourse-order-001",
+      "category": "discourse",
+      "severity": "warning",
+      "pattern": "总之首先",
+      "suggestion": "首先",
+      "message": "请按清晰的篇章顺序组织内容。",
+      "scenarios": ["general", "business", "education", "news"],
+      "auto_fixable": true
+    },
+    {
+      "id": "security-ad-001",
+      "category": "security",
+      "severity": "warning",
+      "pattern": "绝对领先",
+      "suggestion": "领先",
+      "message": "避免使用绝对化表述。",
+      "scenarios": ["general", "business", "news"],
+      "auto_fixable": true
+    }
+  ]
+}

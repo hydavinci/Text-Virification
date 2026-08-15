@@ -29,6 +29,7 @@ class Checker(Protocol):
     name: str
     version: str
     supported_languages: set[str]
+    supported_scenarios: set[str]
 
     def check(self, document: DocumentModel, context: CheckContext) -> list[Issue]: ...
 

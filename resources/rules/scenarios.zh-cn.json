@@ -1,0 +1,29 @@
+{
+  "version": "2026-08-15",
+  "scenarios": [
+    {
+      "id": "general",
+      "label": "通用"
+    },
+    {
+      "id": "business",
+      "label": "商务"
+    },
+    {
+      "id": "news",
+      "label": "新闻"
+    },
+    {
+      "id": "legal",
+      "label": "法务"
+    },
+    {
+      "id": "education",
+      "label": "教育"
+    },
+    {
+      "id": "medical",
+      "label": "医疗"
+    }
+  ]
+}

@@ -2,7 +2,8 @@ name: text-verification
 
 x-backend-service: &backend-service
   build:
-    context: ../apps/api
+    context: ..
+    dockerfile: apps/api/Dockerfile
   image: text-verification-backend:development
   env_file:
     - ../.env
