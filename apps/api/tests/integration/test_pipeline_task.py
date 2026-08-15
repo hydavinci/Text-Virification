@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
 
-from text_verification.domain.documents import FileType
+from text_verification.domain.documents import DocumentModel, FileType
 from text_verification.domain.jobs import (
     TERMINAL_STATUSES,
     JobEvent,
@@ -22,6 +23,7 @@ class InMemoryJobRepository:
         self._fail_on_commit_calls = fail_on_commit_calls or set()
         self._commit_count = 0
         self.rollback_calls = 0
+        self._transaction_observers: list[object] = []
         self._jobs: dict[UUID, JobRead] = {}
         self._events: dict[UUID, list[JobEvent]] = {}
         self._reset_working_copy()
@@ -103,6 +105,9 @@ class InMemoryJobRepository:
             event for event in self._events.get(job_id, []) if event.sequence > after_sequence
         ]
 
+    def register_transaction_observer(self, observer: object) -> None:
+        self._transaction_observers.append(observer)
+
     def commit(self) -> None:
         self._commit_count += 1
         if self._commit_count in self._fail_on_commit_calls:
@@ -113,10 +118,14 @@ class InMemoryJobRepository:
         self._events = {
             job_id: [event for event in events] for job_id, events in self._working_events.items()
         }
+        for observer in self._transaction_observers:
+            observer.commit()
         self._reset_working_copy()
 
     def rollback(self) -> None:
         self.rollback_calls += 1
+        for observer in self._transaction_observers:
+            observer.rollback()
         self._reset_working_copy()
 
     def _reset_working_copy(self) -> None:
@@ -179,6 +188,73 @@ class FlakyGetJobRepository(InMemoryJobRepository):
         return super().get_job(job_id)
 
 
+class InMemoryAnalysisRepository:
+    def __init__(self, repository: InMemoryJobRepository) -> None:
+        repository.register_transaction_observer(self)
+        self._documents: dict[UUID, DocumentModel] = {}
+        self._issues: dict[UUID, list[object]] = {}
+        self._failures: dict[UUID, dict[object, object]] = {}
+        self._last_job_id: UUID | None = None
+        self._working_last_job_id: UUID | None = None
+        self._reset_working_copy()
+
+    def replace_analysis(self, job_id, document, issues, failures) -> None:
+        self._working_documents[job_id] = document.model_copy(deep=True)
+        self._working_issues[job_id] = [issue.model_copy(deep=True) for issue in issues]
+        self._working_failures[job_id] = dict(failures)
+        self._working_last_job_id = job_id
+
+    def get_document(self, job_id: UUID) -> DocumentModel | None:
+        document = self._documents.get(job_id)
+        if document is None:
+            return None
+        return document.model_copy(deep=True)
+
+    @property
+    def issues(self) -> list[object]:
+        if self._last_job_id is None:
+            return []
+        return [issue.model_copy(deep=True) for issue in self._issues.get(self._last_job_id, [])]
+
+    @property
+    def failures(self) -> dict[object, object]:
+        if self._last_job_id is None:
+            return {}
+        return dict(self._failures.get(self._last_job_id, {}))
+
+    def commit(self) -> None:
+        self._documents = {
+            job_id: document.model_copy(deep=True)
+            for job_id, document in self._working_documents.items()
+        }
+        self._issues = {
+            job_id: [issue.model_copy(deep=True) for issue in issues]
+            for job_id, issues in self._working_issues.items()
+        }
+        self._failures = {
+            job_id: dict(failures) for job_id, failures in self._working_failures.items()
+        }
+        self._last_job_id = self._working_last_job_id
+        self._reset_working_copy()
+
+    def rollback(self) -> None:
+        self._reset_working_copy()
+
+    def _reset_working_copy(self) -> None:
+        self._working_documents = {
+            job_id: document.model_copy(deep=True)
+            for job_id, document in self._documents.items()
+        }
+        self._working_issues = {
+            job_id: [issue.model_copy(deep=True) for issue in issues]
+            for job_id, issues in self._issues.items()
+        }
+        self._working_failures = {
+            job_id: dict(failures) for job_id, failures in self._failures.items()
+        }
+        self._working_last_job_id = self._last_job_id
+
+
 @dataclass
 class FakeSession:
     closed: bool = False
@@ -207,18 +283,34 @@ class ExplodingRunner:
 
 
 @dataclass
+class ExplodingChecker:
+    error: Exception
+
+    name: str = "explode"
+    version: str = "1"
+    supported_languages: set[str] = field(default_factory=lambda: {"zh-CN"})
+
+    def check(self, document, context):
+        del document, context
+        raise self.error
+
+
+@dataclass
 class FlakyRunnerFactory:
     failures_remaining: int
     attempts: int = 0
 
-    def __call__(self, repository, storage):
-        from text_verification.workers.pipeline import PipelineRunner
-
+    def __call__(self, session, repository, storage):
+        del session
         self.attempts += 1
         if self.failures_remaining:
             self.failures_remaining -= 1
             return ExplodingRunner(RuntimeError("transient parser failure"))
-        return PipelineRunner(repository, storage)
+        return _build_in_memory_runner_factory(InMemoryAnalysisRepository(repository))(
+            None,
+            repository,
+            storage,
+        )
 
 
 @dataclass
@@ -269,13 +361,15 @@ def _seed_txt_job(
     storage: JobStorage,
     *,
     persist_source: bool = True,
+    text: str | bytes = "需要检查",
 ) -> UUID:
     job_id = uuid4()
     created_at = datetime.now(UTC)
     size_bytes = 8
 
     if persist_source:
-        stored = storage.save_bytes(job_id, "sample.txt", "需要检查".encode())
+        payload = text.encode("utf-8") if isinstance(text, str) else text
+        stored = storage.save_bytes(job_id, "sample.txt", payload)
         size_bytes = stored.size_bytes
 
     repository.create_job(
@@ -304,17 +398,105 @@ def _configure_worker_dependencies(
     monkeypatch.setattr(worker_tasks, "SESSION_FACTORY_PROVIDER", lambda: session_factory)
     monkeypatch.setattr(worker_tasks, "STORAGE_FACTORY", lambda: storage)
     monkeypatch.setattr(worker_tasks, "REPOSITORY_FACTORY", lambda session: repository)
-    if runner_factory is not None:
-        monkeypatch.setattr(worker_tasks, "RUNNER_FACTORY", runner_factory)
+    monkeypatch.setattr(
+        worker_tasks,
+        "RUNNER_FACTORY",
+        runner_factory
+        or _build_in_memory_runner_factory(InMemoryAnalysisRepository(repository)),
+    )
     return session_factory
 
 
-def test_process_job_eager_task_completes_job(monkeypatch, worker_storage, celery_eager) -> None:
+def _build_parser_registry():
+    from text_verification.parsers import DocxParser, ParserRegistry, PdfParser, TxtParser
+
+    return ParserRegistry((TxtParser(), PdfParser(), DocxParser()))
+
+
+def _build_real_checker_registry():
+    from text_verification.checkers import CheckerRegistry, RuleLoader
+
+    repository_root = Path(__file__).resolve().parents[4]
+    rule_set = RuleLoader(
+        repository_root / "resources" / "rules" / "common-rules.zh-cn.json",
+        repository_root / "resources" / "rules" / "scenarios.zh-cn.json",
+    ).load()
+    return CheckerRegistry.from_rule_set(rule_set)
+
+
+def checker_registry_with_failure(failing_category):
+    from collections import defaultdict
+
+    from text_verification.checkers import CheckerRegistry, RuleChecker, RuleLoader
+
+    repository_root = Path(__file__).resolve().parents[4]
+    rule_set = RuleLoader(
+        repository_root / "resources" / "rules" / "common-rules.zh-cn.json",
+        repository_root / "resources" / "rules" / "scenarios.zh-cn.json",
+    ).load()
+    grouped = defaultdict(list)
+    for rule in rule_set.rules:
+        if rule.category == failing_category:
+            grouped[rule.category].append(ExplodingChecker(RuntimeError("checker offline")))
+            continue
+        grouped[rule.category].append(
+            RuleChecker(rule, source="local_rules", source_version=rule_set.version)
+        )
+    return CheckerRegistry(grouped)
+
+
+def _build_in_memory_runner_factory(
+    analysis_repository: InMemoryAnalysisRepository,
+    *,
+    checker_registry=None,
+):
+    parsers = _build_parser_registry()
+    checkers = checker_registry or _build_real_checker_registry()
+
+    def runner_factory(session, repository, storage):
+        del session
+        from text_verification.workers.pipeline import PipelineRunner
+
+        return PipelineRunner(repository, analysis_repository, storage, parsers, checkers)
+
+    return runner_factory
+
+
+def configure_real_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: InMemoryJobRepository,
+    analysis_repository: InMemoryAnalysisRepository,
+    storage: JobStorage,
+    *,
+    checker_registry=None,
+) -> SessionFactorySpy:
+    return _configure_worker_dependencies(
+        monkeypatch,
+        repository,
+        storage,
+        runner_factory=_build_in_memory_runner_factory(
+            analysis_repository,
+            checker_registry=checker_registry,
+        ),
+    )
+
+
+def test_process_job_persists_analysis_and_completes(
+    monkeypatch,
+    worker_storage,
+    celery_eager,
+) -> None:
     from text_verification.workers.tasks import process_job
 
     repository = InMemoryJobRepository()
-    job_id = _seed_txt_job(repository, worker_storage)
-    session_factory = _configure_worker_dependencies(monkeypatch, repository, worker_storage)
+    analysis_repository = InMemoryAnalysisRepository(repository)
+    job_id = _seed_txt_job(repository, worker_storage, text="这是绝对领先的方案")
+    session_factory = configure_real_pipeline(
+        monkeypatch,
+        repository,
+        analysis_repository,
+        worker_storage,
+    )
 
     result = process_job.delay(str(job_id))
 
@@ -323,12 +505,83 @@ def test_process_job_eager_task_completes_job(monkeypatch, worker_storage, celer
     assert job is not None
     assert job.status == JobStatus.COMPLETED
     assert job.progress == 100
+    assert analysis_repository.get_document(job_id) is not None
+    assert [issue.rule_id for issue in analysis_repository.issues] == ["security-ad-001"]
     assert [event.status for event in repository.list_events_after(job_id, 0)] == [
         JobStatus.QUEUED,
         JobStatus.UPLOAD_VALIDATED,
         JobStatus.PARSING,
         JobStatus.COMPLETED,
     ]
+    assert len(session_factory.sessions) == 1
+    assert session_factory.sessions[0].closed is True
+
+
+def test_process_job_marks_partial_and_keeps_available_issues(
+    monkeypatch,
+    worker_storage,
+    celery_eager,
+) -> None:
+    from text_verification.checkers import CheckCategory
+    from text_verification.workers.tasks import process_job
+
+    repository = InMemoryJobRepository()
+    analysis_repository = InMemoryAnalysisRepository(repository)
+    job_id = _seed_txt_job(repository, worker_storage, text="祕密且绝对领先")
+    session_factory = configure_real_pipeline(
+        monkeypatch,
+        repository,
+        analysis_repository,
+        worker_storage,
+        checker_registry=checker_registry_with_failure(CheckCategory.SECURITY),
+    )
+
+    result = process_job.delay(str(job_id))
+
+    assert result.successful()
+    job = repository.get_job(job_id)
+    assert job is not None
+    assert job.status == JobStatus.PARTIAL
+    assert [issue.rule_id for issue in analysis_repository.issues] == [
+        "character-simplified-001"
+    ]
+    assert analysis_repository.failures[CheckCategory.SECURITY].code == "checker_failed"
+    assert [event.status for event in repository.list_events_after(job_id, 0)] == [
+        JobStatus.QUEUED,
+        JobStatus.UPLOAD_VALIDATED,
+        JobStatus.PARSING,
+        JobStatus.PARTIAL,
+    ]
+    assert len(session_factory.sessions) == 1
+    assert session_factory.sessions[0].closed is True
+
+
+def test_process_job_parser_errors_fail_without_retry_and_keep_public_message(
+    monkeypatch,
+    worker_storage,
+    celery_eager,
+) -> None:
+    from text_verification.workers.tasks import process_job
+
+    repository = InMemoryJobRepository()
+    analysis_repository = InMemoryAnalysisRepository(repository)
+    job_id = _seed_txt_job(repository, worker_storage, text="需要检查".encode("utf-16"))
+    session_factory = configure_real_pipeline(
+        monkeypatch,
+        repository,
+        analysis_repository,
+        worker_storage,
+    )
+
+    result = process_job.delay(str(job_id))
+
+    assert result.successful()
+    job = repository.get_job(job_id)
+    assert job is not None
+    assert job.status == JobStatus.FAILED
+    assert job.error_code == "txt_binary_content"
+    assert job.error_message == "无法解析文本文件。"
+    assert analysis_repository.get_document(job_id) is None
     assert len(session_factory.sessions) == 1
     assert session_factory.sessions[0].closed is True
 
@@ -554,8 +807,8 @@ def test_process_job_invalid_upload_is_not_retried(
     job_id = _seed_txt_job(repository, worker_storage)
     attempts = 0
 
-    def invalid_runner_factory(repository, storage):
-        del repository, storage
+    def invalid_runner_factory(session, repository, storage):
+        del session, repository, storage
         nonlocal attempts
         attempts += 1
         return ExplodingRunner(InvalidUpload("invalid upload"))
@@ -595,6 +848,11 @@ def test_process_job_retries_transient_session_factory_failure(
     monkeypatch.setattr(worker_tasks, "SESSION_FACTORY_PROVIDER", lambda: session_factory)
     monkeypatch.setattr(worker_tasks, "STORAGE_FACTORY", lambda: worker_storage)
     monkeypatch.setattr(worker_tasks, "REPOSITORY_FACTORY", lambda session: repository)
+    monkeypatch.setattr(
+        worker_tasks,
+        "RUNNER_FACTORY",
+        _build_in_memory_runner_factory(InMemoryAnalysisRepository(repository)),
+    )
 
     result = process_job.delay(str(job_id))
 
