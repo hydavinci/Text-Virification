@@ -65,6 +65,45 @@ def test_accepts_supported_text_encodings(tmp_path, name, payload):
     assert storage.save_bytes(uuid4(), name, payload).file_type.value == "txt"
 
 
+def test_source_path_returns_existing_expected_source_file(tmp_path):
+    storage = JobStorage(tmp_path, max_upload_bytes=1024)
+    job_id = uuid4()
+    stored = storage.save_bytes(job_id, "sample.txt", b"hello")
+
+    source_path = storage.source_path(job_id, stored.file_type)
+
+    assert source_path == stored.path
+    assert source_path.read_bytes() == b"hello"
+
+
+def test_source_path_rejects_job_directory_outside_storage_root(tmp_path, monkeypatch):
+    storage = JobStorage(tmp_path, max_upload_bytes=1024)
+    job_id = uuid4()
+    outside_directory = tmp_path.parent / str(job_id)
+    outside_directory.mkdir()
+    (outside_directory / "source.txt").write_bytes(b"hello")
+    monkeypatch.setattr(storage, "job_directory", lambda actual_job_id: outside_directory)
+
+    with pytest.raises(InvalidUpload, match="escapes storage root"):
+        storage.source_path(job_id, "txt")
+
+
+def test_source_path_rejects_reparse_point_job_directory(monkeypatch, tmp_path):
+    storage = JobStorage(tmp_path, max_upload_bytes=1024)
+    job_id = uuid4()
+    stored = storage.save_bytes(job_id, "sample.txt", b"hello")
+    job_directory = stored.path.parent
+    monkeypatch.setattr(
+        JobStorage,
+        "_is_reparse_point",
+        lambda self, path: path == job_directory,
+        raising=False,
+    )
+
+    with pytest.raises(InvalidUpload, match="reparse point"):
+        storage.source_path(job_id, "txt")
+
+
 def test_rejects_binary_txt_payload(tmp_path):
     storage = JobStorage(tmp_path, max_upload_bytes=1024)
 

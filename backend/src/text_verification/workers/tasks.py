@@ -48,8 +48,9 @@ def _process_job(job_id: str) -> None:
         if job is None or job.status in TERMINAL_STATUSES:
             return
 
-        runner = RUNNER_FACTORY(repository, STORAGE_FACTORY())
         try:
+            storage = STORAGE_FACTORY()
+            runner = RUNNER_FACTORY(repository, storage)
             runner.run(parsed_job_id)
         except InvalidUpload as error:
             _persist_expected_failure(repository, parsed_job_id, error)
@@ -125,20 +126,18 @@ def _log_failure_persist_error(
         extra={
             "job_id": str(job_id),
             "original_error_type": type(original_error).__name__,
+            "persistence_error_type": type(persist_error).__name__,
         },
-        exc_info=(
-            type(persist_error),
-            persist_error,
-            persist_error.__traceback__,
-        ),
     )
 
 
 def _log_original_failure(job_id: UUID, error: Exception) -> None:
     logger.error(
         "process_job_failed",
-        extra={"job_id": str(job_id)},
-        exc_info=(type(error), error, error.__traceback__),
+        extra={
+            "job_id": str(job_id),
+            "error_type": type(error).__name__,
+        },
     )
 
 

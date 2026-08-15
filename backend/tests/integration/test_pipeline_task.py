@@ -144,6 +144,15 @@ class ExplodingRunner:
         raise self.error
 
 
+@dataclass
+class ExplodingFactory:
+    error: Exception
+
+    def __call__(self, *args, **kwargs):
+        del args, kwargs
+        raise self.error
+
+
 @pytest.fixture
 def celery_eager() -> None:
     from text_verification.workers.celery_app import celery_app
@@ -238,6 +247,57 @@ def test_process_job_eager_task_completes_job(monkeypatch, worker_storage, celer
     ]
     assert len(session_factory.sessions) == 1
     assert session_factory.sessions[0].closed is True
+
+
+def test_process_job_redelivery_from_upload_validated_only_advances_remaining_states(
+    monkeypatch,
+    worker_storage,
+    celery_eager,
+) -> None:
+    from text_verification.workers.tasks import process_job
+
+    repository = InMemoryJobRepository()
+    job_id = _seed_txt_job(repository, worker_storage)
+    repository.transition(job_id, JobStatus.UPLOAD_VALIDATED, 10, "上传校验完成")
+    repository.commit()
+    _configure_worker_dependencies(monkeypatch, repository, worker_storage)
+
+    result = process_job.delay(str(job_id))
+
+    assert result.successful()
+    assert [event.sequence for event in repository.list_events_after(job_id, 0)] == [1, 2, 3, 4]
+    assert [event.status for event in repository.list_events_after(job_id, 0)] == [
+        JobStatus.QUEUED,
+        JobStatus.UPLOAD_VALIDATED,
+        JobStatus.PARSING,
+        JobStatus.COMPLETED,
+    ]
+
+
+def test_process_job_redelivery_from_parsing_only_completes_job(
+    monkeypatch,
+    worker_storage,
+    celery_eager,
+) -> None:
+    from text_verification.workers.tasks import process_job
+
+    repository = InMemoryJobRepository()
+    job_id = _seed_txt_job(repository, worker_storage)
+    repository.transition(job_id, JobStatus.UPLOAD_VALIDATED, 10, "上传校验完成")
+    repository.transition(job_id, JobStatus.PARSING, 25, "开始解析")
+    repository.commit()
+    _configure_worker_dependencies(monkeypatch, repository, worker_storage)
+
+    result = process_job.delay(str(job_id))
+
+    assert result.successful()
+    assert [event.sequence for event in repository.list_events_after(job_id, 0)] == [1, 2, 3, 4]
+    assert [event.status for event in repository.list_events_after(job_id, 0)] == [
+        JobStatus.QUEUED,
+        JobStatus.UPLOAD_VALIDATED,
+        JobStatus.PARSING,
+        JobStatus.COMPLETED,
+    ]
 
 
 def test_process_job_fails_expected_validation_with_safe_message(
@@ -338,6 +398,85 @@ def test_process_job_persists_failed_state_before_reraising_unexpected_errors(
     assert job.error_message == "Processing failed."
 
 
+def test_process_job_persists_failed_state_when_storage_factory_raises(
+    monkeypatch,
+    worker_storage,
+    celery_eager,
+    caplog,
+) -> None:
+    from text_verification.workers.tasks import process_job
+
+    repository = InMemoryJobRepository()
+    job_id = _seed_txt_job(repository, worker_storage)
+    _configure_worker_dependencies(monkeypatch, repository, worker_storage)
+    from text_verification.workers import tasks as worker_tasks
+
+    monkeypatch.setattr(
+        worker_tasks,
+        "STORAGE_FACTORY",
+        ExplodingFactory(RuntimeError("storage root leaked")),
+    )
+
+    with caplog.at_level(logging.ERROR, logger="text_verification.workers.tasks"):
+        result = process_job.delay(str(job_id))
+
+    assert result.failed()
+    assert isinstance(result.result, RuntimeError)
+    assert str(result.result) == "storage root leaked"
+    job = repository.get_job(job_id)
+    assert job is not None
+    assert job.status == JobStatus.FAILED
+    assert job.error_code == "pipeline_failed"
+    assert job.error_message == "Processing failed."
+    task_records = [
+        record for record in caplog.records if record.name == "text_verification.workers.tasks"
+    ]
+    assert [record.getMessage() for record in task_records] == ["process_job_failed"]
+    assert task_records[0].job_id == str(job_id)
+    assert task_records[0].error_type == "RuntimeError"
+    assert all("storage root leaked" not in record.getMessage() for record in task_records)
+    assert all(str(worker_storage._root) not in record.getMessage() for record in task_records)
+
+
+def test_process_job_persists_failed_state_when_runner_factory_raises(
+    monkeypatch,
+    worker_storage,
+    celery_eager,
+    caplog,
+) -> None:
+    from text_verification.workers.tasks import process_job
+
+    repository = InMemoryJobRepository()
+    job_id = _seed_txt_job(repository, worker_storage)
+    _configure_worker_dependencies(monkeypatch, repository, worker_storage)
+    from text_verification.workers import tasks as worker_tasks
+
+    monkeypatch.setattr(
+        worker_tasks,
+        "RUNNER_FACTORY",
+        ExplodingFactory(RuntimeError("runner setup leaked")),
+    )
+
+    with caplog.at_level(logging.ERROR, logger="text_verification.workers.tasks"):
+        result = process_job.delay(str(job_id))
+
+    assert result.failed()
+    assert isinstance(result.result, RuntimeError)
+    assert str(result.result) == "runner setup leaked"
+    job = repository.get_job(job_id)
+    assert job is not None
+    assert job.status == JobStatus.FAILED
+    assert job.error_code == "pipeline_failed"
+    assert job.error_message == "Processing failed."
+    task_records = [
+        record for record in caplog.records if record.name == "text_verification.workers.tasks"
+    ]
+    assert [record.getMessage() for record in task_records] == ["process_job_failed"]
+    assert task_records[0].job_id == str(job_id)
+    assert task_records[0].error_type == "RuntimeError"
+    assert all("runner setup leaked" not in record.getMessage() for record in task_records)
+
+
 def test_process_job_logs_both_errors_when_failure_persistence_fails(
     monkeypatch,
     worker_storage,
@@ -355,7 +494,7 @@ def test_process_job_logs_both_errors_when_failure_persistence_fails(
         runner_factory=lambda repository, storage: ExplodingRunner(RuntimeError("parser offline")),
     )
 
-    with caplog.at_level(logging.ERROR):
+    with caplog.at_level(logging.ERROR, logger="text_verification.workers.tasks"):
         result = process_job.delay(str(job_id))
 
     assert result.failed()
@@ -365,7 +504,17 @@ def test_process_job_logs_both_errors_when_failure_persistence_fails(
     assert job is not None
     assert job.status == JobStatus.QUEUED
     assert repository.rollback_calls == 1
-    assert "process_job_failure_persist_failed" in caplog.text
-    assert "database unavailable" in caplog.text
-    assert "process_job_failed" in caplog.text
-    assert "parser offline" in caplog.text
+    task_records = [
+        record for record in caplog.records if record.name == "text_verification.workers.tasks"
+    ]
+    assert [record.getMessage() for record in task_records] == [
+        "process_job_failure_persist_failed",
+        "process_job_failed",
+    ]
+    assert task_records[0].job_id == str(job_id)
+    assert task_records[0].original_error_type == "RuntimeError"
+    assert task_records[0].persistence_error_type == "RuntimeError"
+    assert task_records[1].job_id == str(job_id)
+    assert task_records[1].error_type == "RuntimeError"
+    assert all("database unavailable" not in record.getMessage() for record in task_records)
+    assert all("parser offline" not in record.getMessage() for record in task_records)

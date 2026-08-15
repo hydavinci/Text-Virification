@@ -85,6 +85,16 @@ class JobStorage:
     def save_bytes(self, job_id: UUID, original_name: str, data: bytes) -> StoredUpload:
         return self.save_stream(job_id, original_name, BytesIO(data))
 
+    def source_path(self, job_id: UUID, file_type: FileType | str) -> Path:
+        resolved_file_type = file_type if isinstance(file_type, FileType) else FileType(file_type)
+        job_directory = self.job_directory(job_id)
+        self._ensure_safe_upload_path(job_directory)
+        source_path = job_directory / f"source.{resolved_file_type.value}"
+        self._ensure_safe_upload_path(source_path)
+        if not source_path.is_file():
+            raise InvalidUpload("Stored upload is unavailable.")
+        return source_path
+
     def delete_job(self, job_id: UUID) -> None:
         self._delete_job_directory(self.job_directory(job_id))
 
