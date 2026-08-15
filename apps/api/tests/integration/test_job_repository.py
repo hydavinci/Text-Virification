@@ -1,18 +1,28 @@
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from threading import Event
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from sqlalchemy import Engine, inspect, text
+from sqlalchemy import Engine, create_engine, inspect, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.session import sessionmaker
 
-from text_verification.domain.documents import FileType
+from alembic import command
+from text_verification.checkers.models import CheckCategory
+from text_verification.domain.documents import DocumentModel, FileType, TextBlock
+from text_verification.domain.issues import Issue, IssueSeverity
 from text_verification.domain.jobs import JobStatus, TerminalJobStateError
+from text_verification.infrastructure.analysis_repositories import AnalysisRepository, IssueQuery
 from text_verification.infrastructure.repositories import JobRepository
+
+BACKEND_ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_database_schema_matches_head_migration(
@@ -35,6 +45,71 @@ def test_database_schema_matches_head_migration(
     assert {"ix_job_events_job_sequence"} <= {
         index["name"] for index in inspector.get_indexes("job_events")
     }
+    assert {"document_id", "page", "issue_type"} <= {
+        column["name"] for column in inspector.get_columns("issues")
+    }
+
+
+def test_upgrade_from_old_0002_adds_issue_roundtrip_fields_and_keeps_repository_round_trip(
+    test_database_url: str,
+) -> None:
+    with migrated_schema(test_database_url) as (engine, alembic_config):
+        command.upgrade(alembic_config, "0002_create_documents_issues")
+        assert {"document_id", "page", "issue_type"}.isdisjoint(
+            {column["name"] for column in inspect(engine).get_columns("issues")}
+        )
+
+        command.upgrade(alembic_config, "head")
+        assert {"document_id", "page", "issue_type"} <= {
+            column["name"] for column in inspect(engine).get_columns("issues")
+        }
+
+        session = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
+        try:
+            repository = AnalysisRepository(session)
+            job_id = seed_analysis_job(session)
+            document = build_analysis_document([("绝对领先", 7)])
+            issue = build_analysis_issue(
+                document,
+                block_id="p-000001",
+                original="绝对领先",
+                suggestion="领先",
+                start=0,
+                end=4,
+                page=7,
+                issue_type="regex",
+            )
+
+            repository.replace_analysis(job_id, document, [issue], {})
+            session.commit()
+
+            assert repository.get_document(job_id) == document
+            page = repository.list_issues(job_id, IssueQuery(limit=20))
+            assert page.items == [issue]
+            assert page.total == 1
+            assert page.next_cursor is None
+        finally:
+            session.close()
+
+
+def test_head_downgrades_back_through_0002_before_removing_analysis_tables(
+    test_database_url: str,
+) -> None:
+    with migrated_schema(test_database_url) as (engine, alembic_config):
+        command.upgrade(alembic_config, "head")
+        assert {"document_id", "page", "issue_type"} <= {
+            column["name"] for column in inspect(engine).get_columns("issues")
+        }
+
+        command.downgrade(alembic_config, "0002_create_documents_issues")
+        assert {"document_id", "page", "issue_type"}.isdisjoint(
+            {column["name"] for column in inspect(engine).get_columns("issues")}
+        )
+
+        command.downgrade(alembic_config, "0001_create_jobs_and_events")
+        assert {"documents", "document_blocks", "issues", "checker_failures"}.isdisjoint(
+            set(inspect(engine).get_table_names())
+        )
 
 
 def test_repository_persists_job_and_ordered_events(db_session: Session) -> None:
@@ -273,3 +348,103 @@ def test_transition_serializes_concurrent_updates_without_sequence_gaps(
         JobStatus.UPLOAD_VALIDATED,
         JobStatus.PARSING,
     ]
+
+
+@contextmanager
+def migrated_schema(test_database_url: str) -> Iterator[tuple[Engine, Config]]:
+    schema_name = f"test_migration_{uuid4().hex}"
+    admin_engine = create_engine(test_database_url, pool_pre_ping=True)
+    schema_url = make_url(test_database_url).update_query_dict(
+        {"options": f"-csearch_path={schema_name}"}
+    ).render_as_string(hide_password=False)
+    alembic_config = Config(str(BACKEND_ROOT / "alembic.ini"))
+    alembic_config.set_main_option("script_location", str(BACKEND_ROOT / "alembic"))
+    alembic_config.attributes["database_url"] = schema_url
+    engine: Engine | None = None
+
+    try:
+        with admin_engine.begin() as connection:
+            connection.execute(text(f'CREATE SCHEMA "{schema_name}"'))
+        engine = create_engine(schema_url, pool_pre_ping=True)
+        yield engine, alembic_config
+    finally:
+        if engine is not None:
+            engine.dispose()
+        with admin_engine.begin() as connection:
+            connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema_name}" CASCADE'))
+        admin_engine.dispose()
+
+
+def seed_analysis_job(db_session: Session) -> UUID:
+    now = datetime.now(UTC)
+    job_id = uuid4()
+    repository = JobRepository(db_session)
+    repository.create_job(
+        job_id=job_id,
+        source_name="analysis.txt",
+        file_type=FileType.TXT.value,
+        size_bytes=16,
+        storage_key=str(job_id),
+        created_at=now,
+        expires_at=now + timedelta(hours=1),
+    )
+    repository.commit()
+    return job_id
+
+
+def build_analysis_document(block_specs: list[tuple[str, int | None]]) -> DocumentModel:
+    blocks = [
+        TextBlock(
+            block_id=f"p-{index + 1:06d}",
+            kind="paragraph",
+            text=text,
+            page=page,
+            paragraph_index=index,
+            parent_id=None,
+            style={"style_name": "Normal"},
+            source_locator={"paragraph_index": index},
+        )
+        for index, (text, page) in enumerate(block_specs)
+    ]
+    return DocumentModel(
+        document_id=uuid4(),
+        file_type=FileType.TXT,
+        source_name="analysis.txt",
+        version=1,
+        blocks=blocks,
+        metadata={"language": "zh-CN"},
+    )
+
+
+def build_analysis_issue(
+    document: DocumentModel,
+    *,
+    block_id: str,
+    original: str,
+    suggestion: str | None,
+    start: int,
+    end: int,
+    page: int | None,
+    issue_type: str,
+) -> Issue:
+    return Issue(
+        issue_id=uuid4(),
+        document_id=document.document_id,
+        block_id=block_id,
+        page=page,
+        start=start,
+        end=end,
+        original=original,
+        suggestion=suggestion,
+        alternatives=[] if suggestion is None else [suggestion],
+        type=issue_type,
+        severity=IssueSeverity.WARNING,
+        layer=CheckCategory.SECURITY.value,
+        message="命中规则。",
+        rule_id="security-001",
+        source="test",
+        source_version="1",
+        confidence=1.0,
+        auto_fixable=suggestion is not None,
+        context=original,
+    )
