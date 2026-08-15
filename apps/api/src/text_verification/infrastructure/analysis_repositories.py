@@ -72,6 +72,7 @@ class AnalysisRepository:
         failures: dict[CheckCategory, CheckerFailure],
     ) -> None:
         self._lock_job(job_id)
+        self._validate_issues(document, issues)
         self._session.execute(
             delete(CheckerFailureRow)
             .where(CheckerFailureRow.job_id == job_id)
@@ -124,16 +125,19 @@ class AnalysisRepository:
                 IssueRow(
                     issue_id=issue.issue_id,
                     job_id=job_id,
+                    document_id=issue.document_id,
                     document_version=document.version,
                     category=issue.layer,
                     severity=issue.severity.value,
                     rule_id=issue.rule_id,
                     block_id=issue.block_id,
+                    page=issue.page,
                     start_offset=issue.start,
                     end_offset=issue.end,
                     original=issue.original,
                     suggestion=issue.suggestion,
                     alternatives_json=issue.alternatives,
+                    issue_type=issue.type,
                     message=issue.message,
                     source=issue.source,
                     source_version=issue.source_version,
@@ -196,11 +200,8 @@ class AnalysisRepository:
         statement = (
             select(
                 IssueRow,
-                DocumentRow.document_id,
-                DocumentBlockRow.page,
                 DocumentBlockRow.block_order,
             )
-            .join(DocumentRow, DocumentRow.job_id == IssueRow.job_id)
             .join(
                 DocumentBlockRow,
                 and_(
@@ -242,16 +243,12 @@ class AnalysisRepository:
         result_rows = self._session.execute(statement).all()
         visible_rows = result_rows[: query.limit]
         items = [
-            _to_issue(
-                issue_row=issue_row,
-                document_id=document_id,
-                page=page,
-            )
-            for issue_row, document_id, page, _block_order in visible_rows
+            _to_issue(issue_row=issue_row)
+            for issue_row, _block_order in visible_rows
         ]
         next_cursor = None
         if len(result_rows) > query.limit:
-            last_issue_row, _document_id, _page, block_order = visible_rows[-1]
+            last_issue_row, block_order = visible_rows[-1]
             next_cursor = _encode_cursor(
                 _IssueCursor(
                     block_order=block_order,
@@ -295,18 +292,28 @@ class AnalysisRepository:
         return row
 
 
-def _to_issue(*, issue_row: IssueRow, document_id: UUID, page: int | None) -> Issue:
+    def _validate_issues(self, document: DocumentModel, issues: list[Issue]) -> None:
+        block_pages = {block.block_id: block.page for block in document.blocks}
+        for issue in issues:
+            if issue.document_id != document.document_id:
+                raise ValueError("issue document_id must match the persisted document")
+            block_page = block_pages.get(issue.block_id)
+            if issue.block_id in block_pages and issue.page != block_page:
+                raise ValueError("issue page must match the referenced document block page")
+
+
+def _to_issue(*, issue_row: IssueRow) -> Issue:
     return Issue(
         issue_id=issue_row.issue_id,
-        document_id=document_id,
+        document_id=issue_row.document_id,
         block_id=issue_row.block_id,
-        page=page,
+        page=issue_row.page,
         start=issue_row.start_offset,
         end=issue_row.end_offset,
         original=issue_row.original,
         suggestion=issue_row.suggestion,
         alternatives=issue_row.alternatives_json,
-        type="literal",
+        type=issue_row.issue_type,
         severity=IssueSeverity(issue_row.severity),
         layer=issue_row.category,
         message=issue_row.message,

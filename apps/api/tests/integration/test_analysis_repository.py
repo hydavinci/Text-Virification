@@ -14,13 +14,14 @@ from text_verification.infrastructure.analysis_repositories import (
     AnalysisRepository,
     IssueQuery,
 )
+from text_verification.infrastructure.orm import IssueRow
 from text_verification.infrastructure.repositories import JobRepository
 
 
-def test_repository_round_trips_document_issue_and_failures(db_session: Session) -> None:
+def test_repository_round_trips_document_issue_and_failures_exactly(db_session: Session) -> None:
     repository = AnalysisRepository(db_session)
     job_id = seed_job(db_session)
-    document = build_document(["绝对领先"])
+    document = build_document([("绝对领先", 7)])
     issue = build_issue(
         document,
         block_id="p-000001",
@@ -28,6 +29,8 @@ def test_repository_round_trips_document_issue_and_failures(db_session: Session)
         suggestion="领先",
         start=0,
         end=4,
+        page=7,
+        issue_type="regex",
     )
     failures = {
         CheckCategory.SECURITY: CheckerFailure(
@@ -41,25 +44,31 @@ def test_repository_round_trips_document_issue_and_failures(db_session: Session)
 
     stored = repository.get_document(job_id)
     page = repository.list_issues(job_id, IssueQuery(limit=20))
+    persisted_issue = db_session.get(IssueRow, issue.issue_id)
 
     assert stored == document
     assert page.items == [issue]
     assert page.total == 1
     assert page.next_cursor is None
     assert repository.get_checker_failures(job_id) == failures
+    assert persisted_issue is not None
+    assert persisted_issue.document_id == issue.document_id
+    assert persisted_issue.page == issue.page
+    assert persisted_issue.issue_type == issue.type
 
 
 def test_replace_analysis_is_atomic(db_session: Session) -> None:
     repository = AnalysisRepository(db_session)
     job_id = seed_job(db_session)
-    repository.replace_analysis(job_id, build_document(["旧"]), [], {})
+    original_document = build_document([("旧", None)])
+    repository.replace_analysis(job_id, original_document, [], {})
     db_session.commit()
 
     with pytest.raises(IntegrityError):
         repository.replace_analysis(
             job_id,
-            build_document(["新"]),
-            [invalid_issue(document_id=UUID("00000000-0000-0000-0000-000000000002"))],
+            build_document([("新", None)]),
+            [invalid_issue(document_id=original_document.document_id)],
             {},
         )
         db_session.flush()
@@ -71,10 +80,69 @@ def test_replace_analysis_is_atomic(db_session: Session) -> None:
     assert stored.blocks[0].text == "旧"
 
 
+def test_replace_analysis_rejects_issue_with_mismatched_document_id(db_session: Session) -> None:
+    repository = AnalysisRepository(db_session)
+    job_id = seed_job(db_session)
+    document = build_document([("正文", 3)])
+    repository.replace_analysis(job_id, document, [], {})
+    db_session.commit()
+
+    with pytest.raises(ValueError, match="document_id"):
+        repository.replace_analysis(
+            job_id,
+            document,
+            [
+                build_issue(
+                    document,
+                    block_id="p-000001",
+                    original="正文",
+                    suggestion="修正",
+                    start=0,
+                    end=2,
+                    page=3,
+                    document_id=UUID("00000000-0000-0000-0000-000000000099"),
+                )
+            ],
+            {},
+        )
+
+    stored = repository.get_document(job_id)
+    assert stored == document
+
+
+def test_replace_analysis_rejects_issue_with_page_mismatched_to_block(db_session: Session) -> None:
+    repository = AnalysisRepository(db_session)
+    job_id = seed_job(db_session)
+    document = build_document([("正文", 3)])
+    repository.replace_analysis(job_id, document, [], {})
+    db_session.commit()
+
+    with pytest.raises(ValueError, match="page"):
+        repository.replace_analysis(
+            job_id,
+            document,
+            [
+                build_issue(
+                    document,
+                    block_id="p-000001",
+                    original="正文",
+                    suggestion="修正",
+                    start=0,
+                    end=2,
+                    page=9,
+                )
+            ],
+            {},
+        )
+
+    stored = repository.get_document(job_id)
+    assert stored == document
+
+
 def test_list_issues_filters_and_paginates_stably(db_session: Session) -> None:
     repository = AnalysisRepository(db_session)
     job_id = seed_job(db_session)
-    document = build_document(["Absolute Alpha", "Beta absolute"])
+    document = build_document([("Absolute Alpha", 1), ("Beta absolute", 2)])
     issue_first = build_issue(
         document,
         block_id="p-000001",
@@ -82,6 +150,7 @@ def test_list_issues_filters_and_paginates_stably(db_session: Session) -> None:
         suggestion="Alpha",
         start=0,
         end=8,
+        page=1,
         issue_id=UUID("00000000-0000-0000-0000-000000000001"),
         category=CheckCategory.SECURITY,
         severity=IssueSeverity.WARNING,
@@ -93,6 +162,7 @@ def test_list_issues_filters_and_paginates_stably(db_session: Session) -> None:
         suggestion="A",
         start=9,
         end=14,
+        page=1,
         issue_id=UUID("00000000-0000-0000-0000-000000000002"),
         category=CheckCategory.SECURITY,
         severity=IssueSeverity.INFO,
@@ -104,6 +174,7 @@ def test_list_issues_filters_and_paginates_stably(db_session: Session) -> None:
         suggestion="beta",
         start=5,
         end=13,
+        page=2,
         issue_id=UUID("00000000-0000-0000-0000-000000000003"),
         category=CheckCategory.VOCABULARY,
         severity=IssueSeverity.WARNING,
@@ -153,19 +224,19 @@ def seed_job(db_session: Session) -> UUID:
     return job_id
 
 
-def build_document(block_texts: list[str]) -> DocumentModel:
+def build_document(block_specs: list[tuple[str, int | None]]) -> DocumentModel:
     blocks = [
         TextBlock(
             block_id=f"p-{index + 1:06d}",
             kind="paragraph",
             text=text,
-            page=None,
+            page=page,
             paragraph_index=index,
             parent_id=None,
             style={"style_name": "Normal"},
             source_locator={"paragraph_index": index},
         )
-        for index, text in enumerate(block_texts)
+        for index, (text, page) in enumerate(block_specs)
     ]
     return DocumentModel(
         document_id=UUID("00000000-0000-0000-0000-000000000001"),
@@ -185,21 +256,24 @@ def build_issue(
     suggestion: str | None,
     start: int,
     end: int,
+    page: int | None,
     issue_id: UUID | None = None,
+    document_id: UUID | None = None,
     category: CheckCategory = CheckCategory.SECURITY,
     severity: IssueSeverity = IssueSeverity.WARNING,
+    issue_type: str = "literal",
 ) -> Issue:
     return Issue(
         issue_id=issue_id or uuid4(),
-        document_id=document.document_id,
+        document_id=document_id or document.document_id,
         block_id=block_id,
-        page=None,
+        page=page,
         start=start,
         end=end,
         original=original,
         suggestion=suggestion,
         alternatives=[] if suggestion is None else [suggestion],
-        type="literal",
+        type=issue_type,
         severity=severity,
         layer=category.value,
         message="命中规则。",
