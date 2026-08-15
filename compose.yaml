@@ -1,0 +1,126 @@
+name: text-verification
+
+x-backend-service: &backend-service
+  build:
+    context: ./backend
+  image: text-verification-backend:development
+  env_file:
+    - .env
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: text_verification
+      POSTGRES_USER: text_verification
+      POSTGRES_PASSWORD: text_verification
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U text_verification -d text_verification"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  migrate:
+    <<: *backend-service
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    <<: *backend-service
+    command: ["uvicorn", "text_verification.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    restart: unless-stopped
+    environment:
+      TEST_DATABASE_URL: postgresql+psycopg://text_verification:text_verification@postgres:5432/text_verification
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health', timeout=5)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    volumes:
+      - job-data:/var/lib/text-verification/jobs
+
+  worker:
+    <<: *backend-service
+    command:
+      [
+        "celery",
+        "-A",
+        "text_verification.workers.celery_app:celery_app",
+        "worker",
+        "--loglevel=INFO",
+      ]
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - job-data:/var/lib/text-verification/jobs
+
+  beat:
+    <<: *backend-service
+    command:
+      [
+        "celery",
+        "-A",
+        "text_verification.workers.celery_app:celery_app",
+        "beat",
+        "--loglevel=INFO",
+        "--schedule=/var/lib/text-verification/jobs/celerybeat-schedule",
+      ]
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - job-data:/var/lib/text-verification/jobs
+
+  web:
+    build:
+      context: ./frontend
+    image: text-verification-web:development
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:80"
+
+volumes:
+  postgres-data:
+  job-data:
