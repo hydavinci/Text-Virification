@@ -1,0 +1,1 @@
+{"root":["./src/main.ts","./src/vite-env.d.ts","./src/api/jobs.ts","./src/types/jobs.ts","./src/app.vue","./src/components/jobprogress.vue","./src/components/uploadworkspace.vue","./src/views/workspaceview.vue","./tests/workspaceview.spec.ts","./tests/jobsapi.spec.ts"],"version":"5.7.3"}
