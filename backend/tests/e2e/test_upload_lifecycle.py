@@ -5,6 +5,7 @@ import httpx
 import pytest
 
 TERMINAL_FAILURE_STATUSES = {"failed", "partial", "expired"}
+MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 
 
 @pytest.fixture
@@ -40,3 +41,15 @@ def test_txt_upload_reaches_completed_state(live_api_url: str) -> None:
         time.sleep(0.25)
 
     raise AssertionError("job did not complete within 30 seconds")
+
+
+def test_exact_maximum_txt_upload_is_accepted_through_web_ingress(
+    live_api_url: str,
+) -> None:
+    response = httpx.post(
+        f"{live_api_url}/api/v1/jobs",
+        files={"file": ("boundary.txt", b"a" * MAX_UPLOAD_BYTES, "text/plain")},
+        timeout=60,
+    )
+
+    assert response.status_code == 202, response.text
