@@ -14,7 +14,6 @@ var/
 *.log
 .idea/
 .vscode/
-translation-pre-checker/.venv/
 
 apps/api/.venv/
 apps/web/node_modules/
