@@ -1,6 +1,6 @@
 import type { InjectionKey } from 'vue'
 
-import type { JobProgressEvent, JobRead, JobStatus } from '../types/jobs'
+import { JOB_STATUS_VALUES, type JobProgressEvent, type JobRead, type JobStatus } from '../types/jobs'
 
 export interface JobsApi {
   createJob(file: File): Promise<JobRead>
@@ -14,13 +14,6 @@ export interface JobsApi {
 interface JobsApiDependencies {
   fetch: typeof fetch
   eventSourceFactory: (url: string) => EventSource
-}
-
-interface ProgressPayload {
-  status: JobStatus
-  progress: number
-  message: string
-  created_at: string
 }
 
 const API_BASE = '/api/v1'
@@ -90,7 +83,7 @@ export function createJobsApi(
         }
 
         try {
-          const payload = JSON.parse(event.data) as ProgressPayload
+          const payload = parseProgressPayload(event.data)
           const sequence = Number.parseInt(event.lastEventId, 10)
           lastSequence = Number.isFinite(sequence) ? sequence : lastSequence
           lastProgress = payload.progress
@@ -148,4 +141,51 @@ async function extractErrorMessage(response: Response): Promise<string> {
   }
 
   return fallback
+}
+
+function parseProgressPayload(data: string): JobProgressEvent {
+  const parsed = JSON.parse(data) as unknown
+
+  if (!isProgressPayload(parsed)) {
+    throw new Error('Invalid progress payload.')
+  }
+
+  return {
+    sequence: 0,
+    status: parsed.status,
+    progress: parsed.progress,
+    message: parsed.message,
+    created_at: parsed.created_at
+  }
+}
+
+function isProgressPayload(value: unknown): value is {
+  status: JobStatus
+  progress: number
+  message: string
+  created_at: string
+} {
+  if (!isRecord(value)) {
+    return false
+  }
+
+  return (
+    isJobStatus(value.status) &&
+    typeof value.progress === 'number' &&
+    Number.isFinite(value.progress) &&
+    value.progress >= 0 &&
+    value.progress <= 100 &&
+    typeof value.message === 'string' &&
+    typeof value.created_at === 'string' &&
+    value.created_at.trim().length > 0 &&
+    Number.isFinite(Date.parse(value.created_at))
+  )
+}
+
+function isJobStatus(value: unknown): value is JobStatus {
+  return typeof value === 'string' && JOB_STATUS_VALUES.includes(value as JobStatus)
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
 }

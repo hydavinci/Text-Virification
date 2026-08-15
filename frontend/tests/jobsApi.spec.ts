@@ -46,6 +46,16 @@ class FakeEventSource {
     }
   }
 
+  emitRaw(type: string, data: string, lastEventId = '0') {
+    const event = {
+      data,
+      lastEventId
+    } as MessageEvent<string>
+    for (const listener of this.listeners.get(type) ?? []) {
+      listener(event)
+    }
+  }
+
   emitControl(type: string) {
     const event = { data: JSON.stringify({ event: type }) } as MessageEvent<string>
     for (const listener of this.listeners.get(type) ?? []) {
@@ -145,6 +155,72 @@ describe('createJobsApi', () => {
     )
     expect(onError).toHaveBeenCalledWith('Connection interrupted. Waiting to reconnect…')
     expect(eventSource.closed).toBe(false)
+    expect(eventSource.closeCalls).toBe(0)
+  })
+
+  it('closes once and reports an error for malformed JSON progress payloads', () => {
+    const eventSource = new FakeEventSource('/api/v1/jobs/job-1/events')
+    const api = createJobsApi({
+      fetch: vi.fn(),
+      eventSourceFactory: () => eventSource as unknown as EventSource
+    })
+    const onEvent = vi.fn()
+    const onError = vi.fn()
+
+    api.subscribe('job-1', onEvent, onError)
+    eventSource.emitRaw('progress', '{"status":"parsing",')
+
+    expect(onEvent).not.toHaveBeenCalled()
+    expect(onError).toHaveBeenCalledWith('Unable to receive job progress updates.')
+    expect(eventSource.closeCalls).toBe(1)
+  })
+
+  it.each([
+    ['missing created_at', '{"status":"parsing","progress":25,"message":"开始解析"}'],
+    ['bad status', '{"status":"unknown","progress":25,"message":"开始解析","created_at":"2026-08-14T00:02:00Z"}'],
+    ['non-finite progress', '{"status":"parsing","progress":1e999,"message":"开始解析","created_at":"2026-08-14T00:02:00Z"}'],
+    ['out-of-range progress', '{"status":"parsing","progress":101,"message":"开始解析","created_at":"2026-08-14T00:02:00Z"}'],
+    ['wrong message type', '{"status":"parsing","progress":25,"message":42,"created_at":"2026-08-14T00:02:00Z"}'],
+    ['wrong created_at type', '{"status":"parsing","progress":25,"message":"开始解析","created_at":42}']
+  ])('closes once and reports an error for invalid progress payload shape: %s', (_label, payload) => {
+    const eventSource = new FakeEventSource('/api/v1/jobs/job-1/events')
+    const api = createJobsApi({
+      fetch: vi.fn(),
+      eventSourceFactory: () => eventSource as unknown as EventSource
+    })
+    const onEvent = vi.fn()
+    const onError = vi.fn()
+
+    api.subscribe('job-1', onEvent, onError)
+    eventSource.emitRaw('progress', payload, '4')
+
+    expect(onEvent).not.toHaveBeenCalled()
+    expect(onError).toHaveBeenCalledWith('Unable to receive job progress updates.')
+    expect(eventSource.closeCalls).toBe(1)
+  })
+
+  it('continues delivering valid progress payloads with validated fields', () => {
+    const eventSource = new FakeEventSource('/api/v1/jobs/job-1/events')
+    const api = createJobsApi({
+      fetch: vi.fn(),
+      eventSourceFactory: () => eventSource as unknown as EventSource
+    })
+    const onEvent = vi.fn()
+
+    api.subscribe('job-1', onEvent, vi.fn())
+    eventSource.emitRaw(
+      'progress',
+      '{"status":"checking_format","progress":50,"message":"正在检查格式","created_at":"2026-08-14T00:02:00+00:00"}',
+      '9'
+    )
+
+    expect(onEvent).toHaveBeenCalledWith({
+      sequence: 9,
+      status: 'checking_format',
+      progress: 50,
+      message: '正在检查格式',
+      created_at: '2026-08-14T00:02:00+00:00'
+    })
     expect(eventSource.closeCalls).toBe(0)
   })
 
