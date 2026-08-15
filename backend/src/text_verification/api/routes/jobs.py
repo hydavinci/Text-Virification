@@ -1,18 +1,25 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import ntpath
 import posixpath
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
 from importlib import import_module
+from time import monotonic
 from typing import Annotated, BinaryIO, NoReturn
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Header, HTTPException, Request, UploadFile, status
+from fastapi.responses import StreamingResponse
+from sqlalchemy.orm import Session, sessionmaker
 
 from text_verification.api.dependencies import get_job_repository, get_job_storage
 from text_verification.config import Settings, get_settings
-from text_verification.domain.jobs import JobRead, JobStatus
+from text_verification.domain.jobs import TERMINAL_STATUSES, JobEvent, JobRead, JobStatus
+from text_verification.infrastructure.database import get_session_factory
 from text_verification.infrastructure.repositories import JobRepository
 from text_verification.infrastructure.storage import (
     InvalidUpload,
@@ -30,10 +37,20 @@ DISPATCH_RECOVERY_FAILURE_CODE = "job_dispatch_recovery_failed"
 JOB_CLEANUP_FAILURE_CODE = "job_cleanup_failed"
 JOB_CREATE_FAILURE_CODE = "job_create_failed"
 INVALID_UPLOAD_CODE = "invalid_upload"
+INVALID_LAST_EVENT_ID_CODE = "invalid_last_event_id"
+JOB_NOT_FOUND_CODE = "job_not_found"
 UNSUPPORTED_FILE_TYPE_CODE = "unsupported_file_type"
 UPLOAD_TOO_LARGE_CODE = "upload_too_large"
+SSE_KEEPALIVE_SECONDS = 15.0
+SSE_POLL_SECONDS = 0.5
 
 router = APIRouter(tags=["jobs"])
+
+SessionFactoryProvider = Callable[[], sessionmaker[Session]]
+RepositoryFactory = Callable[[Session], JobRepository]
+
+SESSION_FACTORY_PROVIDER: SessionFactoryProvider = get_session_factory
+REPOSITORY_FACTORY: RepositoryFactory = JobRepository
 
 
 class JobCleanupFailed(RuntimeError):
@@ -44,6 +61,34 @@ def dispatch_process_job(job_id: str) -> None:
     worker_tasks = import_module("text_verification.workers.tasks")
     process_job = worker_tasks.process_job
     process_job.delay(job_id)
+
+
+@router.get("/jobs/{job_id}", response_model=JobRead)
+def get_job(
+    job_id: UUID,
+    repository: Annotated[JobRepository, Depends(get_job_repository)],
+) -> JobRead:
+    job = repository.get_job(job_id)
+    if job is None:
+        raise _http_error(status.HTTP_404_NOT_FOUND, JOB_NOT_FOUND_CODE, "Job was not found.")
+    return job
+
+
+@router.get("/jobs/{job_id}/events")
+async def stream_job_events(
+    job_id: UUID,
+    request: Request,
+    last_event_id: Annotated[str | None, Header(alias="Last-Event-ID")] = None,
+) -> StreamingResponse:
+    after_sequence = _parse_last_event_id(last_event_id)
+    return StreamingResponse(
+        _job_event_stream(job_id, after_sequence, request),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/jobs", response_model=JobRead, status_code=status.HTTP_202_ACCEPTED)
@@ -203,6 +248,95 @@ def _cleanup_storage(job_id: UUID, storage: JobStorage) -> None:
 
 def _binary_stream(file: UploadFile) -> BinaryIO:
     return file.file
+
+
+def _parse_last_event_id(last_event_id: str | None) -> int:
+    if last_event_id is None:
+        return 0
+    try:
+        parsed = int(last_event_id)
+    except ValueError as error:
+        raise _http_error(
+            status.HTTP_400_BAD_REQUEST,
+            INVALID_LAST_EVENT_ID_CODE,
+            "Last-Event-ID must be a non-negative integer.",
+        ) from error
+    if parsed < 0:
+        raise _http_error(
+            status.HTTP_400_BAD_REQUEST,
+            INVALID_LAST_EVENT_ID_CODE,
+            "Last-Event-ID must be a non-negative integer.",
+        )
+    return parsed
+
+
+async def _job_event_stream(
+    job_id: UUID,
+    after_sequence: int,
+    request: Request,
+) -> AsyncIterator[str]:
+    session_factory = SESSION_FACTORY_PROVIDER()
+    last_keepalive = monotonic()
+
+    while True:
+        if await request.is_disconnected():
+            return
+
+        events, job = _poll_job_state(session_factory, job_id, after_sequence)
+        emitted = False
+        for event in events:
+            yield _format_progress_event(event)
+            after_sequence = event.sequence
+            last_keepalive = monotonic()
+            emitted = True
+
+        if job is None or job.status == JobStatus.EXPIRED:
+            yield _format_control_event("expired")
+            return
+
+        if job.status in TERMINAL_STATUSES:
+            yield _format_control_event("done")
+            return
+
+        if not emitted and monotonic() - last_keepalive >= SSE_KEEPALIVE_SECONDS:
+            yield ": keepalive\n\n"
+            last_keepalive = monotonic()
+
+        await asyncio.sleep(SSE_POLL_SECONDS)
+
+
+def _poll_job_state(
+    session_factory: sessionmaker[Session],
+    job_id: UUID,
+    after_sequence: int,
+) -> tuple[list[JobEvent], JobRead | None]:
+    session = session_factory()
+    try:
+        repository = REPOSITORY_FACTORY(session)
+        job = repository.get_job(job_id)
+        events = repository.list_events_after(job_id, after_sequence)
+        return events, job
+    finally:
+        session.close()
+
+
+def _format_progress_event(event: JobEvent) -> str:
+    payload = json.dumps(
+        {
+            "status": event.status.value,
+            "progress": event.progress,
+            "message": event.message,
+            "created_at": event.created_at.isoformat(),
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return f"id: {event.sequence}\nevent: progress\ndata: {payload}\n\n"
+
+
+def _format_control_event(event_name: str) -> str:
+    payload = json.dumps({"event": event_name}, separators=(",", ":"))
+    return f"event: {event_name}\ndata: {payload}\n\n"
 
 
 def _normalize_source_name(file_name: str) -> str:

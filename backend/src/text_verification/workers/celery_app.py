@@ -20,4 +20,10 @@ celery_app.conf.update(
     task_time_limit=900,
     task_soft_time_limit=840,
     timezone="UTC",
+    beat_schedule={
+        "cleanup-expired-jobs-hourly": {
+            "task": "text_verification.cleanup_expired_jobs",
+            "schedule": 3600.0,
+        }
+    },
 )

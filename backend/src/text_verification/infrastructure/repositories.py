@@ -7,7 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from text_verification.domain.documents import FileType
-from text_verification.domain.jobs import TERMINAL_STATUSES, JobEvent, JobRead, JobStatus
+from text_verification.domain.jobs import JobEvent, JobRead, JobStatus
 from text_verification.infrastructure.orm import JobEventRow, JobRow
 
 INITIAL_EVENT_MESSAGE = "作业已创建"
@@ -108,7 +108,6 @@ class JobRepository:
             select(JobRow)
             .where(
                 JobRow.expires_at <= cutoff,
-                JobRow.status.not_in([status.value for status in TERMINAL_STATUSES]),
             )
             .order_by(JobRow.expires_at, JobRow.job_id)
             .with_for_update()
@@ -116,21 +115,22 @@ class JobRepository:
 
         expired_job_ids: list[UUID] = []
         for row in rows:
-            row.status = JobStatus.EXPIRED.value
-            row.updated_at = cutoff
-            self._session.add(
-                JobEventRow(
-                    job_id=row.job_id,
-                    sequence=self._next_sequence(row.job_id),
-                    status=JobStatus.EXPIRED.value,
-                    progress=row.progress,
-                    message=EXPIRED_EVENT_MESSAGE,
-                    created_at=cutoff,
+            if row.status != JobStatus.EXPIRED.value:
+                row.status = JobStatus.EXPIRED.value
+                row.updated_at = cutoff
+                self._session.add(
+                    JobEventRow(
+                        job_id=row.job_id,
+                        sequence=self._next_sequence(row.job_id),
+                        status=JobStatus.EXPIRED.value,
+                        progress=row.progress,
+                        message=EXPIRED_EVENT_MESSAGE,
+                        created_at=cutoff,
+                    )
                 )
-            )
             expired_job_ids.append(row.job_id)
 
-        if expired_job_ids:
+        if rows:
             self._session.flush()
         return expired_job_ids
 

@@ -105,6 +105,44 @@ def test_repository_expires_jobs_before_cutoff(db_session: Session) -> None:
     assert repository.expire_jobs_before(created_at + timedelta(minutes=1)) == []
 
 
+def test_repository_relists_expired_jobs_for_cleanup_retry_without_duplicate_events(
+    db_session: Session,
+) -> None:
+    repository = JobRepository(db_session)
+    job_id = uuid4()
+    created_at = datetime.now(UTC)
+
+    repository.create_job(
+        job_id=job_id,
+        source_name="stale.txt",
+        file_type="txt",
+        size_bytes=32,
+        storage_key=str(job_id),
+        created_at=created_at,
+        expires_at=created_at,
+    )
+    repository.transition(job_id, JobStatus.COMPLETED, 100, "处理完成")
+    repository.commit()
+
+    first_expired_job_ids = repository.expire_jobs_before(created_at + timedelta(minutes=1))
+    repository.commit()
+    second_expired_job_ids = repository.expire_jobs_before(created_at + timedelta(minutes=1))
+    repository.commit()
+    job = repository.get_job(job_id)
+
+    assert first_expired_job_ids == [job_id]
+    assert second_expired_job_ids == [job_id]
+    assert job is not None
+    assert job.status == JobStatus.EXPIRED
+    assert [
+        (event.sequence, event.status) for event in repository.list_events_after(job_id, 0)
+    ] == [
+        (1, JobStatus.QUEUED),
+        (2, JobStatus.COMPLETED),
+        (3, JobStatus.EXPIRED),
+    ]
+
+
 def test_transition_serializes_concurrent_updates_without_sequence_gaps(
     db_session_factory: sessionmaker[Session],
 ) -> None:

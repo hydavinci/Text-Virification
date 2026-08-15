@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any, NoReturn, cast
 from uuid import UUID
 
@@ -61,6 +62,48 @@ def _process_job(job_id: str) -> None:
 
 
 process_job = cast(Any, celery_app.task(name="text_verification.process_job")(_process_job))
+
+
+def _cleanup_expired_jobs() -> list[str]:
+    cutoff = datetime.now(UTC)
+    session_factory = SESSION_FACTORY_PROVIDER()
+    session = session_factory()
+    repository = REPOSITORY_FACTORY(session)
+
+    try:
+        expired_job_ids = repository.expire_jobs_before(cutoff)
+        repository.commit()
+    except Exception:
+        repository.rollback()
+        raise
+    finally:
+        session.close()
+
+    storage = STORAGE_FACTORY()
+    deleted_job_ids: list[str] = []
+    for job_id in expired_job_ids:
+        job_directory = storage.job_directory(job_id)
+        had_directory = job_directory.exists() or job_directory.is_symlink()
+        try:
+            storage.delete_job(job_id)
+        except Exception as error:
+            logger.warning(
+                "cleanup_expired_job_delete_failed",
+                extra={
+                    "job_id": str(job_id),
+                    "error_type": type(error).__name__,
+                },
+            )
+            continue
+        if had_directory:
+            deleted_job_ids.append(str(job_id))
+    return deleted_job_ids
+
+
+cleanup_expired_jobs = cast(
+    Any,
+    celery_app.task(name="text_verification.cleanup_expired_jobs")(_cleanup_expired_jobs),
+)
 
 
 def dispatch_process_job(job_id: str) -> None:
