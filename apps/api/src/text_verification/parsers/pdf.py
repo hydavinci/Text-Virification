@@ -4,8 +4,11 @@ from pathlib import Path
 from uuid import UUID
 
 from pypdf import PdfReader
+from pypdf._page import PageObject
 
 from text_verification.domain.documents import DocumentModel, FileType, ParseError, TextBlock
+
+PDF_TEXT_EXTRACTION_FAILED_MESSAGE = "无法提取 PDF 文本，请检查文件是否损坏或是否包含受支持的文本层。"
 
 
 class PdfParser:
@@ -28,7 +31,7 @@ class PdfParser:
 
         blocks: list[TextBlock] = []
         for page_number, page in enumerate(reader.pages, start=1):
-            text = page.extract_text().strip()
+            text = self._extract_page_text(page, page_number)
             if not text:
                 continue
             blocks.append(
@@ -58,3 +61,21 @@ class PdfParser:
             blocks=blocks,
             metadata={"page_count": len(reader.pages)},
         )
+
+    def _extract_page_text(self, page: PageObject, page_number: int) -> str:
+        del page_number
+        try:
+            raw_text = page.extract_text()
+        except Exception as error:
+            raise ParseError(
+                "pdf_text_extraction_failed",
+                PDF_TEXT_EXTRACTION_FAILED_MESSAGE,
+            ) from error
+
+        if not isinstance(raw_text, str):
+            raise ParseError(
+                "pdf_text_extraction_failed",
+                PDF_TEXT_EXTRACTION_FAILED_MESSAGE,
+            )
+
+        return raw_text.strip()
