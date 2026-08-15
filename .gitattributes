@@ -1,0 +1,2 @@
+apps/api/tests/fixtures/documents/*.docx binary
+apps/api/tests/fixtures/documents/*.pdf binary
