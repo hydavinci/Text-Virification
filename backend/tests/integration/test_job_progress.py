@@ -20,9 +20,10 @@ class RecordingJobRepository:
         job_id = uuid4()
         created_at = datetime.now(UTC)
         expires_at = created_at + timedelta(hours=24)
+        source_name = f"client-secret-{job_id}.txt"
         job = JobRead(
             job_id=job_id,
-            source_name="sample.txt",
+            source_name=source_name,
             file_type=FileType.TXT,
             size_bytes=12,
             status=JobStatus.COMPLETED,
@@ -136,6 +137,7 @@ def test_sse_replays_events_after_last_event_id(client, completed_job: JobRead) 
         f"/api/v1/jobs/{completed_job.job_id}/events",
         headers={"Last-Event-ID": "1"},
     )
+    client_path = rf"C:\Users\Alice\{completed_job.source_name}"
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/event-stream")
@@ -143,16 +145,19 @@ def test_sse_replays_events_after_last_event_id(client, completed_job: JobRead) 
     assert '"status":"upload_validated"' in response.text
     assert '"status":"completed"' in response.text
     assert "event: done" in response.text
-    assert "source.txt" not in response.text
+    assert completed_job.source_name not in response.text
+    assert client_path not in response.text
 
 
 def test_sse_closes_missing_jobs_as_expired_without_path_leakage(client) -> None:
     response = client.get("/api/v1/jobs/00000000-0000-0000-0000-000000000000/events")
+    client_path = r"C:\Users\Alice\missing-secret.txt"
 
     assert response.status_code == 200
     assert "event: expired" in response.text
     assert "var\\jobs" not in response.text.lower()
-    assert "source.txt" not in response.text.lower()
+    assert "missing-secret.txt" not in response.text
+    assert client_path not in response.text
 
 
 def test_sse_rejects_negative_last_event_id(client, completed_job: JobRead) -> None:

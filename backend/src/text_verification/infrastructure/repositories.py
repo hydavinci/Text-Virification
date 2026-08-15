@@ -7,7 +7,13 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from text_verification.domain.documents import FileType
-from text_verification.domain.jobs import JobEvent, JobRead, JobStatus
+from text_verification.domain.jobs import (
+    TERMINAL_STATUSES,
+    JobEvent,
+    JobRead,
+    JobStatus,
+    TerminalJobStateError,
+)
 from text_verification.infrastructure.orm import JobEventRow, JobRow
 
 INITIAL_EVENT_MESSAGE = "作业已创建"
@@ -74,6 +80,13 @@ class JobRepository:
         error_message: str | None = None,
     ) -> None:
         job = self._lock_job(job_id)
+        current_status = JobStatus(job.status)
+        if current_status in TERMINAL_STATUSES:
+            raise TerminalJobStateError(
+                job_id=job_id,
+                current_status=current_status,
+                target_status=status,
+            )
         changed_at = datetime.now(UTC)
         job.status = status.value
         job.progress = progress
@@ -142,7 +155,10 @@ class JobRepository:
 
     def _lock_job(self, job_id: UUID) -> JobRow:
         job = self._session.execute(
-            select(JobRow).where(JobRow.job_id == job_id).with_for_update()
+            select(JobRow)
+            .where(JobRow.job_id == job_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
         ).scalar_one_or_none()
         if job is None:
             raise LookupError(f"Job {job_id} does not exist.")

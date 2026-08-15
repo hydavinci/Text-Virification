@@ -8,7 +8,13 @@ from uuid import UUID, uuid4
 import pytest
 
 from text_verification.domain.documents import FileType
-from text_verification.domain.jobs import JobEvent, JobRead, JobStatus
+from text_verification.domain.jobs import (
+    TERMINAL_STATUSES,
+    JobEvent,
+    JobRead,
+    JobStatus,
+    TerminalJobStateError,
+)
 from text_verification.infrastructure.storage import JobStorage
 
 
@@ -69,6 +75,12 @@ class InMemoryJobRepository:
         error_message: str | None = None,
     ) -> None:
         current_job = self._working_jobs[job_id]
+        if current_job.status in TERMINAL_STATUSES:
+            raise TerminalJobStateError(
+                job_id=job_id,
+                current_status=current_job.status,
+                target_status=status,
+            )
         self._working_jobs[job_id] = current_job.model_copy(
             update={
                 "status": status,
@@ -115,6 +127,45 @@ class InMemoryJobRepository:
         self._working_events = {
             job_id: [event for event in events] for job_id, events in self._events.items()
         }
+
+
+class ExpiringOnFirstTransitionRepository(InMemoryJobRepository):
+    def __init__(self) -> None:
+        super().__init__()
+        self._expired_job_ids: set[UUID] = set()
+
+    def transition(
+        self,
+        job_id: UUID,
+        status: JobStatus,
+        progress: int,
+        message: str,
+        *,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        if status == JobStatus.UPLOAD_VALIDATED and job_id not in self._expired_job_ids:
+            current_job = self._jobs[job_id]
+            self._jobs[job_id] = current_job.model_copy(update={"status": JobStatus.EXPIRED})
+            self._events[job_id].append(
+                JobEvent(
+                    sequence=len(self._events[job_id]) + 1,
+                    status=JobStatus.EXPIRED,
+                    progress=current_job.progress,
+                    message="作业已过期",
+                    created_at=datetime.now(UTC),
+                )
+            )
+            self._expired_job_ids.add(job_id)
+            self._reset_working_copy()
+        super().transition(
+            job_id,
+            status,
+            progress,
+            message,
+            error_code=error_code,
+            error_message=error_message,
+        )
 
 
 @dataclass
@@ -367,6 +418,29 @@ def test_process_job_noops_when_job_is_terminal(
     assert [event.status for event in repository.list_events_after(job_id, 0)] == [
         JobStatus.QUEUED,
         JobStatus.COMPLETED,
+    ]
+
+
+def test_process_job_stops_when_cleanup_expires_job_before_pipeline_transition(
+    monkeypatch,
+    worker_storage,
+    celery_eager,
+) -> None:
+    from text_verification.workers.tasks import process_job
+
+    repository = ExpiringOnFirstTransitionRepository()
+    job_id = _seed_txt_job(repository, worker_storage)
+    _configure_worker_dependencies(monkeypatch, repository, worker_storage)
+
+    result = process_job.delay(str(job_id))
+
+    assert result.successful()
+    job = repository.get_job(job_id)
+    assert job is not None
+    assert job.status == JobStatus.EXPIRED
+    assert [event.status for event in repository.list_events_after(job_id, 0)] == [
+        JobStatus.QUEUED,
+        JobStatus.EXPIRED,
     ]
 
 

@@ -30,6 +30,24 @@ TERMINAL_STATUSES = {
 }
 
 
+class TerminalJobStateError(RuntimeError):
+    def __init__(
+        self,
+        *,
+        job_id: UUID,
+        current_status: JobStatus,
+        target_status: JobStatus,
+    ) -> None:
+        self.job_id = job_id
+        self.current_status = current_status
+        self.target_status = target_status
+        super().__init__(
+            "Job "
+            f"{job_id} is already terminal ({current_status.value}); "
+            f"refusing transition to {target_status.value}."
+        )
+
+
 class JobRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

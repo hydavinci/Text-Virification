@@ -9,7 +9,11 @@ from uuid import UUID
 from sqlalchemy.orm import Session, sessionmaker
 
 from text_verification.config import get_settings
-from text_verification.domain.jobs import TERMINAL_STATUSES, JobStatus
+from text_verification.domain.jobs import (
+    TERMINAL_STATUSES,
+    JobStatus,
+    TerminalJobStateError,
+)
 from text_verification.infrastructure.database import get_session_factory
 from text_verification.infrastructure.repositories import JobRepository
 from text_verification.infrastructure.storage import InvalidUpload, JobStorage
@@ -53,6 +57,9 @@ def _process_job(job_id: str) -> None:
             storage = STORAGE_FACTORY()
             runner = RUNNER_FACTORY(repository, storage)
             runner.run(parsed_job_id)
+        except TerminalJobStateError:
+            repository.rollback()
+            return
         except InvalidUpload as error:
             _persist_expected_failure(repository, parsed_job_id, error)
         except Exception as error:
@@ -117,6 +124,9 @@ def _persist_expected_failure(
 ) -> None:
     try:
         _mark_failed_job(repository, job_id, MISSING_UPLOAD_MESSAGE)
+    except TerminalJobStateError:
+        repository.rollback()
+        return
     except Exception as persist_error:
         repository.rollback()
         _log_failure_persist_error(job_id, error, persist_error)
@@ -128,9 +138,12 @@ def _persist_unexpected_failure(
     repository: JobRepository,
     job_id: UUID,
     error: Exception,
-) -> NoReturn:
+) -> None:
     try:
         _mark_failed_job(repository, job_id, UNEXPECTED_FAILURE_MESSAGE)
+    except TerminalJobStateError:
+        repository.rollback()
+        return
     except Exception as persist_error:
         repository.rollback()
         _log_failure_persist_error(job_id, error, persist_error)
