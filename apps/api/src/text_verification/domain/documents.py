@@ -2,7 +2,7 @@ from enum import StrEnum
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class FileType(StrEnum):
@@ -14,7 +14,7 @@ class FileType(StrEnum):
 class TextBlock(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    block_id: str
+    block_id: str = Field(min_length=1)
     kind: Literal["paragraph", "heading", "table_cell", "header", "footer"]
     text: str
     page: int | None
@@ -30,4 +30,13 @@ class DocumentModel(BaseModel):
     document_id: UUID
     file_type: FileType
     source_name: str
+    version: int = Field(ge=1)
     blocks: list[TextBlock]
+    metadata: dict[str, Any]
+
+
+class ParseError(Exception):
+    def __init__(self, code: str, public_message: str) -> None:
+        super().__init__(public_message)
+        self.code = code
+        self.public_message = public_message

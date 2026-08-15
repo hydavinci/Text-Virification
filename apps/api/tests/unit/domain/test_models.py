@@ -23,10 +23,38 @@ def test_document_owns_block_local_offsets() -> None:
         document_id=uuid4(),
         file_type=FileType.DOCX,
         source_name="sample.docx",
+        version=1,
         blocks=[block],
+        metadata={},
     )
 
     assert document.blocks[0].text[2:4] == "检查"
+
+
+def test_document_model_requires_positive_version() -> None:
+    with pytest.raises(ValidationError):
+        DocumentModel(
+            document_id=uuid4(),
+            file_type=FileType.TXT,
+            source_name="sample.txt",
+            version=0,
+            blocks=[],
+            metadata={},
+        )
+
+
+def test_text_block_rejects_empty_block_id() -> None:
+    with pytest.raises(ValidationError):
+        TextBlock(
+            block_id="",
+            kind="paragraph",
+            text="正文",
+            page=None,
+            paragraph_index=0,
+            parent_id=None,
+            style={},
+            source_locator={},
+        )
 
 
 def test_issue_rejects_range_beyond_original_block_contract() -> None:

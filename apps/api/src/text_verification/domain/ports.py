@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
+from uuid import UUID
 
 from text_verification.domain.documents import DocumentModel, FileType
 from text_verification.domain.issues import Issue
@@ -15,7 +16,13 @@ class CheckContext:
 class Parser(Protocol):
     supported_type: FileType
 
-    def parse(self, source_path: Path) -> DocumentModel: ...
+    def parse(
+        self,
+        source_path: Path,
+        *,
+        document_id: UUID,
+        source_name: str,
+    ) -> DocumentModel: ...
 
 
 class Checker(Protocol):
