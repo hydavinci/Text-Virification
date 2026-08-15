@@ -8,6 +8,7 @@ class FakeEventSource {
 
   private listeners = new Map<string, Set<(event: MessageEvent<string>) => void>>()
   private _closed = false
+  private _closeCalls = 0
 
   constructor(public readonly url: string) {}
 
@@ -31,6 +32,7 @@ class FakeEventSource {
   }
 
   close() {
+    this._closeCalls += 1
     this._closed = true
   }
 
@@ -57,6 +59,10 @@ class FakeEventSource {
 
   get closed() {
     return this._closed
+  }
+
+  get closeCalls() {
+    return this._closeCalls
   }
 }
 
@@ -110,7 +116,7 @@ describe('createJobsApi', () => {
     ).rejects.toThrow('Upload exceeds the configured maximum size.')
   })
 
-  it('closes the event source on done without reporting duplicate errors', () => {
+  it('keeps the stream open across transient errors and accepts later progress', () => {
     const eventSource = new FakeEventSource('/api/v1/jobs/job-1/events')
     const api = createJobsApi({
       fetch: vi.fn(),
@@ -120,14 +126,13 @@ describe('createJobsApi', () => {
     const onError = vi.fn()
 
     api.subscribe('job-1', onEvent, onError)
+    eventSource.emitError()
     eventSource.emit('progress', {
       status: 'completed',
       progress: 100,
       message: '处理完成',
       created_at: '2026-08-14T00:02:00Z'
     }, '3')
-    eventSource.emitControl('done')
-    eventSource.emitError()
 
     expect(onEvent).toHaveBeenCalledTimes(1)
     expect(onEvent).toHaveBeenLastCalledWith(
@@ -138,8 +143,38 @@ describe('createJobsApi', () => {
         message: '处理完成'
       })
     )
+    expect(onError).toHaveBeenCalledWith('Connection interrupted. Waiting to reconnect…')
+    expect(eventSource.closed).toBe(false)
+    expect(eventSource.closeCalls).toBe(0)
+  })
+
+  it('closes the stream once on done even if unsubscribe is called later', () => {
+    const eventSource = new FakeEventSource('/api/v1/jobs/job-1/events')
+    const api = createJobsApi({
+      fetch: vi.fn(),
+      eventSourceFactory: () => eventSource as unknown as EventSource
+    })
+
+    const unsubscribe = api.subscribe('job-1', vi.fn(), vi.fn())
+    eventSource.emitControl('done')
+    unsubscribe()
+
     expect(eventSource.closed).toBe(true)
-    expect(onError).not.toHaveBeenCalled()
+    expect(eventSource.closeCalls).toBe(1)
+  })
+
+  it('closes the stream when explicitly unsubscribed', () => {
+    const eventSource = new FakeEventSource('/api/v1/jobs/job-1/events')
+    const api = createJobsApi({
+      fetch: vi.fn(),
+      eventSourceFactory: () => eventSource as unknown as EventSource
+    })
+
+    const unsubscribe = api.subscribe('job-1', vi.fn(), vi.fn())
+    unsubscribe()
+
+    expect(eventSource.closed).toBe(true)
+    expect(eventSource.closeCalls).toBe(1)
   })
 
   it('emits an expired terminal state and closes the event source', () => {

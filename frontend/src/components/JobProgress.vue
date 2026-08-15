@@ -36,10 +36,14 @@ const isTerminal = computed(() => isTerminalJobStatus(props.state.status))
         <dd>{{ state.progress }}%</dd>
       </div>
     </dl>
-    <progress :value="state.progress" max="100">{{ state.progress }}%</progress>
-    <p>Current message: {{ state.message }}</p>
+    <progress aria-label="Job progress" :value="state.progress" max="100">{{ state.progress }}%</progress>
+    <p role="status" aria-live="polite">
+      Status: {{ state.status }} · {{ state.progress }}% · {{ state.message }}
+    </p>
     <p v-if="isTerminal">Terminal state retained: {{ state.status }}</p>
-    <p v-if="state.failureMessage">{{ state.failureMessage }}</p>
-    <p v-else-if="state.connectionMessage">{{ state.connectionMessage }}</p>
+    <p v-if="state.failureMessage" role="alert">{{ state.failureMessage }}</p>
+    <p v-else-if="state.connectionMessage" role="status" aria-live="polite">
+      {{ state.connectionMessage }}
+    </p>
   </section>
 </template>

@@ -24,6 +24,7 @@ interface ProgressPayload {
 }
 
 const API_BASE = '/api/v1'
+const TEMPORARY_CONNECTION_NOTICE = 'Connection interrupted. Waiting to reconnect…'
 const PROGRESS_CONNECTION_ERROR = 'Unable to receive job progress updates.'
 const EXPIRED_MESSAGE = '任务已过期'
 
@@ -125,8 +126,7 @@ export function createJobsApi(
         if (closed) {
           return
         }
-        close()
-        onError(PROGRESS_CONNECTION_ERROR)
+        onError(TEMPORARY_CONNECTION_NOTICE)
       }
 
       return close

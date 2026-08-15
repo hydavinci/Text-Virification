@@ -2,6 +2,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { describe, expect, it, vi } from 'vitest'
 
 import { jobsApiKey, type JobsApi } from '../src/api/jobs'
+import UploadWorkspace from '../src/components/UploadWorkspace.vue'
 import WorkspaceView from '../src/views/WorkspaceView.vue'
 
 function buildJobRead(overrides: Partial<Awaited<ReturnType<JobsApi['createJob']>>> = {}) {
@@ -27,6 +28,22 @@ async function selectFile(wrapper: ReturnType<typeof mount>, file: File) {
     value: [file]
   })
   await input.trigger('change')
+}
+
+async function emitUpload(wrapper: ReturnType<typeof mount>, file: File) {
+  wrapper.getComponent(UploadWorkspace).vm.$emit('upload', file)
+  await flushPromises()
+}
+
+function createDeferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((innerResolve, innerReject) => {
+    resolve = innerResolve
+    reject = innerReject
+  })
+
+  return { promise, resolve, reject }
 }
 
 describe('WorkspaceView', () => {
@@ -62,6 +79,8 @@ describe('WorkspaceView', () => {
     expect(wrapper.text()).toContain('100%')
     expect(wrapper.text()).toContain('处理完成')
     expect(wrapper.text()).toContain('completed')
+    expect(wrapper.get('progress').attributes('aria-label')).toBe('Job progress')
+    expect(wrapper.get('[role="status"]').attributes('aria-live')).toBe('polite')
   })
 
   it('accepts files that are exactly 25 MiB', async () => {
@@ -180,6 +199,105 @@ describe('WorkspaceView', () => {
     expect(wrapper.text()).toContain('处理完成')
     expect(wrapper.text()).toContain('completed')
     expect(wrapper.text()).not.toContain('无法接收任务进度，请稍后重试。')
+  })
+
+  it('shows a temporary connection notice and clears it on the next progress event', async () => {
+    const createJob = vi.fn().mockResolvedValue(buildJobRead())
+    const subscribe = vi.fn((_jobId, onEvent, onError) => {
+      onError('Connection interrupted. Waiting to reconnect…')
+      onEvent({
+        sequence: 2,
+        status: 'parsing',
+        progress: 25,
+        message: '开始解析',
+        created_at: '2026-08-14T00:01:00Z'
+      })
+      return vi.fn()
+    })
+    const wrapper = mount(WorkspaceView, {
+      global: { provide: { [jobsApiKey as symbol]: { createJob, subscribe } } }
+    })
+
+    await selectFile(wrapper, new File(['progress'], 'progress.txt', { type: 'text/plain' }))
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('开始解析')
+    expect(wrapper.text()).not.toContain('Connection interrupted. Waiting to reconnect…')
+  })
+
+  it('keeps the newer upload when create-job responses resolve out of order', async () => {
+    const first = createDeferred<Awaited<ReturnType<JobsApi['createJob']>>>()
+    const second = createDeferred<Awaited<ReturnType<JobsApi['createJob']>>>()
+    const createJob = vi.fn()
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise)
+    const closeSecond = vi.fn()
+    const subscribe = vi.fn().mockImplementation(() => closeSecond)
+    const wrapper = mount(WorkspaceView, {
+      global: { provide: { [jobsApiKey as symbol]: { createJob, subscribe } } }
+    })
+
+    await emitUpload(wrapper, new File(['first'], 'first.txt', { type: 'text/plain' }))
+    await emitUpload(wrapper, new File(['second'], 'second.txt', { type: 'text/plain' }))
+
+    second.resolve(
+      buildJobRead({
+        job_id: 'job-2',
+        source_name: 'second.txt'
+      })
+    )
+    await flushPromises()
+
+    first.resolve(
+      buildJobRead({
+        job_id: 'job-1',
+        source_name: 'first.txt'
+      })
+    )
+    await flushPromises()
+
+    expect(subscribe).toHaveBeenCalledTimes(1)
+    expect(subscribe).toHaveBeenCalledWith('job-2', expect.any(Function), expect.any(Function))
+    expect(wrapper.text()).toContain('second.txt')
+    expect(wrapper.text()).not.toContain('first.txt')
+  })
+
+  it('ignores an unresolved create-job response after unmount', async () => {
+    const pending = createDeferred<Awaited<ReturnType<JobsApi['createJob']>>>()
+    const createJob = vi.fn().mockReturnValue(pending.promise)
+    const subscribe = vi.fn()
+    const wrapper = mount(WorkspaceView, {
+      global: { provide: { [jobsApiKey as symbol]: { createJob, subscribe } } }
+    })
+
+    await emitUpload(wrapper, new File(['late'], 'late.txt', { type: 'text/plain' }))
+    wrapper.unmount()
+    pending.resolve(buildJobRead())
+    await flushPromises()
+
+    expect(subscribe).not.toHaveBeenCalled()
+  })
+
+  it('announces backend job failures as alerts', async () => {
+    const createJob = vi.fn().mockResolvedValue(buildJobRead())
+    const subscribe = vi.fn((_jobId, onEvent) => {
+      onEvent({
+        sequence: 2,
+        status: 'failed',
+        progress: 40,
+        message: '处理失败',
+        created_at: '2026-08-14T00:01:00Z'
+      })
+      return vi.fn()
+    })
+    const wrapper = mount(WorkspaceView, {
+      global: { provide: { [jobsApiKey as symbol]: { createJob, subscribe } } }
+    })
+
+    await selectFile(wrapper, new File(['failed'], 'failed.txt', { type: 'text/plain' }))
+    await flushPromises()
+
+    expect(wrapper.get('[role="alert"]').text()).toContain('处理失败')
   })
 
   it('shows backend create-job errors', async () => {

@@ -28,6 +28,8 @@ const isCreating = ref(false)
 const jobState = ref<JobProgressState | null>(null)
 
 let unsubscribe: (() => void) | null = null
+let requestGeneration = 0
+let isMounted = true
 
 function closeSubscription() {
   unsubscribe?.()
@@ -72,20 +74,47 @@ function handleProgressError(message: string) {
 }
 
 async function handleUpload(file: File) {
+  const generation = ++requestGeneration
   uploadError.value = null
   closeSubscription()
   isCreating.value = true
 
   try {
     const job = await jobsApi.createJob(file)
+    if (!isRequestCurrent(generation)) {
+      return
+    }
     jobState.value = buildInitialState(job)
-    unsubscribe = jobsApi.subscribe(job.job_id, handleProgress, handleProgressError)
+    unsubscribe = jobsApi.subscribe(
+      job.job_id,
+      (event) => {
+        if (!isRequestCurrent(generation)) {
+          return
+        }
+        handleProgress(event)
+      },
+      (message) => {
+        if (!isRequestCurrent(generation)) {
+          return
+        }
+        handleProgressError(message)
+      }
+    )
   } catch (error) {
+    if (!isRequestCurrent(generation)) {
+      return
+    }
     uploadError.value =
       error instanceof Error ? error.message : 'Unable to create the job.'
   } finally {
-    isCreating.value = false
+    if (isRequestCurrent(generation)) {
+      isCreating.value = false
+    }
   }
+}
+
+function isRequestCurrent(generation: number): boolean {
+  return isMounted && generation === requestGeneration
 }
 
 function defaultStatusMessage(status: JobStatus): string {
@@ -116,6 +145,8 @@ function defaultStatusMessage(status: JobStatus): string {
 }
 
 onBeforeUnmount(() => {
+  isMounted = false
+  requestGeneration += 1
   closeSubscription()
 })
 </script>
