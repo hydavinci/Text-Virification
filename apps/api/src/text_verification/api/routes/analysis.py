@@ -21,8 +21,12 @@ from text_verification.infrastructure.analysis_repositories import (
 from text_verification.infrastructure.repositories import JobRepository
 
 ANALYSIS_NOT_FOUND_CODE = "analysis_not_found"
+ANALYSIS_FAILED_CODE = "analysis_failed"
 ANALYSIS_NOT_READY_CODE = "analysis_not_ready"
 INVALID_ISSUE_FILTERS_CODE = "invalid_issue_filters"
+JOB_EXPIRED_CODE = "job_expired"
+
+ANALYSIS_FAILED_FALLBACK_MESSAGE = "分析失败，请重新上传文件后重试。"
 
 READY_STATUSES = {JobStatus.COMPLETED, JobStatus.PARTIAL}
 ISSUE_DECISIONS = Literal["accepted", "custom", "ignored", "pending"]
@@ -189,6 +193,18 @@ def _require_ready_job(job_id: UUID, repository: JobRepository) -> JobRead:
     job = repository.get_job(job_id)
     if job is None:
         raise _http_error(status.HTTP_404_NOT_FOUND, JOB_NOT_FOUND_CODE, "作业不存在。")
+    if job.status == JobStatus.FAILED:
+        raise _http_error(
+            status.HTTP_409_CONFLICT,
+            ANALYSIS_FAILED_CODE,
+            job.error_message or ANALYSIS_FAILED_FALLBACK_MESSAGE,
+        )
+    if job.status == JobStatus.EXPIRED:
+        raise _http_error(
+            status.HTTP_410_GONE,
+            JOB_EXPIRED_CODE,
+            "作业已过期，请重新上传文件。",
+        )
     if job.status not in READY_STATUSES:
         raise _http_error(
             status.HTTP_409_CONFLICT,

@@ -168,6 +168,41 @@ def test_analysis_endpoints_return_ready_and_not_found_errors(client, db_session
     assert missing_response.json()["detail"]["code"] == "job_not_found"
 
 
+@pytest.mark.parametrize("path_suffix", ["document", "issues", "summary"])
+@pytest.mark.parametrize(
+    ("status", "error_code", "message"),
+    [
+        (JobStatus.QUEUED, "analysis_not_ready", "分析结果尚未就绪，请稍后重试。"),
+        (JobStatus.PARSING, "analysis_not_ready", "分析结果尚未就绪，请稍后重试。"),
+        (JobStatus.FAILED, "analysis_failed", "PDF 中没有可提取的文本，请使用包含文本层的 PDF。"),
+        (JobStatus.EXPIRED, "job_expired", "作业已过期，请重新上传文件。"),
+    ],
+)
+def test_analysis_routes_guard_non_ready_terminal_statuses(
+    client,
+    db_session: Session,
+    path_suffix: str,
+    status: JobStatus,
+    error_code: str,
+    message: str,
+) -> None:
+    job_id = _seed_job(
+        db_session,
+        status=status,
+        error_message=(
+            "PDF 中没有可提取的文本，请使用包含文本层的 PDF。"
+            if status == JobStatus.FAILED
+            else None
+        ),
+    )
+
+    response = client.get(f"/api/v1/jobs/{job_id}/{path_suffix}")
+
+    expected_status_code = 410 if status == JobStatus.EXPIRED else 409
+    assert response.status_code == expected_status_code
+    assert response.json()["detail"] == {"code": error_code, "message": message}
+
+
 def test_analysis_endpoints_reject_malformed_cursors_with_chinese_errors(
     client,
     db_session: Session,
@@ -231,7 +266,12 @@ def _seed_analysis(
     return job_id
 
 
-def _seed_job(db_session: Session, *, status: JobStatus) -> UUID:
+def _seed_job(
+    db_session: Session,
+    *,
+    status: JobStatus,
+    error_message: str | None = None,
+) -> UUID:
     now = datetime.now(UTC)
     job_id = uuid4()
     repository = JobRepository(db_session)
@@ -249,7 +289,15 @@ def _seed_job(db_session: Session, *, status: JobStatus) -> UUID:
             job_id,
             status,
             100 if status in {JobStatus.COMPLETED, JobStatus.PARTIAL} else 0,
-            "处理完成" if status in {JobStatus.COMPLETED, JobStatus.PARTIAL} else "处理中",
+            (
+                "处理完成"
+                if status in {JobStatus.COMPLETED, JobStatus.PARTIAL}
+                else "作业已过期" if status == JobStatus.EXPIRED else "处理失败"
+                if status == JobStatus.FAILED
+                else "处理中"
+            ),
+            error_code="pipeline_failed" if status == JobStatus.FAILED else None,
+            error_message=error_message,
         )
     repository.commit()
     return job_id

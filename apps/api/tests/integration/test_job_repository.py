@@ -61,6 +61,57 @@ def test_upgrade_from_old_0003_adds_job_check_options_and_keeps_repository_round
             {column["name"] for column in inspect(engine).get_columns("jobs")}
         )
 
+        seeded_job_id = uuid4()
+        seeded_created_at = datetime.now(UTC)
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO jobs (
+                        job_id,
+                        source_name,
+                        file_type,
+                        size_bytes,
+                        storage_key,
+                        status,
+                        progress,
+                        error_code,
+                        error_message,
+                        created_at,
+                        updated_at,
+                        expires_at
+                    ) VALUES (
+                        :job_id,
+                        :source_name,
+                        :file_type,
+                        :size_bytes,
+                        :storage_key,
+                        :status,
+                        :progress,
+                        :error_code,
+                        :error_message,
+                        :created_at,
+                        :updated_at,
+                        :expires_at
+                    )
+                    """
+                ),
+                {
+                    "job_id": seeded_job_id,
+                    "source_name": "preexisting.txt",
+                    "file_type": FileType.TXT.value,
+                    "size_bytes": 16,
+                    "storage_key": str(seeded_job_id),
+                    "status": JobStatus.QUEUED.value,
+                    "progress": 0,
+                    "error_code": None,
+                    "error_message": None,
+                    "created_at": seeded_created_at,
+                    "updated_at": seeded_created_at,
+                    "expires_at": seeded_created_at + timedelta(hours=1),
+                },
+            )
+
         command.upgrade(alembic_config, "head")
         assert {"scenario", "enabled_categories"} <= {
             column["name"] for column in inspect(engine).get_columns("jobs")
@@ -69,6 +120,7 @@ def test_upgrade_from_old_0003_adds_job_check_options_and_keeps_repository_round
         session = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
         try:
             repository = JobRepository(session)
+            legacy_job = repository.get_job(seeded_job_id)
             job_id = uuid4()
             now = datetime.now(UTC)
 
@@ -84,6 +136,10 @@ def test_upgrade_from_old_0003_adds_job_check_options_and_keeps_repository_round
                 enabled_categories=[CheckCategory.CHARACTER, CheckCategory.SECURITY],
             )
             repository.commit()
+
+            assert legacy_job is not None
+            assert legacy_job.scenario == CheckScenario.GENERAL
+            assert legacy_job.enabled_categories == list(CHECK_CATEGORY_ORDER)
 
             stored = repository.get_job(job_id)
             assert stored is not None
