@@ -9,7 +9,7 @@ from docx import Document as WordDocument
 from docx.document import Document as WordProcessingDocument
 from docx.oxml.table import CT_Tbl
 from docx.oxml.text.paragraph import CT_P
-from docx.table import _Cell, Table
+from docx.table import Table, _Cell
 from docx.text.paragraph import Paragraph
 
 from text_verification.domain.documents import DocumentModel, FileType, ParseError, TextBlock

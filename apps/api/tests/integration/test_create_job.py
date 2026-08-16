@@ -10,6 +10,7 @@ from uuid import UUID
 import pytest
 from fastapi import FastAPI
 
+from text_verification.checkers.models import CHECK_CATEGORY_ORDER, CheckCategory, CheckScenario
 from text_verification.domain.documents import FileType
 from text_verification.domain.jobs import JobEvent, JobRead, JobStatus
 from text_verification.infrastructure.storage import JobStorage
@@ -42,6 +43,10 @@ class RecordingJobRepository:
         storage_key: str,
         created_at: datetime,
         expires_at: datetime,
+        scenario: CheckScenario | str = CheckScenario.GENERAL,
+        enabled_categories: (
+            list[CheckCategory | str] | tuple[CheckCategory | str, ...]
+        ) = CHECK_CATEGORY_ORDER,
     ) -> JobRead:
         del storage_key
         job = JobRead(
@@ -51,6 +56,8 @@ class RecordingJobRepository:
             size_bytes=size_bytes,
             status=JobStatus.QUEUED,
             progress=0,
+            scenario=scenario,
+            enabled_categories=list(enabled_categories),
             created_at=created_at,
             expires_at=expires_at,
         )
@@ -257,9 +264,49 @@ def test_create_txt_job_persists_and_enqueues(client, repository, task_spy) -> N
     assert payload["file_type"] == "txt"
     assert payload["status"] == "queued"
     assert payload["progress"] == 0
+    assert payload["scenario"] == "general"
+    assert payload["enabled_categories"] == [category.value for category in CHECK_CATEGORY_ORDER]
     assert "storage_key" not in payload
     assert task_spy.calls == [payload["job_id"]]
     assert repository.get_job(UUID(payload["job_id"])) is not None
+
+
+def test_create_job_persists_repeated_check_options(client, repository, task_spy) -> None:
+    response = client.post(
+        "/api/v1/jobs",
+        files=[
+            ("file", ("sample.txt", "需要检查".encode(), "text/plain")),
+            ("scenario", (None, "legal")),
+            ("enabled_categories", (None, "character")),
+            ("enabled_categories", (None, "security")),
+        ],
+    )
+
+    assert response.status_code == 202
+    payload = response.json()
+    assert payload["scenario"] == "legal"
+    assert payload["enabled_categories"] == ["character", "security"]
+    stored = repository.get_job(UUID(payload["job_id"]))
+    assert stored is not None
+    assert stored.scenario == CheckScenario.LEGAL
+    assert stored.enabled_categories == [CheckCategory.CHARACTER, CheckCategory.SECURITY]
+    assert task_spy.calls == [payload["job_id"]]
+
+
+def test_create_job_rejects_empty_enabled_categories(client, repository, storage, task_spy) -> None:
+    response = client.post(
+        "/api/v1/jobs",
+        files=[
+            ("file", ("sample.txt", b"text", "text/plain")),
+            ("enabled_categories", (None, "")),
+        ],
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "invalid_check_categories"
+    assert repository._jobs == {}
+    assert task_spy.calls == []
+    assert list(storage._root.iterdir()) == []
 
 
 @pytest.mark.parametrize(

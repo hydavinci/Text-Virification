@@ -15,11 +15,10 @@ from sqlalchemy.orm import Session
 from sqlalchemy.orm.session import sessionmaker
 
 from alembic import command
-from text_verification.checkers.models import CheckCategory
+from text_verification.checkers.models import CHECK_CATEGORY_ORDER, CheckCategory, CheckScenario
 from text_verification.domain.documents import DocumentModel, FileType, TextBlock
 from text_verification.domain.issues import Issue, IssueSeverity
 from text_verification.domain.jobs import JobStatus, TerminalJobStateError
-from text_verification.infrastructure.analysis_repositories import AnalysisRepository, IssueQuery
 from text_verification.infrastructure.repositories import JobRepository
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
@@ -42,6 +41,9 @@ def test_database_schema_matches_head_migration(
     assert {"ix_jobs_expires_at", "ix_jobs_status"} <= {
         index["name"] for index in inspector.get_indexes("jobs")
     }
+    assert {"scenario", "enabled_categories"} <= {
+        column["name"] for column in inspector.get_columns("jobs")
+    }
     assert {"ix_job_events_job_sequence"} <= {
         index["name"] for index in inspector.get_indexes("job_events")
     }
@@ -50,53 +52,63 @@ def test_database_schema_matches_head_migration(
     }
 
 
-def test_upgrade_from_old_0002_adds_issue_roundtrip_fields_and_keeps_repository_round_trip(
+def test_upgrade_from_old_0003_adds_job_check_options_and_keeps_repository_round_trip(
     test_database_url: str,
 ) -> None:
     with migrated_schema(test_database_url) as (engine, alembic_config):
-        command.upgrade(alembic_config, "0002_create_documents_issues")
-        assert {"document_id", "page", "issue_type"}.isdisjoint(
-            {column["name"] for column in inspect(engine).get_columns("issues")}
+        command.upgrade(alembic_config, "0003_add_issue_roundtrip_fields")
+        assert {"scenario", "enabled_categories"}.isdisjoint(
+            {column["name"] for column in inspect(engine).get_columns("jobs")}
         )
 
         command.upgrade(alembic_config, "head")
-        assert {"document_id", "page", "issue_type"} <= {
-            column["name"] for column in inspect(engine).get_columns("issues")
+        assert {"scenario", "enabled_categories"} <= {
+            column["name"] for column in inspect(engine).get_columns("jobs")
         }
 
         session = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
         try:
-            repository = AnalysisRepository(session)
-            job_id = seed_analysis_job(session)
-            document = build_analysis_document([("绝对领先", 7)])
-            issue = build_analysis_issue(
-                document,
-                block_id="p-000001",
-                original="绝对领先",
-                suggestion="领先",
-                start=0,
-                end=4,
-                page=7,
-                issue_type="regex",
+            repository = JobRepository(session)
+            job_id = uuid4()
+            now = datetime.now(UTC)
+
+            repository.create_job(
+                job_id=job_id,
+                source_name="analysis.txt",
+                file_type=FileType.TXT.value,
+                size_bytes=16,
+                storage_key=str(job_id),
+                created_at=now,
+                expires_at=now + timedelta(hours=1),
+                scenario=CheckScenario.LEGAL,
+                enabled_categories=[CheckCategory.CHARACTER, CheckCategory.SECURITY],
             )
+            repository.commit()
 
-            repository.replace_analysis(job_id, document, [issue], {})
-            session.commit()
-
-            assert repository.get_document(job_id) == document
-            page = repository.list_issues(job_id, IssueQuery(limit=20))
-            assert page.items == [issue]
-            assert page.total == 1
-            assert page.next_cursor is None
+            stored = repository.get_job(job_id)
+            assert stored is not None
+            assert stored.scenario == CheckScenario.LEGAL
+            assert stored.enabled_categories == [
+                CheckCategory.CHARACTER,
+                CheckCategory.SECURITY,
+            ]
         finally:
             session.close()
 
 
-def test_head_downgrades_back_through_0002_before_removing_analysis_tables(
+def test_head_downgrades_back_through_0003_before_removing_analysis_tables(
     test_database_url: str,
 ) -> None:
     with migrated_schema(test_database_url) as (engine, alembic_config):
         command.upgrade(alembic_config, "head")
+        assert {"scenario", "enabled_categories"} <= {
+            column["name"] for column in inspect(engine).get_columns("jobs")
+        }
+
+        command.downgrade(alembic_config, "0003_add_issue_roundtrip_fields")
+        assert {"scenario", "enabled_categories"}.isdisjoint(
+            {column["name"] for column in inspect(engine).get_columns("jobs")}
+        )
         assert {"document_id", "page", "issue_type"} <= {
             column["name"] for column in inspect(engine).get_columns("issues")
         }
@@ -125,6 +137,8 @@ def test_repository_persists_job_and_ordered_events(db_session: Session) -> None
         storage_key=str(job_id),
         created_at=now,
         expires_at=now + timedelta(hours=24),
+        scenario=CheckScenario.BUSINESS,
+        enabled_categories=[CheckCategory.CHARACTER, CheckCategory.SECURITY],
     )
     repository.transition(job_id, JobStatus.UPLOAD_VALIDATED, 10, "上传校验完成")
     repository.transition(job_id, JobStatus.PARSING, 25, "开始解析")
@@ -137,6 +151,8 @@ def test_repository_persists_job_and_ordered_events(db_session: Session) -> None
     assert job is not None
     assert job.status == JobStatus.PARSING
     assert job.file_type == FileType.DOCX
+    assert job.scenario == CheckScenario.BUSINESS
+    assert job.enabled_categories == [CheckCategory.CHARACTER, CheckCategory.SECURITY]
     assert job.error_code is None
     assert job.error_message is None
     assert [(event.sequence, event.status) for event in events] == [
@@ -200,6 +216,29 @@ def test_repository_lists_all_persisted_job_ids(db_session: Session) -> None:
     repository.commit()
 
     assert repository.list_job_ids() == set(job_ids)
+
+
+def test_repository_defaults_legacy_job_check_options(db_session: Session) -> None:
+    repository = JobRepository(db_session)
+    job_id = uuid4()
+    now = datetime.now(UTC)
+
+    repository.create_job(
+        job_id=job_id,
+        source_name="legacy.txt",
+        file_type="txt",
+        size_bytes=32,
+        storage_key=str(job_id),
+        created_at=now,
+        expires_at=now + timedelta(hours=1),
+    )
+    repository.commit()
+
+    job = repository.get_job(job_id)
+
+    assert job is not None
+    assert job.scenario == CheckScenario.GENERAL
+    assert job.enabled_categories == list(CHECK_CATEGORY_ORDER)
 
 
 def test_transition_rejects_stale_non_terminal_update_after_competing_expiry(

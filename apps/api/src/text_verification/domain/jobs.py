@@ -3,8 +3,9 @@ from datetime import datetime
 from enum import StrEnum
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from text_verification.checkers.models import CHECK_CATEGORY_ORDER, CheckCategory, CheckScenario
 from text_verification.domain.documents import FileType
 
 
@@ -59,8 +60,22 @@ class JobRead(BaseModel):
     progress: int
     error_code: str | None = None
     error_message: str | None = None
+    scenario: CheckScenario = CheckScenario.GENERAL
+    enabled_categories: list[CheckCategory] = Field(
+        default_factory=lambda: list(CHECK_CATEGORY_ORDER)
+    )
     created_at: datetime
     expires_at: datetime
+
+    @field_validator("scenario", mode="before")
+    @classmethod
+    def default_scenario(cls, value: object) -> object:
+        return CheckScenario.GENERAL if value is None else value
+
+    @field_validator("enabled_categories", mode="before")
+    @classmethod
+    def default_enabled_categories(cls, value: object) -> object:
+        return list(CHECK_CATEGORY_ORDER) if value is None else value
 
 
 @dataclass(frozen=True)

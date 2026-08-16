@@ -15,8 +15,10 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Request, UploadFile, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session, sessionmaker
+from starlette.datastructures import FormData
 
 from text_verification.api.dependencies import get_job_repository, get_job_storage
+from text_verification.checkers.models import CHECK_CATEGORY_ORDER, CheckCategory, CheckScenario
 from text_verification.config import Settings, get_settings
 from text_verification.domain.jobs import TERMINAL_STATUSES, JobEvent, JobRead, JobStatus
 from text_verification.infrastructure.database import get_session_factory
@@ -38,6 +40,8 @@ JOB_CLEANUP_FAILURE_CODE = "job_cleanup_failed"
 JOB_CREATE_FAILURE_CODE = "job_create_failed"
 INVALID_UPLOAD_CODE = "invalid_upload"
 INVALID_LAST_EVENT_ID_CODE = "invalid_last_event_id"
+INVALID_CHECK_CATEGORIES_CODE = "invalid_check_categories"
+INVALID_CHECK_SCENARIO_CODE = "invalid_check_scenario"
 JOB_NOT_FOUND_CODE = "job_not_found"
 UNSUPPORTED_FILE_TYPE_CODE = "unsupported_file_type"
 UPLOAD_TOO_LARGE_CODE = "upload_too_large"
@@ -97,7 +101,8 @@ async def stream_job_events(
 
 
 @router.post("/jobs", response_model=JobRead, status_code=status.HTTP_202_ACCEPTED)
-def create_job(
+async def create_job(
+    request: Request,
     file: Annotated[UploadFile, File(...)],
     repository: Annotated[JobRepository, Depends(get_job_repository)],
     storage: Annotated[JobStorage, Depends(get_job_storage)],
@@ -108,6 +113,8 @@ def create_job(
     file_type_hint = _file_type_hint(source_name)
     stored_size: int | None = None
     now = datetime.now(UTC)
+    form = await request.form()
+    scenario, enabled_categories = _parse_check_options(form)
 
     try:
         stored = storage.save_stream(job_id, source_name, _binary_stream(file))
@@ -122,6 +129,8 @@ def create_job(
             storage_key=str(job_id),
             created_at=now,
             expires_at=now + timedelta(hours=settings.job_retention_hours),
+            scenario=scenario,
+            enabled_categories=enabled_categories,
         )
         repository.commit()
     except UploadCleanupFailed:
@@ -282,6 +291,55 @@ def _parse_last_event_id(last_event_id: str | None) -> int:
             "Last-Event-ID must be a non-negative integer.",
         )
     return parsed
+
+
+def _parse_check_options(form: FormData) -> tuple[CheckScenario, list[CheckCategory]]:
+    raw_scenario = form.get("scenario")
+    scenario_value = str(raw_scenario).strip() if raw_scenario is not None else ""
+    if not scenario_value:
+        scenario = CheckScenario.GENERAL
+    else:
+        try:
+            scenario = CheckScenario(scenario_value)
+        except ValueError as error:
+            raise _http_error(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                INVALID_CHECK_SCENARIO_CODE,
+                "使用场景无效，请重新选择。",
+            ) from error
+
+    if "enabled_categories" not in form:
+        return scenario, list(CHECK_CATEGORY_ORDER)
+
+    normalized_values = [
+        str(value).strip()
+        for value in form.getlist("enabled_categories")
+        if str(value).strip()
+    ]
+    if not normalized_values:
+        raise _http_error(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            INVALID_CHECK_CATEGORIES_CODE,
+            "至少选择一个检查类别。",
+        )
+
+    enabled_categories: list[CheckCategory] = []
+    seen: set[CheckCategory] = set()
+    try:
+        for raw_value in normalized_values:
+            category = CheckCategory(raw_value)
+            if category in seen:
+                continue
+            seen.add(category)
+            enabled_categories.append(category)
+    except ValueError as error:
+        raise _http_error(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            INVALID_CHECK_CATEGORIES_CODE,
+            "检查类别无效，请重新选择。",
+        ) from error
+
+    return scenario, enabled_categories
 
 
 async def _job_event_stream(

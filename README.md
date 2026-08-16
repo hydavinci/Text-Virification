@@ -89,9 +89,12 @@ Set-Location ..\..
 
 ## API 与 SSE 端点
 
-- `POST /api/v1/jobs`
+- `POST /api/v1/jobs`（支持 `scenario` 与重复 `enabled_categories` 表单字段）
 - `GET /api/v1/jobs/{job_id}`
 - `GET /api/v1/jobs/{job_id}/events`
+- `GET /api/v1/jobs/{job_id}/document`
+- `GET /api/v1/jobs/{job_id}/issues`
+- `GET /api/v1/jobs/{job_id}/summary`
 - `GET /api/v1/health`
 
 ## 文件限制、保留与安全边界

@@ -6,9 +6,16 @@ from uuid import UUID
 from pypdf import PdfReader
 from pypdf._page import PageObject
 
-from text_verification.domain.documents import DocumentModel, FileType, ParseError, TextBlock
+from text_verification.domain.documents import (
+    DocumentModel,
+    FileType,
+    ParseError,
+    TextBlock,
+)
 
-PDF_TEXT_EXTRACTION_FAILED_MESSAGE = "无法提取 PDF 文本，请检查文件是否损坏或是否包含受支持的文本层。"
+PDF_TEXT_EXTRACTION_FAILED_MESSAGE = (
+    "无法提取 PDF 文本，请检查文件是否损坏或是否包含受支持的文本层。"
+)
 
 
 class PdfParser:

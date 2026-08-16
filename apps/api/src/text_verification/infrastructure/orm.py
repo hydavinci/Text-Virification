@@ -35,6 +35,8 @@ class JobRow(Base):
     progress: Mapped[int] = mapped_column(Integer, default=0)
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    scenario: Mapped[str] = mapped_column(String(32), default="general")
+    enabled_categories_json: Mapped[list[str]] = mapped_column("enabled_categories", JSONB)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)

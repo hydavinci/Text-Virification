@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from text_verification.checkers.models import CHECK_CATEGORY_ORDER, CheckCategory, CheckScenario
 from text_verification.domain.documents import FileType
 from text_verification.domain.jobs import (
     TERMINAL_STATUSES,
@@ -34,7 +36,11 @@ class JobRepository:
         storage_key: str,
         created_at: datetime,
         expires_at: datetime,
+        scenario: CheckScenario | str = CheckScenario.GENERAL,
+        enabled_categories: Iterable[CheckCategory | str] = CHECK_CATEGORY_ORDER,
     ) -> JobRead:
+        normalized_scenario = _normalize_scenario(scenario)
+        normalized_categories = _normalize_enabled_categories(enabled_categories)
         row = JobRow(
             job_id=job_id,
             source_name=source_name,
@@ -45,6 +51,8 @@ class JobRepository:
             progress=0,
             error_code=None,
             error_message=None,
+            scenario=normalized_scenario.value,
+            enabled_categories_json=[category.value for category in normalized_categories],
             created_at=created_at,
             updated_at=created_at,
             expires_at=expires_at,
@@ -183,6 +191,10 @@ class JobRepository:
             progress=row.progress,
             error_code=row.error_code,
             error_message=row.error_message,
+            scenario=CheckScenario(row.scenario),
+            enabled_categories=[
+                CheckCategory(category) for category in row.enabled_categories_json
+            ],
             created_at=row.created_at,
             expires_at=row.expires_at,
         )
@@ -195,3 +207,25 @@ class JobRepository:
             message=row.message,
             created_at=row.created_at,
         )
+
+
+def _normalize_scenario(value: CheckScenario | str) -> CheckScenario:
+    if isinstance(value, CheckScenario):
+        return value
+    return CheckScenario(value)
+
+
+def _normalize_enabled_categories(
+    values: Iterable[CheckCategory | str],
+) -> list[CheckCategory]:
+    normalized: list[CheckCategory] = []
+    seen: set[CheckCategory] = set()
+    for value in values:
+        category = value if isinstance(value, CheckCategory) else CheckCategory(value)
+        if category in seen:
+            continue
+        seen.add(category)
+        normalized.append(category)
+    if not normalized:
+        raise ValueError("enabled_categories must not be empty")
+    return normalized

@@ -3,8 +3,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from text_verification.domain.documents import FileType
-from text_verification.domain.documents import ParseError
+from text_verification.domain.documents import FileType, ParseError
 from text_verification.parsers.registry import ParserRegistry
 from text_verification.parsers.txt import TxtParser
 

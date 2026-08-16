@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import json
 from dataclasses import dataclass
+from typing import Literal, cast
 from uuid import UUID
 
 from sqlalchemy import Select, and_, delete, func, or_, select
@@ -21,6 +23,7 @@ from text_verification.infrastructure.orm import (
 
 PENDING_DECISION = "pending"
 SUPPORTED_DECISIONS = {"accepted", "custom", "ignored", PENDING_DECISION}
+BlockKind = Literal["paragraph", "heading", "table_cell", "header", "footer"]
 
 
 @dataclass(frozen=True)
@@ -54,10 +57,51 @@ class IssuePage:
 
 
 @dataclass(frozen=True)
+class DocumentQuery:
+    cursor: str | None = None
+    limit: int = 100
+
+    def __post_init__(self) -> None:
+        if self.limit <= 0:
+            raise ValueError("limit must be positive")
+
+
+@dataclass(frozen=True)
+class DocumentPage:
+    document_id: UUID
+    file_type: FileType
+    source_name: str
+    version: int
+    metadata: dict[str, object]
+    blocks: list[TextBlock]
+    total_blocks: int
+    next_cursor: str | None
+
+
+@dataclass(frozen=True)
+class IssueSummary:
+    total: int
+    by_category: dict[CheckCategory, int]
+    by_severity: dict[IssueSeverity, int]
+
+
+@dataclass(frozen=True)
 class _IssueCursor:
     block_order: int
     start_offset: int
     issue_id: UUID
+
+
+@dataclass(frozen=True)
+class _DocumentCursor:
+    block_order: int
+
+
+class InvalidCursorError(ValueError):
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        self.message = message
+        super().__init__(message)
 
 
 class AnalysisRepository:
@@ -170,7 +214,7 @@ class AnalysisRepository:
             blocks=[
                 TextBlock(
                     block_id=block.block_id,
-                    kind=block.kind,
+                    kind=cast(BlockKind, block.kind),
                     text=block.text,
                     page=block.page,
                     paragraph_index=block.paragraph_index,
@@ -181,6 +225,48 @@ class AnalysisRepository:
                 for block in row.blocks
             ],
             metadata=row.metadata_json,
+        )
+
+    def list_document_blocks(self, job_id: UUID, query: DocumentQuery) -> DocumentPage | None:
+        row = self._session.get(DocumentRow, job_id)
+        if row is None:
+            return None
+
+        total_blocks = int(
+            self._session.scalar(
+                select(func.count())
+                .select_from(DocumentBlockRow)
+                .where(DocumentBlockRow.job_id == job_id)
+            )
+            or 0
+        )
+
+        cursor = _decode_document_cursor(query.cursor) if query.cursor is not None else None
+        statement = (
+            select(DocumentBlockRow)
+            .where(DocumentBlockRow.job_id == job_id)
+            .order_by(DocumentBlockRow.block_order)
+        )
+        if cursor is not None:
+            statement = statement.where(DocumentBlockRow.block_order > cursor.block_order)
+
+        block_rows = self._session.scalars(statement.limit(query.limit + 1)).all()
+        visible_rows = block_rows[: query.limit]
+        next_cursor = None
+        if len(block_rows) > query.limit:
+            next_cursor = _encode_document_cursor(
+                _DocumentCursor(block_order=visible_rows[-1].block_order)
+            )
+
+        return DocumentPage(
+            document_id=row.document_id,
+            file_type=FileType(row.file_type),
+            source_name=row.source_name,
+            version=row.version,
+            metadata=row.metadata_json,
+            blocks=[_to_text_block(block_row) for block_row in visible_rows],
+            total_blocks=total_blocks,
+            next_cursor=next_cursor,
         )
 
     def list_issues(self, job_id: UUID, query: IssueQuery) -> IssuePage:
@@ -196,7 +282,7 @@ class AnalysisRepository:
             or 0
         )
 
-        cursor = _decode_cursor(query.cursor) if query.cursor is not None else None
+        cursor = _decode_issue_cursor(query.cursor) if query.cursor is not None else None
         statement = (
             select(
                 IssueRow,
@@ -249,7 +335,7 @@ class AnalysisRepository:
         next_cursor = None
         if len(result_rows) > query.limit:
             last_issue_row, block_order = visible_rows[-1]
-            next_cursor = _encode_cursor(
+            next_cursor = _encode_issue_cursor(
                 _IssueCursor(
                     block_order=block_order,
                     start_offset=last_issue_row.start_offset,
@@ -269,6 +355,29 @@ class AnalysisRepository:
             CheckCategory(row.category): CheckerFailure(code=row.code, message=row.message)
             for row in rows
         }
+
+    def summarize_issues(self, job_id: UUID) -> IssueSummary:
+        category_rows = self._session.execute(
+            select(IssueRow.category, func.count())
+            .where(IssueRow.job_id == job_id)
+            .group_by(IssueRow.category)
+        ).all()
+        severity_rows = self._session.execute(
+            select(IssueRow.severity, func.count())
+            .where(IssueRow.job_id == job_id)
+            .group_by(IssueRow.severity)
+        ).all()
+        by_category = {
+            CheckCategory(category): int(count) for category, count in category_rows
+        }
+        by_severity = {
+            IssueSeverity(severity): int(count) for severity, count in severity_rows
+        }
+        return IssueSummary(
+            total=sum(by_category.values()),
+            by_category=by_category,
+            by_severity=by_severity,
+        )
 
     def _filtered_issue_ids_query(self, job_id: UUID, query: IssueQuery) -> Select[tuple[UUID]]:
         statement = select(IssueRow.issue_id).where(IssueRow.job_id == job_id)
@@ -290,7 +399,6 @@ class AnalysisRepository:
         if row is None:
             raise LookupError(f"Job {job_id} does not exist.")
         return row
-
 
     def _validate_issues(self, document: DocumentModel, issues: list[Issue]) -> None:
         block_pages = {block.block_id: block.page for block in document.blocks}
@@ -326,7 +434,20 @@ def _to_issue(*, issue_row: IssueRow) -> Issue:
     )
 
 
-def _encode_cursor(cursor: _IssueCursor) -> str:
+def _to_text_block(block_row: DocumentBlockRow) -> TextBlock:
+    return TextBlock(
+        block_id=block_row.block_id,
+        kind=cast(BlockKind, block_row.kind),
+        text=block_row.text,
+        page=block_row.page,
+        paragraph_index=block_row.paragraph_index,
+        parent_id=block_row.parent_id,
+        style=block_row.style_json,
+        source_locator=block_row.source_locator_json,
+    )
+
+
+def _encode_issue_cursor(cursor: _IssueCursor) -> str:
     payload = json.dumps(
         {
             "block_order": cursor.block_order,
@@ -338,11 +459,69 @@ def _encode_cursor(cursor: _IssueCursor) -> str:
     return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
 
 
-def _decode_cursor(value: str) -> _IssueCursor:
-    padded_value = value + "=" * (-len(value) % 4)
-    data = json.loads(base64.urlsafe_b64decode(padded_value).decode("utf-8"))
+def _decode_issue_cursor(value: str) -> _IssueCursor:
+    data = _decode_cursor_payload(
+        value,
+        code="invalid_issue_cursor",
+        message="问题分页游标无效，请刷新后重试。",
+    )
     return _IssueCursor(
-        block_order=int(data["block_order"]),
-        start_offset=int(data["start_offset"]),
-        issue_id=UUID(str(data["issue_id"])),
+        block_order=_require_int_field(data, "block_order", code="invalid_issue_cursor"),
+        start_offset=_require_int_field(data, "start_offset", code="invalid_issue_cursor"),
+        issue_id=_require_uuid_field(data, "issue_id", code="invalid_issue_cursor"),
+    )
+
+
+def _encode_document_cursor(cursor: _DocumentCursor) -> str:
+    payload = json.dumps({"block_order": cursor.block_order}, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def _decode_document_cursor(value: str) -> _DocumentCursor:
+    data = _decode_cursor_payload(
+        value,
+        code="invalid_document_cursor",
+        message="文档分页游标无效，请刷新后重试。",
+    )
+    return _DocumentCursor(
+        block_order=_require_int_field(data, "block_order", code="invalid_document_cursor")
+    )
+
+
+def _decode_cursor_payload(value: str, *, code: str, message: str) -> dict[str, object]:
+    padded_value = value + "=" * (-len(value) % 4)
+    try:
+        decoded = base64.b64decode(padded_value.encode("ascii"), altchars=b"-_", validate=True)
+        data = json.loads(decoded.decode("utf-8"))
+    except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise InvalidCursorError(code, message) from error
+    if not isinstance(data, dict):
+        raise InvalidCursorError(code, message)
+    return data
+
+
+def _require_int_field(data: dict[str, object], field: str, *, code: str) -> int:
+    raw_value = data.get(field)
+    if not isinstance(raw_value, int | str):
+        raise InvalidCursorError(code, _cursor_message(code))
+    try:
+        return int(raw_value)
+    except ValueError as error:
+        raise InvalidCursorError(code, _cursor_message(code)) from error
+
+
+def _require_uuid_field(data: dict[str, object], field: str, *, code: str) -> UUID:
+    try:
+        return UUID(str(data[field]))
+    except (KeyError, TypeError, ValueError) as error:
+        raise InvalidCursorError(code, _cursor_message(code)) from error
+
+
+def _cursor_message(code: str) -> str:
+    return (
+        "文档分页游标无效，请刷新后重试。"
+        if code == "invalid_document_cursor"
+        else "问题分页游标无效，请刷新后重试。"
     )

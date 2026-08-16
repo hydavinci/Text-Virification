@@ -7,6 +7,13 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from text_verification.checkers.models import (
+    CHECK_CATEGORY_ORDER,
+    CheckCategory,
+    CheckOptions,
+    CheckRunResult,
+    CheckScenario,
+)
 from text_verification.domain.documents import DocumentModel, FileType
 from text_verification.domain.jobs import (
     TERMINAL_STATUSES,
@@ -38,6 +45,10 @@ class InMemoryJobRepository:
         storage_key: str,
         created_at: datetime,
         expires_at: datetime,
+        scenario: CheckScenario | str = CheckScenario.GENERAL,
+        enabled_categories: (
+            list[CheckCategory | str] | tuple[CheckCategory | str, ...]
+        ) = CHECK_CATEGORY_ORDER,
     ) -> JobRead:
         del storage_key
         job = JobRead(
@@ -47,6 +58,8 @@ class InMemoryJobRepository:
             size_bytes=size_bytes,
             status=JobStatus.QUEUED,
             progress=0,
+            scenario=scenario,
+            enabled_categories=list(enabled_categories),
             created_at=created_at,
             expires_at=expires_at,
         )
@@ -302,6 +315,20 @@ class ExplodingChecker:
 
 
 @dataclass
+class RecordingCheckerRegistry:
+    calls: list[CheckOptions] = field(default_factory=list)
+
+    def run(self, document, context, options) -> CheckRunResult:
+        del document, context
+        self.calls.append(options)
+        return CheckRunResult(
+            issues=[],
+            completed_categories=set(options.enabled_categories),
+            failures={},
+        )
+
+
+@dataclass
 class FlakyRunnerFactory:
     failures_remaining: int
     attempts: int = 0
@@ -368,6 +395,10 @@ def _seed_txt_job(
     *,
     persist_source: bool = True,
     text: str | bytes = "需要检查",
+    scenario: CheckScenario | str = CheckScenario.GENERAL,
+    enabled_categories: (
+        list[CheckCategory | str] | tuple[CheckCategory | str, ...]
+    ) = CHECK_CATEGORY_ORDER,
 ) -> UUID:
     job_id = uuid4()
     created_at = datetime.now(UTC)
@@ -386,6 +417,8 @@ def _seed_txt_job(
         storage_key=str(job_id),
         created_at=created_at,
         expires_at=created_at + timedelta(hours=24),
+        scenario=scenario,
+        enabled_categories=enabled_categories,
     )
     repository.commit()
     return job_id
@@ -765,6 +798,49 @@ def test_process_job_retries_transient_unexpected_failure_without_failed_event(
     ]
     assert len(session_factory.sessions) == 2
     assert all(session.closed for session in session_factory.sessions)
+
+
+def test_process_job_passes_persisted_and_legacy_check_options_to_checker_registry(
+    monkeypatch,
+    worker_storage,
+    celery_eager,
+) -> None:
+    from text_verification.workers.tasks import process_job
+
+    repository = InMemoryJobRepository()
+    analysis_repository = InMemoryAnalysisRepository(repository)
+    checker_registry = RecordingCheckerRegistry()
+    configured_job_id = _seed_txt_job(
+        repository,
+        worker_storage,
+        text="需要检查",
+        scenario=CheckScenario.LEGAL,
+        enabled_categories=[CheckCategory.CHARACTER, CheckCategory.SECURITY],
+    )
+    legacy_job_id = _seed_txt_job(repository, worker_storage, text="也需要检查")
+    repository._jobs[legacy_job_id] = repository._jobs[legacy_job_id].model_copy(
+        update={"scenario": None, "enabled_categories": None}
+    )
+    repository._reset_working_copy()
+    configure_real_pipeline(
+        monkeypatch,
+        repository,
+        analysis_repository,
+        worker_storage,
+        checker_registry=checker_registry,
+    )
+
+    first_result = process_job.delay(str(configured_job_id))
+    second_result = process_job.delay(str(legacy_job_id))
+
+    assert first_result.successful()
+    assert second_result.successful()
+    assert checker_registry.calls[0].scenario == CheckScenario.LEGAL
+    assert checker_registry.calls[0].enabled_categories == frozenset(
+        {CheckCategory.CHARACTER, CheckCategory.SECURITY}
+    )
+    assert checker_registry.calls[1].scenario == CheckScenario.GENERAL
+    assert checker_registry.calls[1].enabled_categories == frozenset(CHECK_CATEGORY_ORDER)
 
 
 def test_process_job_rolls_back_failed_final_shared_commit_and_recovers_on_retry(
