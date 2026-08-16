@@ -210,6 +210,12 @@ class InMemoryAnalysisRepository:
             return None
         return document.model_copy(deep=True)
 
+    def pending_document(self, job_id: UUID) -> DocumentModel | None:
+        document = self._working_documents.get(job_id)
+        if document is None:
+            return None
+        return document.model_copy(deep=True)
+
     @property
     def issues(self) -> list[object]:
         if self._last_job_id is None:
@@ -759,6 +765,61 @@ def test_process_job_retries_transient_unexpected_failure_without_failed_event(
     ]
     assert len(session_factory.sessions) == 2
     assert all(session.closed for session in session_factory.sessions)
+
+
+def test_process_job_rolls_back_failed_final_shared_commit_and_recovers_on_retry(
+    monkeypatch,
+    worker_storage,
+    celery_eager,
+) -> None:
+    from text_verification.workers.tasks import process_job
+
+    repository = InMemoryJobRepository(fail_on_commit_calls={4})
+    analysis_repository = InMemoryAnalysisRepository(repository)
+    job_id = _seed_txt_job(repository, worker_storage, text="这是绝对领先的方案")
+    failure_snapshot: dict[str, object] = {}
+    original_commit = repository.commit
+    original_rollback = repository.rollback
+
+    def commit_with_snapshot() -> None:
+        next_commit = repository._commit_count + 1
+        if next_commit == 4:
+            failure_snapshot["staged_working_status"] = repository._working_jobs[job_id].status
+            failure_snapshot["staged_pending_document"] = analysis_repository.pending_document(
+                job_id
+            )
+        original_commit()
+
+    def rollback_with_snapshot() -> None:
+        original_rollback()
+        failure_snapshot["post_rollback_status"] = repository.get_job(job_id).status
+        failure_snapshot["post_rollback_document"] = analysis_repository.get_document(job_id)
+
+    monkeypatch.setattr(repository, "commit", commit_with_snapshot)
+    monkeypatch.setattr(repository, "rollback", rollback_with_snapshot)
+    session_factory = configure_real_pipeline(
+        monkeypatch,
+        repository,
+        analysis_repository,
+        worker_storage,
+    )
+
+    result = process_job.delay(str(job_id))
+
+    assert result.successful()
+    assert failure_snapshot["staged_working_status"] == JobStatus.COMPLETED
+    assert failure_snapshot["staged_pending_document"] is not None
+    assert failure_snapshot["post_rollback_status"] == JobStatus.PARSING
+    assert failure_snapshot["post_rollback_document"] is None
+    assert repository.rollback_calls == 1
+    assert len(session_factory.sessions) == 2
+    assert all(session.closed for session in session_factory.sessions)
+
+    job = repository.get_job(job_id)
+    assert job is not None
+    assert job.status == JobStatus.COMPLETED
+    assert job.progress == 100
+    assert analysis_repository.get_document(job_id) is not None
 
 
 def test_process_job_persists_one_failed_event_after_unexpected_retries_exhausted(
