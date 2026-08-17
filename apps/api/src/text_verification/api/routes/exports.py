@@ -36,6 +36,7 @@ from text_verification.domain.exports import (
     ExportCheckerFailureSnapshot,
     ExportDispatchStatus,
     ExportIssueSummarySnapshot,
+    ExportPublicRead,
     ExportRead,
     ExportSnapshot,
     ExportSnapshotTooLarge,
@@ -100,7 +101,7 @@ class ExportResponse(BaseModel):
     expires_at: datetime
 
     @classmethod
-    def from_export(cls, export: ExportRead) -> ExportResponse:
+    def from_export(cls, export: ExportRead | ExportPublicRead) -> ExportResponse:
         return cls(
             export_id=export.export_id,
             job_id=export.job_id,
@@ -403,7 +404,11 @@ def _resolve_extension(file_type: FileType, export_type: ExportType) -> str:
     return REPORT_EXTENSIONS[export_type]
 
 
-def _require_export(session: Session, job_id: UUID, export_id: UUID) -> ExportRead:
+def _require_export(
+    session: Session,
+    job_id: UUID,
+    export_id: UUID,
+) -> ExportPublicRead:
     export = ExportRepository(session).get_for_job(job_id, export_id)
     if export is None:
         raise _http_error(

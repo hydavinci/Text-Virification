@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from importlib import import_module
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
+from pydantic import ValidationError
+from sqlalchemy import event, update
 from sqlalchemy.orm import Session
 
 from text_verification.checkers.models import CHECK_CATEGORY_ORDER, CheckScenario
@@ -15,6 +17,7 @@ from text_verification.domain.exports import (
     ExportSnapshot,
     ExportWarning,
 )
+from text_verification.infrastructure.orm import ExportRow
 from text_verification.infrastructure.repositories import JobRepository
 
 
@@ -85,6 +88,94 @@ def test_export_lifecycle_round_trip(
     assert stored.error_code is None
     assert stored.error_message is None
     assert stored.expires_at == expires_at
+
+
+def test_get_for_job_uses_public_projection_without_selecting_snapshot(
+    postgres_session: Session,
+) -> None:
+    ExportType, ExportStatus, ExportRepository, _ = _export_symbols()
+    job_id, expires_at = seed_job(postgres_session)
+    repository = ExportRepository(postgres_session)
+    warning = ExportWarning(
+        code="unsafe_docx_run_boundary",
+        message="请手动修改后重新导出。",
+        issue_id=UUID("00000000-0000-0000-0000-000000000001"),
+        block_id="p-000001",
+    )
+    export = repository.create(
+        job_id,
+        ExportType.HTML_REPORT,
+        "html",
+        snapshot=build_snapshot(file_type=FileType.TXT),
+    )
+    repository.mark_completed(export.export_id, warnings=[warning])
+    postgres_session.commit()
+    postgres_session.execute(
+        update(ExportRow)
+        .where(ExportRow.export_id == export.export_id)
+        .values(snapshot_json=_large_invalid_snapshot_sentinel())
+    )
+    postgres_session.commit()
+    statements: list[str] = []
+    bind = postgres_session.get_bind()
+
+    def _capture_statement(
+        _conn: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        normalized = " ".join(statement.lower().split())
+        if normalized.startswith("select") and " from exports " in f" {normalized} ":
+            statements.append(normalized)
+
+    event.listen(bind, "before_cursor_execute", _capture_statement)
+    try:
+        found = repository.get_for_job(job_id, export.export_id)
+    finally:
+        event.remove(bind, "before_cursor_execute", _capture_statement)
+
+    assert found is not None
+    assert found.export_id == export.export_id
+    assert found.job_id == job_id
+    assert found.status == ExportStatus.COMPLETED
+    assert found.file_name == "report.html"
+    assert found.warnings == [warning]
+    assert found.error_code is None
+    assert found.error_message is None
+    assert found.expires_at == expires_at
+    assert statements
+    assert all("snapshot" not in statement.partition(" from ")[0] for statement in statements)
+
+
+def test_get_preserves_worker_snapshot_validation(
+    postgres_session: Session,
+) -> None:
+    ExportType, _, ExportRepository, _ = _export_symbols()
+    job_id, _ = seed_job(postgres_session)
+    repository = ExportRepository(postgres_session)
+    snapshot = build_snapshot(file_type=FileType.TXT)
+    export = repository.create(
+        job_id,
+        ExportType.HTML_REPORT,
+        "html",
+        snapshot=snapshot,
+    )
+    postgres_session.commit()
+    postgres_session.execute(
+        update(ExportRow)
+        .where(ExportRow.export_id == export.export_id)
+        .values(snapshot_json=_mismatched_snapshot_payload(snapshot))
+    )
+    postgres_session.commit()
+
+    with pytest.raises(
+        ValidationError,
+        match="snapshot source type must match the normalized document",
+    ):
+        repository.get(export.export_id)
 
 
 @pytest.mark.parametrize(
@@ -237,3 +328,18 @@ def build_snapshot(*, file_type: FileType) -> ExportSnapshot:
         issues=[],
         preflight_warnings=[],
     )
+
+
+def _large_invalid_snapshot_sentinel() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "unexpected_payload": "x" * (1024 * 1024),
+    }
+
+
+def _mismatched_snapshot_payload(snapshot: ExportSnapshot) -> dict[str, object]:
+    payload = cast(dict[str, object], snapshot.model_dump(mode="json"))
+    document = payload["document"]
+    assert isinstance(document, dict)
+    document["file_type"] = FileType.DOCX.value
+    return payload

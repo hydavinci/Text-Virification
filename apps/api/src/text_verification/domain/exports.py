@@ -203,6 +203,40 @@ class ExportSnapshot(BaseModel):
         return self
 
 
+class ExportPublicRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    export_id: UUID
+    job_id: UUID
+    export_type: ExportType
+    status: ExportStatus
+    file_name: str = Field(min_length=1, max_length=255)
+    warnings: list[ExportWarning] = Field(default_factory=list)
+    error_code: str | None = None
+    error_message: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    expires_at: datetime
+
+    @field_validator("file_name")
+    @classmethod
+    def normalize_file_name(cls, value: str) -> str:
+        return validate_export_file_name(value)
+
+    @model_validator(mode="after")
+    def validate_state(self) -> ExportPublicRead:
+        _validate_export_state(
+            export_id=self.export_id,
+            job_id=self.job_id,
+            export_type=self.export_type,
+            status=self.status,
+            file_name=self.file_name,
+            error_code=self.error_code,
+            error_message=self.error_message,
+        )
+        return self
+
+
 class ExportRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -227,24 +261,47 @@ class ExportRead(BaseModel):
 
     @model_validator(mode="after")
     def validate_state(self) -> ExportRead:
-        file_name_extension = Path(self.file_name).suffix.removeprefix(".")
-        expected_artifact = build_export_artifact(
+        _validate_export_state(
             job_id=self.job_id,
             export_id=self.export_id,
             export_type=self.export_type,
-            extension=file_name_extension,
+            status=self.status,
+            file_name=self.file_name,
+            storage_key=self.storage_key,
+            error_code=self.error_code,
+            error_message=self.error_message,
         )
-        if self.file_name != expected_artifact.file_name:
-            raise ValueError("export file_name must use the server-generated value")
-        if self.storage_key != expected_artifact.storage_key:
-            raise ValueError("export storage_key must use the server-generated value")
-        if self.status == ExportStatus.FAILED:
-            if self.error_code is None or self.error_message is None:
-                raise ValueError("failed exports must include error details")
-            return self
-        if self.error_code is not None or self.error_message is not None:
-            raise ValueError("non-failed exports must not include error details")
         return self
+
+
+def _validate_export_state(
+    *,
+    export_id: UUID,
+    job_id: UUID,
+    export_type: ExportType,
+    status: ExportStatus,
+    file_name: str,
+    error_code: str | None,
+    error_message: str | None,
+    storage_key: str | None = None,
+) -> None:
+    file_name_extension = Path(file_name).suffix.removeprefix(".")
+    expected_artifact = build_export_artifact(
+        job_id=job_id,
+        export_id=export_id,
+        export_type=export_type,
+        extension=file_name_extension,
+    )
+    if file_name != expected_artifact.file_name:
+        raise ValueError("export file_name must use the server-generated value")
+    if storage_key is not None and storage_key != expected_artifact.storage_key:
+        raise ValueError("export storage_key must use the server-generated value")
+    if status == ExportStatus.FAILED:
+        if error_code is None or error_message is None:
+            raise ValueError("failed exports must include error details")
+        return
+    if error_code is not None or error_message is not None:
+        raise ValueError("non-failed exports must not include error details")
 
 
 def serialize_export_snapshot(

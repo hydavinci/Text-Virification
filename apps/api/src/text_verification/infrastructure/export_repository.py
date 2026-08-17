@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from text_verification.domain.exports import (
     MAX_EXPORT_SNAPSHOT_BYTES,
     TERMINAL_EXPORT_STATUSES,
+    ExportPublicRead,
     ExportRead,
     ExportSnapshot,
     ExportStatus,
@@ -23,6 +24,20 @@ from text_verification.domain.exports import (
     serialize_export_warnings,
 )
 from text_verification.infrastructure.orm import ExportRow, JobRow
+
+_PublicExportRow = tuple[
+    UUID,
+    UUID,
+    str,
+    str,
+    str,
+    list[object],
+    str | None,
+    str | None,
+    datetime,
+    datetime,
+    datetime,
+]
 
 
 class ExportRepository:
@@ -84,16 +99,32 @@ class ExportRepository:
             return None
         return _to_export_read(row)
 
-    def get_for_job(self, job_id: UUID, export_id: UUID) -> ExportRead | None:
-        row = self._session.scalar(
-            select(ExportRow).where(
-                ExportRow.job_id == job_id,
-                ExportRow.export_id == export_id,
+    def get_for_job(self, job_id: UUID, export_id: UUID) -> ExportPublicRead | None:
+        row = (
+            self._session.execute(
+                select(
+                    ExportRow.export_id,
+                    ExportRow.job_id,
+                    ExportRow.export_type,
+                    ExportRow.status,
+                    ExportRow.file_name,
+                    ExportRow.warnings_json,
+                    ExportRow.error_code,
+                    ExportRow.error_message,
+                    ExportRow.created_at,
+                    ExportRow.updated_at,
+                    ExportRow.expires_at,
+                ).where(
+                    ExportRow.job_id == job_id,
+                    ExportRow.export_id == export_id,
+                )
             )
+            .tuples()
+            .one_or_none()
         )
         if row is None:
             return None
-        return _to_export_read(row)
+        return _to_public_export_read(row)
 
     def list_stale_recoverable(
         self,
@@ -209,4 +240,33 @@ def _to_export_read(row: ExportRow) -> ExportRead:
         created_at=row.created_at,
         updated_at=row.updated_at,
         expires_at=row.expires_at,
+    )
+
+
+def _to_public_export_read(row: _PublicExportRow) -> ExportPublicRead:
+    (
+        export_id,
+        job_id,
+        export_type,
+        status,
+        file_name,
+        warnings_json,
+        error_code,
+        error_message,
+        created_at,
+        updated_at,
+        expires_at,
+    ) = row
+    return ExportPublicRead(
+        export_id=export_id,
+        job_id=job_id,
+        export_type=ExportType(export_type),
+        status=ExportStatus(status),
+        file_name=file_name,
+        warnings=deserialize_export_warnings(warnings_json),
+        error_code=error_code,
+        error_message=error_message,
+        created_at=created_at,
+        updated_at=updated_at,
+        expires_at=expires_at,
     )

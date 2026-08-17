@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 import pytest
 from docx import Document as WordDocument
 from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -512,6 +513,49 @@ def test_export_status_is_scoped_to_job_and_omits_internal_storage_key(
     assert wrong_job.json()["detail"]["code"] == "export_not_found"
 
 
+def test_status_and_download_ignore_large_invalid_private_snapshot(
+    app: FastAPI,
+    db_session: Session,
+    export_storage: JobStorage,
+) -> None:
+    job_id = _seed_job_with_analysis(db_session, file_type=FileType.TXT)
+    repository = ExportRepository(db_session)
+    export = repository.create(
+        job_id,
+        ExportType.MODIFIED_DOCUMENT,
+        "txt",
+        snapshot=_snapshot_for_job(db_session, job_id),
+    )
+    repository.mark_processing(export.export_id)
+    repository.mark_completed(export.export_id, warnings=[])
+    db_session.commit()
+    export_path = export_storage.export_path(job_id, export.export_id, "txt")
+    export_path.parent.mkdir(parents=True, exist_ok=True)
+    export_path.write_bytes("修改后的正文\n".encode())
+    db_session.execute(
+        update(ExportRow)
+        .where(ExportRow.export_id == export.export_id)
+        .values(snapshot_json=_large_invalid_snapshot_sentinel())
+    )
+    db_session.commit()
+
+    with TestClient(app, raise_server_exceptions=False) as resilient_client:
+        status_response = resilient_client.get(
+            f"/api/v1/jobs/{job_id}/exports/{export.export_id}"
+        )
+        download_response = resilient_client.get(
+            f"/api/v1/jobs/{job_id}/exports/{export.export_id}/download"
+        )
+
+    assert status_response.status_code == 200
+    assert status_response.json()["status"] == "completed"
+    assert status_response.json()["warnings"] == []
+    assert "storage_key" not in status_response.json()
+    assert "snapshot" not in status_response.json()
+    assert download_response.status_code == 200
+    assert download_response.content.decode("utf-8") == "修改后的正文\n"
+
+
 def test_download_returns_conflict_until_completed(client, db_session: Session) -> None:
     job_id = _seed_job_with_analysis(db_session, file_type=FileType.TXT)
     export = ExportRepository(db_session).create(
@@ -834,3 +878,10 @@ def _snapshot_for_job(session: Session, job_id: UUID) -> ExportSnapshot:
         issues=issues,
         preflight_warnings=warnings,
     )
+
+
+def _large_invalid_snapshot_sentinel() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "unexpected_payload": "x" * (1024 * 1024),
+    }
