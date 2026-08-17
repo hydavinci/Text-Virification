@@ -108,6 +108,12 @@ def test_analysis_endpoints_paginate_and_summarize_completed_results(
     assert summary_payload["by_category"]["vocabulary"] == 1
     assert summary_payload["by_severity"]["warning"] == 1
     assert summary_payload["by_severity"]["info"] == 1
+    assert summary_payload["by_decision"] == {
+        "accepted": 0,
+        "ignored": 0,
+        "custom": 0,
+        "unreviewed": 2,
+    }
     assert summary_payload["checker_failures"] == {}
 
 
@@ -402,6 +408,16 @@ def test_issue_query_filters_by_decision_and_returns_decision_metadata(
     assert unreviewed_payload["items"][0]["rule_id"] == "sentence-001"
     assert unreviewed_payload["items"][0]["document_version"] == 1
     assert unreviewed_payload["items"][0]["decision"] is None
+
+    summary_response = client.get(f"/api/v1/jobs/{job_id}/summary")
+
+    assert summary_response.status_code == 200
+    assert summary_response.json()["by_decision"] == {
+        "accepted": 1,
+        "ignored": 1,
+        "custom": 1,
+        "unreviewed": 1,
+    }
 
 
 @pytest.mark.parametrize(

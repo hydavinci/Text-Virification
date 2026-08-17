@@ -10,7 +10,7 @@ from text_verification.api.dependencies import get_analysis_repository, get_job_
 from text_verification.api.routes.jobs import JOB_NOT_FOUND_CODE, _http_error
 from text_verification.checkers.models import CHECK_CATEGORY_ORDER, CheckCategory, CheckerFailure
 from text_verification.domain.documents import FileType, TextBlock
-from text_verification.domain.issues import Issue, IssueSeverity
+from text_verification.domain.issues import DecisionAction, Issue, IssueSeverity
 from text_verification.domain.jobs import JobRead, JobStatus
 from text_verification.infrastructure.analysis_repositories import (
     AnalysisRepository,
@@ -31,6 +31,7 @@ ANALYSIS_NOT_FOUND_MESSAGE = "分析结果不存在，请重新上传后重试�
 
 READY_STATUSES = {JobStatus.COMPLETED, JobStatus.PARTIAL}
 ISSUE_DECISIONS = Literal["accepted", "custom", "ignored", "unreviewed"]
+SUMMARY_DECISION_STATES = tuple(action.value for action in DecisionAction) + ("unreviewed",)
 
 router = APIRouter(tags=["analysis"])
 
@@ -77,6 +78,7 @@ class AnalysisSummaryResponse(BaseModel):
     total_issues: int
     by_category: dict[str, int]
     by_severity: dict[str, int]
+    by_decision: dict[str, int]
     checker_failures: dict[str, CheckerFailurePayload]
 
 
@@ -186,6 +188,10 @@ def get_analysis_summary(
         by_severity={
             severity.value: summary.by_severity.get(severity, 0)
             for severity in IssueSeverity
+        },
+        by_decision={
+            decision: summary.by_decision.get(decision, 0)
+            for decision in SUMMARY_DECISION_STATES
         },
         checker_failures=_serialize_checker_failures(
             analysis_repository.get_checker_failures(job_id)

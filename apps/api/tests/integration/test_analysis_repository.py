@@ -4,17 +4,19 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from text_verification.checkers.models import CheckCategory, CheckerFailure
 from text_verification.domain.documents import DocumentModel, FileType, TextBlock
-from text_verification.domain.issues import Issue, IssueSeverity
+from text_verification.domain.issues import DecisionAction, DecisionCommand, Issue, IssueSeverity
 from text_verification.infrastructure.analysis_repositories import (
     AnalysisRepository,
     IssueQuery,
 )
-from text_verification.infrastructure.orm import IssueRow
+from text_verification.infrastructure.decision_repository import DecisionRepository
+from text_verification.infrastructure.orm import IssueDecisionRow, IssueRow
 from text_verification.infrastructure.repositories import JobRepository
 
 
@@ -63,11 +65,12 @@ def test_replace_analysis_is_atomic(db_session: Session) -> None:
     original_document = build_document([("旧", None)])
     repository.replace_analysis(job_id, original_document, [], {})
     db_session.commit()
+    replacement_document = build_document([("新", None)], version=2)
 
     with pytest.raises(IntegrityError):
         repository.replace_analysis(
             job_id,
-            build_document([("新", None)]),
+            replacement_document,
             [invalid_issue(document_id=original_document.document_id)],
             {},
         )
@@ -80,20 +83,125 @@ def test_replace_analysis_is_atomic(db_session: Session) -> None:
     assert stored.blocks[0].text == "旧"
 
 
+def test_replace_analysis_removes_stale_decisions_when_new_version_persists(
+    db_session: Session,
+) -> None:
+    repository = AnalysisRepository(db_session)
+    job_id = seed_job(db_session)
+    original_document = build_document([("旧问题", 1)])
+    original_issue = build_issue(
+        original_document,
+        block_id="p-000001",
+        issue_id=UUID("00000000-0000-0000-0000-000000000011"),
+        original="旧",
+        suggestion="新",
+        start=0,
+        end=1,
+        page=1,
+    )
+    repository.replace_analysis(job_id, original_document, [original_issue], {})
+    DecisionRepository(db_session).apply(
+        job_id,
+        DecisionCommand(
+            issue_id=original_issue.issue_id,
+            issue_version=original_document.version,
+            action=DecisionAction.ACCEPTED,
+        ),
+    )
+    db_session.commit()
+
+    replacement_document = build_document([("新问题", 1)], version=2)
+    replacement_issue = build_issue(
+        replacement_document,
+        block_id="p-000001",
+        issue_id=UUID("00000000-0000-0000-0000-000000000012"),
+        original="新",
+        suggestion="更新",
+        start=0,
+        end=1,
+        page=1,
+    )
+
+    repository.replace_analysis(job_id, replacement_document, [replacement_issue], {})
+    db_session.commit()
+
+    page = repository.list_issues(job_id, IssueQuery(limit=20))
+
+    assert count_decisions(db_session, original_issue.issue_id) == 0
+    assert page.items == [replacement_issue]
+    assert page.items[0].decision is None
+
+
+@pytest.mark.parametrize("replacement_version", [2, 1])
+def test_replace_analysis_rejects_non_increasing_document_version_before_deleting_current_analysis(
+    db_session: Session,
+    replacement_version: int,
+) -> None:
+    repository = AnalysisRepository(db_session)
+    job_id = seed_job(db_session)
+    current_document = build_document([("当前问题", 1)], version=2)
+    current_issue = build_issue(
+        current_document,
+        block_id="p-000001",
+        issue_id=UUID("00000000-0000-0000-0000-000000000021"),
+        original="当前",
+        suggestion="最新",
+        start=0,
+        end=2,
+        page=1,
+    )
+    repository.replace_analysis(job_id, current_document, [current_issue], {})
+    db_session.commit()
+    DecisionRepository(db_session).apply(
+        job_id,
+        DecisionCommand(
+            issue_id=current_issue.issue_id,
+            issue_version=current_document.version,
+            action=DecisionAction.IGNORED,
+        ),
+    )
+    db_session.commit()
+
+    replacement_document = build_document([("过时问题", 1)], version=replacement_version)
+    replacement_issue = build_issue(
+        replacement_document,
+        block_id="p-000001",
+        issue_id=UUID("00000000-0000-0000-0000-000000000022"),
+        original="过时",
+        suggestion="替换",
+        start=0,
+        end=2,
+        page=1,
+    )
+
+    with pytest.raises(ValueError, match="strictly greater"):
+        repository.replace_analysis(job_id, replacement_document, [replacement_issue], {})
+
+    stored = repository.get_document(job_id)
+    page = repository.list_issues(job_id, IssueQuery(limit=20))
+
+    assert stored == current_document
+    assert db_session.get(IssueRow, replacement_issue.issue_id) is None
+    assert [item.issue_id for item in page.items] == [current_issue.issue_id]
+    assert page.items[0].document_version == current_document.version
+    assert count_decisions(db_session, current_issue.issue_id) == 1
+
+
 def test_replace_analysis_rejects_issue_with_mismatched_document_id(db_session: Session) -> None:
     repository = AnalysisRepository(db_session)
     job_id = seed_job(db_session)
     document = build_document([("正文", 3)])
     repository.replace_analysis(job_id, document, [], {})
     db_session.commit()
+    replacement_document = build_document([("正文", 3)], version=2)
 
     with pytest.raises(ValueError, match="document_id"):
         repository.replace_analysis(
             job_id,
-            document,
+            replacement_document,
             [
                 build_issue(
-                    document,
+                    replacement_document,
                     block_id="p-000001",
                     original="正文",
                     suggestion="修正",
@@ -116,14 +224,15 @@ def test_replace_analysis_rejects_issue_with_page_mismatched_to_block(db_session
     document = build_document([("正文", 3)])
     repository.replace_analysis(job_id, document, [], {})
     db_session.commit()
+    replacement_document = build_document([("正文", 3)], version=2)
 
     with pytest.raises(ValueError, match="page"):
         repository.replace_analysis(
             job_id,
-            document,
+            replacement_document,
             [
                 build_issue(
-                    document,
+                    replacement_document,
                     block_id="p-000001",
                     original="正文",
                     suggestion="修正",
@@ -224,7 +333,11 @@ def seed_job(db_session: Session) -> UUID:
     return job_id
 
 
-def build_document(block_specs: list[tuple[str, int | None]]) -> DocumentModel:
+def build_document(
+    block_specs: list[tuple[str, int | None]],
+    *,
+    version: int = 1,
+) -> DocumentModel:
     blocks = [
         TextBlock(
             block_id=f"p-{index + 1:06d}",
@@ -242,7 +355,7 @@ def build_document(block_specs: list[tuple[str, int | None]]) -> DocumentModel:
         document_id=UUID("00000000-0000-0000-0000-000000000001"),
         file_type=FileType.TXT,
         source_name="analysis.txt",
-        version=1,
+        version=version,
         blocks=blocks,
         metadata={"language": "zh-CN"},
     )
@@ -308,4 +421,15 @@ def invalid_issue(*, document_id: UUID) -> Issue:
         confidence=1.0,
         auto_fixable=True,
         context="错",
+    )
+
+
+def count_decisions(db_session: Session, issue_id: UUID) -> int:
+    return int(
+        db_session.scalar(
+            select(func.count())
+            .select_from(IssueDecisionRow)
+            .where(IssueDecisionRow.issue_id == issue_id)
+        )
+        or 0
     )

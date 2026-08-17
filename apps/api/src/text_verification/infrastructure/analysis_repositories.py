@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Literal, cast
 from uuid import UUID
 
-from sqlalchemy import Select, and_, delete, func, or_, select
+from sqlalchemy import Select, and_, delete, func, literal, or_, select
 from sqlalchemy.orm import Session
 
 from text_verification.checkers.models import CheckCategory, CheckerFailure
@@ -28,7 +28,8 @@ from text_verification.infrastructure.orm import (
 )
 
 UNREVIEWED_DECISION = "unreviewed"
-SUPPORTED_DECISIONS = {"accepted", "custom", "ignored", UNREVIEWED_DECISION}
+SUMMARY_DECISION_STATES = ("accepted", "ignored", "custom", UNREVIEWED_DECISION)
+SUPPORTED_DECISIONS = set(SUMMARY_DECISION_STATES)
 BlockKind = Literal["paragraph", "heading", "table_cell", "header", "footer"]
 
 
@@ -89,6 +90,7 @@ class IssueSummary:
     total: int
     by_category: dict[CheckCategory, int]
     by_severity: dict[IssueSeverity, int]
+    by_decision: dict[str, int]
 
 
 @dataclass(frozen=True)
@@ -122,6 +124,7 @@ class AnalysisRepository:
         failures: dict[CheckCategory, CheckerFailure],
     ) -> None:
         self._lock_job(job_id)
+        self._require_strictly_newer_document_version(job_id, document.version)
         self._validate_issues(document, issues)
         self._session.execute(
             delete(CheckerFailureRow)
@@ -379,16 +382,26 @@ class AnalysisRepository:
             .where(IssueRow.job_id == job_id)
             .group_by(IssueRow.severity)
         ).all()
+        decision_group = func.coalesce(IssueDecisionRow.action, literal(UNREVIEWED_DECISION))
+        decision_rows = self._session.execute(
+            select(decision_group, func.count())
+            .select_from(IssueRow)
+            .outerjoin(IssueDecisionRow, IssueDecisionRow.issue_id == IssueRow.issue_id)
+            .where(IssueRow.job_id == job_id)
+            .group_by(decision_group)
+        ).all()
         by_category = {
             CheckCategory(category): int(count) for category, count in category_rows
         }
         by_severity = {
             IssueSeverity(severity): int(count) for severity, count in severity_rows
         }
+        by_decision = {str(decision): int(count) for decision, count in decision_rows}
         return IssueSummary(
             total=sum(by_category.values()),
             by_category=by_category,
             by_severity=by_severity,
+            by_decision=by_decision,
         )
 
     def _filtered_issue_ids_query(self, job_id: UUID, query: IssueQuery) -> Select[tuple[UUID]]:
@@ -429,6 +442,19 @@ class AnalysisRepository:
             block_page = block_pages.get(issue.block_id)
             if issue.block_id in block_pages and issue.page != block_page:
                 raise ValueError("issue page must match the referenced document block page")
+
+    def _require_strictly_newer_document_version(self, job_id: UUID, version: int) -> None:
+        current_document = self._session.execute(
+            select(DocumentRow)
+            .where(DocumentRow.job_id == job_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+        if current_document is not None and version <= current_document.version:
+            raise ValueError(
+                "replacement document version must be strictly greater than "
+                "current persisted version"
+            )
 
 
 def _to_issue(*, issue_row: IssueRow, decision_row: IssueDecisionRow | None) -> Issue:
