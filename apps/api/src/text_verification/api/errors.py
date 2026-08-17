@@ -42,6 +42,9 @@ def _validation_error_detail(
             "问题筛选条件无效，请刷新后重试。",
         )
 
+    if request.url.path.endswith("/decisions") and "decisions" in fields:
+        return "invalid_decision_request", "问题决策请求无效，请检查后重试。"
+
     if request.url.path.endswith("/jobs"):
         if "file" in fields:
             return "invalid_upload", "请选择要上传的文件。"

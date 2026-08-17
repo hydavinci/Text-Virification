@@ -10,9 +10,10 @@ from sqlalchemy.orm import Session
 from text_verification.api.dependencies import get_db_session
 from text_verification.checkers.models import CheckCategory, CheckerFailure
 from text_verification.domain.documents import DocumentModel, FileType, TextBlock
-from text_verification.domain.issues import Issue, IssueSeverity
+from text_verification.domain.issues import DecisionAction, DecisionCommand, Issue, IssueSeverity
 from text_verification.domain.jobs import JobStatus
 from text_verification.infrastructure.analysis_repositories import AnalysisRepository
+from text_verification.infrastructure.decision_repository import DecisionRepository
 from text_verification.infrastructure.repositories import JobRepository
 
 
@@ -268,11 +269,147 @@ def test_analysis_endpoints_reject_malformed_cursors_with_chinese_errors(
     assert "json" not in issues_response.text.lower()
 
 
+def test_issue_query_filters_by_decision_and_returns_decision_metadata(
+    client,
+    db_session: Session,
+) -> None:
+    job_id = _seed_analysis(
+        db_session,
+        status=JobStatus.COMPLETED,
+        document=_build_document([("接受项", 1), ("忽略项", 1), ("自定义项", 1), ("未处理项", 2)]),
+        issues=[
+            _build_issue(
+                block_id="p-000001",
+                issue_id=UUID("00000000-0000-0000-0000-000000000011"),
+                original="接受",
+                suggestion="采纳",
+                start=0,
+                end=2,
+                page=1,
+                category=CheckCategory.SECURITY,
+            ),
+            _build_issue(
+                block_id="p-000002",
+                issue_id=UUID("00000000-0000-0000-0000-000000000012"),
+                original="忽略",
+                suggestion="跳过",
+                start=0,
+                end=2,
+                page=1,
+                category=CheckCategory.VOCABULARY,
+            ),
+            _build_issue(
+                block_id="p-000003",
+                issue_id=UUID("00000000-0000-0000-0000-000000000013"),
+                original="自定义",
+                suggestion="默认",
+                start=0,
+                end=3,
+                page=1,
+                category=CheckCategory.CHARACTER,
+            ),
+            _build_issue(
+                block_id="p-000004",
+                issue_id=UUID("00000000-0000-0000-0000-000000000014"),
+                original="未处理",
+                suggestion=None,
+                start=0,
+                end=3,
+                page=2,
+                category=CheckCategory.SENTENCE,
+            ),
+        ],
+        failures={},
+    )
+    repository = DecisionRepository(db_session)
+    repository.apply(
+        job_id,
+        DecisionCommand(
+            issue_id=UUID("00000000-0000-0000-0000-000000000011"),
+            issue_version=1,
+            action=DecisionAction.ACCEPTED,
+        ),
+    )
+    repository.apply(
+        job_id,
+        DecisionCommand(
+            issue_id=UUID("00000000-0000-0000-0000-000000000012"),
+            issue_version=1,
+            action=DecisionAction.IGNORED,
+        ),
+    )
+    repository.apply(
+        job_id,
+        DecisionCommand(
+            issue_id=UUID("00000000-0000-0000-0000-000000000013"),
+            issue_version=1,
+            action=DecisionAction.CUSTOM,
+            replacement="建议文本",
+        ),
+    )
+    db_session.commit()
+
+    accepted_response = client.get(
+        f"/api/v1/jobs/{job_id}/issues",
+        params={"decision": "accepted"},
+    )
+    ignored_response = client.get(
+        f"/api/v1/jobs/{job_id}/issues",
+        params={"decision": "ignored"},
+    )
+    custom_response = client.get(
+        f"/api/v1/jobs/{job_id}/issues",
+        params={"decision": "custom"},
+    )
+    unreviewed_response = client.get(
+        f"/api/v1/jobs/{job_id}/issues",
+        params={"decision": "unreviewed"},
+    )
+
+    assert accepted_response.status_code == 200
+    accepted_payload = accepted_response.json()
+    assert accepted_payload["total"] == 1
+    assert accepted_payload["items"][0]["rule_id"] == "security-001"
+    assert accepted_payload["items"][0]["document_version"] == 1
+    assert accepted_payload["items"][0]["decision"]["action"] == "accepted"
+    assert accepted_payload["items"][0]["decision"]["replacement"] is None
+    assert accepted_payload["items"][0]["decision"]["issue_version"] == 1
+    assert accepted_payload["items"][0]["decision"]["updated_at"] is not None
+    assert "issue_id" not in accepted_payload["items"][0]["decision"]
+
+    assert ignored_response.status_code == 200
+    ignored_payload = ignored_response.json()
+    assert ignored_payload["total"] == 1
+    assert ignored_payload["items"][0]["rule_id"] == "vocabulary-001"
+    assert ignored_payload["items"][0]["decision"]["action"] == "ignored"
+    assert ignored_payload["items"][0]["decision"]["replacement"] is None
+    assert ignored_payload["items"][0]["decision"]["issue_version"] == 1
+
+    assert custom_response.status_code == 200
+    custom_payload = custom_response.json()
+    assert custom_payload["total"] == 1
+    assert custom_payload["items"][0]["rule_id"] == "character-001"
+    assert custom_payload["items"][0]["decision"] == {
+        "action": "custom",
+        "replacement": "建议文本",
+        "issue_version": 1,
+        "updated_at": custom_payload["items"][0]["decision"]["updated_at"],
+    }
+
+    assert unreviewed_response.status_code == 200
+    unreviewed_payload = unreviewed_response.json()
+    assert unreviewed_payload["total"] == 1
+    assert unreviewed_payload["items"][0]["rule_id"] == "sentence-001"
+    assert unreviewed_payload["items"][0]["document_version"] == 1
+    assert unreviewed_payload["items"][0]["decision"] is None
+
+
 @pytest.mark.parametrize(
     "params",
     [
         {"category": "unknown"},
         {"severity": "urgent"},
+        {"decision": "pending"},
         {"decision": "deleted"},
     ],
 )

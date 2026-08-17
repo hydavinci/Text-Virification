@@ -12,17 +12,23 @@ from sqlalchemy.orm import Session
 
 from text_verification.checkers.models import CheckCategory, CheckerFailure
 from text_verification.domain.documents import DocumentModel, FileType, TextBlock
-from text_verification.domain.issues import Issue, IssueSeverity
+from text_verification.domain.issues import (
+    DecisionAction,
+    Issue,
+    IssueDecisionSummary,
+    IssueSeverity,
+)
 from text_verification.infrastructure.orm import (
     CheckerFailureRow,
     DocumentBlockRow,
     DocumentRow,
+    IssueDecisionRow,
     IssueRow,
     JobRow,
 )
 
-PENDING_DECISION = "pending"
-SUPPORTED_DECISIONS = {"accepted", "custom", "ignored", PENDING_DECISION}
+UNREVIEWED_DECISION = "unreviewed"
+SUPPORTED_DECISIONS = {"accepted", "custom", "ignored", UNREVIEWED_DECISION}
 BlockKind = Literal["paragraph", "heading", "table_cell", "header", "footer"]
 
 
@@ -273,9 +279,6 @@ class AnalysisRepository:
         )
 
     def list_issues(self, job_id: UUID, query: IssueQuery) -> IssuePage:
-        if query.decision not in (None, PENDING_DECISION):
-            return IssuePage(items=[], total=0, next_cursor=None)
-
         filtered_issue_ids = self._filtered_issue_ids_query(job_id, query)
         total = int(
             self._session.scalar(
@@ -290,6 +293,7 @@ class AnalysisRepository:
             select(
                 IssueRow,
                 DocumentBlockRow.block_order,
+                IssueDecisionRow,
             )
             .join(
                 DocumentBlockRow,
@@ -298,6 +302,7 @@ class AnalysisRepository:
                     DocumentBlockRow.block_id == IssueRow.block_id,
                 ),
             )
+            .outerjoin(IssueDecisionRow, IssueDecisionRow.issue_id == IssueRow.issue_id)
             .where(IssueRow.job_id == job_id)
         )
 
@@ -305,6 +310,10 @@ class AnalysisRepository:
             statement = statement.where(IssueRow.category == query.category.value)
         if query.severity is not None:
             statement = statement.where(IssueRow.severity == query.severity.value)
+        if query.decision == UNREVIEWED_DECISION:
+            statement = statement.where(IssueDecisionRow.issue_id.is_(None))
+        elif query.decision is not None:
+            statement = statement.where(IssueDecisionRow.action == query.decision)
         if query.search is not None:
             statement = statement.where(IssueRow.original.ilike(f"%{query.search}%"))
         if cursor is not None:
@@ -332,12 +341,12 @@ class AnalysisRepository:
         result_rows = self._session.execute(statement).all()
         visible_rows = result_rows[: query.limit]
         items = [
-            _to_issue(issue_row=issue_row)
-            for issue_row, _block_order in visible_rows
+            _to_issue(issue_row=issue_row, decision_row=decision_row)
+            for issue_row, _block_order, decision_row in visible_rows
         ]
         next_cursor = None
         if len(result_rows) > query.limit:
-            last_issue_row, block_order = visible_rows[-1]
+            last_issue_row, block_order, _decision_row = visible_rows[-1]
             next_cursor = _encode_issue_cursor(
                 _IssueCursor(
                     block_order=block_order,
@@ -384,10 +393,19 @@ class AnalysisRepository:
 
     def _filtered_issue_ids_query(self, job_id: UUID, query: IssueQuery) -> Select[tuple[UUID]]:
         statement = select(IssueRow.issue_id).where(IssueRow.job_id == job_id)
+        if query.decision is not None:
+            statement = statement.outerjoin(
+                IssueDecisionRow,
+                IssueDecisionRow.issue_id == IssueRow.issue_id,
+            )
         if query.category is not None:
             statement = statement.where(IssueRow.category == query.category.value)
         if query.severity is not None:
             statement = statement.where(IssueRow.severity == query.severity.value)
+        if query.decision == UNREVIEWED_DECISION:
+            statement = statement.where(IssueDecisionRow.issue_id.is_(None))
+        elif query.decision is not None:
+            statement = statement.where(IssueDecisionRow.action == query.decision)
         if query.search is not None:
             statement = statement.where(IssueRow.original.ilike(f"%{query.search}%"))
         return statement
@@ -413,10 +431,11 @@ class AnalysisRepository:
                 raise ValueError("issue page must match the referenced document block page")
 
 
-def _to_issue(*, issue_row: IssueRow) -> Issue:
+def _to_issue(*, issue_row: IssueRow, decision_row: IssueDecisionRow | None) -> Issue:
     return Issue(
         issue_id=issue_row.issue_id,
         document_id=issue_row.document_id,
+        document_version=issue_row.document_version,
         block_id=issue_row.block_id,
         page=issue_row.page,
         start=issue_row.start_offset,
@@ -434,6 +453,18 @@ def _to_issue(*, issue_row: IssueRow) -> Issue:
         confidence=issue_row.confidence,
         auto_fixable=issue_row.auto_fixable,
         context=issue_row.context,
+        decision=_to_issue_decision_summary(decision_row),
+    )
+
+
+def _to_issue_decision_summary(row: IssueDecisionRow | None) -> IssueDecisionSummary | None:
+    if row is None:
+        return None
+    return IssueDecisionSummary(
+        issue_version=row.issue_version,
+        action=DecisionAction(row.action),
+        replacement=row.replacement,
+        updated_at=row.updated_at,
     )
 
 

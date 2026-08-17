@@ -266,6 +266,7 @@ def build_issue(
     return Issue(
         issue_id=issue_id or uuid4(),
         document_id=document_id or document.document_id,
+        document_version=document.version,
         block_id=block_id,
         page=page,
         start=start,

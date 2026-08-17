@@ -21,11 +21,34 @@ class DecisionAction(StrEnum):
 NON_WHITESPACE_PATTERN = re.compile(r"\S")
 
 
+class IssueDecisionSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    issue_version: int = Field(gt=0)
+    action: DecisionAction
+    replacement: str | None = None
+    updated_at: datetime
+
+    @model_validator(mode="after")
+    def validate_replacement(self) -> "IssueDecisionSummary":
+        if self.action == DecisionAction.CUSTOM:
+            if (
+                self.replacement is None
+                or NON_WHITESPACE_PATTERN.search(self.replacement) is None
+            ):
+                raise ValueError("custom decisions require a non-empty replacement")
+            return self
+        if self.replacement is not None:
+            raise ValueError("replacement is only allowed for custom decisions")
+        return self
+
+
 class Issue(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     issue_id: UUID
     document_id: UUID
+    document_version: int | None = Field(default=None, gt=0)
     block_id: str
     page: int | None
     start: int = Field(ge=0)
@@ -43,6 +66,7 @@ class Issue(BaseModel):
     confidence: float = Field(ge=0, le=1)
     auto_fixable: bool
     context: str
+    decision: IssueDecisionSummary | None = None
 
     @model_validator(mode="after")
     def validate_range(self) -> "Issue":

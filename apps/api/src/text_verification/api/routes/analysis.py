@@ -30,7 +30,7 @@ ANALYSIS_FAILED_FALLBACK_MESSAGE = "分析失败，请重新上传文件后重�
 ANALYSIS_NOT_FOUND_MESSAGE = "分析结果不存在，请重新上传后重试。"
 
 READY_STATUSES = {JobStatus.COMPLETED, JobStatus.PARTIAL}
-ISSUE_DECISIONS = Literal["accepted", "custom", "ignored", "pending"]
+ISSUE_DECISIONS = Literal["accepted", "custom", "ignored", "unreviewed"]
 
 router = APIRouter(tags=["analysis"])
 
@@ -221,13 +221,13 @@ def _require_ready_job(job_id: UUID, repository: JobRepository) -> JobRead:
 def _require_analysis(
     job_id: UUID,
     analysis_repository: AnalysisRepository,
+    *,
+    missing_status_code: int = status.HTTP_404_NOT_FOUND,
+    missing_code: str = ANALYSIS_NOT_FOUND_CODE,
+    missing_message: str = ANALYSIS_NOT_FOUND_MESSAGE,
 ) -> None:
     if not analysis_repository.has_analysis(job_id):
-        raise _http_error(
-            status.HTTP_404_NOT_FOUND,
-            ANALYSIS_NOT_FOUND_CODE,
-            ANALYSIS_NOT_FOUND_MESSAGE,
-        )
+        raise _http_error(missing_status_code, missing_code, missing_message)
 
 
 def _normalize_cursor(cursor: str | None) -> str | None:
