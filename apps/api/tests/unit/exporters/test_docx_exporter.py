@@ -92,7 +92,7 @@ def test_docx_export_preserves_run_formatting_for_single_run_replacement(
     assert not (tmp_path / "formatted.docx.tmp").exists()
 
 
-def test_docx_export_warns_and_skips_cross_run_sample_replacement(
+def test_docx_export_warns_and_byte_copies_when_no_safe_sample_replacement_applies(
     fixture_path: Path,
     tmp_path: Path,
 ) -> None:
@@ -120,6 +120,7 @@ def test_docx_export_warns_and_skips_cross_run_sample_replacement(
     exported = WordDocument(str(result.path))
 
     assert exported.paragraphs[1].text == "核验示例文本"
+    assert result.path.read_bytes() == source.read_bytes()
     assert result.warnings == [
         ExportWarning(
             code="unsafe_docx_run_boundary",
@@ -128,6 +129,7 @@ def test_docx_export_warns_and_skips_cross_run_sample_replacement(
             block_id=paragraph.block_id,
         )
     ]
+    assert not (tmp_path / "cross-run.docx.tmp").exists()
 
 
 def test_docx_export_resolves_table_cell_locator_and_applies_descending_same_run_edits(
@@ -174,6 +176,101 @@ def test_docx_export_resolves_table_cell_locator_and_applies_descending_same_run
     assert cell_run.text == "aXdYZg"
     assert cell_run.italic is True
     assert result.warnings == []
+
+
+def test_docx_export_resolves_second_paragraph_table_cell_locator(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "table-second-paragraph.docx"
+    document = WordDocument()
+    table = document.add_table(rows=1, cols=1)
+    first_paragraph = table.cell(0, 0).paragraphs[0]
+    first_paragraph.add_run("甲")
+    first_paragraph.add_run("乙")
+    second_paragraph = table.cell(0, 0).add_paragraph()
+    second_paragraph.add_run("丙")
+    styled_run = second_paragraph.add_run("丁戊")
+    styled_run.bold = True
+    document.save(source)
+
+    parsed = parse_docx(source)
+    block = parsed.blocks[0]
+    assert block.text == "甲乙\n丙丁戊"
+
+    result = DocxExporter().export(
+        source,
+        parsed,
+        build_plan(
+            Replacement(
+                block_id=block.block_id,
+                start=4,
+                end=5,
+                original="丁",
+                value="庚",
+                issue_id=UUID("00000000-0000-0000-0000-000000000007"),
+            )
+        ),
+        tmp_path / "table-second-paragraph-modified.docx",
+    )
+
+    exported = WordDocument(str(result.path))
+    exported_cell = exported.tables[0].cell(0, 0)
+
+    assert exported_cell.paragraphs[0].text == "甲乙"
+    assert exported_cell.paragraphs[1].runs[0].text == "丙"
+    assert exported_cell.paragraphs[1].runs[1].text == "庚戊"
+    assert exported_cell.paragraphs[1].runs[1].bold is True
+    assert result.warnings == []
+
+
+def test_docx_export_warns_for_cross_paragraph_table_cell_replacement(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "table-cross-paragraph.docx"
+    document = WordDocument()
+    table = document.add_table(rows=1, cols=1)
+    first_paragraph = table.cell(0, 0).paragraphs[0]
+    first_paragraph.add_run("甲")
+    first_paragraph.add_run("乙")
+    second_paragraph = table.cell(0, 0).add_paragraph()
+    second_paragraph.add_run("丙")
+    second_paragraph.add_run("丁")
+    document.save(source)
+
+    parsed = parse_docx(source)
+    block = parsed.blocks[0]
+    issue_id = UUID("00000000-0000-0000-0000-000000000008")
+    assert block.text == "甲乙\n丙丁"
+
+    result = DocxExporter().export(
+        source,
+        parsed,
+        build_plan(
+            Replacement(
+                block_id=block.block_id,
+                start=1,
+                end=4,
+                original="乙\n丙",
+                value="替换",
+                issue_id=issue_id,
+            )
+        ),
+        tmp_path / "table-cross-paragraph-modified.docx",
+    )
+
+    exported = WordDocument(str(result.path))
+    exported_cell = exported.tables[0].cell(0, 0)
+
+    assert exported_cell.paragraphs[0].text == "甲乙"
+    assert exported_cell.paragraphs[1].text == "丙丁"
+    assert result.warnings == [
+        ExportWarning(
+            code="unsafe_docx_run_boundary",
+            message="修改范围跨越多个 DOCX 文本运行，无法在保留格式的前提下自动应用。",
+            issue_id=issue_id,
+            block_id=block.block_id,
+        )
+    ]
 
 
 def test_docx_export_cleans_temp_and_raises_explicit_error_when_validation_reopen_fails(

@@ -4,6 +4,7 @@ from collections import defaultdict
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
+from shutil import copyfile
 from uuid import UUID
 
 from docx import Document as WordDocument
@@ -74,11 +75,23 @@ class DocxExporter:
             edits_by_target[resolved.target].append(resolved)
 
         try:
-            rendered = WordDocument(str(source))
-            for target_ref, edits in edits_by_target.items():
-                run = self._resolve_run(rendered, target_ref)
-                run.text = self._apply_run_edits(run.text, edits)
-            self._write_verified_document(rendered, target)
+            if edits_by_target:
+                rendered = WordDocument(str(source))
+                edited = False
+                for target_ref, edits in edits_by_target.items():
+                    run = self._resolve_run(rendered, target_ref)
+                    updated_text = self._apply_run_edits(run.text, edits)
+                    if updated_text == run.text:
+                        continue
+                    run.text = updated_text
+                    edited = True
+
+                if edited:
+                    self._write_verified_document(rendered, target)
+                else:
+                    self._copy_verified_document(source, target)
+            else:
+                self._copy_verified_document(source, target)
         except ExportError:
             raise
         except Exception as error:
@@ -204,13 +217,44 @@ class DocxExporter:
         document: WordProcessingDocument,
         target: Path,
     ) -> None:
+        temp_target = self._prepare_temp_target(target)
+
+        try:
+            document.save(str(temp_target))
+        except Exception as error:
+            with suppress(FileNotFoundError):
+                temp_target.unlink()
+            raise ExportError("docx_export_failed", "无法导出 DOCX 文件。") from error
+        self._replace_verified_temp_target(temp_target, target)
+
+    def _copy_verified_document(
+        self,
+        source: Path,
+        target: Path,
+    ) -> None:
+        temp_target = self._prepare_temp_target(target)
+
+        try:
+            copyfile(source, temp_target)
+        except Exception as error:
+            with suppress(FileNotFoundError):
+                temp_target.unlink()
+            raise ExportError("docx_export_failed", "无法导出 DOCX 文件。") from error
+        self._replace_verified_temp_target(temp_target, target)
+
+    def _prepare_temp_target(self, target: Path) -> Path:
         target.parent.mkdir(parents=True, exist_ok=True)
         temp_target = target.with_name(f"{target.name}.tmp")
         with suppress(FileNotFoundError):
             temp_target.unlink()
+        return temp_target
 
+    def _replace_verified_temp_target(
+        self,
+        temp_target: Path,
+        target: Path,
+    ) -> None:
         try:
-            document.save(str(temp_target))
             WordDocument(str(temp_target))
             temp_target.replace(target)
         except Exception as error:
