@@ -144,16 +144,14 @@ class ReportExporter:
             "generated_at": _format_datetime(model.generated_at),
             "scenario_label": SCENARIO_LABELS.get(model.scenario, model.scenario.value),
             "enabled_categories": [
-                CATEGORY_LABELS.get(category, category.value)
-                for category in model.enabled_categories
+                _category_label(category) for category in model.enabled_categories
             ],
             "completed_categories": [
-                CATEGORY_LABELS.get(category, category.value)
-                for category in model.completed_categories
+                _category_label(category) for category in model.completed_categories
             ],
             "failed_categories": [
                 {
-                    "label": CATEGORY_LABELS.get(failure.category, failure.category.value),
+                    "label": _category_label(failure.category),
                     "code": failure.code,
                     "message": failure.message,
                 }
@@ -163,7 +161,7 @@ class ReportExporter:
                 "total_issues": model.summary.total_issues,
                 "category_counts": [
                     {
-                        "label": CATEGORY_LABELS[category],
+                        "label": _category_label(category),
                         "count": _lookup_count(model.summary.by_category, category),
                     }
                     for category in CHECK_CATEGORY_ORDER
@@ -206,7 +204,7 @@ class ReportExporter:
 
         return {
             "issue_id": str(issue.issue_id),
-            "category_label": CATEGORY_LABELS.get(CheckCategory(issue.layer), issue.layer),
+            "category_label": _category_label(issue.layer),
             "severity_label": SEVERITY_LABELS.get(issue.severity, issue.severity.value),
             "page": issue.page,
             "block_id": issue.block_id,
@@ -226,6 +224,17 @@ def _prepare_temp_target(target: Path) -> Path:
     with suppress(FileNotFoundError):
         temp_target.unlink()
     return temp_target
+
+
+def _category_label(value: CheckCategory | str) -> str:
+    category = value
+    if not isinstance(category, CheckCategory):
+        try:
+            category = CheckCategory(category)
+        except ValueError:
+            return str(value)
+
+    return CATEGORY_LABELS.get(category, category.value)
 
 
 def _lookup_count(mapping: Mapping[Any, int], key: Any) -> int:

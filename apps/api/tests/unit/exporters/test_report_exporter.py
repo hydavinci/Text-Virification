@@ -22,7 +22,9 @@ from text_verification.exporters.replacements import ExportWarning
 DECISION_ORDER = ("accepted", "custom", "ignored", "unreviewed")
 
 
-def test_html_and_pdf_reports_share_title_counts_and_issues(tmp_path: Path) -> None:
+def test_html_and_pdf_reports_share_title_counts_issues_failures_and_warnings(
+    tmp_path: Path,
+) -> None:
     report_module, ReportExporter, *_rest = _report_symbols()
     issues = [
         build_issue(
@@ -47,14 +49,38 @@ def test_html_and_pdf_reports_share_title_counts_and_issues(tmp_path: Path) -> N
     pdf_path = ReportExporter().render_pdf(model, tmp_path / "report.pdf")
 
     html = html_path.read_text(encoding="utf-8")
+    normalized_html = _normalize_text(html)
     pdf_text = _normalize_text(_read_pdf_text(pdf_path))
 
     assert "sample.docx" in html
     assert "发现问题：2" in html
     assert "示例文本" in html
+    assert "checker_failed" in normalized_html
+    assert "安全分类检查失败。" in normalized_html
+    assert "missing_replacement_value" in normalized_html
+    assert "导出时跳过1项。" in normalized_html
     assert "sample.docx" in pdf_text
     assert "发现问题：2" in pdf_text
     assert "示例文本" in pdf_text
+    assert "checker_failed" in pdf_text
+    assert "安全分类检查失败。" in pdf_text
+    assert "missing_replacement_value" in pdf_text
+    assert "导出时跳过1项。" in pdf_text
+
+
+def test_html_and_pdf_reports_render_unknown_issue_layer_as_raw_text(tmp_path: Path) -> None:
+    report_module, ReportExporter, *_rest = _report_symbols()
+    issue = build_issue(index=1, layer="future-layer", original="未来术语")
+    model = build_report_model(report_module, source_name="future.docx", issues=[issue])
+
+    html_path = ReportExporter().render_html(model, tmp_path / "future.html")
+    pdf_path = ReportExporter().render_pdf(model, tmp_path / "future.pdf")
+
+    html = html_path.read_text(encoding="utf-8")
+    pdf_text = _normalize_text(_read_pdf_text(pdf_path))
+
+    assert "future-layer" in html
+    assert "future-layer" in pdf_text
 
 
 def test_report_html_escapes_source_issue_and_warning_values(tmp_path: Path) -> None:
@@ -91,6 +117,53 @@ def test_report_html_escapes_source_issue_and_warning_values(tmp_path: Path) -> 
     assert "&lt;section&gt;上下文&lt;/section&gt;" in html
     assert "<mark>警告</mark>" not in html
     assert "&lt;mark&gt;警告&lt;/mark&gt;" in html
+
+
+@pytest.mark.parametrize("failure_point", ("write_text", "replace"))
+def test_render_html_surfaces_failure_and_removes_partial_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_point: str,
+) -> None:
+    report_module, ReportExporter, *_symbols, ExportError = _report_symbols()
+    target = tmp_path / "report.html"
+    temp_target = target.with_name(f"{target.name}.tmp")
+    original_write_text = Path.write_text
+    original_replace = Path.replace
+
+    def failing_write_text(
+        self: Path,
+        data: str,
+        *args: object,
+        **kwargs: object,
+    ) -> int:
+        if failure_point == "write_text" and self == temp_target:
+            original_write_text(self, "partial-html", encoding="utf-8")
+            raise OSError("boom")
+        return original_write_text(self, data, *args, **kwargs)
+
+    def failing_replace(self: Path, destination: str | Path) -> Path:
+        if failure_point == "replace" and self == temp_target and Path(destination) == target:
+            raise OSError("boom")
+        return original_replace(self, destination)
+
+    monkeypatch.setattr(Path, "write_text", failing_write_text)
+    monkeypatch.setattr(Path, "replace", failing_replace)
+
+    with pytest.raises(ExportError) as raised:
+        ReportExporter().render_html(
+            build_report_model(
+                report_module,
+                source_name="sample.docx",
+                issues=[build_issue(index=1)],
+            ),
+            target,
+        )
+
+    assert raised.value.code == "report_export_failed"
+    assert raised.value.public_message == "无法导出问题报告。"
+    assert not target.exists()
+    assert not temp_target.exists()
 
 
 def test_render_pdf_surfaces_failure_and_removes_partial_output(
@@ -132,14 +205,17 @@ def build_report_model(
     *,
     source_name: str,
     issues: list[Issue],
-    warning_message: str = "导出时跳过 1 项。<safe>",
+    warning_message: str = "导出时跳过 1 项。",
 ) -> Any:
     by_category = {category: 0 for category in CHECK_CATEGORY_ORDER}
     by_severity = {severity: 0 for severity in IssueSeverity}
     by_decision = {decision: 0 for decision in DECISION_ORDER}
 
     for issue in issues:
-        by_category[CheckCategory(issue.layer)] += 1
+        try:
+            by_category[CheckCategory(issue.layer)] += 1
+        except ValueError:
+            pass
         by_severity[issue.severity] += 1
         decision = issue.decision.action.value if issue.decision is not None else "unreviewed"
         by_decision[decision] += 1
@@ -182,6 +258,7 @@ def build_issue(
     *,
     index: int,
     category: CheckCategory = CheckCategory.CHARACTER,
+    layer: str | None = None,
     original: str = "示例文本",
     suggestion: str | None = "专业文本",
     action: DecisionAction | None = DecisionAction.ACCEPTED,
@@ -190,6 +267,7 @@ def build_issue(
     context: str = "原文上下文示例文本",
 ) -> Issue:
     issue_id = UUID(f"00000000-0000-0000-0000-{index:012d}")
+    layer_value = category.value if layer is None else layer
     if action is None:
         decision = None
     else:
@@ -213,9 +291,9 @@ def build_issue(
         alternatives=[] if suggestion is None else [suggestion],
         type="literal",
         severity=IssueSeverity.WARNING,
-        layer=category.value,
+        layer=layer_value,
         message=message,
-        rule_id=f"{category.value}-{index:03d}",
+        rule_id=f"{layer_value}-{index:03d}",
         source="test",
         source_version="1",
         confidence=1.0,
