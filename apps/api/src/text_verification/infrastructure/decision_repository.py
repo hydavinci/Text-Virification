@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from text_verification.domain.issues import DecisionAction, DecisionCommand, IssueDecision
-from text_verification.infrastructure.orm import IssueDecisionRow, IssueRow
+from text_verification.infrastructure.orm import DocumentRow, IssueDecisionRow, IssueRow
 
 ISSUE_NOT_FOUND_CODE = "issue_not_found"
 STALE_ISSUE_VERSION_CODE = "stale_issue_version"
@@ -59,6 +59,18 @@ class DecisionRepository:
             .execution_options(populate_existing=True)
         ).scalar_one_or_none()
         if issue_row is None:
+            current_document_version = self._session.scalar(
+                select(DocumentRow.version).where(DocumentRow.job_id == job_id)
+            )
+            if (
+                current_document_version is not None
+                and current_document_version > command.issue_version
+            ):
+                return DecisionOutcome(
+                    issue_id=command.issue_id,
+                    status=DecisionOutcomeStatus.CONFLICT,
+                    code=STALE_ISSUE_VERSION_CODE,
+                )
             return DecisionOutcome(
                 issue_id=command.issue_id,
                 status=DecisionOutcomeStatus.INVALID,

@@ -1,3 +1,4 @@
+import re
 from datetime import datetime
 from enum import StrEnum
 from uuid import UUID
@@ -15,6 +16,9 @@ class DecisionAction(StrEnum):
     ACCEPTED = "accepted"
     IGNORED = "ignored"
     CUSTOM = "custom"
+
+
+NON_WHITESPACE_PATTERN = re.compile(r"\S")
 
 
 class Issue(BaseModel):
@@ -58,7 +62,10 @@ class DecisionCommand(BaseModel):
     @model_validator(mode="after")
     def validate_replacement(self) -> "DecisionCommand":
         if self.action == DecisionAction.CUSTOM:
-            if self.replacement is None or not self.replacement.strip():
+            if (
+                self.replacement is None
+                or NON_WHITESPACE_PATTERN.search(self.replacement) is None
+            ):
                 raise ValueError("custom decisions require a non-empty replacement")
             return self
         if self.replacement is not None:

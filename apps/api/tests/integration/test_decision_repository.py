@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 import pytest
 from pydantic import ValidationError
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from text_verification.checkers.models import CheckCategory
@@ -28,6 +29,8 @@ def postgres_session(db_session: Session) -> Session:
     [
         ("CUSTOM", None),
         ("CUSTOM", "   "),
+        ("CUSTOM", "\t"),
+        ("CUSTOM", "\n"),
         ("ACCEPTED", "replacement"),
         ("IGNORED", "replacement"),
     ],
@@ -65,6 +68,37 @@ def test_apply_rejects_stale_issue_version(postgres_session: Session) -> None:
     assert outcome.code == "stale_issue_version"
     assert outcome.decision is None
     assert count_decisions(postgres_session, issue.issue_id) == 0
+
+
+def test_apply_returns_conflict_for_removed_issue_from_stale_document_version(
+    postgres_session: Session,
+) -> None:
+    DecisionAction, DecisionCommand, DecisionRepository, DecisionOutcomeStatus, _ = (
+        _decision_symbols()
+    )
+    job_id, stale_issue = seed_issue(postgres_session, document_version=1)
+
+    AnalysisRepository(postgres_session).replace_analysis(
+        job_id,
+        build_document(document_version=2),
+        [],
+        {},
+    )
+    postgres_session.commit()
+
+    outcome = DecisionRepository(postgres_session).apply(
+        job_id,
+        DecisionCommand(
+            issue_id=stale_issue.issue_id,
+            issue_version=stale_issue.document_version,
+            action=DecisionAction.IGNORED,
+        ),
+    )
+
+    assert outcome.status == DecisionOutcomeStatus.CONFLICT
+    assert outcome.code == "stale_issue_version"
+    assert outcome.decision is None
+    assert count_decisions(postgres_session, stale_issue.issue_id) == 0
 
 
 def test_apply_same_decision_is_idempotent(postgres_session: Session) -> None:
@@ -125,24 +159,52 @@ def test_apply_updates_existing_decision_when_command_changes(postgres_session: 
     assert count_decisions(postgres_session, issue.issue_id) == 1
 
 
-def test_apply_returns_invalid_outcome_for_unknown_issue(postgres_session: Session) -> None:
+def test_apply_returns_invalid_outcome_for_unknown_current_version_issue(
+    postgres_session: Session,
+) -> None:
     DecisionAction, DecisionCommand, DecisionRepository, DecisionOutcomeStatus, _ = (
         _decision_symbols()
     )
-    job_id = seed_job(postgres_session)
+    job_id, issue = seed_issue(postgres_session, document_version=2)
 
     outcome = DecisionRepository(postgres_session).apply(
         job_id,
         DecisionCommand(
             issue_id=uuid4(),
-            issue_version=1,
+            issue_version=issue.document_version,
             action=DecisionAction.IGNORED,
         ),
     )
 
     assert outcome.status == DecisionOutcomeStatus.INVALID
-    assert outcome.code is not None
+    assert outcome.code == "issue_not_found"
     assert outcome.decision is None
+
+
+@pytest.mark.parametrize("replacement", ["\t", "\n", "\r\n\t"])
+def test_issue_decision_table_rejects_whitespace_only_custom_replacement(
+    postgres_session: Session,
+    replacement: str,
+) -> None:
+    *_, IssueDecisionRow = _decision_symbols()
+    job_id, issue = seed_issue(postgres_session, document_version=1)
+
+    postgres_session.add(
+        IssueDecisionRow(
+            issue_id=issue.issue_id,
+            job_id=job_id,
+            issue_version=issue.document_version,
+            action="custom",
+            replacement=replacement,
+            updated_at=datetime.now(UTC),
+        )
+    )
+
+    with pytest.raises(IntegrityError, match="ck_issue_decisions_action_replacement"):
+        postgres_session.flush()
+
+    postgres_session.rollback()
+    assert count_decisions(postgres_session, issue.issue_id) == 0
 
 
 def _decision_symbols() -> tuple[Any, Any, Any, Any, Any]:

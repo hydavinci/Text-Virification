@@ -156,7 +156,7 @@ class IssueDecisionRow(Base):
             (
                 action = 'custom'
                 AND replacement IS NOT NULL
-                AND btrim(replacement) <> ''
+                AND replacement ~ '[^[:space:]]'
             )
             OR (
                 action IN ('accepted', 'ignored')
