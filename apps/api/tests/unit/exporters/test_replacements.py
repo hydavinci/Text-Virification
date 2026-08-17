@@ -194,6 +194,35 @@ def test_planner_rejects_overlapping_replacements() -> None:
     ]
 
 
+def test_planner_accepts_adjacent_half_open_replacement_ranges() -> None:
+    document = build_document(["甲乙丙丁"])
+
+    plan = ReplacementPlanner().build(
+        document,
+        [
+            build_issue(
+                document,
+                block_index=0,
+                start=0,
+                end=2,
+                suggestion="A",
+                action=DecisionAction.ACCEPTED,
+            ),
+            build_issue(
+                document,
+                block_index=0,
+                start=2,
+                end=4,
+                suggestion="B",
+                action=DecisionAction.ACCEPTED,
+            ),
+        ],
+    )
+
+    assert [(item.start, item.end) for item in plan.applicable] == [(0, 2), (2, 4)]
+    assert plan.warnings == []
+
+
 def build_document(block_texts: list[str]) -> DocumentModel:
     blocks = [
         TextBlock(

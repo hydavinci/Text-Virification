@@ -2,26 +2,41 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from io import BytesIO
 from pathlib import Path
 from threading import Event
 from uuid import UUID, uuid4
 
 import pytest
+from docx import Document as WordDocument
 from fastapi import FastAPI
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from text_verification.api.dependencies import get_db_session, get_job_storage
 from text_verification.checkers.models import CheckCategory
 from text_verification.domain.documents import DocumentModel, FileType, TextBlock
-from text_verification.domain.exports import ExportType
-from text_verification.domain.issues import Issue, IssueSeverity
+from text_verification.domain.exports import (
+    ExportCheckerFailureSnapshot,
+    ExportIssueSummarySnapshot,
+    ExportSnapshot,
+    ExportType,
+)
+from text_verification.domain.issues import (
+    DecisionAction,
+    DecisionCommand,
+    Issue,
+    IssueSeverity,
+)
 from text_verification.domain.jobs import JobStatus
+from text_verification.exporters import ReplacementPlanner
 from text_verification.infrastructure.analysis_repositories import AnalysisRepository
+from text_verification.infrastructure.decision_repository import DecisionRepository
 from text_verification.infrastructure.export_repository import ExportRepository
 from text_verification.infrastructure.orm import ExportRow, JobRow
 from text_verification.infrastructure.repositories import JobRepository
 from text_verification.infrastructure.storage import JobStorage
+from text_verification.parsers import DocxParser
 
 
 @pytest.fixture
@@ -118,9 +133,107 @@ def test_reports_allow_unreviewed_issues_and_use_server_derived_extension(
     assert payload["job_id"] == str(job_id)
     assert payload["export_type"] == "html_report"
     assert payload["status"] == "queued"
+    assert payload["dispatch_status"] == "dispatched"
     assert payload["file_name"] == "report.html"
     assert "storage_key" not in payload
+    assert "snapshot" not in payload
     assert export_api_dependencies == [payload["export_id"]]
+
+
+def test_modified_docx_warnings_require_confirmation_without_creating_export(
+    client,
+    db_session: Session,
+    export_storage: JobStorage,
+    export_api_dependencies: list[str],
+) -> None:
+    job_id, issue = _seed_reviewed_docx_job(db_session, export_storage)
+
+    response = client.post(
+        f"/api/v1/jobs/{job_id}/exports",
+        json={"type": "modified_document"},
+    )
+    export_count = db_session.scalar(
+        select(func.count()).select_from(ExportRow).where(ExportRow.job_id == job_id)
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "export_confirmation_required",
+        "message": "检测到无法自动应用的 DOCX 修改，请确认警告后重试。",
+        "warnings": [
+            {
+                "code": "unsafe_docx_run_boundary",
+                "message": (
+                    "修改范围跨越多个 DOCX 文本运行，为保留格式已跳过；"
+                    "请在原文中手动修改后重新导出。"
+                ),
+                "issue_id": str(issue.issue_id),
+                "block_id": issue.block_id,
+            }
+        ],
+    }
+    assert export_count == 0
+    assert export_api_dependencies == []
+
+
+def test_confirmed_docx_export_persists_structured_warnings_for_status(
+    client,
+    db_session: Session,
+    export_storage: JobStorage,
+    export_api_dependencies: list[str],
+) -> None:
+    job_id, issue = _seed_reviewed_docx_job(db_session, export_storage)
+
+    created = client.post(
+        f"/api/v1/jobs/{job_id}/exports",
+        json={"type": "modified_document", "confirm_warnings": True},
+    )
+    export_id = created.json()["export_id"]
+    status_response = client.get(f"/api/v1/jobs/{job_id}/exports/{export_id}")
+    expected_warning = {
+        "code": "unsafe_docx_run_boundary",
+        "message": (
+            "修改范围跨越多个 DOCX 文本运行，为保留格式已跳过；"
+            "请在原文中手动修改后重新导出。"
+        ),
+        "issue_id": str(issue.issue_id),
+        "block_id": issue.block_id,
+    }
+
+    assert created.status_code == 202
+    assert created.json()["warnings"] == [expected_warning]
+    assert created.json()["dispatch_status"] == "dispatched"
+    assert status_response.status_code == 200
+    assert status_response.json()["warnings"] == [expected_warning]
+    assert "storage_key" not in status_response.json()
+    assert "snapshot" not in status_response.json()
+    assert export_api_dependencies == [export_id]
+
+
+def test_docx_report_preflight_exposes_warnings_without_confirmation(
+    client,
+    db_session: Session,
+    export_storage: JobStorage,
+) -> None:
+    job_id, issue = _seed_reviewed_docx_job(db_session, export_storage)
+
+    response = client.post(
+        f"/api/v1/jobs/{job_id}/exports",
+        json={"type": "html_report"},
+    )
+
+    assert response.status_code == 202
+    assert response.json()["warnings"] == [
+        {
+            "code": "unsafe_docx_run_boundary",
+            "message": (
+                "修改范围跨越多个 DOCX 文本运行，为保留格式已跳过；"
+                "请在原文中手动修改后重新导出。"
+            ),
+            "issue_id": str(issue.issue_id),
+            "block_id": issue.block_id,
+        }
+    ]
 
 
 def test_export_dispatch_occurs_only_after_queued_row_is_committed(
@@ -154,10 +267,11 @@ def test_export_dispatch_occurs_only_after_queued_row_is_committed(
     assert observed_statuses == ["queued"]
 
 
-def test_dispatch_failure_marks_export_failed_and_returns_structured_error(
+def test_dispatch_timeout_returns_deferred_queued_export_for_recovery(
     client,
     db_session: Session,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     from text_verification.api.routes import exports as export_routes
 
@@ -167,6 +281,7 @@ def test_dispatch_failure_marks_export_failed_and_returns_structured_error(
         raise ConnectionError("broker unavailable")
 
     monkeypatch.setattr(export_routes, "dispatch_process_export", fail_dispatch)
+    caplog.set_level("ERROR", logger=export_routes.__name__)
 
     response = client.post(
         f"/api/v1/jobs/{job_id}/exports",
@@ -179,15 +294,55 @@ def test_dispatch_failure_marks_export_failed_and_returns_structured_error(
         .order_by(ExportRow.created_at.desc())
     )
 
-    assert response.status_code == 503
-    assert response.json()["detail"] == {
-        "code": "export_dispatch_failed",
-        "message": "暂时无法开始导出，请稍后重试。",
-    }
+    assert response.status_code == 202
+    assert response.json()["status"] == "queued"
+    assert response.json()["dispatch_status"] == "deferred"
     assert stored is not None
-    assert stored.status == "failed"
-    assert stored.error_code == "export_dispatch_failed"
-    assert stored.error_message == "导出任务调度失败，请稍后重试。"
+    assert stored.status == "queued"
+    assert stored.error_code is None
+    assert stored.error_message is None
+    assert "export_dispatch_deferred" in caplog.messages
+    stale_at = datetime.now(UTC) - timedelta(seconds=61)
+    db_session.execute(
+        update(ExportRow)
+        .where(ExportRow.export_id == stored.export_id)
+        .values(updated_at=stale_at)
+    )
+    db_session.commit()
+    recoverable = ExportRepository(db_session).list_stale_recoverable(
+        queued_cutoff=datetime.now(UTC) - timedelta(seconds=60),
+        processing_cutoff=datetime.now(UTC) - timedelta(minutes=16),
+        limit=100,
+    )
+    assert stored.export_id in recoverable
+
+
+def test_oversized_export_snapshot_is_rejected_without_persistence_or_dispatch(
+    client,
+    db_session: Session,
+    export_api_dependencies: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from text_verification.api.routes import exports as export_routes
+
+    job_id = _seed_job_with_analysis(db_session, file_type=FileType.TXT)
+    monkeypatch.setattr(export_routes, "MAX_EXPORT_SNAPSHOT_BYTES", 1, raising=False)
+
+    response = client.post(
+        f"/api/v1/jobs/{job_id}/exports",
+        json={"type": "html_report"},
+    )
+    export_count = db_session.scalar(
+        select(func.count()).select_from(ExportRow).where(ExportRow.job_id == job_id)
+    )
+
+    assert response.status_code == 413
+    assert response.json()["detail"] == {
+        "code": "export_snapshot_too_large",
+        "message": "导出快照过大，无法创建导出；请缩小文档或问题数量后重试。",
+    }
+    assert export_count == 0
+    assert export_api_dependencies == []
 
 
 @pytest.mark.parametrize(
@@ -343,6 +498,7 @@ def test_export_status_is_scoped_to_job_and_omits_internal_storage_key(
         first_job,
         ExportType.HTML_REPORT,
         "html",
+        snapshot=_snapshot_for_job(db_session, first_job),
     )
     db_session.commit()
 
@@ -362,6 +518,7 @@ def test_download_returns_conflict_until_completed(client, db_session: Session) 
         job_id,
         ExportType.MODIFIED_DOCUMENT,
         "txt",
+        snapshot=_snapshot_for_job(db_session, job_id),
     )
     db_session.commit()
 
@@ -386,7 +543,12 @@ def test_download_returns_gone_after_expiry(
         expires_at=datetime.now(UTC) - timedelta(minutes=1),
     )
     repository = ExportRepository(db_session)
-    export = repository.create(job_id, ExportType.MODIFIED_DOCUMENT, "txt")
+    export = repository.create(
+        job_id,
+        ExportType.MODIFIED_DOCUMENT,
+        "txt",
+        snapshot=_snapshot_for_job(db_session, job_id),
+    )
     repository.mark_processing(export.export_id)
     repository.mark_completed(export.export_id, warnings=[])
     db_session.commit()
@@ -409,7 +571,12 @@ def test_download_serves_generated_path_with_rfc5987_filename(
 ) -> None:
     job_id = _seed_job_with_analysis(db_session, file_type=FileType.TXT)
     repository = ExportRepository(db_session)
-    export = repository.create(job_id, ExportType.MODIFIED_DOCUMENT, "txt")
+    export = repository.create(
+        job_id,
+        ExportType.MODIFIED_DOCUMENT,
+        "txt",
+        snapshot=_snapshot_for_job(db_session, job_id),
+    )
     repository.mark_processing(export.export_id)
     repository.mark_completed(export.export_id, warnings=[])
     db_session.commit()
@@ -440,7 +607,12 @@ def test_download_fails_closed_when_job_directory_escapes_storage_root(
 ) -> None:
     job_id = _seed_job_with_analysis(db_session, file_type=FileType.TXT)
     repository = ExportRepository(db_session)
-    export = repository.create(job_id, ExportType.MODIFIED_DOCUMENT, "txt")
+    export = repository.create(
+        job_id,
+        ExportType.MODIFIED_DOCUMENT,
+        "txt",
+        snapshot=_snapshot_for_job(db_session, job_id),
+    )
     repository.mark_processing(export.export_id)
     repository.mark_completed(export.export_id, warnings=[])
     db_session.commit()
@@ -561,4 +733,104 @@ def _build_issue(*, file_type: FileType) -> Issue:
         confidence=1.0,
         auto_fixable=True,
         context="原始正文",
+    )
+
+
+def _seed_reviewed_docx_job(
+    session: Session,
+    storage: JobStorage,
+) -> tuple[UUID, Issue]:
+    job_id = _seed_job(
+        session,
+        file_type=FileType.DOCX,
+        status=JobStatus.COMPLETED,
+    )
+    source = WordDocument()
+    paragraph = source.add_paragraph()
+    paragraph.add_run("核验")
+    paragraph.add_run("示例")
+    payload = BytesIO()
+    source.save(payload)
+    stored = storage.save_bytes(job_id, "sample.docx", payload.getvalue())
+    document = DocxParser().parse(
+        stored.path,
+        document_id=uuid4(),
+        source_name="sample.docx",
+    )
+    issue = Issue(
+        issue_id=uuid4(),
+        document_id=document.document_id,
+        document_version=document.version,
+        block_id=document.blocks[0].block_id,
+        page=None,
+        start=1,
+        end=3,
+        original="验示",
+        suggestion="审查",
+        alternatives=["审查"],
+        type="literal",
+        severity=IssueSeverity.WARNING,
+        layer=CheckCategory.CHARACTER.value,
+        message="命中规则。",
+        rule_id="character-001",
+        source="test",
+        source_version="1",
+        confidence=1.0,
+        auto_fixable=True,
+        context=document.blocks[0].text,
+    )
+    AnalysisRepository(session).replace_analysis(job_id, document, [issue], {})
+    session.commit()
+    outcome = DecisionRepository(session).apply(
+        job_id,
+        DecisionCommand(
+            issue_id=issue.issue_id,
+            issue_version=document.version,
+            action=DecisionAction.ACCEPTED,
+        ),
+    )
+    assert outcome.decision is not None
+    session.commit()
+    return job_id, issue
+
+
+def _snapshot_for_job(session: Session, job_id: UUID) -> ExportSnapshot:
+    job = JobRepository(session).get_job(job_id)
+    document = AnalysisRepository(session).get_document(job_id)
+    assert job is not None
+    assert document is not None
+    repository = AnalysisRepository(session)
+    issues = repository.list_all_issues(job_id)
+    summary = repository.summarize_issues(job_id)
+    failures = repository.get_checker_failures(job_id)
+    warnings = ReplacementPlanner().build(document, issues).warnings
+    return ExportSnapshot(
+        captured_at=datetime.now(UTC),
+        source_name=job.source_name,
+        source_type=job.file_type,
+        source_size_bytes=job.size_bytes,
+        source_sha256=None,
+        scenario=job.scenario,
+        enabled_categories=list(job.enabled_categories),
+        completed_categories=[
+            category for category in job.enabled_categories if category not in failures
+        ],
+        checker_failures=[
+            ExportCheckerFailureSnapshot(
+                category=category,
+                code=failures[category].code,
+                message=failures[category].message,
+            )
+            for category in job.enabled_categories
+            if category in failures
+        ],
+        summary=ExportIssueSummarySnapshot(
+            total=summary.total,
+            by_category=summary.by_category,
+            by_severity=summary.by_severity,
+            by_decision=summary.by_decision,
+        ),
+        document=document,
+        issues=issues,
+        preflight_warnings=warnings,
     )

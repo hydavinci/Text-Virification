@@ -9,6 +9,7 @@ from uuid import UUID
 
 from docx import Document as WordDocument
 from docx.document import Document as WordProcessingDocument
+from docx.oxml.ns import qn
 from docx.table import _Cell
 from docx.text.run import Run
 
@@ -51,54 +52,7 @@ class _RunEdit:
     block_id: str
 
 
-class DocxExporter:
-    def export(
-        self,
-        source: Path,
-        document: DocumentModel,
-        plan: ReplacementPlan,
-        target: Path,
-    ) -> ExportResult:
-        warnings = [*plan.warnings]
-        edits_by_target: dict[_RunTarget, list[_RunEdit]] = defaultdict(list)
-        block_by_id = {block.block_id: block for block in document.blocks}
-
-        for replacement in plan.applicable:
-            block = block_by_id.get(replacement.block_id)
-            if block is None:
-                raise ExportError("docx_export_failed", "无法导出 DOCX 文件。")
-
-            resolved = self._resolve_edit(block, replacement)
-            if isinstance(resolved, ExportWarning):
-                warnings.append(resolved)
-                continue
-            edits_by_target[resolved.target].append(resolved)
-
-        try:
-            if edits_by_target:
-                rendered = WordDocument(str(source))
-                edited = False
-                for target_ref, edits in edits_by_target.items():
-                    run = self._resolve_run(rendered, target_ref)
-                    updated_text = self._apply_run_edits(run.text, edits)
-                    if updated_text == run.text:
-                        continue
-                    run.text = updated_text
-                    edited = True
-
-                if edited:
-                    self._write_verified_document(rendered, target)
-                else:
-                    self._copy_verified_document(source, target)
-            else:
-                self._copy_verified_document(source, target)
-        except ExportError:
-            raise
-        except Exception as error:
-            raise ExportError("docx_export_failed", "无法导出 DOCX 文件。") from error
-
-        return ExportResult(path=target, warnings=warnings)
-
+class _DocxRunResolver:
     def _resolve_edit(
         self,
         block: TextBlock,
@@ -196,6 +150,94 @@ class DocxExporter:
         table = document.tables[table_index]
         return table.rows[row_index].cells[column_index]
 
+
+class DocxApplicabilityEvaluator(_DocxRunResolver):
+    def evaluate(
+        self,
+        source: Path,
+        document: DocumentModel,
+        plan: ReplacementPlan,
+    ) -> ReplacementPlan:
+        warnings = [*plan.warnings]
+        applicable: list[Replacement] = []
+        block_by_id = {block.block_id: block for block in document.blocks}
+
+        try:
+            rendered = WordDocument(str(source))
+            for replacement in plan.applicable:
+                block = block_by_id.get(replacement.block_id)
+                if block is None:
+                    raise ExportError("docx_export_failed", "无法导出 DOCX 文件。")
+
+                resolved = self._resolve_edit(block, replacement)
+                if isinstance(resolved, ExportWarning):
+                    warnings.append(resolved)
+                    continue
+                run = self._resolve_run(rendered, resolved.target)
+                if not _is_text_only_run(run):
+                    warnings.append(_unsafe_mixed_content_warning(replacement))
+                    continue
+                applicable.append(replacement)
+        except ExportError:
+            raise
+        except Exception as error:
+            raise ExportError("docx_export_failed", "无法导出 DOCX 文件。") from error
+
+        return ReplacementPlan(applicable=applicable, warnings=warnings)
+
+
+class DocxExporter(_DocxRunResolver):
+    def export(
+        self,
+        source: Path,
+        document: DocumentModel,
+        plan: ReplacementPlan,
+        target: Path,
+    ) -> ExportResult:
+        evaluated_plan = DocxApplicabilityEvaluator().evaluate(source, document, plan)
+        warnings = [*evaluated_plan.warnings]
+        edits_by_target: dict[_RunTarget, list[_RunEdit]] = defaultdict(list)
+        block_by_id = {block.block_id: block for block in document.blocks}
+
+        for replacement in evaluated_plan.applicable:
+            block = block_by_id.get(replacement.block_id)
+            if block is None:
+                raise ExportError("docx_export_failed", "无法导出 DOCX 文件。")
+            resolved = self._resolve_edit(block, replacement)
+            if isinstance(resolved, ExportWarning):
+                raise ExportError("docx_export_failed", "无法导出 DOCX 文件。")
+            edits_by_target[resolved.target].append(resolved)
+
+        try:
+            if edits_by_target:
+                rendered = WordDocument(str(source))
+                edited = False
+                for target_ref, edits in edits_by_target.items():
+                    run = self._resolve_run(rendered, target_ref)
+                    if not _is_text_only_run(run):
+                        warnings.extend(
+                            _unsafe_mixed_content_warning(edit) for edit in edits
+                        )
+                        continue
+                    updated_text = self._apply_run_edits(run.text, edits)
+                    if updated_text == run.text:
+                        continue
+                    run.text = updated_text
+                    edited = True
+
+                if edited:
+                    self._write_verified_document(rendered, target)
+                else:
+                    self._copy_verified_document(source, target)
+            else:
+                self._copy_verified_document(source, target)
+        except ExportError:
+            raise
+        except Exception as error:
+            raise ExportError("docx_export_failed", "无法导出 DOCX 文件。") from error
+
+        return ExportResult(path=target, warnings=warnings)
+
     def _apply_run_edits(
         self,
         text: str,
@@ -266,7 +308,31 @@ class DocxExporter:
 def _unsafe_run_boundary_warning(replacement: Replacement) -> ExportWarning:
     return ExportWarning(
         code="unsafe_docx_run_boundary",
-        message="修改范围跨越多个 DOCX 文本运行，无法在保留格式的前提下自动应用。",
+        message=(
+            "修改范围跨越多个 DOCX 文本运行，为保留格式已跳过；"
+            "请在原文中手动修改后重新导出。"
+        ),
         issue_id=replacement.issue_id,
         block_id=replacement.block_id,
+    )
+
+
+def _unsafe_mixed_content_warning(
+    replacement: Replacement | _RunEdit,
+) -> ExportWarning:
+    return ExportWarning(
+        code="unsafe_docx_mixed_content",
+        message=(
+            "修改所在的 DOCX 文本运行还包含图片、域或其他非文本内容，"
+            "为避免破坏文档已跳过；请在原文中手动修改后重新导出。"
+        ),
+        issue_id=replacement.issue_id,
+        block_id=replacement.block_id,
+    )
+
+
+def _is_text_only_run(run: Run) -> bool:
+    child_tags = [child.tag for child in run._r]
+    return qn("w:t") in child_tags and all(
+        tag in {qn("w:rPr"), qn("w:t")} for tag in child_tags
     )

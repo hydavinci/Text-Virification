@@ -5,15 +5,8 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from text_verification.domain.documents import DocumentModel
+from text_verification.domain.exports import ExportWarning
 from text_verification.domain.issues import DecisionAction, Issue
-
-
-@dataclass(frozen=True, slots=True)
-class ExportWarning:
-    code: str
-    message: str
-    issue_id: UUID
-    block_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,7 +47,7 @@ class ReplacementPlanner:
                     _build_warning(
                         issue,
                         code="missing_block",
-                        message="问题引用的文本块不存在，无法应用修改。",
+                        message="问题引用的文本块不存在，已跳过；请重新分析文档后再导出。",
                     )
                 )
                 continue
@@ -64,7 +57,7 @@ class ReplacementPlanner:
                     _build_warning(
                         issue,
                         code="replacement_out_of_bounds",
-                        message="问题的替换范围超出文本块边界，无法应用修改。",
+                        message="问题的替换范围超出文本块边界，已跳过；请重新分析文档后再导出。",
                     )
                 )
                 continue
@@ -74,7 +67,7 @@ class ReplacementPlanner:
                     _build_warning(
                         issue,
                         code="original_text_mismatch",
-                        message="问题的原文与当前文档内容不一致，无法应用修改。",
+                        message="问题的原文与当前文档内容不一致，已跳过；请重新分析文档后再导出。",
                     )
                 )
                 continue
@@ -85,7 +78,7 @@ class ReplacementPlanner:
                     _build_warning(
                         issue,
                         code="missing_replacement_value",
-                        message="问题缺少可应用的替换内容，无法应用修改。",
+                        message="问题缺少可应用的替换内容，已跳过；请补充建议或自定义替换后再导出。",
                     )
                 )
                 continue
@@ -149,7 +142,7 @@ def _filter_overlapping_replacements(
             warnings.append(
                 ExportWarning(
                     code="overlapping_replacements",
-                    message="问题与其他修改范围重叠，无法自动应用。",
+                    message="问题与其他修改范围重叠，相关修改均已跳过；请逐项调整后再导出。",
                     issue_id=replacement.issue_id,
                     block_id=replacement.block_id,
                 )

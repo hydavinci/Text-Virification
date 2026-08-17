@@ -8,12 +8,19 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from text_verification.domain.exports import (
+    MAX_EXPORT_SNAPSHOT_BYTES,
     TERMINAL_EXPORT_STATUSES,
     ExportRead,
+    ExportSnapshot,
     ExportStatus,
     ExportType,
+    ExportWarning,
     TerminalExportStateError,
     build_export_artifact,
+    deserialize_export_snapshot,
+    deserialize_export_warnings,
+    serialize_export_snapshot,
+    serialize_export_warnings,
 )
 from text_verification.infrastructure.orm import ExportRow, JobRow
 
@@ -28,7 +35,10 @@ class ExportRepository:
         export_type: ExportType,
         extension: str,
         *,
+        snapshot: ExportSnapshot,
+        warnings: Sequence[ExportWarning] = (),
         expires_at: datetime | None = None,
+        maximum_snapshot_bytes: int = MAX_EXPORT_SNAPSHOT_BYTES,
     ) -> ExportRead:
         resolved_expires_at = expires_at
         if resolved_expires_at is None:
@@ -53,7 +63,11 @@ class ExportRepository:
             status=ExportStatus.QUEUED.value,
             file_name=artifact.file_name,
             storage_key=artifact.storage_key,
-            warnings_json=[],
+            warnings_json=serialize_export_warnings(tuple(warnings)),
+            snapshot_json=serialize_export_snapshot(
+                snapshot,
+                maximum_bytes=maximum_snapshot_bytes,
+            ),
             error_code=None,
             error_message=None,
             created_at=created_at,
@@ -81,17 +95,29 @@ class ExportRepository:
             return None
         return _to_export_read(row)
 
-    def list_stale_queued(self, cutoff: datetime, *, limit: int) -> list[UUID]:
+    def list_stale_recoverable(
+        self,
+        *,
+        queued_cutoff: datetime,
+        processing_cutoff: datetime,
+        limit: int,
+    ) -> list[UUID]:
         if limit <= 0:
             raise ValueError("limit must be positive")
         return list(
             self._session.scalars(
                 select(ExportRow.export_id)
                 .where(
-                    ExportRow.status == ExportStatus.QUEUED.value,
-                    ExportRow.created_at <= cutoff,
+                    (
+                        (ExportRow.status == ExportStatus.QUEUED.value)
+                        & (ExportRow.updated_at <= queued_cutoff)
+                    )
+                    | (
+                        (ExportRow.status == ExportStatus.PROCESSING.value)
+                        & (ExportRow.updated_at <= processing_cutoff)
+                    ),
                 )
-                .order_by(ExportRow.created_at, ExportRow.export_id)
+                .order_by(ExportRow.updated_at, ExportRow.export_id)
                 .limit(limit)
             ).all()
         )
@@ -106,11 +132,16 @@ class ExportRepository:
         self._session.flush()
         return _to_export_read(row)
 
-    def mark_completed(self, export_id: UUID, *, warnings: Sequence[str]) -> ExportRead:
+    def mark_completed(
+        self,
+        export_id: UUID,
+        *,
+        warnings: Sequence[ExportWarning],
+    ) -> ExportRead:
         row = self._lock_export(export_id)
         self._ensure_not_terminal(row, ExportStatus.COMPLETED)
         row.status = ExportStatus.COMPLETED.value
-        row.warnings_json = list(warnings)
+        row.warnings_json = serialize_export_warnings(tuple(warnings))
         row.error_code = None
         row.error_message = None
         row.updated_at = datetime.now(UTC)
@@ -123,12 +154,13 @@ class ExportRepository:
         *,
         error_code: str,
         error_message: str,
-        warnings: Sequence[str] = (),
+        warnings: Sequence[ExportWarning] | None = None,
     ) -> ExportRead:
         row = self._lock_export(export_id)
         self._ensure_not_terminal(row, ExportStatus.FAILED)
         row.status = ExportStatus.FAILED.value
-        row.warnings_json = list(warnings)
+        if warnings is not None:
+            row.warnings_json = serialize_export_warnings(tuple(warnings))
         row.error_code = error_code
         row.error_message = error_message
         row.updated_at = datetime.now(UTC)
@@ -170,7 +202,8 @@ def _to_export_read(row: ExportRow) -> ExportRead:
         status=ExportStatus(row.status),
         file_name=row.file_name,
         storage_key=row.storage_key,
-        warnings=list(row.warnings_json),
+        warnings=deserialize_export_warnings(row.warnings_json),
+        snapshot=deserialize_export_snapshot(row.snapshot_json),
         error_code=row.error_code,
         error_message=row.error_message,
         created_at=row.created_at,

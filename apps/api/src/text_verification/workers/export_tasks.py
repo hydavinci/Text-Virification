@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
-from hashlib import blake2b
+from hashlib import blake2b, sha256
 from pathlib import Path
 from typing import Any, cast
 from uuid import UUID, uuid4
@@ -13,18 +13,17 @@ from celery import Task  # type: ignore[import-untyped]
 from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from text_verification.checkers.models import CheckCategory, CheckerFailure
 from text_verification.config import get_settings
-from text_verification.domain.documents import DocumentModel, FileType
+from text_verification.domain.documents import FileType
 from text_verification.domain.exports import (
     ExportRead,
+    ExportSnapshot,
     ExportStatus,
     ExportType,
     TerminalExportStateError,
 )
-from text_verification.domain.issues import Issue
-from text_verification.domain.jobs import JobRead, JobStatus
 from text_verification.exporters import (
+    DocxApplicabilityEvaluator,
     DocxExporter,
     ExportError,
     ExportWarning,
@@ -36,18 +35,20 @@ from text_verification.exporters import (
     ReportSummary,
     TxtExporter,
 )
-from text_verification.infrastructure.analysis_repositories import AnalysisRepository
 from text_verification.infrastructure.database import get_session_factory
 from text_verification.infrastructure.export_repository import ExportRepository
-from text_verification.infrastructure.repositories import JobRepository
 from text_verification.infrastructure.storage import JobStorage
-from text_verification.workers.celery_app import celery_app
+from text_verification.workers.celery_app import (
+    TASK_HARD_TIME_LIMIT_SECONDS,
+    celery_app,
+)
 
 logger = logging.getLogger(__name__)
 
 PROCESS_EXPORT_MAX_RETRIES = 2
 PROCESS_EXPORT_RETRY_BACKOFF_CAP_SECONDS = 4
 QUEUED_EXPORT_RECOVERY_AGE_SECONDS = 60
+PROCESSING_EXPORT_RECOVERY_AGE_SECONDS = TASK_HARD_TIME_LIMIT_SECONDS + 60
 QUEUED_EXPORT_RECOVERY_BATCH_SIZE = 100
 UNEXPECTED_EXPORT_FAILURE_CODE = "export_failed"
 UNEXPECTED_EXPORT_FAILURE_MESSAGE = "导出失败，请稍后重试。"
@@ -166,6 +167,7 @@ process_export = cast(
         name="text_verification.process_export",
         max_retries=PROCESS_EXPORT_MAX_RETRIES,
         acks_late=True,
+        reject_on_worker_lost=True,
     )(_process_export),
 )
 
@@ -175,12 +177,17 @@ def dispatch_recovered_export(export_id: str) -> None:
 
 
 def _recover_stale_queued_exports() -> list[str]:
-    cutoff = datetime.now(UTC) - timedelta(seconds=QUEUED_EXPORT_RECOVERY_AGE_SECONDS)
+    now = datetime.now(UTC)
+    queued_cutoff = now - timedelta(seconds=QUEUED_EXPORT_RECOVERY_AGE_SECONDS)
+    processing_cutoff = now - timedelta(
+        seconds=PROCESSING_EXPORT_RECOVERY_AGE_SECONDS
+    )
     session_factory = SESSION_FACTORY_PROVIDER()
     session = session_factory()
     try:
-        export_ids = ExportRepository(session).list_stale_queued(
-            cutoff,
+        export_ids = ExportRepository(session).list_stale_recoverable(
+            queued_cutoff=queued_cutoff,
+            processing_cutoff=processing_cutoff,
             limit=QUEUED_EXPORT_RECOVERY_BATCH_SIZE,
         )
     finally:
@@ -233,7 +240,7 @@ def _run_process_export_attempt(session: Session, export_id: UUID) -> None:
         warnings = _render_export(session, export)
         repository.mark_completed(
             export_id,
-            warnings=[_serialize_warning(warning) for warning in warnings],
+            warnings=warnings,
         )
         session.commit()
     except Exception:
@@ -242,21 +249,31 @@ def _run_process_export_attempt(session: Session, export_id: UUID) -> None:
 
 
 def _render_export(session: Session, export: ExportRead) -> list[ExportWarning]:
-    job = JobRepository(session).get_job(export.job_id)
-    if job is None:
-        raise ExportError("export_job_not_found", "导出所属作业不存在。")
-    if job.status == JobStatus.EXPIRED or export.expires_at <= datetime.now(UTC):
+    del session
+    if export.expires_at <= datetime.now(UTC):
         raise ExportError("export_expired", "导出已过期，请重新创建。")
-    if job.status not in {JobStatus.COMPLETED, JobStatus.PARTIAL}:
-        raise ExportError("export_job_not_ready", "分析结果尚未就绪，无法导出。")
+    snapshot = export.snapshot
+    if snapshot is None:
+        raise ExportError("export_snapshot_missing", "导出快照不存在，无法导出。")
 
-    analysis_repository = AnalysisRepository(session)
-    document = analysis_repository.get_document(export.job_id)
-    if document is None:
-        raise ExportError("export_analysis_missing", "分析结果不存在，无法导出。")
-    issues = analysis_repository.list_all_issues(export.job_id)
-    plan = ReplacementPlanner().build(document, issues)
     storage = STORAGE_FACTORY()
+    source: Path | None = None
+    if snapshot.source_type == FileType.DOCX:
+        source = storage.source_path(export.job_id, FileType.DOCX)
+        _verify_immutable_source(snapshot, source)
+
+    plan = ReplacementPlanner().build(snapshot.document, snapshot.issues)
+    if snapshot.source_type == FileType.DOCX:
+        if source is None:
+            raise ExportError("export_source_missing", "导出源文件不存在。")
+        plan = DocxApplicabilityEvaluator().evaluate(
+            source,
+            snapshot.document,
+            plan,
+        )
+    if plan.warnings != snapshot.preflight_warnings:
+        raise ExportError("export_snapshot_mismatch", "导出快照校验失败，请重新创建。")
+
     extension = Path(export.file_name).suffix.removeprefix(".").lower()
     target = storage.export_path(export.job_id, export.export_id, extension)
     staging = target.with_name(f"{target.name}.{uuid4().hex}.building")
@@ -264,14 +281,16 @@ def _render_export(session: Session, export: ExportRead) -> list[ExportWarning]:
     try:
         warnings = _write_export(
             export=export,
-            job=job,
-            document=document,
-            issues=issues,
+            snapshot=snapshot,
             plan=plan,
-            analysis_repository=analysis_repository,
-            storage=storage,
+            source=source,
             staging=staging,
         )
+        if warnings != snapshot.preflight_warnings:
+            raise ExportError(
+                "export_snapshot_mismatch",
+                "导出快照校验失败，请重新创建。",
+            )
         try:
             staging.replace(target)
         except OSError as error:
@@ -287,32 +306,30 @@ def _render_export(session: Session, export: ExportRead) -> list[ExportWarning]:
 def _write_export(
     *,
     export: ExportRead,
-    job: JobRead,
-    document: DocumentModel,
-    issues: list[Issue],
+    snapshot: ExportSnapshot,
     plan: ReplacementPlan,
-    analysis_repository: AnalysisRepository,
-    storage: JobStorage,
+    source: Path | None,
     staging: Path,
 ) -> list[ExportWarning]:
     if export.export_type == ExportType.MODIFIED_DOCUMENT:
-        if document.file_type == FileType.TXT:
-            TxtExporter().export(document, plan, staging)
+        if snapshot.source_type == FileType.TXT:
+            TxtExporter().export(snapshot.document, plan, staging)
             return plan.warnings
-        if document.file_type == FileType.DOCX:
-            source = storage.source_path(export.job_id, FileType.DOCX)
-            return DocxExporter().export(source, document, plan, staging).warnings
+        if snapshot.source_type == FileType.DOCX:
+            if source is None:
+                raise ExportError("export_source_missing", "导出源文件不存在。")
+            return DocxExporter().export(
+                source,
+                snapshot.document,
+                plan,
+                staging,
+            ).warnings
         raise ExportError(
             "unsupported_export_type",
             "该文件类型不支持修改版导出。",
         )
 
-    report_model = _build_report_model(
-        job=job,
-        issues=issues,
-        plan=plan,
-        analysis_repository=analysis_repository,
-    )
+    report_model = _build_report_model(snapshot=snapshot)
     report_exporter = ReportExporter()
     if export.export_type == ExportType.HTML_REPORT:
         report_exporter.render_html(report_model, staging)
@@ -325,53 +342,44 @@ def _write_export(
 
 def _build_report_model(
     *,
-    job: JobRead,
-    issues: Sequence[Issue],
-    plan: ReplacementPlan,
-    analysis_repository: AnalysisRepository,
+    snapshot: ExportSnapshot,
 ) -> ReportModel:
-    failures = analysis_repository.get_checker_failures(job.job_id)
-    summary = analysis_repository.summarize_issues(job.job_id)
     return ReportModel(
-        source_name=job.source_name,
-        generated_at=datetime.now(UTC),
-        scenario=job.scenario,
-        enabled_categories=tuple(job.enabled_categories),
-        completed_categories=tuple(
-            category for category in job.enabled_categories if category not in failures
-        ),
+        source_name=snapshot.source_name,
+        generated_at=snapshot.captured_at,
+        scenario=snapshot.scenario,
+        enabled_categories=tuple(snapshot.enabled_categories),
+        completed_categories=tuple(snapshot.completed_categories),
         failed_categories=tuple(
-            _report_failure(category, failures[category])
-            for category in job.enabled_categories
-            if category in failures
+            ReportCategoryFailure(
+                category=failure.category,
+                code=failure.code,
+                message=failure.message,
+            )
+            for failure in snapshot.checker_failures
         ),
         summary=ReportSummary(
-            total_issues=summary.total,
-            by_category=summary.by_category,
-            by_severity=summary.by_severity,
-            by_decision=summary.by_decision,
+            total_issues=snapshot.summary.total,
+            by_category=snapshot.summary.by_category,
+            by_severity=snapshot.summary.by_severity,
+            by_decision=snapshot.summary.by_decision,
         ),
-        issues=tuple(issues),
-        warnings=tuple(plan.warnings),
+        issues=tuple(snapshot.issues),
+        warnings=tuple(snapshot.preflight_warnings),
     )
 
 
-def _report_failure(
-    category: CheckCategory,
-    failure: CheckerFailure,
-) -> ReportCategoryFailure:
-    return ReportCategoryFailure(
-        category=category,
-        code=failure.code,
-        message=failure.message,
-    )
+def _verify_immutable_source(snapshot: ExportSnapshot, source: Path) -> None:
+    expected_digest = snapshot.source_sha256
+    if expected_digest is None or source.stat().st_size != snapshot.source_size_bytes:
+        raise ExportError("export_source_changed", "导出源文件校验失败，请重新创建。")
 
-
-def _serialize_warning(warning: ExportWarning) -> str:
-    return (
-        f"{warning.code}: {warning.message} "
-        f"[issue_id={warning.issue_id}; block_id={warning.block_id}]"
-    )
+    digest = sha256()
+    with source.open("rb") as source_file:
+        while chunk := source_file.read(1024 * 1024):
+            digest.update(chunk)
+    if digest.hexdigest() != expected_digest:
+        raise ExportError("export_source_changed", "导出源文件校验失败，请重新创建。")
 
 
 def _persist_export_failure(

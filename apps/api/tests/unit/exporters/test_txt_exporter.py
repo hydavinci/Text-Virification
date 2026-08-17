@@ -17,7 +17,7 @@ def test_txt_export_applies_code_point_offsets_from_end(tmp_path: Path) -> None:
         target,
     )
 
-    assert target.read_text(encoding="utf-8") == "A😀领先B"
+    assert target.read_text(encoding="utf-8") == "A😀领先B\n"
 
 
 def test_txt_export_reconstructs_blocks_with_single_blank_lines_and_one_final_newline(
@@ -65,7 +65,17 @@ def test_txt_export_sorts_replacements_descending_before_applying(tmp_path: Path
         target,
     )
 
-    assert target.read_text(encoding="utf-8") == "aXdYZg"
+    assert target.read_text(encoding="utf-8") == "aXdYZg\n"
+
+
+def test_txt_export_text_normalizes_existing_trailing_newlines_to_exactly_one(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "modified.txt"
+
+    TxtExporter().export_text("正文\r\n\n", [], target)
+
+    assert target.read_bytes() == "正文\n".encode()
 
 
 def build_document(block_texts: list[str]) -> DocumentModel:

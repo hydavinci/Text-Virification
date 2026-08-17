@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 from uuid import UUID, uuid4
+from zipfile import ZipFile
 
 import pytest
 from docx import Document as WordDocument
 
+import text_verification.exporters as exporters
 from text_verification.exporters import (
     DocxExporter,
     ExportError,
@@ -124,12 +126,67 @@ def test_docx_export_warns_and_byte_copies_when_no_safe_sample_replacement_appli
     assert result.warnings == [
         ExportWarning(
             code="unsafe_docx_run_boundary",
-            message="修改范围跨越多个 DOCX 文本运行，无法在保留格式的前提下自动应用。",
+            message=(
+                "修改范围跨越多个 DOCX 文本运行，为保留格式已跳过；"
+                "请在原文中手动修改后重新导出。"
+            ),
             issue_id=issue_id,
             block_id=paragraph.block_id,
         )
     ]
     assert not (tmp_path / "cross-run.docx.tmp").exists()
+
+
+def test_docx_export_skips_mixed_content_run_without_dropping_drawing_or_field_xml(
+    fixture_path: Path,
+    tmp_path: Path,
+) -> None:
+    source = fixture_path / "mixed-content-run.docx"
+    parsed = parse_docx(source)
+    block = parsed.blocks[0]
+    issue_id = UUID("00000000-0000-0000-0000-000000000009")
+    plan = build_plan(
+        Replacement(
+            block_id=block.block_id,
+            start=2,
+            end=4,
+            original="正文",
+            value="文稿",
+            issue_id=issue_id,
+        )
+    )
+    source_bytes = source.read_bytes()
+
+    evaluated = exporters.DocxApplicabilityEvaluator().evaluate(source, parsed, plan)
+    result = DocxExporter().export(
+        source,
+        parsed,
+        plan,
+        tmp_path / "mixed-content-run.docx",
+    )
+
+    assert source.read_bytes() == source_bytes
+    assert evaluated.applicable == []
+    assert evaluated.warnings == [
+        ExportWarning(
+            code="unsafe_docx_mixed_content",
+            message=(
+                "修改所在的 DOCX 文本运行还包含图片、域或其他非文本内容，"
+                "为避免破坏文档已跳过；请在原文中手动修改后重新导出。"
+            ),
+            issue_id=issue_id,
+            block_id=block.block_id,
+        )
+    ]
+    assert result.warnings == evaluated.warnings
+    assert result.path.read_bytes() == source_bytes
+    with ZipFile(result.path) as archive:
+        document_xml = archive.read("word/document.xml")
+    assert b"drawing" in document_xml
+    assert b"fldChar" in document_xml
+    assert b"instrText" in document_xml
+    assert b" DATE " in document_xml
+    assert len(WordDocument(str(result.path)).inline_shapes) == 1
 
 
 def test_docx_export_resolves_table_cell_locator_and_applies_descending_same_run_edits(
@@ -266,7 +323,10 @@ def test_docx_export_warns_for_cross_paragraph_table_cell_replacement(
     assert result.warnings == [
         ExportWarning(
             code="unsafe_docx_run_boundary",
-            message="修改范围跨越多个 DOCX 文本运行，无法在保留格式的前提下自动应用。",
+            message=(
+                "修改范围跨越多个 DOCX 文本运行，为保留格式已跳过；"
+                "请在原文中手动修改后重新导出。"
+            ),
             issue_id=issue_id,
             block_id=block.block_id,
         )

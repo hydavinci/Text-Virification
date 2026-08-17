@@ -2,6 +2,9 @@ from celery import Celery  # type: ignore[import-untyped]
 
 from text_verification.config import get_settings
 
+TASK_HARD_TIME_LIMIT_SECONDS = 900
+TASK_SOFT_TIME_LIMIT_SECONDS = 840
+
 settings = get_settings()
 
 celery_app = Celery(
@@ -19,9 +22,10 @@ celery_app.conf.update(
     accept_content=["json"],
     task_track_started=True,
     task_acks_late=True,
+    task_reject_on_worker_lost=True,
     worker_prefetch_multiplier=1,
-    task_time_limit=900,
-    task_soft_time_limit=840,
+    task_time_limit=TASK_HARD_TIME_LIMIT_SECONDS,
+    task_soft_time_limit=TASK_SOFT_TIME_LIMIT_SECONDS,
     timezone="UTC",
     beat_schedule={
         "cleanup-expired-jobs-hourly": {

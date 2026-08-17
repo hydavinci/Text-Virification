@@ -1,3 +1,4 @@
+import json
 import logging
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -57,6 +58,12 @@ def test_database_schema_matches_head_migration(
     }
     assert {"document_id", "page", "issue_type"} <= {
         column["name"] for column in inspector.get_columns("issues")
+    }
+    assert "snapshot" in {
+        column["name"] for column in inspector.get_columns("exports")
+    }
+    assert "ix_exports_recoverable_updated_at" in {
+        index["name"] for index in inspector.get_indexes("exports")
     }
 
 
@@ -275,6 +282,185 @@ def test_head_downgrades_back_through_0003_before_removing_analysis_tables(
         assert {"documents", "document_blocks", "issues", "checker_failures"}.isdisjoint(
             set(inspect(engine).get_table_names())
         )
+
+
+def test_0010_export_snapshot_migration_round_trips_from_0009(
+    test_database_url: str,
+) -> None:
+    with migrated_schema(test_database_url) as (engine, alembic_config):
+        command.upgrade(alembic_config, "0009_index_queued_exports")
+        columns_at_0009 = {
+            column["name"] for column in inspect(engine).get_columns("exports")
+        }
+        indexes_at_0009 = {
+            index["name"] for index in inspect(engine).get_indexes("exports")
+        }
+        assert "snapshot" not in columns_at_0009
+        assert "ix_exports_queued_created_at" in indexes_at_0009
+        assert "ix_exports_recoverable_updated_at" not in indexes_at_0009
+
+        legacy_job_id = uuid4()
+        legacy_export_id = uuid4()
+        legacy_created_at = datetime.now(UTC)
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO jobs (
+                        job_id, source_name, file_type, size_bytes, storage_key,
+                        status, progress, error_code, error_message, scenario,
+                        enabled_categories, created_at, updated_at, expires_at
+                    ) VALUES (
+                        :job_id, 'legacy.txt', 'txt', 8, :storage_key,
+                        'completed', 100, NULL, NULL, 'general',
+                        CAST(:enabled_categories AS jsonb),
+                        :created_at, :created_at, :expires_at
+                    )
+                    """
+                ),
+                {
+                    "job_id": legacy_job_id,
+                    "storage_key": str(legacy_job_id),
+                    "enabled_categories": json.dumps(["character"]),
+                    "created_at": legacy_created_at,
+                    "expires_at": legacy_created_at + timedelta(hours=1),
+                },
+            )
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO exports (
+                        export_id, job_id, export_type, status, file_name,
+                        storage_key, warnings, error_code, error_message,
+                        created_at, updated_at, expires_at
+                    ) VALUES (
+                        :export_id, :job_id, 'html_report', 'queued', 'report.html',
+                        :export_storage_key, '[]'::jsonb, NULL, NULL,
+                        :created_at, :created_at, :expires_at
+                    )
+                    """
+                ),
+                {
+                    "export_id": legacy_export_id,
+                    "job_id": legacy_job_id,
+                    "export_storage_key": (
+                        f"{legacy_job_id}/{legacy_export_id}.html"
+                    ),
+                    "created_at": legacy_created_at,
+                    "expires_at": legacy_created_at + timedelta(hours=1),
+                },
+            )
+
+        command.upgrade(alembic_config, "0010_export_snapshots")
+        upgraded_columns = {
+            column["name"] for column in inspect(engine).get_columns("exports")
+        }
+        upgraded_indexes = {
+            index["name"] for index in inspect(engine).get_indexes("exports")
+        }
+        assert "snapshot" in upgraded_columns
+        assert "ix_exports_queued_created_at" not in upgraded_indexes
+        assert "ix_exports_recoverable_updated_at" in upgraded_indexes
+        with engine.connect() as connection:
+            legacy_status = connection.execute(
+                text(
+                    """
+                    SELECT status, error_code, error_message
+                    FROM exports
+                    WHERE export_id = :export_id
+                    """
+                ),
+                {"export_id": legacy_export_id},
+            ).one()
+        assert legacy_status == (
+            "failed",
+            "export_snapshot_unavailable",
+            "导出任务缺少不可变快照，请重新创建。",
+        )
+
+        job_id = uuid4()
+        export_id = uuid4()
+        created_at = datetime.now(UTC)
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO jobs (
+                        job_id, source_name, file_type, size_bytes, storage_key,
+                        status, progress, error_code, error_message, scenario,
+                        enabled_categories, created_at, updated_at, expires_at
+                    ) VALUES (
+                        :job_id, 'sample.txt', 'txt', 8, :storage_key,
+                        'completed', 100, NULL, NULL, 'general',
+                        CAST(:enabled_categories AS jsonb),
+                        :created_at, :created_at, :expires_at
+                    )
+                    """
+                ),
+                {
+                    "job_id": job_id,
+                    "storage_key": str(job_id),
+                    "enabled_categories": json.dumps(["character"]),
+                    "created_at": created_at,
+                    "expires_at": created_at + timedelta(hours=1),
+                },
+            )
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO exports (
+                        export_id, job_id, export_type, status, file_name,
+                        storage_key, warnings, snapshot, error_code, error_message,
+                        created_at, updated_at, expires_at
+                    ) VALUES (
+                        :export_id, :job_id, 'html_report', 'queued', 'report.html',
+                        :export_storage_key, CAST(:warnings AS jsonb), NULL, NULL, NULL,
+                        :created_at, :created_at, :expires_at
+                    )
+                    """
+                ),
+                {
+                    "export_id": export_id,
+                    "job_id": job_id,
+                    "export_storage_key": f"{job_id}/{export_id}.html",
+                    "warnings": json.dumps(
+                        [
+                            {
+                                "code": "unsafe_docx_run_boundary",
+                                "message": "请手动修改后重新导出。",
+                                "issue_id": "00000000-0000-0000-0000-000000000001",
+                                "block_id": "p-000001",
+                            }
+                        ],
+                        ensure_ascii=False,
+                    ),
+                    "created_at": created_at,
+                    "expires_at": created_at + timedelta(hours=1),
+                },
+            )
+
+        command.downgrade(alembic_config, "0009_index_queued_exports")
+        downgraded_columns = {
+            column["name"] for column in inspect(engine).get_columns("exports")
+        }
+        downgraded_indexes = {
+            index["name"] for index in inspect(engine).get_indexes("exports")
+        }
+        assert "snapshot" not in downgraded_columns
+        assert "ix_exports_queued_created_at" in downgraded_indexes
+        assert "ix_exports_recoverable_updated_at" not in downgraded_indexes
+        with engine.connect() as connection:
+            downgraded_warnings = connection.execute(
+                text("SELECT warnings FROM exports WHERE export_id = :export_id"),
+                {"export_id": export_id},
+            ).scalar_one()
+        assert downgraded_warnings == [
+            (
+                "unsafe_docx_run_boundary: 请手动修改后重新导出。 "
+                "[issue_id=00000000-0000-0000-0000-000000000001; "
+                "block_id=p-000001]"
+            )
+        ]
 
 
 def test_repository_persists_job_and_ordered_events(db_session: Session) -> None:

@@ -22,7 +22,7 @@ class TxtExporter:
             )
             for block in document.blocks
         ]
-        payload = "\n\n".join(rendered_blocks) + "\n"
+        payload = self._normalize_trailing_newline("\n\n".join(rendered_blocks))
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(payload, encoding="utf-8", newline="\n")
         return target
@@ -33,7 +33,9 @@ class TxtExporter:
         replacements: Sequence[Replacement],
         target: Path,
     ) -> Path:
-        payload = self._apply_replacements(text, replacements)
+        payload = self._normalize_trailing_newline(
+            self._apply_replacements(text, replacements)
+        )
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(payload, encoding="utf-8", newline="\n")
         return target
@@ -55,3 +57,6 @@ class TxtExporter:
                 + rendered[replacement.end :]
             )
         return rendered
+
+    def _normalize_trailing_newline(self, text: str) -> str:
+        return f"{text.rstrip('\r\n')}\n"

@@ -204,10 +204,11 @@ class ExportRow(Base):
         ),
         Index("ix_exports_job_created_at", "job_id", "created_at"),
         Index(
-            "ix_exports_queued_created_at",
-            "created_at",
+            "ix_exports_recoverable_updated_at",
+            "status",
+            "updated_at",
             "export_id",
-            postgresql_where=text("status = 'queued'"),
+            postgresql_where=text("status IN ('queued', 'processing')"),
         ),
     )
 
@@ -220,7 +221,12 @@ class ExportRow(Base):
     status: Mapped[str] = mapped_column(String(16))
     file_name: Mapped[str] = mapped_column(String(255))
     storage_key: Mapped[str] = mapped_column(String(255))
-    warnings_json: Mapped[list[str]] = mapped_column("warnings", JSONB)
+    warnings_json: Mapped[list[object]] = mapped_column("warnings", JSONB)
+    snapshot_json: Mapped[dict[str, object] | None] = mapped_column(
+        "snapshot",
+        JSONB,
+        nullable=True,
+    )
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

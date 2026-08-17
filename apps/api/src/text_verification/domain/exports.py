@@ -1,14 +1,27 @@
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from text_verification.checkers.models import CheckCategory, CheckScenario
+from text_verification.domain.documents import DocumentModel, FileType
+from text_verification.domain.issues import Issue, IssueSeverity
+
 SUPPORTED_EXPORT_EXTENSIONS = frozenset({"txt", "docx", "html", "pdf"})
+MAX_EXPORT_SNAPSHOT_BYTES = 64 * 1024 * 1024
+_LEGACY_WARNING_PATTERN = re.compile(
+    r"^(?P<code>[^:]+): (?P<message>.*) "
+    r"\[issue_id=(?P<issue_id>[0-9a-fA-F-]{36}); block_id=(?P<block_id>.+)\]$"
+)
+_LEGACY_WARNING_ISSUE_ID = UUID(int=0)
 
 
 class ExportType(StrEnum):
@@ -22,6 +35,11 @@ class ExportStatus(StrEnum):
     PROCESSING = "processing"
     COMPLETED = "completed"
     FAILED = "failed"
+
+
+class ExportDispatchStatus(StrEnum):
+    DISPATCHED = "dispatched"
+    DEFERRED = "deferred"
 
 
 TERMINAL_EXPORT_STATUSES = {
@@ -121,6 +139,70 @@ class TerminalExportStateError(RuntimeError):
         )
 
 
+class ExportSnapshotTooLarge(ValueError):
+    def __init__(self, *, actual_bytes: int, maximum_bytes: int) -> None:
+        self.actual_bytes = actual_bytes
+        self.maximum_bytes = maximum_bytes
+        super().__init__(
+            f"Export snapshot is {actual_bytes} bytes; maximum is {maximum_bytes} bytes."
+        )
+
+
+class ExportWarning(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    code: str = Field(min_length=1, max_length=64)
+    message: str = Field(min_length=1)
+    issue_id: UUID
+    block_id: str = Field(min_length=1, max_length=64)
+
+
+class ExportCheckerFailureSnapshot(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    category: CheckCategory
+    code: str = Field(min_length=1, max_length=64)
+    message: str = Field(min_length=1)
+
+
+class ExportIssueSummarySnapshot(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    total: int = Field(ge=0)
+    by_category: dict[CheckCategory, int]
+    by_severity: dict[IssueSeverity, int]
+    by_decision: dict[str, int]
+
+
+class ExportSnapshot(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal[1] = 1
+    captured_at: datetime
+    source_name: str = Field(min_length=1, max_length=255)
+    source_type: FileType
+    source_size_bytes: int = Field(ge=0)
+    source_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    scenario: CheckScenario
+    enabled_categories: list[CheckCategory]
+    completed_categories: list[CheckCategory]
+    checker_failures: list[ExportCheckerFailureSnapshot]
+    summary: ExportIssueSummarySnapshot
+    document: DocumentModel
+    issues: list[Issue]
+    preflight_warnings: list[ExportWarning]
+
+    @model_validator(mode="after")
+    def validate_source(self) -> ExportSnapshot:
+        if self.document.file_type != self.source_type:
+            raise ValueError("snapshot source type must match the normalized document")
+        if self.document.source_name != self.source_name:
+            raise ValueError("snapshot source name must match the normalized document")
+        if self.source_type == FileType.DOCX and self.source_sha256 is None:
+            raise ValueError("DOCX export snapshots require a source digest")
+        return self
+
+
 class ExportRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -130,7 +212,8 @@ class ExportRead(BaseModel):
     status: ExportStatus
     file_name: str = Field(min_length=1, max_length=255)
     storage_key: str = Field(min_length=1, max_length=255)
-    warnings: list[str] = Field(default_factory=list)
+    warnings: list[ExportWarning] = Field(default_factory=list)
+    snapshot: ExportSnapshot | None = None
     error_code: str | None = None
     error_message: str | None = None
     created_at: datetime
@@ -162,3 +245,63 @@ class ExportRead(BaseModel):
         if self.error_code is not None or self.error_message is not None:
             raise ValueError("non-failed exports must not include error details")
         return self
+
+
+def serialize_export_snapshot(
+    snapshot: ExportSnapshot,
+    *,
+    maximum_bytes: int = MAX_EXPORT_SNAPSHOT_BYTES,
+) -> dict[str, Any]:
+    if maximum_bytes <= 0:
+        raise ValueError("maximum_bytes must be positive")
+    encoded = snapshot.model_dump_json()
+    actual_bytes = len(encoded.encode("utf-8"))
+    if actual_bytes > maximum_bytes:
+        raise ExportSnapshotTooLarge(
+            actual_bytes=actual_bytes,
+            maximum_bytes=maximum_bytes,
+        )
+    value = json.loads(encoded)
+    if not isinstance(value, dict):
+        raise ValueError("serialized export snapshot must be an object")
+    return value
+
+
+def deserialize_export_snapshot(value: object) -> ExportSnapshot | None:
+    if value is None:
+        return None
+    return ExportSnapshot.model_validate(value)
+
+
+def serialize_export_warnings(
+    warnings: list[ExportWarning] | tuple[ExportWarning, ...],
+) -> list[object]:
+    return [warning.model_dump(mode="json") for warning in warnings]
+
+
+def deserialize_export_warnings(values: object) -> list[ExportWarning]:
+    if not isinstance(values, list):
+        raise ValueError("export warnings must be a list")
+    return [_deserialize_export_warning(value) for value in values]
+
+
+def _deserialize_export_warning(value: object) -> ExportWarning:
+    if isinstance(value, dict):
+        return ExportWarning.model_validate(value)
+    if not isinstance(value, str):
+        raise ValueError("export warning must be an object")
+
+    matched = _LEGACY_WARNING_PATTERN.fullmatch(value)
+    if matched is not None:
+        return ExportWarning(
+            code=matched.group("code"),
+            message=matched.group("message"),
+            issue_id=UUID(matched.group("issue_id")),
+            block_id=matched.group("block_id"),
+        )
+    return ExportWarning(
+        code="legacy_export_warning",
+        message=value,
+        issue_id=_LEGACY_WARNING_ISSUE_ID,
+        block_id="legacy",
+    )

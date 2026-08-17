@@ -11,8 +11,13 @@ import pytest
 from sqlalchemy import delete
 from sqlalchemy.orm import Session
 
-from text_verification.domain.documents import FileType
-from text_verification.domain.exports import ExportType
+from text_verification.checkers.models import CHECK_CATEGORY_ORDER, CheckScenario
+from text_verification.domain.documents import DocumentModel, FileType
+from text_verification.domain.exports import (
+    ExportIssueSummarySnapshot,
+    ExportSnapshot,
+    ExportType,
+)
 from text_verification.domain.jobs import JobEvent, JobRead, JobStatus
 from text_verification.infrastructure.export_repository import ExportRepository
 from text_verification.infrastructure.orm import ExportRow, JobRow
@@ -194,6 +199,33 @@ def test_deleting_job_cascades_export_rows(db_session: Session) -> None:
         job_id,
         ExportType.MODIFIED_DOCUMENT,
         "txt",
+        snapshot=ExportSnapshot(
+            captured_at=now,
+            source_name="sample.txt",
+            source_type=FileType.TXT,
+            source_size_bytes=8,
+            source_sha256=None,
+            scenario=CheckScenario.GENERAL,
+            enabled_categories=list(CHECK_CATEGORY_ORDER),
+            completed_categories=list(CHECK_CATEGORY_ORDER),
+            checker_failures=[],
+            summary=ExportIssueSummarySnapshot(
+                total=0,
+                by_category={},
+                by_severity={},
+                by_decision={},
+            ),
+            document=DocumentModel(
+                document_id=uuid4(),
+                file_type=FileType.TXT,
+                source_name="sample.txt",
+                version=1,
+                blocks=[],
+                metadata={},
+            ),
+            issues=[],
+            preflight_warnings=[],
+        ),
     )
     db_session.commit()
 

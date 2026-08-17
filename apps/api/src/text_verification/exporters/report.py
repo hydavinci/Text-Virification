@@ -11,10 +11,10 @@ from typing import Any
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
 
 from text_verification.checkers.models import CHECK_CATEGORY_ORDER, CheckCategory, CheckScenario
+from text_verification.domain.exports import ExportWarning
 from text_verification.domain.issues import DecisionAction, Issue, IssueSeverity
 
 from .docx import ExportError
-from .replacements import ExportWarning
 
 HTML: Any = None
 
