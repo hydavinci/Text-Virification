@@ -78,6 +78,9 @@ class JobRepository:
             return None
         return self._to_job_read(row)
 
+    def lock_job(self, job_id: UUID) -> JobRow:
+        return self._lock_job(job_id)
+
     def list_job_ids(self) -> set[UUID]:
         return set(self._session.scalars(select(JobRow.job_id)).all())
 

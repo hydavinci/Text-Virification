@@ -31,8 +31,20 @@ def postgres_session(db_session: Session) -> Session:
         ("CUSTOM", "   "),
         ("CUSTOM", "\t"),
         ("CUSTOM", "\n"),
+        ("CUSTOM", "before\0after"),
+        ("CUSTOM", "🙂" * 10_001),
         ("ACCEPTED", "replacement"),
         ("IGNORED", "replacement"),
+    ],
+    ids=[
+        "custom-none",
+        "custom-spaces",
+        "custom-tab",
+        "custom-newline",
+        "custom-nul",
+        "custom-over-limit",
+        "accepted-with-replacement",
+        "ignored-with-replacement",
     ],
 )
 def test_decision_rejects_invalid_replacement(
@@ -47,6 +59,20 @@ def test_decision_rejects_invalid_replacement(
             action=getattr(DecisionAction, action_name),
             replacement=replacement,
         )
+
+
+def test_decision_accepts_custom_replacement_at_10_000_code_point_boundary() -> None:
+    DecisionAction, DecisionCommand, *_ = _decision_symbols()
+
+    command = DecisionCommand(
+        issue_id=uuid4(),
+        issue_version=1,
+        action=DecisionAction.CUSTOM,
+        replacement="🙂" * 10_000,
+    )
+
+    assert command.replacement is not None
+    assert len(command.replacement) == 10_000
 
 
 def test_apply_rejects_stale_issue_version(postgres_session: Session) -> None:

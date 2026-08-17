@@ -24,8 +24,8 @@ from text_verification.infrastructure.orm import (
     DocumentRow,
     IssueDecisionRow,
     IssueRow,
-    JobRow,
 )
+from text_verification.infrastructure.repositories import JobRepository
 
 UNREVIEWED_DECISION = "unreviewed"
 SUMMARY_DECISION_STATES = ("accepted", "ignored", "custom", UNREVIEWED_DECISION)
@@ -123,7 +123,7 @@ class AnalysisRepository:
         issues: list[Issue],
         failures: dict[CheckCategory, CheckerFailure],
     ) -> None:
-        self._lock_job(job_id)
+        JobRepository(self._session).lock_job(job_id)
         self._require_strictly_newer_document_version(job_id, document.version)
         self._validate_issues(document, issues)
         self._session.execute(
@@ -422,17 +422,6 @@ class AnalysisRepository:
         if query.search is not None:
             statement = statement.where(IssueRow.original.ilike(f"%{query.search}%"))
         return statement
-
-    def _lock_job(self, job_id: UUID) -> JobRow:
-        row = self._session.execute(
-            select(JobRow)
-            .where(JobRow.job_id == job_id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        ).scalar_one_or_none()
-        if row is None:
-            raise LookupError(f"Job {job_id} does not exist.")
-        return row
 
     def _validate_issues(self, document: DocumentModel, issues: list[Issue]) -> None:
         block_pages = {block.block_id: block.page for block in document.blocks}

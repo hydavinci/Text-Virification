@@ -62,6 +62,7 @@ def put_decisions(
         missing_message="分析结果尚未就绪，请稍后重试。",
     )
 
+    job_repository.lock_job(job_id)
     repository = DecisionRepository(session)
     outcomes: list[DecisionOutcome] = []
     try:

@@ -1,9 +1,10 @@
 import re
 from datetime import datetime
 from enum import StrEnum
+from typing import Annotated
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
 
 class IssueSeverity(StrEnum):
@@ -19,6 +20,20 @@ class DecisionAction(StrEnum):
 
 
 NON_WHITESPACE_PATTERN = re.compile(r"\S")
+MAX_CUSTOM_REPLACEMENT_CODE_POINTS = 10_000
+
+
+def _reject_nul(value: str) -> str:
+    if "\0" in value:
+        raise ValueError("replacement must not contain NUL")
+    return value
+
+
+CustomReplacement = Annotated[
+    str,
+    Field(max_length=MAX_CUSTOM_REPLACEMENT_CODE_POINTS),
+    AfterValidator(_reject_nul),
+]
 
 
 class IssueDecisionSummary(BaseModel):
@@ -81,7 +96,7 @@ class DecisionCommand(BaseModel):
     issue_id: UUID
     issue_version: int = Field(gt=0)
     action: DecisionAction
-    replacement: str | None = None
+    replacement: CustomReplacement | None = None
 
     @model_validator(mode="after")
     def validate_replacement(self) -> "DecisionCommand":
