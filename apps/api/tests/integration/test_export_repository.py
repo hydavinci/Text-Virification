@@ -17,12 +17,28 @@ def postgres_session(db_session: Session) -> Session:
     return db_session
 
 
-def test_export_lifecycle_round_trip(postgres_session: Session) -> None:
+@pytest.mark.parametrize(
+    ("export_type_name", "extension", "expected_file_name"),
+    [
+        ("MODIFIED_DOCUMENT", "txt", "modified_document.txt"),
+        ("MODIFIED_DOCUMENT", "docx", "modified_document.docx"),
+        ("HTML_REPORT", "html", "report.html"),
+        ("PDF_REPORT", "pdf", "report.pdf"),
+    ],
+    ids=["modified-txt", "modified-docx", "html-report", "pdf-report"],
+)
+def test_export_lifecycle_round_trip(
+    postgres_session: Session,
+    export_type_name: str,
+    extension: str,
+    expected_file_name: str,
+) -> None:
     ExportType, ExportStatus, ExportRepository, _ = _export_symbols()
     job_id, expires_at = seed_job(postgres_session)
     repository = ExportRepository(postgres_session)
+    export_type = getattr(ExportType, export_type_name)
 
-    created = repository.create(job_id, ExportType.HTML_REPORT, "report.html")
+    created = repository.create(job_id, export_type, extension)
     processing = repository.mark_processing(created.export_id)
     completed = repository.mark_completed(
         created.export_id,
@@ -38,12 +54,12 @@ def test_export_lifecycle_round_trip(postgres_session: Session) -> None:
     assert stored is not None
     assert stored.export_id == created.export_id
     assert stored.job_id == job_id
-    assert stored.export_type == ExportType.HTML_REPORT
+    assert stored.export_type == export_type
     assert stored.status == ExportStatus.COMPLETED
-    assert stored.file_name == "report.html"
+    assert stored.file_name == expected_file_name
     assert stored.storage_key is not None
     assert str(job_id) in stored.storage_key
-    assert stored.storage_key.endswith(f"{created.export_id}.html")
+    assert stored.storage_key.endswith(f"{created.export_id}.{extension}")
     assert stored.warnings == ["1 项修改未自动应用"]
     assert stored.error_code is None
     assert stored.error_message is None
@@ -72,7 +88,7 @@ def test_terminal_export_states_reject_later_transitions(
     ExportType, _, ExportRepository, TerminalExportStateError = _export_symbols()
     job_id, _ = seed_job(postgres_session)
     repository = ExportRepository(postgres_session)
-    export = repository.create(job_id, ExportType.PDF_REPORT, "report.pdf")
+    export = repository.create(job_id, ExportType.PDF_REPORT, "pdf")
 
     getattr(repository, terminal_method)(export.export_id, **terminal_kwargs)
 
@@ -80,15 +96,51 @@ def test_terminal_export_states_reject_later_transitions(
         repository.mark_processing(export.export_id)
 
 
-def test_create_rejects_path_like_file_name(postgres_session: Session) -> None:
+@pytest.mark.parametrize(
+    ("export_type_name", "extension"),
+    [
+        ("MODIFIED_DOCUMENT", "html"),
+        ("MODIFIED_DOCUMENT", "pdf"),
+        ("HTML_REPORT", "pdf"),
+        ("PDF_REPORT", "html"),
+    ],
+    ids=[
+        "modified-with-html",
+        "modified-with-pdf",
+        "html-report-with-pdf",
+        "pdf-report-with-html",
+    ],
+)
+def test_create_rejects_mismatched_export_type_and_extension(
+    postgres_session: Session,
+    export_type_name: str,
+    extension: str,
+) -> None:
+    ExportType, _, ExportRepository, _ = _export_symbols()
+    job_id, _ = seed_job(postgres_session)
+    export_type = getattr(ExportType, export_type_name)
+
+    with pytest.raises(ValueError, match="supports extension"):
+        ExportRepository(postgres_session).create(
+            job_id,
+            export_type,
+            extension,
+        )
+
+
+@pytest.mark.parametrize("extension", ["../report.html", "zip", "html.exe"])
+def test_create_rejects_path_like_or_unsupported_extension(
+    postgres_session: Session,
+    extension: str,
+) -> None:
     ExportType, _, ExportRepository, _ = _export_symbols()
     job_id, _ = seed_job(postgres_session)
 
-    with pytest.raises(ValueError, match="file_name"):
+    with pytest.raises(ValueError, match="Unsupported export extension"):
         ExportRepository(postgres_session).create(
             job_id,
             ExportType.HTML_REPORT,
-            "../report.html",
+            extension,
         )
 
 

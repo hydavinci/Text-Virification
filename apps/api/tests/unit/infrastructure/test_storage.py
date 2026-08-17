@@ -79,14 +79,18 @@ def test_source_path_returns_existing_expected_source_file(tmp_path):
     assert source_path.read_bytes() == b"hello"
 
 
-def test_export_path_returns_server_controlled_file_inside_job_directory(tmp_path):
+@pytest.mark.parametrize("extension", ["txt", "docx", "html", "pdf"])
+def test_export_path_returns_server_controlled_file_inside_job_directory(
+    tmp_path,
+    extension,
+):
     storage = JobStorage(tmp_path, max_upload_bytes=1024)
     job_id = uuid4()
     export_id = uuid4()
 
-    export_path = storage.export_path(job_id, export_id, "html")
+    export_path = storage.export_path(job_id, export_id, extension)
 
-    assert export_path == tmp_path / str(job_id) / f"{export_id}.html"
+    assert export_path == tmp_path / str(job_id) / f"{export_id}.{extension}"
 
 
 @pytest.mark.parametrize("extension", ["../report.html", "zip", "html.exe"])

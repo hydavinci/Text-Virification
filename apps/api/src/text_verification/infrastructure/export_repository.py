@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import UTC, datetime
-from pathlib import Path, PurePosixPath
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
@@ -14,8 +13,7 @@ from text_verification.domain.exports import (
     ExportStatus,
     ExportType,
     TerminalExportStateError,
-    normalize_export_extension,
-    validate_export_file_name,
+    build_export_artifact,
 )
 from text_verification.infrastructure.orm import ExportRow, JobRow
 
@@ -24,23 +22,28 @@ class ExportRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
 
-    def create(self, job_id: UUID, export_type: ExportType, file_name: str) -> ExportRead:
+    def create(self, job_id: UUID, export_type: ExportType, extension: str) -> ExportRead:
         expires_at = self._session.scalar(
             select(JobRow.expires_at).where(JobRow.job_id == job_id)
         )
         if expires_at is None:
             raise LookupError(f"Job {job_id} does not exist.")
 
-        normalized_file_name = validate_export_file_name(file_name)
         export_id = uuid4()
+        artifact = build_export_artifact(
+            job_id=job_id,
+            export_id=export_id,
+            export_type=export_type,
+            extension=extension,
+        )
         created_at = datetime.now(UTC)
         row = ExportRow(
             export_id=export_id,
             job_id=job_id,
             export_type=_normalize_export_type(export_type).value,
             status=ExportStatus.QUEUED.value,
-            file_name=normalized_file_name,
-            storage_key=_build_storage_key(job_id, export_id, normalized_file_name),
+            file_name=artifact.file_name,
+            storage_key=artifact.storage_key,
             warnings_json=[],
             error_code=None,
             error_message=None,
@@ -116,11 +119,6 @@ class ExportRepository:
                 current_status=current_status,
                 target_status=target_status,
             )
-
-
-def _build_storage_key(job_id: UUID, export_id: UUID, file_name: str) -> str:
-    extension = normalize_export_extension(Path(file_name).suffix.removeprefix("."))
-    return str(PurePosixPath(str(job_id)) / f"{export_id}.{extension}")
 
 
 def _normalize_export_type(value: ExportType | str) -> ExportType:

@@ -12,7 +12,7 @@ from typing import BinaryIO
 from uuid import UUID
 
 from text_verification.domain.documents import FileType
-from text_verification.domain.exports import normalize_export_extension
+from text_verification.domain.exports import build_export_storage_name
 
 logger = logging.getLogger(__name__)
 
@@ -101,10 +101,9 @@ class JobStorage:
         return source_path
 
     def export_path(self, job_id: UUID, export_id: UUID, extension: str) -> Path:
-        normalized_extension = normalize_export_extension(extension)
         job_directory = self.job_directory(job_id)
         self._ensure_safe_upload_path(job_directory)
-        export_path = job_directory / f"{export_id}.{normalized_extension}"
+        export_path = job_directory / build_export_storage_name(export_id, extension)
         self._ensure_safe_upload_path(export_path)
         return export_path
 
