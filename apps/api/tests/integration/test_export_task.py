@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
+from threading import Event, Lock
 from uuid import UUID, uuid4
 
 import pytest
@@ -15,7 +18,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from text_verification.api.dependencies import get_db_session, get_job_storage
 from text_verification.checkers.models import CheckCategory, CheckerFailure
 from text_verification.domain.documents import DocumentModel, FileType
-from text_verification.domain.exports import ExportStatus
+from text_verification.domain.exports import ExportStatus, ExportType
 from text_verification.domain.issues import (
     DecisionAction,
     DecisionCommand,
@@ -27,7 +30,7 @@ from text_verification.exporters import ExportError, TxtExporter
 from text_verification.infrastructure.analysis_repositories import AnalysisRepository
 from text_verification.infrastructure.decision_repository import DecisionRepository
 from text_verification.infrastructure.export_repository import ExportRepository
-from text_verification.infrastructure.orm import IssueDecisionRow
+from text_verification.infrastructure.orm import ExportRow, IssueDecisionRow
 from text_verification.infrastructure.repositories import JobRepository
 from text_verification.infrastructure.storage import JobStorage
 from text_verification.parsers import DocxParser, TxtParser
@@ -314,6 +317,76 @@ def test_repeat_delivery_keeps_completed_export_terminal(
     ) == "修改后的正文\n"
 
 
+def test_concurrent_deliveries_claim_export_once(
+    celery_eager,
+    db_session: Session,
+    db_session_factory: sessionmaker[Session],
+    export_storage: JobStorage,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from text_verification.workers import export_tasks
+
+    job_id, _issue = _seed_reviewed_txt_job(db_session, export_storage)
+    export = ExportRepository(db_session).create(
+        job_id,
+        export_tasks.ExportType.MODIFIED_DOCUMENT,
+        "txt",
+    )
+    db_session.commit()
+    render_started = Event()
+    allow_render_to_finish = Event()
+    counter_lock = Lock()
+    render_count = 0
+    finalizer_count = 0
+    real_export = TxtExporter.export
+    real_mark_completed = ExportRepository.mark_completed
+
+    def blocking_export(self, document, plan, target):
+        nonlocal render_count
+        with counter_lock:
+            render_count += 1
+        render_started.set()
+        if not allow_render_to_finish.wait(timeout=5):
+            raise TimeoutError("timed out waiting to finish export rendering")
+        return real_export(self, document, plan, target)
+
+    def counting_mark_completed(self, export_id, *, warnings):
+        nonlocal finalizer_count
+        with counter_lock:
+            finalizer_count += 1
+        return real_mark_completed(self, export_id, warnings=warnings)
+
+    monkeypatch.setattr(TxtExporter, "export", blocking_export)
+    monkeypatch.setattr(ExportRepository, "mark_completed", counting_mark_completed)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first_delivery = executor.submit(
+            export_tasks.process_export.delay,
+            str(export.export_id),
+        )
+        assert render_started.wait(timeout=3)
+        assert _load_export(db_session_factory, export.export_id).status == ExportStatus.PROCESSING
+
+        duplicate_delivery = executor.submit(
+            export_tasks.process_export.delay,
+            str(export.export_id),
+        )
+        try:
+            duplicate_result = duplicate_delivery.result(timeout=2)
+        finally:
+            allow_render_to_finish.set()
+        first_result = first_delivery.result(timeout=5)
+
+    stored = _load_export(db_session_factory, export.export_id)
+    assert first_result.successful()
+    assert duplicate_result.successful()
+    assert render_count == 1
+    assert finalizer_count == 1
+    assert stored.status == ExportStatus.COMPLETED
+    assert stored.error_code is None
+    assert stored.error_message is None
+
+
 def test_exhausted_task_failure_is_safe_and_repeat_delivery_stays_failed(
     celery_eager,
     db_session: Session,
@@ -385,6 +458,118 @@ def test_expected_export_error_persists_public_code_and_task_result_is_failed(
     assert stored.status == ExportStatus.FAILED
     assert stored.error_code == "txt_export_failed"
     assert stored.error_message == "无法导出 TXT 文件。"
+
+
+def test_stale_queue_recovery_redispatches_only_stale_queued_exports(
+    celery_eager,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from text_verification.workers import export_tasks
+
+    job_id = _seed_empty_job(
+        db_session,
+        file_type=FileType.TXT,
+        status=JobStatus.COMPLETED,
+    )
+    repository = ExportRepository(db_session)
+    stale = repository.create(job_id, ExportType.HTML_REPORT, "html")
+    fresh = repository.create(job_id, ExportType.HTML_REPORT, "html")
+    completed = repository.create(job_id, ExportType.HTML_REPORT, "html")
+    failed = repository.create(job_id, ExportType.HTML_REPORT, "html")
+    repository.mark_completed(completed.export_id, warnings=[])
+    repository.mark_failed(
+        failed.export_id,
+        error_code="export_failed",
+        error_message="导出失败，请稍后重试。",
+    )
+    stale_at = datetime.now(UTC) - timedelta(seconds=61)
+    db_session.execute(
+        update(ExportRow)
+        .where(
+            ExportRow.export_id.in_(
+                [stale.export_id, completed.export_id, failed.export_id]
+            )
+        )
+        .values(created_at=stale_at, updated_at=stale_at)
+    )
+    db_session.commit()
+    dispatched: list[str] = []
+    monkeypatch.setattr(
+        export_tasks,
+        "dispatch_recovered_export",
+        lambda export_id: dispatched.append(export_id),
+        raising=False,
+    )
+
+    result = export_tasks.recover_stale_queued_exports.delay()
+
+    assert export_tasks.recover_stale_queued_exports.name == (
+        "text_verification.recover_stale_queued_exports"
+    )
+    assert result.successful()
+    assert result.result == [str(stale.export_id)]
+    assert dispatched == [str(stale.export_id)]
+    assert str(fresh.export_id) not in dispatched
+    assert str(completed.export_id) not in dispatched
+    assert str(failed.export_id) not in dispatched
+
+
+def test_stale_queue_recovery_dispatch_failure_stays_queued_and_task_fails(
+    celery_eager,
+    db_session: Session,
+    db_session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from text_verification.workers import export_tasks
+
+    job_id = _seed_empty_job(
+        db_session,
+        file_type=FileType.TXT,
+        status=JobStatus.COMPLETED,
+    )
+    export = ExportRepository(db_session).create(
+        job_id,
+        ExportType.HTML_REPORT,
+        "html",
+    )
+    stale_at = datetime.now(UTC) - timedelta(seconds=61)
+    db_session.execute(
+        update(ExportRow)
+        .where(ExportRow.export_id == export.export_id)
+        .values(created_at=stale_at, updated_at=stale_at)
+    )
+    db_session.commit()
+
+    def fail_dispatch(_export_id: str) -> None:
+        raise ConnectionError("broker unavailable at internal endpoint")
+
+    monkeypatch.setattr(
+        export_tasks,
+        "dispatch_recovered_export",
+        fail_dispatch,
+        raising=False,
+    )
+    caplog.set_level(logging.ERROR, logger=export_tasks.__name__)
+
+    result = export_tasks.recover_stale_queued_exports.delay()
+
+    stored = _load_export(db_session_factory, export.export_id)
+    assert result.failed()
+    assert type(result.result).__name__ == "QueuedExportRecoveryError"
+    assert "internal endpoint" not in str(result.result)
+    assert stored.status == ExportStatus.QUEUED
+    assert "stale_queued_export_dispatch_failed" in caplog.messages
+
+
+def test_stale_queue_recovery_is_scheduled_every_minute() -> None:
+    from text_verification.workers.celery_app import celery_app
+
+    assert celery_app.conf.beat_schedule["recover-stale-queued-exports-every-minute"] == {
+        "task": "text_verification.recover_stale_queued_exports",
+        "schedule": 60.0,
+    }
 
 
 def _seed_reviewed_txt_job(

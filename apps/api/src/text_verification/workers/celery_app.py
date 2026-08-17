@@ -27,6 +27,10 @@ celery_app.conf.update(
         "cleanup-expired-jobs-hourly": {
             "task": "text_verification.cleanup_expired_jobs",
             "schedule": 3600.0,
-        }
+        },
+        "recover-stale-queued-exports-every-minute": {
+            "task": "text_verification.recover_stale_queued_exports",
+            "schedule": 60.0,
+        },
     },
 )

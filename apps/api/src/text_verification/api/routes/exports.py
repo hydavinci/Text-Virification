@@ -19,15 +19,20 @@ from text_verification.api.dependencies import (
     get_job_storage,
 )
 from text_verification.api.routes.analysis import (
+    ANALYSIS_FAILED_CODE,
+    ANALYSIS_FAILED_FALLBACK_MESSAGE,
     ANALYSIS_NOT_READY_CODE,
+    JOB_EXPIRED_CODE,
+    READY_STATUSES,
     _require_analysis,
-    _require_ready_job,
 )
-from text_verification.api.routes.jobs import _http_error
+from text_verification.api.routes.jobs import JOB_NOT_FOUND_CODE, _http_error
 from text_verification.domain.documents import FileType
 from text_verification.domain.exports import ExportRead, ExportStatus, ExportType
+from text_verification.domain.jobs import JobStatus
 from text_verification.infrastructure.analysis_repositories import AnalysisRepository
 from text_verification.infrastructure.export_repository import ExportRepository
+from text_verification.infrastructure.orm import JobRow
 from text_verification.infrastructure.repositories import JobRepository
 from text_verification.infrastructure.storage import InvalidUpload, JobStorage
 
@@ -111,19 +116,17 @@ def create_export(
     job_repository: Annotated[JobRepository, Depends(get_job_repository)],
     analysis_repository: Annotated[AnalysisRepository, Depends(get_analysis_repository)],
 ) -> ExportResponse:
-    job = _require_ready_job(job_id, job_repository)
-    _require_analysis(
-        job_id,
-        analysis_repository,
-        missing_status_code=status.HTTP_409_CONFLICT,
-        missing_code=ANALYSIS_NOT_READY_CODE,
-        missing_message="分析结果尚未就绪，请稍后重试。",
-    )
-    export_type = _parse_export_type(payload.type)
-    extension = _resolve_extension(job.file_type, export_type)
-
     try:
-        job_repository.lock_job(job_id)
+        job = _lock_ready_job(job_id, job_repository)
+        _require_analysis(
+            job_id,
+            analysis_repository,
+            missing_status_code=status.HTTP_409_CONFLICT,
+            missing_code=ANALYSIS_NOT_READY_CODE,
+            missing_message="分析结果尚未就绪，请稍后重试。",
+        )
+        export_type = _parse_export_type(payload.type)
+        extension = _resolve_extension(FileType(job.file_type), export_type)
         if export_type == ExportType.MODIFIED_DOCUMENT:
             summary = analysis_repository.summarize_issues(job_id)
             if (
@@ -135,7 +138,12 @@ def create_export(
                     EXPORT_DECISIONS_REQUIRED_CODE,
                     "请先处理至少一个问题，再导出修改版文件。",
                 )
-        export = ExportRepository(session).create(job_id, export_type, extension)
+        export = ExportRepository(session).create(
+            job_id,
+            export_type,
+            extension,
+            expires_at=job.expires_at,
+        )
         session.commit()
     except HTTPException:
         session.rollback()
@@ -230,6 +238,38 @@ def _parse_export_type(value: str) -> ExportType:
             UNSUPPORTED_EXPORT_TYPE_CODE,
             "不支持所选导出格式。",
         ) from error
+
+
+def _lock_ready_job(job_id: UUID, repository: JobRepository) -> JobRow:
+    try:
+        job = repository.lock_job(job_id)
+    except LookupError as error:
+        raise _http_error(
+            status.HTTP_404_NOT_FOUND,
+            JOB_NOT_FOUND_CODE,
+            "作业不存在。",
+        ) from error
+
+    job_status = JobStatus(job.status)
+    if job_status == JobStatus.FAILED:
+        raise _http_error(
+            status.HTTP_409_CONFLICT,
+            ANALYSIS_FAILED_CODE,
+            job.error_message or ANALYSIS_FAILED_FALLBACK_MESSAGE,
+        )
+    if job_status == JobStatus.EXPIRED or job.expires_at <= datetime.now(UTC):
+        raise _http_error(
+            status.HTTP_410_GONE,
+            JOB_EXPIRED_CODE,
+            "作业已过期，请重新上传文件。",
+        )
+    if job_status not in READY_STATUSES:
+        raise _http_error(
+            status.HTTP_409_CONFLICT,
+            ANALYSIS_NOT_READY_CODE,
+            "分析结果尚未就绪，请稍后重试。",
+        )
+    return job
 
 
 def _resolve_extension(file_type: FileType, export_type: ExportType) -> str:

@@ -22,11 +22,20 @@ class ExportRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
 
-    def create(self, job_id: UUID, export_type: ExportType, extension: str) -> ExportRead:
-        expires_at = self._session.scalar(
-            select(JobRow.expires_at).where(JobRow.job_id == job_id)
-        )
-        if expires_at is None:
+    def create(
+        self,
+        job_id: UUID,
+        export_type: ExportType,
+        extension: str,
+        *,
+        expires_at: datetime | None = None,
+    ) -> ExportRead:
+        resolved_expires_at = expires_at
+        if resolved_expires_at is None:
+            resolved_expires_at = self._session.scalar(
+                select(JobRow.expires_at).where(JobRow.job_id == job_id)
+            )
+        if resolved_expires_at is None:
             raise LookupError(f"Job {job_id} does not exist.")
 
         export_id = uuid4()
@@ -49,7 +58,7 @@ class ExportRepository:
             error_message=None,
             created_at=created_at,
             updated_at=created_at,
-            expires_at=expires_at,
+            expires_at=resolved_expires_at,
         )
         self._session.add(row)
         self._session.flush()
@@ -71,6 +80,21 @@ class ExportRepository:
         if row is None:
             return None
         return _to_export_read(row)
+
+    def list_stale_queued(self, cutoff: datetime, *, limit: int) -> list[UUID]:
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        return list(
+            self._session.scalars(
+                select(ExportRow.export_id)
+                .where(
+                    ExportRow.status == ExportStatus.QUEUED.value,
+                    ExportRow.created_at <= cutoff,
+                )
+                .order_by(ExportRow.created_at, ExportRow.export_id)
+                .limit(limit)
+            ).all()
+        )
 
     def mark_processing(self, export_id: UUID) -> ExportRead:
         row = self._lock_export(export_id)

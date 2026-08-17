@@ -3,12 +3,14 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Sequence
 from contextlib import suppress
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from hashlib import blake2b
 from pathlib import Path
 from typing import Any, cast
 from uuid import UUID, uuid4
 
 from celery import Task  # type: ignore[import-untyped]
+from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from text_verification.checkers.models import CheckCategory, CheckerFailure
@@ -45,6 +47,8 @@ logger = logging.getLogger(__name__)
 
 PROCESS_EXPORT_MAX_RETRIES = 2
 PROCESS_EXPORT_RETRY_BACKOFF_CAP_SECONDS = 4
+QUEUED_EXPORT_RECOVERY_AGE_SECONDS = 60
+QUEUED_EXPORT_RECOVERY_BATCH_SIZE = 100
 UNEXPECTED_EXPORT_FAILURE_CODE = "export_failed"
 UNEXPECTED_EXPORT_FAILURE_MESSAGE = "导出失败，请稍后重试。"
 
@@ -65,24 +69,71 @@ class PersistedExportFailure(RuntimeError):
     pass
 
 
+class QueuedExportRecoveryError(RuntimeError):
+    pass
+
+
 def _process_export(task: Task, export_id: str) -> None:
     parsed_export_id = UUID(export_id)
+    session_factory = SESSION_FACTORY_PROVIDER()
+    bind = session_factory.kw.get("bind")
+    if not isinstance(bind, Engine):
+        raise RuntimeError("Export task session factory must be bound to an engine.")
+    connection = bind.connect()
+    session = session_factory(bind=connection)
+    lock_key = _export_advisory_lock_key(parsed_export_id)
+    claimed = False
     try:
-        _run_process_export_attempt(parsed_export_id)
+        claimed = bool(
+            connection.scalar(select(func.pg_try_advisory_lock(lock_key)))
+        )
+        if not claimed:
+            return
+        connection.commit()
+        _process_claimed_export(task, session, parsed_export_id)
+    finally:
+        try:
+            if session.in_transaction():
+                session.rollback()
+        finally:
+            try:
+                if claimed:
+                    try:
+                        connection.scalar(select(func.pg_advisory_unlock(lock_key)))
+                    except Exception as error:
+                        logger.error(
+                            "export_advisory_unlock_failed",
+                            extra={
+                                "export_id": str(parsed_export_id),
+                                "error_type": type(error).__name__,
+                            },
+                        )
+                        connection.invalidate(error)
+            finally:
+                try:
+                    session.close()
+                finally:
+                    connection.close()
+
+
+def _process_claimed_export(task: Task, session: Session, export_id: UUID) -> None:
+    try:
+        _run_process_export_attempt(session, export_id)
     except PersistedExportFailure:
         raise
     except ExportError as error:
         status_after_failure = _persist_export_failure(
-            parsed_export_id,
+            session,
+            export_id,
             error_code=error.code,
             error_message=error.public_message,
         )
         if status_after_failure == ExportStatus.COMPLETED:
             return
-        _log_export_failure(parsed_export_id, error)
+        _log_export_failure(export_id, error)
         raise PersistedExportFailure(error.public_message) from error
     except TerminalExportStateError as error:
-        terminal = _get_export(parsed_export_id)
+        terminal = _get_export(session, export_id)
         if terminal is None or terminal.status == ExportStatus.COMPLETED:
             return
         if terminal.status == ExportStatus.FAILED:
@@ -97,13 +148,14 @@ def _process_export(task: Task, export_id: str) -> None:
                 countdown=_retry_countdown(task.request.retries),
             ) from error
         status_after_failure = _persist_export_failure(
-            parsed_export_id,
+            session,
+            export_id,
             error_code=UNEXPECTED_EXPORT_FAILURE_CODE,
             error_message=UNEXPECTED_EXPORT_FAILURE_MESSAGE,
         )
         if status_after_failure == ExportStatus.COMPLETED:
             return
-        _log_export_failure(parsed_export_id, error)
+        _log_export_failure(export_id, error)
         raise PersistedExportFailure(UNEXPECTED_EXPORT_FAILURE_MESSAGE) from error
 
 
@@ -118,9 +170,54 @@ process_export = cast(
 )
 
 
-def _run_process_export_attempt(export_id: UUID) -> None:
+def dispatch_recovered_export(export_id: str) -> None:
+    process_export.delay(export_id)
+
+
+def _recover_stale_queued_exports() -> list[str]:
+    cutoff = datetime.now(UTC) - timedelta(seconds=QUEUED_EXPORT_RECOVERY_AGE_SECONDS)
     session_factory = SESSION_FACTORY_PROVIDER()
     session = session_factory()
+    try:
+        export_ids = ExportRepository(session).list_stale_queued(
+            cutoff,
+            limit=QUEUED_EXPORT_RECOVERY_BATCH_SIZE,
+        )
+    finally:
+        session.close()
+
+    dispatched: list[str] = []
+    dispatch_failed = False
+    for export_id in export_ids:
+        serialized_export_id = str(export_id)
+        try:
+            dispatch_recovered_export(serialized_export_id)
+        except Exception as error:
+            dispatch_failed = True
+            logger.error(
+                "stale_queued_export_dispatch_failed",
+                extra={
+                    "export_id": serialized_export_id,
+                    "error_type": type(error).__name__,
+                },
+            )
+        else:
+            dispatched.append(serialized_export_id)
+
+    if dispatch_failed:
+        raise QueuedExportRecoveryError("部分导出任务重新调度失败，将稍后重试。")
+    return dispatched
+
+
+recover_stale_queued_exports = cast(
+    Any,
+    celery_app.task(name="text_verification.recover_stale_queued_exports")(
+        _recover_stale_queued_exports
+    ),
+)
+
+
+def _run_process_export_attempt(session: Session, export_id: UUID) -> None:
     repository = ExportRepository(session)
     try:
         export = repository.get(export_id)
@@ -142,8 +239,6 @@ def _run_process_export_attempt(export_id: UUID) -> None:
     except Exception:
         session.rollback()
         raise
-    finally:
-        session.close()
 
 
 def _render_export(session: Session, export: ExportRead) -> list[ExportWarning]:
@@ -280,16 +375,16 @@ def _serialize_warning(warning: ExportWarning) -> str:
 
 
 def _persist_export_failure(
+    session: Session,
     export_id: UUID,
     *,
     error_code: str,
     error_message: str,
 ) -> ExportStatus | None:
-    session_factory = SESSION_FACTORY_PROVIDER()
-    session = session_factory()
     repository = ExportRepository(session)
     failed_export: ExportRead | None = None
     try:
+        session.expire_all()
         current = repository.get(export_id)
         if current is None:
             return None
@@ -308,8 +403,6 @@ def _persist_export_failure(
     except Exception:
         session.rollback()
         raise
-    finally:
-        session.close()
 
     _remove_failed_artifact(failed_export)
     return ExportStatus.FAILED
@@ -336,13 +429,14 @@ def _remove_failed_artifact(export: ExportRead) -> None:
         )
 
 
-def _get_export(export_id: UUID) -> ExportRead | None:
-    session_factory = SESSION_FACTORY_PROVIDER()
-    session = session_factory()
-    try:
-        return ExportRepository(session).get(export_id)
-    finally:
-        session.close()
+def _get_export(session: Session, export_id: UUID) -> ExportRead | None:
+    session.expire_all()
+    return ExportRepository(session).get(export_id)
+
+
+def _export_advisory_lock_key(export_id: UUID) -> int:
+    digest = blake2b(export_id.bytes, digest_size=8, person=b"tv-export").digest()
+    return int.from_bytes(digest, byteorder="big", signed=True)
 
 
 def _retry_countdown(retries: int) -> int:

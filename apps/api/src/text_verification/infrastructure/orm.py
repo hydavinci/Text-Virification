@@ -14,6 +14,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
@@ -202,6 +203,12 @@ class ExportRow(Base):
             name="ck_exports_status_error",
         ),
         Index("ix_exports_job_created_at", "job_id", "created_at"),
+        Index(
+            "ix_exports_queued_created_at",
+            "created_at",
+            "export_id",
+            postgresql_where=text("status = 'queued'"),
+        ),
     )
 
     export_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)

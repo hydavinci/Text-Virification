@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Event
 from uuid import UUID, uuid4
 
 import pytest
 from fastapi import FastAPI
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from text_verification.api.dependencies import get_db_session, get_job_storage
@@ -17,7 +19,7 @@ from text_verification.domain.issues import Issue, IssueSeverity
 from text_verification.domain.jobs import JobStatus
 from text_verification.infrastructure.analysis_repositories import AnalysisRepository
 from text_verification.infrastructure.export_repository import ExportRepository
-from text_verification.infrastructure.orm import ExportRow
+from text_verification.infrastructure.orm import ExportRow, JobRow
 from text_verification.infrastructure.repositories import JobRepository
 from text_verification.infrastructure.storage import JobStorage
 
@@ -234,6 +236,86 @@ def test_create_export_rejects_terminal_job_without_persisted_analysis(
         "code": "analysis_not_ready",
         "message": "分析结果尚未就绪，请稍后重试。",
     }
+
+
+@pytest.mark.parametrize(
+    ("locked_change", "expected_status", "expected_detail"),
+    [
+        (
+            "expires",
+            410,
+            {
+                "code": "job_expired",
+                "message": "作业已过期，请重新上传文件。",
+            },
+        ),
+        (
+            "transitions",
+            409,
+            {
+                "code": "analysis_not_ready",
+                "message": "分析结果尚未就绪，请稍后重试。",
+            },
+        ),
+    ],
+)
+def test_create_export_validates_job_state_acquired_after_waiting_for_lock(
+    client,
+    db_session: Session,
+    db_session_factory: sessionmaker[Session],
+    export_api_dependencies: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+    locked_change: str,
+    expected_status: int,
+    expected_detail: dict[str, str],
+) -> None:
+    job_id = _seed_job_with_analysis(db_session, file_type=FileType.TXT)
+    lock_attempted = Event()
+    real_lock_job = JobRepository.lock_job
+
+    def observed_lock_job(repository: JobRepository, locked_job_id: UUID) -> JobRow:
+        lock_attempted.set()
+        return real_lock_job(repository, locked_job_id)
+
+    monkeypatch.setattr(JobRepository, "lock_job", observed_lock_job)
+    blocking_session = db_session_factory()
+    try:
+        locked_job = blocking_session.execute(
+            select(JobRow).where(JobRow.job_id == job_id).with_for_update()
+        ).scalar_one()
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            request = executor.submit(
+                client.post,
+                f"/api/v1/jobs/{job_id}/exports",
+                json={"type": "html_report"},
+            )
+            assert lock_attempted.wait(timeout=3)
+            if locked_change == "expires":
+                locked_job.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            else:
+                locked_job.status = JobStatus.PARSING.value
+                locked_job.progress = 50
+            blocking_session.commit()
+            response = request.result(timeout=5)
+    finally:
+        blocking_session.rollback()
+        blocking_session.close()
+
+    verification_session = db_session_factory()
+    try:
+        export_count = verification_session.scalar(
+            select(func.count())
+            .select_from(ExportRow)
+            .where(ExportRow.job_id == job_id)
+        )
+    finally:
+        verification_session.close()
+
+    assert response.status_code == expected_status
+    assert response.json()["detail"] == expected_detail
+    assert export_count == 0
+    assert export_api_dependencies == []
 
 
 def test_unknown_export_type_has_structured_error(client, db_session: Session) -> None:
