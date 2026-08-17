@@ -8,9 +8,15 @@ from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
+from sqlalchemy import delete
+from sqlalchemy.orm import Session
 
 from text_verification.domain.documents import FileType
+from text_verification.domain.exports import ExportType
 from text_verification.domain.jobs import JobEvent, JobRead, JobStatus
+from text_verification.infrastructure.export_repository import ExportRepository
+from text_verification.infrastructure.orm import ExportRow, JobRow
+from text_verification.infrastructure.repositories import JobRepository
 from text_verification.infrastructure.storage import JobStorage
 
 
@@ -156,6 +162,11 @@ def test_cleanup_expires_database_job_and_deletes_exact_directory(
         source_name="live.txt",
     )
     storage.save_bytes(live_job.job_id, "live.txt", b"live")
+    export_id = uuid4()
+    storage.export_path(expired_job.job_id, export_id, "txt").write_text(
+        "expired export",
+        encoding="utf-8",
+    )
 
     deleted_job_ids = cleanup_expired_jobs()
 
@@ -164,6 +175,32 @@ def test_cleanup_expires_database_job_and_deletes_exact_directory(
     assert not storage.job_directory(expired_job.job_id).exists()
     assert storage.job_directory(live_job.job_id).exists()
     assert deleted_job_ids == [str(expired_job.job_id)]
+
+
+def test_deleting_job_cascades_export_rows(db_session: Session) -> None:
+    now = datetime.now(UTC)
+    job_id = uuid4()
+    job_repository = JobRepository(db_session)
+    job_repository.create_job(
+        job_id=job_id,
+        source_name="sample.txt",
+        file_type=FileType.TXT.value,
+        size_bytes=8,
+        storage_key=str(job_id),
+        created_at=now,
+        expires_at=now + timedelta(hours=1),
+    )
+    export = ExportRepository(db_session).create(
+        job_id,
+        ExportType.MODIFIED_DOCUMENT,
+        "txt",
+    )
+    db_session.commit()
+
+    db_session.execute(delete(JobRow).where(JobRow.job_id == job_id))
+    db_session.commit()
+
+    assert db_session.get(ExportRow, export.export_id) is None
 
 
 def test_cleanup_retries_storage_deletion_for_already_expired_jobs(

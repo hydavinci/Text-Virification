@@ -61,6 +61,17 @@ class ExportRepository:
             return None
         return _to_export_read(row)
 
+    def get_for_job(self, job_id: UUID, export_id: UUID) -> ExportRead | None:
+        row = self._session.scalar(
+            select(ExportRow).where(
+                ExportRow.job_id == job_id,
+                ExportRow.export_id == export_id,
+            )
+        )
+        if row is None:
+            return None
+        return _to_export_read(row)
+
     def mark_processing(self, export_id: UUID) -> ExportRead:
         row = self._lock_export(export_id)
         self._ensure_not_terminal(row, ExportStatus.PROCESSING)

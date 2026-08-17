@@ -360,6 +360,33 @@ class AnalysisRepository:
 
         return IssuePage(items=items, total=total, next_cursor=next_cursor)
 
+    def list_all_issues(self, job_id: UUID) -> list[Issue]:
+        rows = self._session.execute(
+            select(
+                IssueRow,
+                DocumentBlockRow.block_order,
+                IssueDecisionRow,
+            )
+            .join(
+                DocumentBlockRow,
+                and_(
+                    DocumentBlockRow.job_id == IssueRow.job_id,
+                    DocumentBlockRow.block_id == IssueRow.block_id,
+                ),
+            )
+            .outerjoin(IssueDecisionRow, IssueDecisionRow.issue_id == IssueRow.issue_id)
+            .where(IssueRow.job_id == job_id)
+            .order_by(
+                DocumentBlockRow.block_order,
+                IssueRow.start_offset,
+                IssueRow.issue_id,
+            )
+        ).all()
+        return [
+            _to_issue(issue_row=issue_row, decision_row=decision_row)
+            for issue_row, _block_order, decision_row in rows
+        ]
+
     def get_checker_failures(self, job_id: UUID) -> dict[CheckCategory, CheckerFailure]:
         rows = self._session.scalars(
             select(CheckerFailureRow)

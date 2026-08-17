@@ -8,7 +8,10 @@ celery_app = Celery(
     "text_verification",
     broker=settings.redis_url,
     backend=settings.redis_url,
-    include=["text_verification.workers.tasks"],
+    include=[
+        "text_verification.workers.tasks",
+        "text_verification.workers.export_tasks",
+    ],
 )
 celery_app.conf.update(
     task_serializer="json",
