@@ -79,6 +79,35 @@ def test_source_path_returns_existing_expected_source_file(tmp_path):
     assert source_path.read_bytes() == b"hello"
 
 
+def test_export_path_returns_server_controlled_file_inside_job_directory(tmp_path):
+    storage = JobStorage(tmp_path, max_upload_bytes=1024)
+    job_id = uuid4()
+    export_id = uuid4()
+
+    export_path = storage.export_path(job_id, export_id, "html")
+
+    assert export_path == tmp_path / str(job_id) / f"{export_id}.html"
+
+
+@pytest.mark.parametrize("extension", ["../report.html", "zip", "html.exe"])
+def test_export_path_rejects_unsupported_extensions(tmp_path, extension):
+    storage = JobStorage(tmp_path, max_upload_bytes=1024)
+
+    with pytest.raises(ValueError, match="Unsupported export extension"):
+        storage.export_path(uuid4(), uuid4(), extension)
+
+
+def test_export_path_rejects_job_directory_outside_storage_root(tmp_path, monkeypatch):
+    storage = JobStorage(tmp_path, max_upload_bytes=1024)
+    job_id = uuid4()
+    outside_directory = tmp_path.parent / str(job_id)
+    outside_directory.mkdir()
+    monkeypatch.setattr(storage, "job_directory", lambda actual_job_id: outside_directory)
+
+    with pytest.raises(InvalidUpload, match="escapes storage root"):
+        storage.export_path(job_id, uuid4(), "pdf")
+
+
 def test_source_path_rejects_job_directory_outside_storage_root(tmp_path, monkeypatch):
     storage = JobStorage(tmp_path, max_upload_bytes=1024)
     job_id = uuid4()

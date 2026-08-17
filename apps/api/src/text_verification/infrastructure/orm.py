@@ -183,6 +183,44 @@ class IssueDecisionRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class ExportRow(Base):
+    __tablename__ = "exports"
+    __table_args__ = (
+        CheckConstraint(
+            """
+            (
+                status = 'failed'
+                AND error_code IS NOT NULL
+                AND error_message IS NOT NULL
+            )
+            OR (
+                status IN ('queued', 'processing', 'completed')
+                AND error_code IS NULL
+                AND error_message IS NULL
+            )
+            """,
+            name="ck_exports_status_error",
+        ),
+        Index("ix_exports_job_created_at", "job_id", "created_at"),
+    )
+
+    export_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    job_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("jobs.job_id", ondelete="CASCADE"),
+    )
+    export_type: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(16))
+    file_name: Mapped[str] = mapped_column(String(255))
+    storage_key: Mapped[str] = mapped_column(String(255))
+    warnings_json: Mapped[list[str]] = mapped_column("warnings", JSONB)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class CheckerFailureRow(Base):
     __tablename__ = "checker_failures"
 

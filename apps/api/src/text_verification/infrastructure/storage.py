@@ -12,6 +12,7 @@ from typing import BinaryIO
 from uuid import UUID
 
 from text_verification.domain.documents import FileType
+from text_verification.domain.exports import normalize_export_extension
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +99,14 @@ class JobStorage:
         if not source_path.is_file():
             raise InvalidUpload("上传文件不存在或已被清理，请重新上传。")
         return source_path
+
+    def export_path(self, job_id: UUID, export_id: UUID, extension: str) -> Path:
+        normalized_extension = normalize_export_extension(extension)
+        job_directory = self.job_directory(job_id)
+        self._ensure_safe_upload_path(job_directory)
+        export_path = job_directory / f"{export_id}.{normalized_extension}"
+        self._ensure_safe_upload_path(export_path)
+        return export_path
 
     def delete_job(self, job_id: UUID) -> None:
         self._delete_job_directory(self.job_directory(job_id))
