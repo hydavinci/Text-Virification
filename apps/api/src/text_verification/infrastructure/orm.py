@@ -5,6 +5,7 @@ from uuid import UUID
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -145,6 +146,41 @@ class IssueRow(Base):
     confidence: Mapped[float] = mapped_column(Float)
     auto_fixable: Mapped[bool] = mapped_column(Boolean)
     context: Mapped[str] = mapped_column(Text)
+
+
+class IssueDecisionRow(Base):
+    __tablename__ = "issue_decisions"
+    __table_args__ = (
+        CheckConstraint(
+            """
+            (
+                action = 'custom'
+                AND replacement IS NOT NULL
+                AND btrim(replacement) <> ''
+            )
+            OR (
+                action IN ('accepted', 'ignored')
+                AND replacement IS NULL
+            )
+            """,
+            name="ck_issue_decisions_action_replacement",
+        ),
+        Index("ix_issue_decisions_job_action", "job_id", "action"),
+    )
+
+    issue_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("issues.issue_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    job_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("jobs.job_id", ondelete="CASCADE"),
+    )
+    issue_version: Mapped[int] = mapped_column(Integer)
+    action: Mapped[str] = mapped_column(String(16))
+    replacement: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class CheckerFailureRow(Base):

@@ -1,3 +1,4 @@
+from datetime import datetime
 from enum import StrEnum
 from uuid import UUID
 
@@ -8,6 +9,12 @@ class IssueSeverity(StrEnum):
     ERROR = "error"
     WARNING = "warning"
     INFO = "info"
+
+
+class DecisionAction(StrEnum):
+    ACCEPTED = "accepted"
+    IGNORED = "ignored"
+    CUSTOM = "custom"
 
 
 class Issue(BaseModel):
@@ -38,3 +45,26 @@ class Issue(BaseModel):
         if self.end <= self.start:
             raise ValueError("end must be greater than start")
         return self
+
+
+class DecisionCommand(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    issue_id: UUID
+    issue_version: int = Field(gt=0)
+    action: DecisionAction
+    replacement: str | None = None
+
+    @model_validator(mode="after")
+    def validate_replacement(self) -> "DecisionCommand":
+        if self.action == DecisionAction.CUSTOM:
+            if self.replacement is None or not self.replacement.strip():
+                raise ValueError("custom decisions require a non-empty replacement")
+            return self
+        if self.replacement is not None:
+            raise ValueError("replacement is only allowed for custom decisions")
+        return self
+
+
+class IssueDecision(DecisionCommand):
+    updated_at: datetime
