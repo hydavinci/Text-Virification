@@ -60,6 +60,7 @@ class JobEventRow(Base):
     status: Mapped[str] = mapped_column(String(32))
     progress: Mapped[int] = mapped_column(Integer)
     message: Mapped[str] = mapped_column(String(255))
+    metadata_json: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     job: Mapped[JobRow] = relationship(back_populates="events")
 

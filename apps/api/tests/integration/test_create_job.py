@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import io
 import zipfile
 from dataclasses import dataclass, field
@@ -271,6 +272,46 @@ def test_create_txt_job_persists_and_enqueues(client, repository, task_spy) -> N
     assert repository.get_job(UUID(payload["job_id"])) is not None
 
 
+def test_create_job_openapi_exposes_typed_repeated_check_options(client) -> None:
+    openapi = client.get("/openapi.json").json()
+    multipart_schema = openapi["paths"]["/api/v1/jobs"]["post"]["requestBody"]["content"][
+        "multipart/form-data"
+    ]["schema"]
+    request_schema = _resolve_openapi_schema(openapi, multipart_schema)
+    scenario_schema = _non_null_openapi_schema(
+        openapi,
+        request_schema["properties"]["scenario"],
+    )
+    categories_schema = _non_null_openapi_schema(
+        openapi,
+        request_schema["properties"]["enabled_categories"],
+    )
+
+    assert scenario_schema["enum"] == [
+        "general",
+        "academic",
+        "business",
+        "legal",
+        "news",
+        "technical",
+    ]
+    assert categories_schema["type"] == "array"
+    assert _resolve_openapi_schema(openapi, categories_schema["items"])["enum"] == [
+        "character",
+        "vocabulary",
+        "sentence",
+        "format",
+        "discourse",
+        "security",
+    ]
+
+
+def test_create_job_route_is_synchronous_to_isolate_blocking_file_and_db_work() -> None:
+    from text_verification.api.routes.jobs import create_job
+
+    assert not inspect.iscoroutinefunction(create_job)
+
+
 def test_create_job_persists_repeated_check_options(client, repository, task_spy) -> None:
     response = client.post(
         "/api/v1/jobs",
@@ -293,6 +334,47 @@ def test_create_job_persists_repeated_check_options(client, repository, task_spy
     assert task_spy.calls == [payload["job_id"]]
 
 
+@pytest.mark.parametrize("scenario", ["academic", "technical"])
+def test_create_job_accepts_approved_scenarios(
+    client,
+    repository,
+    task_spy,
+    scenario: str,
+) -> None:
+    response = client.post(
+        "/api/v1/jobs",
+        files={"file": ("sample.txt", b"text", "text/plain")},
+        data={"scenario": scenario},
+    )
+
+    assert response.status_code == 202
+    assert response.json()["scenario"] == scenario
+    assert repository.get_job(UUID(response.json()["job_id"])).scenario.value == scenario
+    assert task_spy.calls == [response.json()["job_id"]]
+
+
+@pytest.mark.parametrize("scenario", ["education", "medical"])
+def test_create_job_rejects_removed_scenarios(
+    client,
+    repository,
+    task_spy,
+    scenario: str,
+) -> None:
+    response = client.post(
+        "/api/v1/jobs",
+        files={"file": ("sample.txt", b"text", "text/plain")},
+        data={"scenario": scenario},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == {
+        "code": "invalid_check_scenario",
+        "message": "使用场景无效，请重新选择。",
+    }
+    assert repository._jobs == {}
+    assert task_spy.calls == []
+
+
 def test_create_job_rejects_empty_enabled_categories(client, repository, storage, task_spy) -> None:
     response = client.post(
         "/api/v1/jobs",
@@ -303,10 +385,53 @@ def test_create_job_rejects_empty_enabled_categories(client, repository, storage
     )
 
     assert response.status_code == 422
-    assert response.json()["detail"]["code"] == "invalid_check_categories"
+    assert response.json()["detail"] == {
+        "code": "invalid_check_categories",
+        "message": "至少选择一个检查类别。",
+    }
     assert repository._jobs == {}
     assert task_spy.calls == []
     assert list(storage._root.iterdir()) == []
+
+
+def test_create_job_rejects_missing_file_with_structured_chinese_error(
+    client,
+    repository,
+    task_spy,
+) -> None:
+    response = client.post("/api/v1/jobs", data={"scenario": "general"})
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == {
+        "code": "invalid_upload",
+        "message": "请选择要上传的文件。",
+    }
+    assert "Field required" not in response.text
+    assert repository._jobs == {}
+    assert task_spy.calls == []
+
+
+def _resolve_openapi_schema(
+    openapi: dict[str, object],
+    schema: dict[str, object],
+) -> dict[str, object]:
+    reference = schema.get("$ref")
+    if reference is None:
+        return schema
+    component_name = str(reference).rsplit("/", 1)[-1]
+    return openapi["components"]["schemas"][component_name]
+
+
+def _non_null_openapi_schema(
+    openapi: dict[str, object],
+    schema: dict[str, object],
+) -> dict[str, object]:
+    resolved = _resolve_openapi_schema(openapi, schema)
+    for candidate in resolved.get("anyOf", [resolved]):
+        candidate_schema = _resolve_openapi_schema(openapi, candidate)
+        if candidate_schema.get("type") != "null":
+            return candidate_schema
+    raise AssertionError("Expected a non-null OpenAPI schema")
 
 
 @pytest.mark.parametrize(

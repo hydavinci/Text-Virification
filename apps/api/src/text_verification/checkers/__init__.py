@@ -1,7 +1,13 @@
+from text_verification.checkers.dictionary_checker import DictionaryChecker
+from text_verification.checkers.dictionary_loader import (
+    DictionaryConfigurationError,
+    DictionaryLoader,
+)
 from text_verification.checkers.models import (
     CHECK_CATEGORY_ORDER,
     CheckCategory,
     CheckerFailure,
+    CheckerProgress,
     CheckOptions,
     CheckRunResult,
     CheckScenario,
@@ -16,10 +22,14 @@ __all__ = [
     "CHECK_CATEGORY_ORDER",
     "CheckCategory",
     "CheckerFailure",
+    "CheckerProgress",
     "CheckerRegistry",
     "CheckOptions",
     "CheckRunResult",
     "CheckScenario",
+    "DictionaryChecker",
+    "DictionaryConfigurationError",
+    "DictionaryLoader",
     "LiteralRule",
     "RuleChecker",
     "RuleConfigurationError",

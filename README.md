@@ -91,11 +91,14 @@ Set-Location ..\..
 
 - `POST /api/v1/jobs`（支持 `scenario` 与重复 `enabled_categories` 表单字段）
 - `GET /api/v1/jobs/{job_id}`
-- `GET /api/v1/jobs/{job_id}/events`
+- `GET /api/v1/jobs/{job_id}/events`（检查进度事件包含当前类别、已完成类别和问题数）
 - `GET /api/v1/jobs/{job_id}/document`
 - `GET /api/v1/jobs/{job_id}/issues`
 - `GET /api/v1/jobs/{job_id}/summary`
 - `GET /api/v1/health`
+
+`scenario` 可选值严格为 `general`、`academic`、`business`、`legal`、`news`
+和 `technical`。共享规则和词库从 `resources` 目录加载并在启动分析时校验。
 
 ## 文件限制、保留与安全边界
 

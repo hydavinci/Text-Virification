@@ -6,8 +6,10 @@ from text_verification.checkers.models import (
     CheckerFailure,
     CheckOptions,
     CheckScenario,
+    LiteralRule,
 )
 from text_verification.checkers.registry import CheckerRegistry
+from text_verification.checkers.rule_checker import RuleChecker
 from text_verification.domain.documents import DocumentModel, FileType, TextBlock
 from text_verification.domain.issues import Issue, IssueSeverity
 from text_verification.domain.ports import CheckContext
@@ -99,6 +101,35 @@ def test_registry_logs_only_category_and_exception_type(caplog) -> None:
     assert "绝对领先的正文" not in caplog.text
     assert secret not in caplog.text
     assert "checker-message" not in caplog.text
+
+
+def test_registry_suppresses_rules_for_a_different_scenario() -> None:
+    checker = RuleChecker(
+        LiteralRule(
+            id="legal-only-001",
+            category=CheckCategory.SECURITY,
+            severity=IssueSeverity.WARNING,
+            pattern="绝对领先",
+            suggestion="领先",
+            message="避免使用绝对化表述。",
+            scenarios=frozenset({CheckScenario.LEGAL}),
+            auto_fixable=True,
+        )
+    )
+    registry = CheckerRegistry({CheckCategory.SECURITY: checker})
+
+    result = registry.run(
+        build_document("绝对领先"),
+        CheckContext((), ()),
+        CheckOptions(
+            scenario=CheckScenario.GENERAL,
+            enabled_categories={CheckCategory.SECURITY},
+        ),
+    )
+
+    assert result.issues == []
+    assert result.completed_categories == {CheckCategory.SECURITY}
+    assert result.failures == {}
 
 
 class StaticChecker:

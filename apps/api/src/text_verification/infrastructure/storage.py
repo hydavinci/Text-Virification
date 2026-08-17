@@ -96,7 +96,7 @@ class JobStorage:
         source_path = job_directory / f"source.{resolved_file_type.value}"
         self._ensure_safe_upload_path(source_path)
         if not source_path.is_file():
-            raise InvalidUpload("Stored upload is unavailable.")
+            raise InvalidUpload("上传文件不存在或已被清理，请重新上传。")
         return source_path
 
     def delete_job(self, job_id: UUID) -> None:

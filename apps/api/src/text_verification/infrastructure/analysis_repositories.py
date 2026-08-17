@@ -227,6 +227,9 @@ class AnalysisRepository:
             metadata=row.metadata_json,
         )
 
+    def has_analysis(self, job_id: UUID) -> bool:
+        return self._session.get(DocumentRow, job_id) is not None
+
     def list_document_blocks(self, job_id: UUID, query: DocumentQuery) -> DocumentPage | None:
         row = self._session.get(DocumentRow, job_id)
         if row is None:

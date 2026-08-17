@@ -1,8 +1,18 @@
 from uuid import UUID
 
-from text_verification.checkers.models import CHECK_CATEGORY_ORDER, CheckOptions, CheckScenario
+from text_verification.checkers.models import (
+    CHECK_CATEGORY_ORDER,
+    CheckerProgress,
+    CheckOptions,
+    CheckScenario,
+)
 from text_verification.checkers.registry import CheckerRegistry
-from text_verification.domain.jobs import JobRead, JobStatus, TerminalJobStateError
+from text_verification.domain.jobs import (
+    JobEventMetadata,
+    JobRead,
+    JobStatus,
+    TerminalJobStateError,
+)
 from text_verification.domain.ports import CheckContext
 from text_verification.infrastructure.analysis_repositories import AnalysisRepository
 from text_verification.infrastructure.repositories import JobRepository
@@ -10,10 +20,11 @@ from text_verification.infrastructure.storage import InvalidUpload, JobStorage
 from text_verification.parsers.registry import ParserRegistry
 
 COMPLETED_EVENT_MESSAGE = "处理完成"
+CHECKING_EVENT_MESSAGE = "检查进度已更新"
 PARTIAL_EVENT_MESSAGE = "部分完成"
 PARSING_EVENT_MESSAGE = "开始解析"
 UPLOAD_VALIDATED_EVENT_MESSAGE = "上传校验完成"
-MISSING_UPLOAD_MESSAGE = "Stored upload is unavailable."
+MISSING_UPLOAD_MESSAGE = "上传文件不存在或已被清理，请重新上传。"
 DEFAULT_CHECK_CONTEXT = CheckContext((), ())
 
 
@@ -25,12 +36,14 @@ class PipelineRunner:
         storage: JobStorage,
         parsers: ParserRegistry,
         checkers: CheckerRegistry,
+        check_context: CheckContext = DEFAULT_CHECK_CONTEXT,
     ) -> None:
         self._repository = repository
         self._analysis_repository = analysis_repository
         self._storage = storage
         self._parsers = parsers
         self._checkers = checkers
+        self._check_context = check_context
 
     def run(self, job_id: UUID) -> None:
         job = self._repository.get_job(job_id)
@@ -87,10 +100,31 @@ class PipelineRunner:
             document_id=job.job_id,
             source_name=job.source_name,
         )
+        options = self._check_options_for(job)
+        enabled_count = len(options.enabled_categories)
+        attempted_count = 0
+
+        def persist_progress(checker_progress: CheckerProgress) -> None:
+            nonlocal attempted_count
+            attempted_count += 1
+            progress = 25 + (70 * attempted_count) // enabled_count
+            self._repository.record_progress(
+                job.job_id,
+                progress=progress,
+                message=CHECKING_EVENT_MESSAGE,
+                metadata=JobEventMetadata(
+                    current_category=checker_progress.current_category,
+                    completed_categories=list(checker_progress.completed_categories),
+                    issue_count=checker_progress.issue_count,
+                ),
+            )
+            self._repository.commit()
+
         result = self._checkers.run(
             document,
-            DEFAULT_CHECK_CONTEXT,
-            self._check_options_for(job),
+            self._check_context,
+            options,
+            on_progress=persist_progress,
         )
         self._analysis_repository.replace_analysis(
             job.job_id,

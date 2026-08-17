@@ -71,8 +71,13 @@ class DocxParser:
                 continue
 
             cell_index = 1
+            seen_physical_cells: set[Any] = set()
             for row_index, row in enumerate(block.rows):
                 for column_index, cell in enumerate(row.cells):
+                    if cell._tc in seen_physical_cells:
+                        cell_index += 1
+                        continue
+                    seen_physical_cells.add(cell._tc)
                     text, locator = self._build_cell_locator(
                         cell,
                         table_index=table_block_index,

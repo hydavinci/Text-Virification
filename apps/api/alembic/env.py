@@ -16,7 +16,7 @@ from text_verification.infrastructure.orm import Base
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 configured_database_url = config.attributes.get("database_url")
 if configured_database_url is None:

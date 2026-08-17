@@ -78,6 +78,14 @@ class JobRead(BaseModel):
         return list(CHECK_CATEGORY_ORDER) if value is None else value
 
 
+class JobEventMetadata(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    current_category: CheckCategory
+    completed_categories: list[CheckCategory]
+    issue_count: int = Field(ge=0)
+
+
 @dataclass(frozen=True)
 class JobEvent:
     sequence: int
@@ -85,3 +93,4 @@ class JobEvent:
     progress: int
     message: str
     created_at: datetime
+    metadata: JobEventMetadata | None = None

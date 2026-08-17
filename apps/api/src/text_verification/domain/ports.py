@@ -3,6 +3,10 @@ from pathlib import Path
 from typing import Protocol
 from uuid import UUID
 
+from text_verification.domain.dictionaries import (
+    EMPTY_SHARED_DICTIONARIES,
+    SharedDictionaries,
+)
 from text_verification.domain.documents import DocumentModel, FileType
 from text_verification.domain.issues import Issue
 
@@ -11,6 +15,7 @@ from text_verification.domain.issues import Issue
 class CheckContext:
     industry_dictionary_ids: tuple[str, ...]
     personal_dictionary: tuple[dict[str, str], ...]
+    shared_dictionaries: SharedDictionaries = EMPTY_SHARED_DICTIONARIES
 
 
 class Parser(Protocol):

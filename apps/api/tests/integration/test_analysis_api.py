@@ -169,6 +169,23 @@ def test_analysis_endpoints_return_ready_and_not_found_errors(client, db_session
 
 
 @pytest.mark.parametrize("path_suffix", ["document", "issues", "summary"])
+def test_legacy_completed_job_without_analysis_returns_structured_not_found(
+    client,
+    db_session: Session,
+    path_suffix: str,
+) -> None:
+    job_id = _seed_job(db_session, status=JobStatus.COMPLETED)
+
+    response = client.get(f"/api/v1/jobs/{job_id}/{path_suffix}")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == {
+        "code": "analysis_not_found",
+        "message": "分析结果不存在，请重新上传后重试。",
+    }
+
+
+@pytest.mark.parametrize("path_suffix", ["document", "issues", "summary"])
 @pytest.mark.parametrize(
     ("status", "error_code", "message"),
     [
@@ -249,6 +266,33 @@ def test_analysis_endpoints_reject_malformed_cursors_with_chinese_errors(
     }
     assert "uuid" not in issues_response.text.lower()
     assert "json" not in issues_response.text.lower()
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"category": "unknown"},
+        {"severity": "urgent"},
+        {"decision": "deleted"},
+    ],
+)
+def test_issue_filters_return_structured_chinese_validation_errors(
+    client,
+    params: dict[str, str],
+) -> None:
+    response = client.get(
+        "/api/v1/jobs/00000000-0000-0000-0000-000000000000/issues",
+        params=params,
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == {
+        "code": "invalid_issue_filters",
+        "message": "问题筛选条件无效，请刷新后重试。",
+    }
+    assert "enum" not in response.text.lower()
+    assert "literal" not in response.text.lower()
+    assert "input" not in response.text.lower()
 
 
 def _seed_analysis(

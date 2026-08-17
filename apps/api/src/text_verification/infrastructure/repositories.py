@@ -12,6 +12,7 @@ from text_verification.domain.documents import FileType
 from text_verification.domain.jobs import (
     TERMINAL_STATUSES,
     JobEvent,
+    JobEventMetadata,
     JobRead,
     JobStatus,
     TerminalJobStateError,
@@ -127,6 +128,38 @@ class JobRepository:
         ).all()
         return [self._to_job_event(row) for row in rows]
 
+    def record_progress(
+        self,
+        job_id: UUID,
+        *,
+        progress: int,
+        message: str,
+        metadata: JobEventMetadata,
+    ) -> None:
+        job = self._lock_job(job_id)
+        current_status = JobStatus(job.status)
+        if current_status in TERMINAL_STATUSES:
+            raise TerminalJobStateError(
+                job_id=job_id,
+                current_status=current_status,
+                target_status=current_status,
+            )
+        changed_at = datetime.now(UTC)
+        job.progress = progress
+        job.updated_at = changed_at
+        self._session.add(
+            JobEventRow(
+                job_id=job_id,
+                sequence=self._next_sequence(job_id),
+                status=current_status.value,
+                progress=progress,
+                message=message,
+                metadata_json=metadata.model_dump(mode="json"),
+                created_at=changed_at,
+            )
+        )
+        self._session.flush()
+
     def expire_jobs_before(self, cutoff: datetime) -> list[UUID]:
         rows = self._session.scalars(
             select(JobRow)
@@ -206,6 +239,11 @@ class JobRepository:
             progress=row.progress,
             message=row.message,
             created_at=row.created_at,
+            metadata=(
+                JobEventMetadata.model_validate(row.metadata_json)
+                if row.metadata_json is not None
+                else None
+            ),
         )
 
 

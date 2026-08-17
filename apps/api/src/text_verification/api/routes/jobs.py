@@ -12,10 +12,19 @@ from time import monotonic
 from typing import Annotated, BinaryIO, NoReturn
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, File, Header, HTTPException, Request, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Request,
+    UploadFile,
+    status,
+)
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session, sessionmaker
-from starlette.datastructures import FormData
 
 from text_verification.api.dependencies import get_job_repository, get_job_storage
 from text_verification.checkers.models import CHECK_CATEGORY_ORDER, CheckCategory, CheckScenario
@@ -79,7 +88,7 @@ def get_job(
 ) -> JobRead:
     job = repository.get_job(job_id)
     if job is None:
-        raise _http_error(status.HTTP_404_NOT_FOUND, JOB_NOT_FOUND_CODE, "Job was not found.")
+        raise _http_error(status.HTTP_404_NOT_FOUND, JOB_NOT_FOUND_CODE, "作业不存在。")
     return job
 
 
@@ -101,20 +110,23 @@ async def stream_job_events(
 
 
 @router.post("/jobs", response_model=JobRead, status_code=status.HTTP_202_ACCEPTED)
-async def create_job(
-    request: Request,
+def create_job(
     file: Annotated[UploadFile, File(...)],
     repository: Annotated[JobRepository, Depends(get_job_repository)],
     storage: Annotated[JobStorage, Depends(get_job_storage)],
     settings: Annotated[Settings, Depends(get_settings)],
+    scenario: Annotated[CheckScenario | None, Form()] = None,
+    enabled_categories: Annotated[list[CheckCategory] | None, Form()] = None,
 ) -> JobRead:
     job_id = uuid4()
     source_name = _normalize_source_name(file.filename or "upload")
     file_type_hint = _file_type_hint(source_name)
     stored_size: int | None = None
     now = datetime.now(UTC)
-    form = await request.form()
-    scenario, enabled_categories = _parse_check_options(form)
+    scenario, enabled_categories = _normalize_check_options(
+        scenario,
+        enabled_categories,
+    )
 
     try:
         stored = storage.save_stream(job_id, source_name, _binary_stream(file))
@@ -141,7 +153,7 @@ async def create_job(
             stored_size,
             status.HTTP_500_INTERNAL_SERVER_ERROR,
             JOB_CLEANUP_FAILURE_CODE,
-            "Unable to recover from the failed upload.",
+            "上传失败且文件清理未完成，请稍后重试。",
         )
     except UploadTooLarge:
         repository.rollback()
@@ -152,7 +164,7 @@ async def create_job(
             stored_size,
             status.HTTP_413_CONTENT_TOO_LARGE,
             UPLOAD_TOO_LARGE_CODE,
-            "Upload exceeds the configured maximum size.",
+            "文件超过大小限制，请压缩后重试。",
         )
     except UnsupportedFileType:
         repository.rollback()
@@ -163,7 +175,7 @@ async def create_job(
             stored_size,
             status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
             UNSUPPORTED_FILE_TYPE_CODE,
-            "Upload file type is not supported.",
+            "文件类型不受支持，请上传 DOCX、PDF 或 TXT 文件。",
         )
     except InvalidUpload:
         repository.rollback()
@@ -174,7 +186,7 @@ async def create_job(
             stored_size,
             status.HTTP_400_BAD_REQUEST,
             INVALID_UPLOAD_CODE,
-            "Upload content is invalid.",
+            "文件内容无效或与扩展名不一致，请检查后重试。",
         )
     except HTTPException:
         raise
@@ -187,7 +199,7 @@ async def create_job(
             stored_size,
             status.HTTP_500_INTERNAL_SERVER_ERROR,
             JOB_CREATE_FAILURE_CODE,
-            "Unable to create the job.",
+            "创建作业失败，请稍后重试。",
         )
 
     try:
@@ -218,7 +230,7 @@ def _recover_from_dispatch_failure(
             0,
             "作业调度失败",
             error_code=DISPATCH_FAILURE_CODE,
-            error_message="Job dispatch failed.",
+            error_message="作业调度失败，请稍后重试。",
         )
         repository.commit()
     except Exception:
@@ -229,7 +241,7 @@ def _recover_from_dispatch_failure(
             stored_size,
             status.HTTP_500_INTERNAL_SERVER_ERROR,
             DISPATCH_RECOVERY_FAILURE_CODE,
-            "Unable to recover from the dispatch failure.",
+            "作业调度失败且状态恢复未完成，请稍后重试。",
         )
 
     try:
@@ -241,7 +253,7 @@ def _recover_from_dispatch_failure(
             stored_size,
             status.HTTP_500_INTERNAL_SERVER_ERROR,
             DISPATCH_CLEANUP_FAILURE_CODE,
-            "Unable to clean up the failed dispatched job.",
+            "作业调度失败且文件清理未完成，请稍后重试。",
         )
 
     _raise_failure(
@@ -250,7 +262,7 @@ def _recover_from_dispatch_failure(
         stored_size,
         status.HTTP_503_SERVICE_UNAVAILABLE,
         DISPATCH_FAILURE_CODE,
-        "Unable to dispatch the job for processing.",
+        "暂时无法开始处理，请稍后重新上传。",
     )
 
 
@@ -282,64 +294,38 @@ def _parse_last_event_id(last_event_id: str | None) -> int:
         raise _http_error(
             status.HTTP_400_BAD_REQUEST,
             INVALID_LAST_EVENT_ID_CODE,
-            "Last-Event-ID must be a non-negative integer.",
+            "Last-Event-ID 必须是非负整数。",
         ) from error
     if parsed < 0:
         raise _http_error(
             status.HTTP_400_BAD_REQUEST,
             INVALID_LAST_EVENT_ID_CODE,
-            "Last-Event-ID must be a non-negative integer.",
+            "Last-Event-ID 必须是非负整数。",
         )
     return parsed
 
 
-def _parse_check_options(form: FormData) -> tuple[CheckScenario, list[CheckCategory]]:
-    raw_scenario = form.get("scenario")
-    scenario_value = str(raw_scenario).strip() if raw_scenario is not None else ""
-    if not scenario_value:
-        scenario = CheckScenario.GENERAL
-    else:
-        try:
-            scenario = CheckScenario(scenario_value)
-        except ValueError as error:
-            raise _http_error(
-                status.HTTP_422_UNPROCESSABLE_CONTENT,
-                INVALID_CHECK_SCENARIO_CODE,
-                "使用场景无效，请重新选择。",
-            ) from error
-
-    if "enabled_categories" not in form:
-        return scenario, list(CHECK_CATEGORY_ORDER)
-
-    normalized_values = [
-        str(value).strip()
-        for value in form.getlist("enabled_categories")
-        if str(value).strip()
-    ]
-    if not normalized_values:
+def _normalize_check_options(
+    scenario: CheckScenario | None,
+    enabled_categories: list[CheckCategory] | None,
+) -> tuple[CheckScenario, list[CheckCategory]]:
+    normalized_scenario = scenario or CheckScenario.GENERAL
+    if enabled_categories is None:
+        return normalized_scenario, list(CHECK_CATEGORY_ORDER)
+    if not enabled_categories:
         raise _http_error(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             INVALID_CHECK_CATEGORIES_CODE,
             "至少选择一个检查类别。",
         )
-
-    enabled_categories: list[CheckCategory] = []
+    normalized_categories: list[CheckCategory] = []
     seen: set[CheckCategory] = set()
-    try:
-        for raw_value in normalized_values:
-            category = CheckCategory(raw_value)
-            if category in seen:
-                continue
-            seen.add(category)
-            enabled_categories.append(category)
-    except ValueError as error:
-        raise _http_error(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            INVALID_CHECK_CATEGORIES_CODE,
-            "检查类别无效，请重新选择。",
-        ) from error
-
-    return scenario, enabled_categories
+    for category in enabled_categories:
+        if category in seen:
+            continue
+        seen.add(category)
+        normalized_categories.append(category)
+    return normalized_scenario, normalized_categories
 
 
 async def _job_event_stream(
@@ -393,13 +379,16 @@ def _poll_job_state(
 
 
 def _format_progress_event(event: JobEvent) -> str:
+    payload_data: dict[str, object] = {
+        "status": event.status.value,
+        "progress": event.progress,
+        "message": event.message,
+        "created_at": event.created_at.isoformat(),
+    }
+    if event.metadata is not None:
+        payload_data.update(event.metadata.model_dump(mode="json"))
     payload = json.dumps(
-        {
-            "status": event.status.value,
-            "progress": event.progress,
-            "message": event.message,
-            "created_at": event.created_at.isoformat(),
-        },
+        payload_data,
         ensure_ascii=False,
         separators=(",", ":"),
     )
@@ -446,7 +435,7 @@ def _raise_failure_after_cleanup(
             stored_size,
             status.HTTP_500_INTERNAL_SERVER_ERROR,
             JOB_CLEANUP_FAILURE_CODE,
-            "Unable to recover from the failed upload.",
+            "上传失败且文件清理未完成，请稍后重试。",
         )
 
     _raise_failure(job_id, file_type_hint, stored_size, status_code, error_code, message)

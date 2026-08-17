@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import cast
 
 from text_verification.checkers.models import (
     CHECK_CATEGORY_ORDER,
     CheckCategory,
     CheckerFailure,
+    CheckerProgress,
     CheckOptions,
     CheckRunResult,
     RuleSet,
@@ -46,12 +47,23 @@ class CheckerRegistry:
         rule_set: RuleSet,
         *,
         source: str = "local_rules",
+        additional_checkers: Mapping[
+            CheckCategory,
+            Checker | Iterable[Checker],
+        ]
+        | None = None,
     ) -> CheckerRegistry:
         grouped: defaultdict[CheckCategory, list[Checker]] = defaultdict(list)
         for rule in rule_set.rules:
             grouped[rule.category].append(
                 RuleChecker(rule, source=source, source_version=rule_set.version)
             )
+        if additional_checkers is not None:
+            for category, checkers in additional_checkers.items():
+                if hasattr(checkers, "check"):
+                    grouped[category].append(cast(Checker, checkers))
+                else:
+                    grouped[category].extend(checkers)
         return cls(grouped)
 
     def run(
@@ -59,6 +71,7 @@ class CheckerRegistry:
         document: DocumentModel,
         context: CheckContext,
         options: CheckOptions,
+        on_progress: Callable[[CheckerProgress], None] | None = None,
     ) -> CheckRunResult:
         issues: list[Issue] = []
         completed_categories: set[CheckCategory] = set()
@@ -68,6 +81,7 @@ class CheckerRegistry:
             if category not in options.enabled_categories:
                 continue
 
+            category_failed = False
             try:
                 for checker in self._checkers.get(category, ()):
                     if not self._supports_scenario(checker, options):
@@ -83,9 +97,22 @@ class CheckerRegistry:
                     code="checker_failed",
                     message=FAILURE_MESSAGES[category],
                 )
-                continue
+                category_failed = True
 
-            completed_categories.add(category)
+            if not category_failed:
+                completed_categories.add(category)
+            if on_progress is not None:
+                on_progress(
+                    CheckerProgress(
+                        current_category=category,
+                        completed_categories=tuple(
+                            completed
+                            for completed in CHECK_CATEGORY_ORDER
+                            if completed in completed_categories
+                        ),
+                        issue_count=len(issues),
+                    )
+                )
 
         return CheckRunResult(
             issues=issues,

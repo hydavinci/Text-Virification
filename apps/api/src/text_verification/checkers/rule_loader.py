@@ -15,6 +15,9 @@ from text_verification.domain.issues import IssueSeverity
 class RuleConfigurationError(ValueError):
     """Raised when a rule configuration file is invalid."""
 
+    code = "invalid_rule_configuration"
+    public_message = "规则配置无效，请联系管理员检查规则资源。"
+
 
 class RuleLoader:
     def __init__(self, rule_path: Path, scenario_path: Path) -> None:

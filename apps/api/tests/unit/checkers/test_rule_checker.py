@@ -28,6 +28,18 @@ def test_rule_checker_generates_deterministic_issue_ids() -> None:
     assert [issue.issue_id for issue in first] == [issue.issue_id for issue in second]
 
 
+def test_rule_checker_emits_each_repeated_literal_match() -> None:
+    checker = RuleChecker(build_rule("repeat-001", CheckCategory.SENTENCE, "非常", "很"))
+
+    issues = checker.check(build_document("非常非常非常"), CheckContext((), ()))
+
+    assert [(issue.start, issue.end, issue.original) for issue in issues] == [
+        (0, 2, "非常"),
+        (2, 4, "非常"),
+        (4, 6, "非常"),
+    ]
+
+
 def build_document(text: str) -> DocumentModel:
     return DocumentModel(
         document_id=UUID("00000000-0000-0000-0000-000000000001"),

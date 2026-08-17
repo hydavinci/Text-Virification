@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from text_verification.checkers.dictionary_loader import DictionaryConfigurationError
 from text_verification.checkers.models import (
     CHECK_CATEGORY_ORDER,
     CheckCategory,
@@ -14,10 +15,12 @@ from text_verification.checkers.models import (
     CheckRunResult,
     CheckScenario,
 )
-from text_verification.domain.documents import DocumentModel, FileType
+from text_verification.checkers.rule_loader import RuleConfigurationError
+from text_verification.domain.documents import DocumentModel, FileType, TextBlock
 from text_verification.domain.jobs import (
     TERMINAL_STATUSES,
     JobEvent,
+    JobEventMetadata,
     JobRead,
     JobStatus,
     TerminalJobStateError,
@@ -117,6 +120,34 @@ class InMemoryJobRepository:
         return [
             event for event in self._events.get(job_id, []) if event.sequence > after_sequence
         ]
+
+    def record_progress(
+        self,
+        job_id: UUID,
+        *,
+        progress: int,
+        message: str,
+        metadata: JobEventMetadata,
+    ) -> None:
+        job = self._working_jobs[job_id]
+        if job.status in TERMINAL_STATUSES:
+            raise TerminalJobStateError(
+                job_id=job_id,
+                current_status=job.status,
+                target_status=job.status,
+            )
+        self._working_jobs[job_id] = job.model_copy(update={"progress": progress})
+        events = self._working_events[job_id]
+        events.append(
+            JobEvent(
+                sequence=len(events) + 1,
+                status=job.status,
+                progress=progress,
+                message=message,
+                created_at=datetime.now(UTC),
+                metadata=metadata,
+            )
+        )
 
     def register_transaction_observer(self, observer: object) -> None:
         self._transaction_observers.append(observer)
@@ -318,12 +349,31 @@ class ExplodingChecker:
 class RecordingCheckerRegistry:
     calls: list[CheckOptions] = field(default_factory=list)
 
-    def run(self, document, context, options) -> CheckRunResult:
+    def run(self, document, context, options, on_progress=None) -> CheckRunResult:
         del document, context
         self.calls.append(options)
+        completed_categories: set[CheckCategory] = set()
+        for category in CHECK_CATEGORY_ORDER:
+            if category not in options.enabled_categories:
+                continue
+            completed_categories.add(category)
+            if on_progress is not None:
+                from text_verification.checkers.models import CheckerProgress
+
+                on_progress(
+                    CheckerProgress(
+                        current_category=category,
+                        completed_categories=tuple(
+                            completed
+                            for completed in CHECK_CATEGORY_ORDER
+                            if completed in completed_categories
+                        ),
+                        issue_count=0,
+                    )
+                )
         return CheckRunResult(
             issues=[],
-            completed_categories=set(options.enabled_categories),
+            completed_categories=completed_categories,
             failures={},
         )
 
@@ -520,6 +570,17 @@ def configure_real_pipeline(
     )
 
 
+def _state_events(
+    repository: InMemoryJobRepository,
+    job_id: UUID,
+) -> list[JobEvent]:
+    return [
+        event
+        for event in repository.list_events_after(job_id, 0)
+        if event.metadata is None
+    ]
+
+
 def test_process_job_persists_analysis_and_completes(
     monkeypatch,
     worker_storage,
@@ -546,7 +607,7 @@ def test_process_job_persists_analysis_and_completes(
     assert job.progress == 100
     assert analysis_repository.get_document(job_id) is not None
     assert [issue.rule_id for issue in analysis_repository.issues] == ["security-ad-001"]
-    assert [event.status for event in repository.list_events_after(job_id, 0)] == [
+    assert [event.status for event in _state_events(repository, job_id)] == [
         JobStatus.QUEUED,
         JobStatus.UPLOAD_VALIDATED,
         JobStatus.PARSING,
@@ -554,6 +615,105 @@ def test_process_job_persists_analysis_and_completes(
     ]
     assert len(session_factory.sessions) == 1
     assert session_factory.sessions[0].closed is True
+
+
+def test_runtime_checker_construction_loads_approved_shared_dictionaries() -> None:
+    from text_verification.workers import tasks as worker_tasks
+
+    worker_tasks._build_checker_registry.cache_clear()
+    worker_tasks._build_check_context.cache_clear()
+
+    result = worker_tasks._build_checker_registry().run(
+        _build_document("这是最高级方案"),
+        worker_tasks._build_check_context(),
+        CheckOptions(
+            scenario=CheckScenario.GENERAL,
+            enabled_categories={CheckCategory.SECURITY},
+        ),
+    )
+
+    assert [(issue.original, issue.source) for issue in result.issues] == [
+        ("最高级", "shared_dictionary")
+    ]
+
+
+def test_process_job_persists_ordered_checker_progress_events(
+    monkeypatch,
+    worker_storage,
+    celery_eager,
+) -> None:
+    from text_verification.workers.tasks import process_job
+
+    repository = InMemoryJobRepository()
+    analysis_repository = InMemoryAnalysisRepository(repository)
+    job_id = _seed_txt_job(
+        repository,
+        worker_storage,
+        text="祕密且绝对领先",
+        enabled_categories=[CheckCategory.CHARACTER, CheckCategory.SECURITY],
+    )
+    configure_real_pipeline(
+        monkeypatch,
+        repository,
+        analysis_repository,
+        worker_storage,
+    )
+
+    result = process_job.delay(str(job_id))
+
+    assert result.successful()
+    progress_events = [
+        event
+        for event in repository.list_events_after(job_id, 0)
+        if event.metadata is not None
+    ]
+    assert [
+        (
+            event.status,
+            event.progress,
+            event.metadata.current_category,
+            event.metadata.completed_categories,
+            event.metadata.issue_count,
+        )
+        for event in progress_events
+    ] == [
+        (
+            JobStatus.PARSING,
+            60,
+            CheckCategory.CHARACTER,
+            [CheckCategory.CHARACTER],
+            1,
+        ),
+        (
+            JobStatus.PARSING,
+            95,
+            CheckCategory.SECURITY,
+            [CheckCategory.CHARACTER, CheckCategory.SECURITY],
+            2,
+        ),
+    ]
+
+
+def _build_document(text: str) -> DocumentModel:
+    return DocumentModel(
+        document_id=UUID("00000000-0000-0000-0000-000000000001"),
+        file_type=FileType.TXT,
+        source_name="dictionary.txt",
+        version=1,
+        blocks=[
+            TextBlock(
+                block_id="p-000001",
+                kind="paragraph",
+                text=text,
+                page=None,
+                paragraph_index=0,
+                parent_id=None,
+                style={},
+                source_locator={"paragraph_index": 0},
+            )
+        ],
+        metadata={},
+    )
 
 
 def test_process_job_marks_partial_and_keeps_available_issues(
@@ -585,7 +745,7 @@ def test_process_job_marks_partial_and_keeps_available_issues(
         "character-simplified-001"
     ]
     assert analysis_repository.failures[CheckCategory.SECURITY].code == "checker_failed"
-    assert [event.status for event in repository.list_events_after(job_id, 0)] == [
+    assert [event.status for event in _state_events(repository, job_id)] == [
         JobStatus.QUEUED,
         JobStatus.UPLOAD_VALIDATED,
         JobStatus.PARSING,
@@ -641,8 +801,7 @@ def test_process_job_redelivery_from_upload_validated_only_advances_remaining_st
     result = process_job.delay(str(job_id))
 
     assert result.successful()
-    assert [event.sequence for event in repository.list_events_after(job_id, 0)] == [1, 2, 3, 4]
-    assert [event.status for event in repository.list_events_after(job_id, 0)] == [
+    assert [event.status for event in _state_events(repository, job_id)] == [
         JobStatus.QUEUED,
         JobStatus.UPLOAD_VALIDATED,
         JobStatus.PARSING,
@@ -667,8 +826,7 @@ def test_process_job_redelivery_from_parsing_only_completes_job(
     result = process_job.delay(str(job_id))
 
     assert result.successful()
-    assert [event.sequence for event in repository.list_events_after(job_id, 0)] == [1, 2, 3, 4]
-    assert [event.status for event in repository.list_events_after(job_id, 0)] == [
+    assert [event.status for event in _state_events(repository, job_id)] == [
         JobStatus.QUEUED,
         JobStatus.UPLOAD_VALIDATED,
         JobStatus.PARSING,
@@ -695,7 +853,7 @@ def test_process_job_fails_expected_validation_with_safe_message(
     assert job.status == JobStatus.FAILED
     assert job.progress < 100
     assert job.error_code == "pipeline_failed"
-    assert job.error_message == "Stored upload is unavailable."
+    assert job.error_message == "上传文件不存在或已被清理，请重新上传。"
     assert str(worker_storage._root).lower() not in job.error_message.lower()
     assert "\\" not in job.error_message
     assert [event.status for event in repository.list_events_after(job_id, 0)] == [
@@ -850,7 +1008,7 @@ def test_process_job_rolls_back_failed_final_shared_commit_and_recovers_on_retry
 ) -> None:
     from text_verification.workers.tasks import process_job
 
-    repository = InMemoryJobRepository(fail_on_commit_calls={4})
+    repository = InMemoryJobRepository(fail_on_commit_calls={10})
     analysis_repository = InMemoryAnalysisRepository(repository)
     job_id = _seed_txt_job(repository, worker_storage, text="这是绝对领先的方案")
     failure_snapshot: dict[str, object] = {}
@@ -859,7 +1017,7 @@ def test_process_job_rolls_back_failed_final_shared_commit_and_recovers_on_retry
 
     def commit_with_snapshot() -> None:
         next_commit = repository._commit_count + 1
-        if next_commit == 4:
+        if next_commit == 10:
             failure_snapshot["staged_working_status"] = repository._working_jobs[job_id].status
             failure_snapshot["staged_pending_document"] = analysis_repository.pending_document(
                 job_id
@@ -925,12 +1083,70 @@ def test_process_job_persists_one_failed_event_after_unexpected_retries_exhauste
     assert job is not None
     assert job.status == JobStatus.FAILED
     assert job.error_code == "pipeline_failed"
-    assert job.error_message == "Processing failed."
+    assert job.error_message == "处理失败，请稍后重新上传文件重试。"
     assert [
         event.status for event in repository.list_events_after(job_id, 0)
     ].count(JobStatus.FAILED) == 1
     assert len(session_factory.sessions) == 4
     assert all(session.closed for session in session_factory.sessions)
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_code", "expected_message"),
+    [
+        pytest.param(
+            RuleConfigurationError(r"C:\secret\rules.json: invalid"),
+            "invalid_rule_configuration",
+            "规则配置无效，请联系管理员检查规则资源。",
+            id="rules",
+        ),
+        pytest.param(
+            DictionaryConfigurationError(r"C:\secret\dictionaries.json: invalid"),
+            "invalid_dictionary_configuration",
+            "共享词库配置无效，请联系管理员检查词库资源。",
+            id="dictionaries",
+        ),
+    ],
+)
+def test_process_job_configuration_errors_fail_once_with_actionable_public_code(
+    monkeypatch,
+    worker_storage,
+    celery_eager,
+    error: Exception,
+    expected_code: str,
+    expected_message: str,
+) -> None:
+    from text_verification.workers.tasks import process_job
+
+    repository = InMemoryJobRepository()
+    job_id = _seed_txt_job(repository, worker_storage)
+    attempts = 0
+
+    def invalid_configuration_factory(session, repository, storage):
+        del session, repository, storage
+        nonlocal attempts
+        attempts += 1
+        raise error
+
+    session_factory = _configure_worker_dependencies(
+        monkeypatch,
+        repository,
+        worker_storage,
+        runner_factory=invalid_configuration_factory,
+    )
+
+    result = process_job.delay(str(job_id))
+
+    assert result.successful()
+    assert attempts == 1
+    job = repository.get_job(job_id)
+    assert job is not None
+    assert job.status == JobStatus.FAILED
+    assert job.error_code == expected_code
+    assert job.error_message == expected_message
+    assert "secret" not in job.error_message.lower()
+    assert "\\" not in job.error_message
+    assert len(session_factory.sessions) == 1
 
 
 def test_process_job_invalid_upload_is_not_retried(

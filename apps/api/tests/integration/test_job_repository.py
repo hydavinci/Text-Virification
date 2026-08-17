@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -18,7 +19,11 @@ from alembic import command
 from text_verification.checkers.models import CHECK_CATEGORY_ORDER, CheckCategory, CheckScenario
 from text_verification.domain.documents import DocumentModel, FileType, TextBlock
 from text_verification.domain.issues import Issue, IssueSeverity
-from text_verification.domain.jobs import JobStatus, TerminalJobStateError
+from text_verification.domain.jobs import (
+    JobEventMetadata,
+    JobStatus,
+    TerminalJobStateError,
+)
 from text_verification.infrastructure.repositories import JobRepository
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
@@ -47,9 +52,19 @@ def test_database_schema_matches_head_migration(
     assert {"ix_job_events_job_sequence"} <= {
         index["name"] for index in inspector.get_indexes("job_events")
     }
+    assert "metadata_json" in {
+        column["name"] for column in inspector.get_columns("job_events")
+    }
     assert {"document_id", "page", "issue_type"} <= {
         column["name"] for column in inspector.get_columns("issues")
     }
+
+
+def test_migrations_do_not_disable_application_loggers(db_engine: Engine) -> None:
+    del db_engine
+
+    assert not logging.getLogger("text_verification.checkers.registry").disabled
+    assert not logging.getLogger("text_verification.infrastructure.storage").disabled
 
 
 def test_upgrade_from_old_0003_adds_job_check_options_and_keeps_repository_round_trip(
@@ -152,6 +167,88 @@ def test_upgrade_from_old_0003_adds_job_check_options_and_keeps_repository_round
             session.close()
 
 
+def test_upgrade_from_0004_normalizes_legacy_scenarios_without_editing_applied_revision(
+    test_database_url: str,
+) -> None:
+    with migrated_schema(test_database_url) as (engine, alembic_config):
+        command.upgrade(alembic_config, "0004_add_job_check_options")
+        created_at = datetime.now(UTC)
+        legacy_jobs = {
+            uuid4(): "education",
+            uuid4(): "medical",
+        }
+        with engine.begin() as connection:
+            for job_id, scenario in legacy_jobs.items():
+                connection.execute(
+                    text(
+                        """
+                        INSERT INTO jobs (
+                            job_id,
+                            source_name,
+                            file_type,
+                            size_bytes,
+                            storage_key,
+                            status,
+                            progress,
+                            error_code,
+                            error_message,
+                            scenario,
+                            enabled_categories,
+                            created_at,
+                            updated_at,
+                            expires_at
+                        ) VALUES (
+                            :job_id,
+                            :source_name,
+                            :file_type,
+                            :size_bytes,
+                            :storage_key,
+                            :status,
+                            :progress,
+                            :error_code,
+                            :error_message,
+                            :scenario,
+                            CAST(:enabled_categories AS jsonb),
+                            :created_at,
+                            :updated_at,
+                            :expires_at
+                        )
+                        """
+                    ),
+                    {
+                        "job_id": job_id,
+                        "source_name": f"{scenario}.txt",
+                        "file_type": FileType.TXT.value,
+                        "size_bytes": 16,
+                        "storage_key": str(job_id),
+                        "status": JobStatus.COMPLETED.value,
+                        "progress": 100,
+                        "error_code": None,
+                        "error_message": None,
+                        "scenario": scenario,
+                        "enabled_categories": '["character"]',
+                        "created_at": created_at,
+                        "updated_at": created_at,
+                        "expires_at": created_at + timedelta(hours=1),
+                    },
+                )
+
+        command.upgrade(alembic_config, "head")
+        with engine.connect() as connection:
+            stored = dict(
+                connection.execute(
+                    text(
+                        "SELECT source_name, scenario FROM jobs ORDER BY source_name"
+                    )
+                ).all()
+            )
+
+        assert stored == {
+            "education.txt": "academic",
+            "medical.txt": "technical",
+        }
+
+
 def test_head_downgrades_back_through_0003_before_removing_analysis_tables(
     test_database_url: str,
 ) -> None:
@@ -220,6 +317,49 @@ def test_repository_persists_job_and_ordered_events(db_session: Session) -> None
         (2, JobStatus.UPLOAD_VALIDATED),
         (3, JobStatus.PARSING),
     ]
+
+
+def test_repository_persists_checker_progress_metadata_without_status_transition(
+    db_session: Session,
+) -> None:
+    repository = JobRepository(db_session)
+    job_id = uuid4()
+    now = datetime.now(UTC)
+    repository.create_job(
+        job_id=job_id,
+        source_name="progress.txt",
+        file_type="txt",
+        size_bytes=32,
+        storage_key=str(job_id),
+        created_at=now,
+        expires_at=now + timedelta(hours=1),
+    )
+    repository.transition(job_id, JobStatus.UPLOAD_VALIDATED, 10, "上传校验完成")
+    repository.transition(job_id, JobStatus.PARSING, 25, "开始解析")
+
+    repository.record_progress(
+        job_id,
+        progress=60,
+        message="检查进度已更新",
+        metadata=JobEventMetadata(
+            current_category=CheckCategory.CHARACTER,
+            completed_categories=[CheckCategory.CHARACTER],
+            issue_count=3,
+        ),
+    )
+    repository.commit()
+
+    job = repository.get_job(job_id)
+    event = repository.list_events_after(job_id, after_sequence=3)[0]
+    assert job is not None
+    assert job.status == JobStatus.PARSING
+    assert job.progress == 60
+    assert event.status == JobStatus.PARSING
+    assert event.metadata == JobEventMetadata(
+        current_category=CheckCategory.CHARACTER,
+        completed_categories=[CheckCategory.CHARACTER],
+        issue_count=3,
+    )
 
 
 def test_repository_expires_jobs_before_cutoff(db_session: Session) -> None:

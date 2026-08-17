@@ -8,7 +8,7 @@
       "pattern": "祕密",
       "suggestion": "秘密",
       "message": "请统一使用简体字。",
-      "scenarios": ["general", "business", "news", "legal", "education", "medical"],
+      "scenarios": ["general", "academic", "business", "legal", "news", "technical"],
       "auto_fixable": true
     },
     {
@@ -28,7 +28,7 @@
       "pattern": "非常非常",
       "suggestion": "非常",
       "message": "避免重复堆叠的句式。",
-      "scenarios": ["general", "business", "news", "education"],
+      "scenarios": ["general", "academic", "business", "news"],
       "auto_fixable": true
     },
     {
@@ -38,7 +38,7 @@
       "pattern": "联系电话 :",
       "suggestion": "联系电话：",
       "message": "中文语境请使用中文冒号且不要保留多余空格。",
-      "scenarios": ["general", "business", "legal", "medical"],
+      "scenarios": ["general", "business", "legal", "technical"],
       "auto_fixable": true
     },
     {
@@ -48,7 +48,7 @@
       "pattern": "总之首先",
       "suggestion": "首先",
       "message": "请按清晰的篇章顺序组织内容。",
-      "scenarios": ["general", "business", "education", "news"],
+      "scenarios": ["general", "academic", "business", "news"],
       "auto_fixable": true
     },
     {

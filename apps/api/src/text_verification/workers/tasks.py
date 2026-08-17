@@ -11,6 +11,13 @@ from celery import Task  # type: ignore[import-untyped]
 from sqlalchemy.orm import Session, sessionmaker
 
 from text_verification.checkers import CheckerRegistry, RuleLoader
+from text_verification.checkers.dictionary_checker import DictionaryChecker
+from text_verification.checkers.dictionary_loader import (
+    DictionaryConfigurationError,
+    DictionaryLoader,
+)
+from text_verification.checkers.models import CheckCategory
+from text_verification.checkers.rule_loader import RuleConfigurationError
 from text_verification.config import get_settings
 from text_verification.domain.documents import ParseError
 from text_verification.domain.jobs import (
@@ -18,6 +25,7 @@ from text_verification.domain.jobs import (
     JobStatus,
     TerminalJobStateError,
 )
+from text_verification.domain.ports import CheckContext
 from text_verification.infrastructure.analysis_repositories import AnalysisRepository
 from text_verification.infrastructure.database import get_session_factory
 from text_verification.infrastructure.repositories import JobRepository
@@ -30,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 FAILED_EVENT_MESSAGE = "处理失败"
 PIPELINE_FAILURE_CODE = "pipeline_failed"
-UNEXPECTED_FAILURE_MESSAGE = "Processing failed."
+UNEXPECTED_FAILURE_MESSAGE = "处理失败，请稍后重新上传文件重试。"
 
 SessionFactoryProvider = Callable[[], sessionmaker[Session]]
 StorageFactory = Callable[[], JobStorage]
@@ -63,7 +71,22 @@ def _build_checker_registry() -> CheckerRegistry:
         settings.rules_root / "common-rules.zh-cn.json",
         settings.rules_root / "scenarios.zh-cn.json",
     ).load()
-    return CheckerRegistry.from_rule_set(rule_set)
+    return CheckerRegistry.from_rule_set(
+        rule_set,
+        additional_checkers={
+            CheckCategory.SECURITY: DictionaryChecker(),
+        },
+    )
+
+
+@lru_cache(maxsize=1)
+def _build_check_context() -> CheckContext:
+    settings = get_settings()
+    return CheckContext(
+        (),
+        (),
+        shared_dictionaries=DictionaryLoader(settings.dictionaries_root).load(),
+    )
 
 
 def _build_pipeline_runner(
@@ -77,6 +100,7 @@ def _build_pipeline_runner(
         storage,
         _build_parser_registry(),
         _build_checker_registry(),
+        _build_check_context(),
     )
 
 
@@ -124,6 +148,10 @@ def _run_process_job_attempt(job_id: UUID) -> None:
         if repository is None:
             raise
         _persist_parse_failure(repository, job_id, error)
+    except (RuleConfigurationError, DictionaryConfigurationError) as error:
+        if repository is None:
+            raise
+        _persist_configuration_failure(repository, job_id, error)
     except Exception:
         if repository is not None:
             repository.rollback()
@@ -221,6 +249,22 @@ def _persist_parse_failure(
     repository: JobRepository,
     job_id: UUID,
     error: ParseError,
+) -> None:
+    try:
+        _mark_failed_job(repository, job_id, error.code, error.public_message)
+    except TerminalJobStateError:
+        repository.rollback()
+        return
+    except Exception as persist_error:
+        repository.rollback()
+        _log_failure_persist_error(job_id, error, persist_error)
+        raise
+
+
+def _persist_configuration_failure(
+    repository: JobRepository,
+    job_id: UUID,
+    error: RuleConfigurationError | DictionaryConfigurationError,
 ) -> None:
     try:
         _mark_failed_job(repository, job_id, error.code, error.public_message)

@@ -27,6 +27,7 @@ INVALID_ISSUE_FILTERS_CODE = "invalid_issue_filters"
 JOB_EXPIRED_CODE = "job_expired"
 
 ANALYSIS_FAILED_FALLBACK_MESSAGE = "分析失败，请重新上传文件后重试。"
+ANALYSIS_NOT_FOUND_MESSAGE = "分析结果不存在，请重新上传后重试。"
 
 READY_STATUSES = {JobStatus.COMPLETED, JobStatus.PARTIAL}
 ISSUE_DECISIONS = Literal["accepted", "custom", "ignored", "pending"]
@@ -88,6 +89,7 @@ def get_document_page(
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
 ) -> DocumentPageResponse:
     job = _require_ready_job(job_id, repository)
+    _require_analysis(job_id, analysis_repository)
     try:
         page = analysis_repository.list_document_blocks(
             job_id,
@@ -99,7 +101,7 @@ def get_document_page(
         raise _http_error(
             status.HTTP_404_NOT_FOUND,
             ANALYSIS_NOT_FOUND_CODE,
-            "分析结果不存在，请重新上传后重试。",
+            ANALYSIS_NOT_FOUND_MESSAGE,
         )
     return DocumentPageResponse(
         job_id=job_id,
@@ -131,6 +133,7 @@ def get_issue_page(
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> IssuePageResponse:
     job = _require_ready_job(job_id, repository)
+    _require_analysis(job_id, analysis_repository)
     try:
         page = analysis_repository.list_issues(
             job_id,
@@ -170,6 +173,7 @@ def get_analysis_summary(
     analysis_repository: Annotated[AnalysisRepository, Depends(get_analysis_repository)],
 ) -> AnalysisSummaryResponse:
     job = _require_ready_job(job_id, repository)
+    _require_analysis(job_id, analysis_repository)
     summary = analysis_repository.summarize_issues(job_id)
     return AnalysisSummaryResponse(
         job_id=job_id,
@@ -212,6 +216,18 @@ def _require_ready_job(job_id: UUID, repository: JobRepository) -> JobRead:
             "分析结果尚未就绪，请稍后重试。",
         )
     return job
+
+
+def _require_analysis(
+    job_id: UUID,
+    analysis_repository: AnalysisRepository,
+) -> None:
+    if not analysis_repository.has_analysis(job_id):
+        raise _http_error(
+            status.HTTP_404_NOT_FOUND,
+            ANALYSIS_NOT_FOUND_CODE,
+            ANALYSIS_NOT_FOUND_MESSAGE,
+        )
 
 
 def _normalize_cursor(cursor: str | None) -> str | None:

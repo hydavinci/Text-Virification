@@ -13,6 +13,11 @@ def fixture_path() -> Path:
     return Path(__file__).resolve().parents[2] / "fixtures" / "documents"
 
 
+@pytest.fixture
+def merged_cells_docx(fixture_path: Path) -> Path:
+    return fixture_path / "merged-cells.docx"
+
+
 def test_docx_parser_preserves_paragraph_table_and_run_mapping(fixture_path: Path) -> None:
     document = DocxParser().parse(
         fixture_path / "sample.docx",
@@ -115,6 +120,49 @@ def test_docx_parser_preserves_body_order_for_interleaved_blocks(tmp_path: Path)
         "paragraph",
     ]
     assert [block.text for block in parsed.blocks] == ["段落一", "表格一", "段落二"]
+
+
+def test_docx_parser_emits_each_merged_physical_cell_once(
+    merged_cells_docx: Path,
+) -> None:
+    parsed = DocxParser().parse(
+        merged_cells_docx,
+        document_id=uuid4(),
+        source_name="merged-cells.docx",
+    )
+
+    assert [block.block_id for block in parsed.blocks] == [
+        "p-000001",
+        "t-000001-000001",
+        "t-000001-000003",
+        "t-000001-000008",
+        "p-000002",
+    ]
+    assert [block.text for block in parsed.blocks] == [
+        "表格前",
+        "横向合并",
+        "纵向合并",
+        "尾部单元格",
+        "表格后",
+    ]
+    assert parsed.blocks[1].source_locator == {
+        "table_index": 0,
+        "row_index": 0,
+        "column_index": 0,
+        "paragraphs": [
+            {
+                "paragraph_index": 0,
+                "start": 0,
+                "end": 4,
+                "runs": [
+                    {"run_index": 0, "start": 0, "end": 2},
+                    {"run_index": 1, "start": 2, "end": 4},
+                ],
+            }
+        ],
+    }
+    assert parsed.blocks[2].source_locator["row_index"] == 0
+    assert parsed.blocks[2].source_locator["column_index"] == 2
 
 
 def test_docx_parser_rejects_missing_document_xml(tmp_path: Path) -> None:

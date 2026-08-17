@@ -7,8 +7,9 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi import FastAPI
 
+from text_verification.checkers.models import CheckCategory
 from text_verification.domain.documents import FileType
-from text_verification.domain.jobs import JobEvent, JobRead, JobStatus
+from text_verification.domain.jobs import JobEvent, JobEventMetadata, JobRead, JobStatus
 
 
 class RecordingJobRepository:
@@ -56,6 +57,33 @@ class RecordingJobRepository:
             ),
             JobEvent(
                 sequence=4,
+                status=JobStatus.PARSING,
+                progress=60,
+                message="检查进度已更新",
+                metadata=JobEventMetadata(
+                    current_category=CheckCategory.CHARACTER,
+                    completed_categories=[CheckCategory.CHARACTER],
+                    issue_count=1,
+                ),
+                created_at=created_at,
+            ),
+            JobEvent(
+                sequence=5,
+                status=JobStatus.PARSING,
+                progress=95,
+                message="检查进度已更新",
+                metadata=JobEventMetadata(
+                    current_category=CheckCategory.SECURITY,
+                    completed_categories=[
+                        CheckCategory.CHARACTER,
+                        CheckCategory.SECURITY,
+                    ],
+                    issue_count=2,
+                ),
+                created_at=created_at,
+            ),
+            JobEvent(
+                sequence=6,
                 status=JobStatus.COMPLETED,
                 progress=100,
                 message="处理完成",
@@ -144,6 +172,16 @@ def test_sse_replays_events_after_last_event_id(client, completed_job: JobRead) 
     assert "id: 2" in response.text
     assert '"status":"upload_validated"' in response.text
     assert '"status":"completed"' in response.text
+    assert (
+        '"current_category":"character","completed_categories":["character"],'
+        '"issue_count":1'
+    ) in response.text
+    assert (
+        '"current_category":"security",'
+        '"completed_categories":["character","security"],"issue_count":2'
+    ) in response.text
+    assert '"issues"' not in response.text
+    assert '"text"' not in response.text
     assert "event: done" in response.text
     assert completed_job.source_name not in response.text
     assert client_path not in response.text

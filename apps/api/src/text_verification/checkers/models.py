@@ -28,11 +28,11 @@ CHECK_CATEGORY_ORDER: tuple[CheckCategory, ...] = (
 
 class CheckScenario(StrEnum):
     GENERAL = "general"
+    ACADEMIC = "academic"
     BUSINESS = "business"
-    NEWS = "news"
     LEGAL = "legal"
-    EDUCATION = "education"
-    MEDICAL = "medical"
+    NEWS = "news"
+    TECHNICAL = "technical"
 
 
 @dataclass(frozen=True)
@@ -86,6 +86,13 @@ class CheckRunResult:
     issues: list[Issue]
     completed_categories: set[CheckCategory]
     failures: dict[CheckCategory, CheckerFailure]
+
+
+@dataclass(frozen=True)
+class CheckerProgress:
+    current_category: CheckCategory
+    completed_categories: tuple[CheckCategory, ...]
+    issue_count: int
 
 
 def _parse_check_category(value: CheckCategory | str) -> CheckCategory:
