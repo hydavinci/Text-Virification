@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <title>问题报告 - {{ report.source_name }}</title>
+    <style>
+      body {
+        color: #1f2937;
+        font-family: "Noto Sans CJK SC", "Microsoft YaHei", "PingFang SC", sans-serif;
+        font-size: 14px;
+        line-height: 1.6;
+        margin: 24px;
+      }
+
+      h1,
+      h2,
+      h3 {
+        color: #111827;
+        margin-bottom: 8px;
+      }
+
+      h1 {
+        border-bottom: 2px solid #d1d5db;
+        font-size: 28px;
+        padding-bottom: 10px;
+      }
+
+      h2 {
+        border-left: 4px solid #2563eb;
+        font-size: 20px;
+        margin-top: 24px;
+        padding-left: 10px;
+      }
+
+      p,
+      ul {
+        margin: 6px 0;
+      }
+
+      table {
+        border-collapse: collapse;
+        margin-top: 12px;
+        width: 100%;
+      }
+
+      th,
+      td {
+        border: 1px solid #d1d5db;
+        padding: 8px;
+        text-align: left;
+        vertical-align: top;
+      }
+
+      th {
+        background: #f3f4f6;
+      }
+
+      .muted {
+        color: #6b7280;
+      }
+
+      .pre-wrap {
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>问题报告</h1>
+    <p><strong>文件名：</strong>{{ report.source_name }}</p>
+    <p><strong>生成时间：</strong>{{ report.generated_at }}</p>
+    <p><strong>使用场景：</strong>{{ report.scenario_label }}</p>
+    <p><strong>启用分类：</strong>{{ report.enabled_categories | join("、") }}</p>
+    <p><strong>完成分类：</strong>{{ report.completed_categories | join("、") }}</p>
+
+    <h2>摘要</h2>
+    <p><strong>发现问题：{{ report.summary.total_issues }}</strong></p>
+
+    <h3>按类别统计</h3>
+    <ul>
+      {% for item in report.summary.category_counts %}
+      <li>{{ item.label }}：{{ item.count }}</li>
+      {% endfor %}
+    </ul>
+
+    <h3>按严重级别统计</h3>
+    <ul>
+      {% for item in report.summary.severity_counts %}
+      <li>{{ item.label }}：{{ item.count }}</li>
+      {% endfor %}
+    </ul>
+
+    <h3>按处理状态统计</h3>
+    <ul>
+      {% for item in report.summary.decision_counts %}
+      <li>{{ item.label }}：{{ item.count }}</li>
+      {% endfor %}
+    </ul>
+
+    <h2>失败分类</h2>
+    {% if report.failed_categories %}
+    <ul>
+      {% for item in report.failed_categories %}
+      <li><strong>{{ item.label }}</strong>（{{ item.code }}）：{{ item.message }}</li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="muted">无</p>
+    {% endif %}
+
+    <h2>问题明细</h2>
+    {% if report.issues %}
+    <table>
+      <thead>
+        <tr>
+          <th>位置</th>
+          <th>分类</th>
+          <th>严重级别</th>
+          <th>原文</th>
+          <th>建议</th>
+          <th>处理结果</th>
+          <th>说明</th>
+          <th>上下文</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for issue in report.issues %}
+        <tr>
+          <td>
+            <div>页码：{{ issue.page if issue.page is not none else "—" }}</div>
+            <div>块：{{ issue.block_id }}</div>
+            <div>范围：{{ issue.range_text }}</div>
+            <div class="muted">{{ issue.issue_id }}</div>
+          </td>
+          <td>{{ issue.category_label }}</td>
+          <td>{{ issue.severity_label }}</td>
+          <td class="pre-wrap">{{ issue.original }}</td>
+          <td class="pre-wrap">{{ issue.suggestion if issue.suggestion is not none else "—" }}</td>
+          <td>
+            <div><strong>{{ issue.decision_label }}</strong></div>
+            <div class="pre-wrap">{{ issue.decision_value if issue.decision_value is not none else "—" }}</div>
+          </td>
+          <td class="pre-wrap">{{ issue.message }}</td>
+          <td class="pre-wrap">{{ issue.context }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="muted">无问题。</p>
+    {% endif %}
+
+    <h2>导出警告</h2>
+    {% if report.warnings %}
+    <ul>
+      {% for warning in report.warnings %}
+      <li>
+        <strong>{{ warning.code }}</strong>：{{ warning.message }}
+        <span class="muted">（issue {{ warning.issue_id }}，block {{ warning.block_id }}）</span>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="muted">无</p>
+    {% endif %}
+  </body>
+</html>
