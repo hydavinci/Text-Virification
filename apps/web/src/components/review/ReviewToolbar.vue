@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 
 import BatchActions from './BatchActions.vue'
+import ExportPanel from './ExportPanel.vue'
 import FindReplace from './FindReplace.vue'
 import type {
   AnalysisSummaryResponse,
@@ -10,6 +11,7 @@ import type {
 import type { FileType } from '../../types/review'
 
 const props = defineProps<{
+  jobId: string
   sourceName: string
   fileType: FileType
   summary: AnalysisSummaryResponse | null
@@ -66,7 +68,8 @@ const failures = computed(() =>
     </div>
   </header>
 
-  <section class="review-toolbar__actions" aria-label="批量与查找工具">
+  <section class="review-toolbar__actions" aria-label="导出、批量与查找工具">
+    <ExportPanel :job-id="jobId" :file-type="fileType" />
     <BatchActions
       :issue-count="visibleIssueCount"
       :batch-limit="batchLimit"
@@ -168,7 +171,7 @@ button {
 
 .review-toolbar__actions {
   display: grid;
-  grid-template-columns: minmax(280px, 0.9fr) minmax(320px, 1.1fr);
+  grid-template-columns: minmax(260px, 0.9fr) minmax(280px, 0.9fr) minmax(320px, 1.1fr);
   gap: 12px;
   margin-top: 12px;
 }

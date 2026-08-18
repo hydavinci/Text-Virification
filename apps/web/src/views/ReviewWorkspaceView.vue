@@ -60,6 +60,7 @@ const {
 <template>
   <section class="review-workspace" aria-label="文档审阅工作台">
     <ReviewToolbar
+      :job-id="jobId"
       :source-name="sourceName"
       :file-type="fileType"
       :summary="summary"

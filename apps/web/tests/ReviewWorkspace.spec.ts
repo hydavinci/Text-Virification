@@ -3,6 +3,7 @@ import { defineComponent } from 'vue'
 import { describe, expect, it, vi } from 'vitest'
 
 import { analysisApiKey, type AnalysisApi } from '../src/api/analysis'
+import { exportsApiKey, type ExportsApi } from '../src/api/exports'
 import {
   reviewIntersectionObserverFactoryKey,
   type ReviewIntersectionObserverCallback,
@@ -10,6 +11,7 @@ import {
 } from '../src/components/review/observer'
 import ReviewNavigation from '../src/components/review/ReviewNavigation.vue'
 import { useReviewWorkspace } from '../src/composables/useReviewWorkspace'
+import { ApiError } from '../src/types/api'
 import type {
   AnalysisSummaryResponse,
   DecisionBatchResponse,
@@ -19,6 +21,8 @@ import type {
   IssueDecision,
   IssuePageResponse
 } from '../src/types/analysis'
+import type { ExportCreateResponse, ExportResponse, ExportWarning } from '../src/types/exports'
+import type { FileType } from '../src/types/review'
 import ReviewWorkspaceView from '../src/views/ReviewWorkspaceView.vue'
 
 const jobId = 'job-1'
@@ -169,12 +173,73 @@ function createAnalysisApiMock(overrides: Partial<AnalysisApi> = {}): AnalysisAp
   }
 }
 
-function mountReviewWorkspace(
+function buildExportWarning(overrides: Partial<ExportWarning> = {}): ExportWarning {
+  return {
+    code: 'unsafe_docx_run_boundary',
+    message: '修改范围跨越多个 DOCX 文本运行，为保留格式已跳过；请在原文中手动修改后重新导出。',
+    issue_id: 'issue-1',
+    block_id: 'block-1',
+    ...overrides
+  }
+}
+
+function buildExport(overrides: Partial<ExportResponse> = {}): ExportResponse {
+  return {
+    export_id: 'export-1',
+    job_id: jobId,
+    export_type: 'html_report',
+    status: 'queued',
+    file_name: 'report.html',
+    warnings: [],
+    error_code: null,
+    error_message: null,
+    created_at: '2026-08-18T00:00:00Z',
+    updated_at: '2026-08-18T00:00:00Z',
+    expires_at: '2026-08-19T00:00:00Z',
+    ...overrides
+  }
+}
+
+function buildCreatedExport(
+  overrides: Partial<ExportCreateResponse> = {}
+): ExportCreateResponse {
+  return {
+    ...buildExport(overrides),
+    dispatch_status: 'dispatched',
+    ...overrides
+  }
+}
+
+function createExportsApiMock(overrides: Partial<ExportsApi> = {}): ExportsApi {
+  return {
+    create: vi.fn().mockResolvedValue(buildCreatedExport()),
+    get: vi.fn().mockResolvedValue(buildExport({ status: 'completed' })),
+    downloadUrl: vi.fn().mockImplementation(
+      (requestedJobId: string, exportId: string) =>
+        `/api/v1/jobs/${requestedJobId}/exports/${exportId}/download`
+    ),
+    ...overrides
+  }
+}
+
+function mountReviewWorkspaceWithConfig({
   analysisApi = createAnalysisApiMock(),
+  observerFactory,
+  exportsApi = createExportsApiMock(),
+  props = {}
+}: {
+  analysisApi?: AnalysisApi
   observerFactory?: ReviewIntersectionObserverFactory
-) {
+  exportsApi?: ExportsApi
+  props?: Partial<{
+    jobId: string
+    sourceName: string
+    fileType: FileType
+  }>
+} = {}) {
   const provide: Record<symbol, unknown> = {
-    [analysisApiKey as symbol]: analysisApi
+    [analysisApiKey as symbol]: analysisApi,
+    [exportsApiKey as symbol]: exportsApi
   }
 
   if (observerFactory) {
@@ -185,9 +250,22 @@ function mountReviewWorkspace(
     props: {
       jobId,
       sourceName: 'sample.txt',
-      fileType: 'txt'
+      fileType: 'txt',
+      ...props
     },
     global: { provide }
+  })
+}
+
+function mountReviewWorkspace(
+  analysisApi = createAnalysisApiMock(),
+  observerFactory?: ReviewIntersectionObserverFactory,
+  exportsApi = createExportsApiMock()
+) {
+  return mountReviewWorkspaceWithConfig({
+    analysisApi,
+    observerFactory,
+    exportsApi
   })
 }
 
@@ -234,6 +312,251 @@ function mountReviewWorkspaceState(analysisApi: AnalysisApi) {
 }
 
 describe('ReviewWorkspaceView', () => {
+  it('does not offer modified document export for PDF', async () => {
+    const wrapper = mountReviewWorkspaceWithConfig({
+      props: {
+        sourceName: 'sample.pdf',
+        fileType: 'pdf'
+      }
+    })
+    await flushPromises()
+
+    expect(wrapper.find('option[value="modified_document"]').exists()).toBe(false)
+    expect(wrapper.find('option[value="html_report"]').exists()).toBe(true)
+    expect(wrapper.find('option[value="pdf_report"]').exists()).toBe(true)
+  })
+
+  it('creates, polls, and exposes a completed export download', async () => {
+    vi.useFakeTimers()
+
+    try {
+      const create = vi.fn().mockResolvedValue(
+        buildCreatedExport({
+          export_id: 'export-1',
+          export_type: 'html_report',
+          status: 'queued',
+          file_name: 'report.html'
+        })
+      )
+      const get = vi
+        .fn()
+        .mockResolvedValueOnce(
+          buildExport({
+            export_id: 'export-1',
+            export_type: 'html_report',
+            status: 'processing',
+            file_name: 'report.html'
+          })
+        )
+        .mockResolvedValueOnce(
+          buildExport({
+            export_id: 'export-1',
+            export_type: 'html_report',
+            status: 'completed',
+            file_name: 'report.html'
+          })
+        )
+      const downloadUrl = vi
+        .fn()
+        .mockReturnValue('/api/v1/jobs/job-1/exports/export-1/download')
+      const wrapper = mountReviewWorkspaceWithConfig({
+        exportsApi: createExportsApiMock({ create, get, downloadUrl })
+      })
+      await flushPromises()
+
+      await wrapper.get('select[name="export-type"]').setValue('html_report')
+      await wrapper.get('button[name="create-export"]').trigger('click')
+      await flushPromises()
+
+      expect(create).toHaveBeenCalledWith(jobId, {
+        type: 'html_report',
+        confirm_warnings: false
+      })
+      expect(wrapper.get('[data-testid="export-status"]').text()).toContain('排队')
+
+      await vi.advanceTimersByTimeAsync(2000)
+      await flushPromises()
+
+      expect(get).toHaveBeenCalledTimes(1)
+      expect(wrapper.get('[data-testid="export-status"]').text()).toContain('处理中')
+
+      await vi.advanceTimersByTimeAsync(2000)
+      await flushPromises()
+
+      expect(get).toHaveBeenCalledTimes(2)
+      expect(wrapper.get('[data-testid="export-download-link"]').attributes('href')).toBe(
+        '/api/v1/jobs/job-1/exports/export-1/download'
+      )
+      expect(wrapper.get('[data-testid="export-download-link"]').attributes('download')).toBe(
+        'report.html'
+      )
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('surfaces terminal export failures and lets the user retry', async () => {
+    vi.useFakeTimers()
+
+    try {
+      const create = vi
+        .fn()
+        .mockResolvedValueOnce(
+          buildCreatedExport({
+            export_id: 'export-1',
+            export_type: 'html_report',
+            status: 'queued',
+            file_name: 'report.html'
+          })
+        )
+        .mockResolvedValueOnce(
+          buildCreatedExport({
+            export_id: 'export-2',
+            export_type: 'html_report',
+            status: 'completed',
+            file_name: 'report-2.html'
+          })
+        )
+      const get = vi.fn().mockResolvedValue(
+        buildExport({
+          export_id: 'export-1',
+          export_type: 'html_report',
+          status: 'failed',
+          file_name: 'report.html',
+          error_code: 'export_failed',
+          error_message: '导出失败，请稍后重试。'
+        })
+      )
+      const downloadUrl = vi.fn().mockImplementation(
+        (_requestedJobId: string, exportId: string) =>
+          `/api/v1/jobs/job-1/exports/${exportId}/download`
+      )
+      const wrapper = mountReviewWorkspaceWithConfig({
+        exportsApi: createExportsApiMock({ create, get, downloadUrl })
+      })
+      await flushPromises()
+
+      await wrapper.get('select[name="export-type"]').setValue('html_report')
+      await wrapper.get('button[name="create-export"]').trigger('click')
+      await flushPromises()
+      await vi.advanceTimersByTimeAsync(2000)
+      await flushPromises()
+
+      expect(wrapper.get('[data-testid="export-error"]').text()).toContain(
+        '导出失败，请稍后重试。'
+      )
+      expect(wrapper.find('[data-testid="export-download-link"]').exists()).toBe(false)
+
+      await wrapper.get('button[name="retry-export"]').trigger('click')
+      await flushPromises()
+
+      expect(create).toHaveBeenNthCalledWith(2, jobId, {
+        type: 'html_report',
+        confirm_warnings: false
+      })
+      expect(wrapper.get('[data-testid="export-download-link"]').attributes('href')).toBe(
+        '/api/v1/jobs/job-1/exports/export-2/download'
+      )
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('stops export polling when the workspace unmounts', async () => {
+    vi.useFakeTimers()
+
+    try {
+      const create = vi.fn().mockResolvedValue(
+        buildCreatedExport({
+          export_id: 'export-1',
+          export_type: 'html_report',
+          status: 'queued',
+          file_name: 'report.html'
+        })
+      )
+      const get = vi.fn().mockResolvedValue(
+        buildExport({
+          export_id: 'export-1',
+          export_type: 'html_report',
+          status: 'processing',
+          file_name: 'report.html'
+        })
+      )
+      const wrapper = mountReviewWorkspaceWithConfig({
+        exportsApi: createExportsApiMock({ create, get })
+      })
+      await flushPromises()
+
+      await wrapper.get('select[name="export-type"]').setValue('html_report')
+      await wrapper.get('button[name="create-export"]').trigger('click')
+      await flushPromises()
+
+      await vi.advanceTimersByTimeAsync(2000)
+      await flushPromises()
+
+      expect(get).toHaveBeenCalledTimes(1)
+
+      wrapper.unmount()
+      await vi.advanceTimersByTimeAsync(10000)
+      await flushPromises()
+
+      expect(get).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('requires explicit warning confirmation before retrying a structured DOCX export', async () => {
+    const create = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new ApiError(409, {
+          code: 'export_confirmation_required',
+          message: '检测到无法自动应用的 DOCX 修改，请确认警告后重试。',
+          warnings: [buildExportWarning()]
+        })
+      )
+      .mockResolvedValueOnce(
+        buildCreatedExport({
+          export_id: 'export-2',
+          export_type: 'modified_document',
+          status: 'completed',
+          file_name: 'modified_document.docx',
+          warnings: [buildExportWarning()]
+        })
+      )
+    const wrapper = mountReviewWorkspaceWithConfig({
+      props: {
+        sourceName: 'sample.docx',
+        fileType: 'docx'
+      },
+      exportsApi: createExportsApiMock({ create })
+    })
+    await flushPromises()
+
+    await wrapper.get('button[name="create-export"]').trigger('click')
+    await flushPromises()
+
+    expect(create).toHaveBeenCalledTimes(1)
+    expect(wrapper.get('[data-testid="export-warnings"]').text()).toContain(
+      '检测到无法自动应用的 DOCX 修改，请确认警告后重试。'
+    )
+    expect(wrapper.get('[data-testid="export-warnings"]').text()).toContain(
+      '修改范围跨越多个 DOCX 文本运行'
+    )
+
+    await wrapper.get('button[name="confirm-export-warnings"]').trigger('click')
+    await flushPromises()
+
+    expect(create).toHaveBeenNthCalledWith(2, jobId, {
+      type: 'modified_document',
+      confirm_warnings: true
+    })
+    expect(wrapper.get('[data-testid="export-download-link"]').attributes('download')).toBe(
+      'modified_document.docx'
+    )
+  })
+
   it('renders semantic columns and synchronizes issue and highlight selection', async () => {
     const wrapper = mountReviewWorkspace()
     await flushPromises()
