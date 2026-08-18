@@ -83,7 +83,6 @@ export interface ReviewWorkspaceState {
   decisionAnnouncement: Ref<string>
   batchLimit: number
   visibleIssueCount: ComputedRef<number>
-  visibleIssueOverflow: ComputedRef<boolean>
   highRiskVisibleIssueCount: ComputedRef<number>
   batchDecisionError: Ref<string | null>
   bulkActionPending: Ref<boolean>
@@ -162,7 +161,6 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
   const authoritativeDecisions = new Map<string, IssueDecisionSummary | null>()
   const decisionGenerations = new Map<string, number>()
   const failedDecisions = ref<Record<string, FailedDecision | undefined>>({})
-  const issueNotices = ref<Record<string, string | undefined>>({})
   const currentFindMatchIndex = ref(-1)
 
   const blocks = computed(() =>
@@ -209,14 +207,11 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     Object.fromEntries(
       issues.value.map((issue) => [
         issue.issue_id,
-        issueNotices.value[issue.issue_id] ?? decisionStatusLabel(issue.decision)
+        decisionStatusLabel(issue.decision)
       ])
     )
   )
   const visibleIssueCount = computed(() => issues.value.length)
-  const visibleIssueOverflow = computed(
-    () => visibleIssueCount.value > MAX_VISIBLE_BATCH_DECISIONS
-  )
   const visibleBatchIssues = computed(() =>
     issues.value.slice(0, MAX_VISIBLE_BATCH_DECISIONS)
   )
@@ -327,7 +322,7 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
   function loadIssuePage(
     cursor: string | null,
     append: boolean,
-    decisionGuard?: DecisionRequestGuard
+    decisionGuards?: DecisionRequestGuard | DecisionRequestGuard[]
   ): Promise<void> {
     const generation = ++issueGeneration
     lastIssueRequest = { cursor, append }
@@ -343,8 +338,7 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
         })
         if (
           !isCurrent(generation, issueGeneration) ||
-          (decisionGuard &&
-            !isDecisionCurrent(decisionGuard.issueId, decisionGuard.generation))
+          !areDecisionGuardsCurrent(decisionGuards)
         ) {
           return
         }
@@ -497,7 +491,10 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     localizationGeneration += 1
     explicitlySelectedIssueId = null
     selectedIssueId.value = null
+    issuesById.value = {}
+    issueIds.value = []
     issueCursor.value = null
+    issueCheckerFailures.value = {}
     lastIssueRequest = { cursor: null, append: false }
     await loadIssuePage(null, false)
   }
@@ -510,6 +507,17 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
 
   function isDecisionCurrent(issueId: string, generation: number): boolean {
     return active && decisionGenerations.get(issueId) === generation
+  }
+
+  function areDecisionGuardsCurrent(
+    decisionGuards?: DecisionRequestGuard | DecisionRequestGuard[]
+  ): boolean {
+    if (!decisionGuards) {
+      return true
+    }
+
+    const guards = Array.isArray(decisionGuards) ? decisionGuards : [decisionGuards]
+    return guards.every((guard) => isDecisionCurrent(guard.issueId, guard.generation))
   }
 
   function setIssueDecision(
@@ -528,23 +536,6 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
         decision
       }
     }
-  }
-
-  function setIssueNotice(issueId: string, message: string): void {
-    issueNotices.value = {
-      ...issueNotices.value,
-      [issueId]: message
-    }
-  }
-
-  function clearIssueNotice(issueId: string): void {
-    if (!Object.prototype.hasOwnProperty.call(issueNotices.value, issueId)) {
-      return
-    }
-
-    const nextIssueNotices = { ...issueNotices.value }
-    delete nextIssueNotices[issueId]
-    issueNotices.value = nextIssueNotices
   }
 
   function setFailedDecision(issueId: string, failure: FailedDecision): void {
@@ -620,7 +611,6 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     const generation = nextDecisionGeneration(command.issue_id)
     decisionAnnouncement.value = ''
     clearFailedDecision(command.issue_id)
-    clearIssueNotice(command.issue_id)
     setIssueDecision(command.issue_id, optimisticDecision(command))
 
     try {
@@ -711,7 +701,6 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
       const generation = nextDecisionGeneration(command.issue_id)
       generations.set(command.issue_id, generation)
       clearFailedDecision(command.issue_id)
-      clearIssueNotice(command.issue_id)
       setIssueDecision(command.issue_id, optimisticDecision(command))
     }
 
@@ -719,6 +708,7 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
       const response = await analysisApi.putDecisions(jobId, commands)
       let appliedCount = 0
       let needsReviewCount = 0
+      const authoritativeReloadGuards: DecisionRequestGuard[] = []
 
       for (const command of commands) {
         const generation = generations.get(command.issue_id)
@@ -737,7 +727,6 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
         if (outcome.status === 'applied') {
           authoritativeDecisions.set(command.issue_id, outcome.decision)
           setIssueDecision(command.issue_id, outcome.decision)
-          clearIssueNotice(command.issue_id)
           appliedCount += 1
           continue
         }
@@ -746,12 +735,20 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
           command.issue_id,
           authoritativeDecisions.get(command.issue_id) ?? null
         )
-        setIssueNotice(command.issue_id, '需重新确认')
+        authoritativeReloadGuards.push({
+          issueId: command.issue_id,
+          generation
+        })
         needsReviewCount += 1
       }
 
       decisionAnnouncement.value = batchDecisionAnnouncement(appliedCount, needsReviewCount)
-      await loadSummary()
+      await Promise.all([
+        loadSummary(),
+        authoritativeReloadGuards.length > 0
+          ? loadIssuePage(null, false, authoritativeReloadGuards)
+          : Promise.resolve()
+      ])
     } catch (error) {
       for (const command of commands) {
         const generation = generations.get(command.issue_id)
@@ -775,6 +772,9 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     action: Exclude<DecisionAction, 'custom'>
   ): Promise<void> {
     findReplaceError.value = null
+    if (loading.issues) {
+      return
+    }
 
     const commands = visibleBatchIssues.value.flatMap((issue) => {
       const command = decisionCommand(issue, action)
@@ -942,7 +942,6 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     decisionAnnouncement,
     batchLimit: MAX_VISIBLE_BATCH_DECISIONS,
     visibleIssueCount,
-    visibleIssueOverflow,
     highRiskVisibleIssueCount,
     batchDecisionError,
     bulkActionPending,

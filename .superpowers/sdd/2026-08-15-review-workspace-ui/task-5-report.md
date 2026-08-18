@@ -53,3 +53,71 @@
 ## Concerns
 
 - None.
+
+## Fix Round 1
+
+### Finding 1: Batch conflict/invalid outcomes now reload authoritative issue + summary state
+
+- Root cause: `submitDecisionBatch()` handled non-applied outcomes locally, announced counts, and only refreshed the summary; the current filtered issue page stayed stale.
+- RED command: `Set-Location C:\Work\text-verification\apps\web; npm test -- --run tests/ReviewWorkspace.spec.ts`
+- RED output:
+  - `FAIL ReviewWorkspaceView > reconciles batch conflict and invalid outcomes with authoritative issue state`
+  - `expected "spy" to be called 2 times, but got 1 times`
+- GREEN command: `Set-Location C:\Work\text-verification\apps\web; npm test -- --run tests/ReviewWorkspace.spec.ts`
+- GREEN output:
+  - `✓ tests/ReviewWorkspace.spec.ts (32 tests)`
+  - `Tests 32 passed (32)`
+- Files:
+  - `apps/web/src/composables/useReviewWorkspace.ts`
+  - `apps/web/tests/ReviewWorkspace.spec.ts`
+
+### Finding 2: Filter/search transitions no longer leave stale visible issues batch-actionable
+
+- Root cause: `setFilters()` cleared selection and cursors but preserved the previously loaded issue set until the replacement request resolved, so batch actions still targeted stale visible issues.
+- RED command: `Set-Location C:\Work\text-verification\apps\web; npm test -- --run tests/ReviewWorkspace.spec.ts`
+- RED output:
+  - `FAIL ReviewWorkspaceView > does not submit stale visible issues while a filter request is in flight`
+  - `expected undefined to be defined`
+- GREEN command: `Set-Location C:\Work\text-verification\apps\web; npm test -- --run tests/ReviewWorkspace.spec.ts`
+- GREEN output:
+  - `✓ tests/ReviewWorkspace.spec.ts (32 tests)`
+  - `Tests 32 passed (32)`
+- Files:
+  - `apps/web/src/composables/useReviewWorkspace.ts`
+  - `apps/web/tests/ReviewWorkspace.spec.ts`
+
+### Finding 3: Missing `confirm` no longer implicitly approves high-risk batch acceptance
+
+- Root cause: `BatchActions.vue` used `globalThis.confirm?.(...) ?? true`, which treated unavailable confirmation infrastructure as approval.
+- RED command: `Set-Location C:\Work\text-verification\apps\web; npm test -- --run tests/ReviewWorkspace.spec.ts`
+- RED output:
+  - `FAIL ReviewWorkspaceView > rejects high-risk batch acceptance when confirm is unavailable`
+  - `expected "spy" to not be called at all, but actually been called 1 times`
+- GREEN command: `Set-Location C:\Work\text-verification\apps\web; npm test -- --run tests/ReviewWorkspace.spec.ts`
+- GREEN output:
+  - `✓ tests/ReviewWorkspace.spec.ts (32 tests)`
+  - `Tests 32 passed (32)`
+- Files:
+  - `apps/web/src/components/review/BatchActions.vue`
+  - `apps/web/tests/ReviewWorkspace.spec.ts`
+
+### Minor: Removed unused `visibleIssueOverflow` plumbing
+
+- Safe mechanical removal completed; no deferral needed.
+- Files:
+  - `apps/web/src/composables/useReviewWorkspace.ts`
+  - `apps/web/src/components/review/ReviewToolbar.vue`
+  - `apps/web/src/views/ReviewWorkspaceView.vue`
+
+### Validation
+
+- Focused spec: `Set-Location C:\Work\text-verification\apps\web; npm test -- --run tests/ReviewWorkspace.spec.ts`
+  - Output: `✓ tests/ReviewWorkspace.spec.ts (32 tests)` / `Tests 32 passed (32)`
+- Production build: `Set-Location C:\Work\text-verification\apps\web; npm run build`
+  - Output: `vue-tsc -b && vite build` / `✓ built in 964ms`
+
+### Self-review
+
+- Batch non-applied outcomes now reuse guarded issue reloads instead of exposing retry metadata for known-stale commands; per-issue retries remain limited to infrastructure failures.
+- Filter-driven issue invalidation prevents stale batch submissions without changing the 500-item cap, loaded-page find behavior, replace-all issue mapping, or raw document text immutability.
+- High-risk batch acceptance now fails closed when `confirm` is unavailable, and the focused spec plus production build both passed after the fixes.

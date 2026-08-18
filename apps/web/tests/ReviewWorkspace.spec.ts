@@ -866,7 +866,73 @@ describe('ReviewWorkspaceView', () => {
     )
   })
 
-  it('applies successful batch items and marks conflicts', async () => {
+  it('reconciles batch conflict and invalid outcomes with authoritative issue state', async () => {
+    const acceptedDecision = {
+      issue_version: 1,
+      action: 'accepted' as const,
+      replacement: null,
+      updated_at: '2026-08-18T02:00:00Z'
+    }
+    const ignoredDecision = {
+      issue_version: 1,
+      action: 'ignored' as const,
+      replacement: null,
+      updated_at: '2026-08-18T02:01:00Z'
+    }
+    const getIssues = vi
+      .fn()
+      .mockResolvedValueOnce(
+        buildIssuePage({
+          total: 3,
+          items: [
+            buildIssue(),
+            buildIssue({
+              issue_id: 'issue-2',
+              block_id: 'block-2',
+              start: 3,
+              end: 5,
+              original: '冲突项',
+              message: '需要重新确认'
+            }),
+            buildIssue({
+              issue_id: 'issue-3',
+              block_id: 'block-2',
+              start: 0,
+              end: 2,
+              original: '失效项',
+              message: '服务器已移除'
+            })
+          ]
+        })
+      )
+      .mockResolvedValueOnce(
+        buildIssuePage({
+          total: 2,
+          items: [
+            buildIssue({
+              decision: acceptedDecision
+            }),
+            buildIssue({
+              issue_id: 'issue-2',
+              block_id: 'block-2',
+              start: 3,
+              end: 5,
+              original: '冲突项',
+              message: '服务器已忽略',
+              decision: ignoredDecision
+            })
+          ]
+        })
+      )
+    const getSummary = vi
+      .fn()
+      .mockResolvedValueOnce(buildSummary({ total_issues: 3 }))
+      .mockResolvedValueOnce(
+        buildSummary({
+          total_issues: 2,
+          by_decision: { accepted: 1, ignored: 1, custom: 0, unreviewed: 0 }
+        })
+      )
     const putDecisions = vi.fn().mockResolvedValue({
       outcomes: [
         {
@@ -875,10 +941,7 @@ describe('ReviewWorkspaceView', () => {
           code: null,
           decision: {
             issue_id: 'issue-1',
-            issue_version: 1,
-            action: 'accepted',
-            replacement: null,
-            updated_at: '2026-08-18T02:00:00Z'
+            ...acceptedDecision
           }
         },
         {
@@ -886,10 +949,18 @@ describe('ReviewWorkspaceView', () => {
           status: 'conflict',
           code: 'stale_issue_version',
           decision: null
+        },
+        {
+          issue_id: 'issue-3',
+          status: 'invalid',
+          code: 'issue_not_found',
+          decision: null
         }
       ]
     } satisfies DecisionBatchResponse)
-    const wrapper = mountReviewWorkspace(createAnalysisApiMock({ putDecisions }))
+    const wrapper = mountReviewWorkspace(
+      createAnalysisApiMock({ getIssues, getSummary, putDecisions })
+    )
     await flushPromises()
 
     await wrapper.get('button[name="accept-visible"]').trigger('click')
@@ -905,13 +976,69 @@ describe('ReviewWorkspaceView', () => {
         issue_id: 'issue-2',
         issue_version: 1,
         action: 'accepted'
+      },
+      {
+        issue_id: 'issue-3',
+        issue_version: 1,
+        action: 'accepted'
       }
     ])
+    expect(getIssues).toHaveBeenCalledTimes(2)
+    expect(getIssues).toHaveBeenLastCalledWith(jobId, {
+      cursor: null,
+      limit: 50
+    })
+    expect(getSummary).toHaveBeenCalledTimes(2)
     expect(wrapper.get('[data-issue-id="issue-1"]').text()).toContain('已接受')
-    expect(wrapper.get('[data-issue-id="issue-2"]').text()).toContain('需重新确认')
+    expect(wrapper.get('[data-issue-id="issue-2"]').text()).toContain('已忽略')
+    expect(wrapper.find('[data-issue-id="issue-3"]').exists()).toBe(false)
     expect(wrapper.get('[data-testid="decision-announcement"]').text()).toContain(
-      '成功 1 项，需重新确认 1 项'
+      '成功 1 项，需重新确认 2 项'
     )
+  })
+
+  it('does not submit stale visible issues while a filter request is in flight', async () => {
+    const filteredPage = createDeferred<IssuePageResponse>()
+    const getIssues = vi
+      .fn()
+      .mockResolvedValueOnce(buildIssuePage())
+      .mockReturnValueOnce(filteredPage.promise)
+    const putDecisions = vi.fn().mockResolvedValue({ outcomes: [] } satisfies DecisionBatchResponse)
+    const wrapper = mountReviewWorkspace(createAnalysisApiMock({ getIssues, putDecisions }))
+    await flushPromises()
+
+    await wrapper.get('[aria-label="问题严重程度"]').setValue('error')
+    await flushPromises()
+
+    const acceptVisible = wrapper.get('button[name="accept-visible"]')
+    expect(acceptVisible.attributes('disabled')).toBeDefined()
+
+    await acceptVisible.trigger('click')
+    expect(putDecisions).not.toHaveBeenCalled()
+
+    filteredPage.resolve(
+      buildIssuePage({
+        total: 1,
+        items: [
+          buildIssue({
+            issue_id: 'issue-error',
+            severity: 'error',
+            original: '筛选后的问题'
+          })
+        ]
+      })
+    )
+    await flushPromises()
+
+    await wrapper.get('button[name="accept-visible"]').trigger('click')
+
+    expect(putDecisions).toHaveBeenCalledWith(jobId, [
+      {
+        issue_id: 'issue-error',
+        issue_version: 1,
+        action: 'accepted'
+      }
+    ])
   })
 
   it('asks confirmation before accepting visible high-risk security issues', async () => {
@@ -955,6 +1082,46 @@ describe('ReviewWorkspaceView', () => {
       expect(putDecisions).not.toHaveBeenCalled()
     } finally {
       globalThis.confirm = originalConfirm
+    }
+  })
+
+  it('rejects high-risk batch acceptance when confirm is unavailable', async () => {
+    const originalConfirm = globalThis.confirm
+    Object.defineProperty(globalThis, 'confirm', {
+      configurable: true,
+      value: undefined
+    })
+
+    try {
+      const putDecisions = vi.fn()
+      const wrapper = mountReviewWorkspace(
+        createAnalysisApiMock({
+          getIssues: vi.fn().mockResolvedValue(
+            buildIssuePage({
+              total: 1,
+              items: [
+                buildIssue({
+                  issue_id: 'issue-security',
+                  type: 'security',
+                  severity: 'error',
+                  original: '敏感信息'
+                })
+              ]
+            })
+          ),
+          putDecisions
+        })
+      )
+      await flushPromises()
+
+      await wrapper.get('button[name="accept-visible"]').trigger('click')
+
+      expect(putDecisions).not.toHaveBeenCalled()
+    } finally {
+      Object.defineProperty(globalThis, 'confirm', {
+        configurable: true,
+        value: originalConfirm
+      })
     }
   })
 

@@ -23,7 +23,7 @@ function requestAcceptVisible(): void {
     const confirmed =
       globalThis.confirm?.(
         `当前包含 ${props.highRiskSecurityCount} 个高风险安全问题，确认批量接受建议吗？`
-      ) ?? true
+      ) ?? false
 
     if (!confirmed) {
       return

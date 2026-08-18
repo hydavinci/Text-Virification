@@ -30,7 +30,6 @@ const {
   decisionAnnouncement,
   batchLimit,
   visibleIssueCount,
-  visibleIssueOverflow,
   highRiskVisibleIssueCount,
   batchDecisionError,
   bulkActionPending,
@@ -69,7 +68,6 @@ const {
       :checker-failures="checkerFailures"
       :batch-limit="batchLimit"
       :visible-issue-count="visibleIssueCount"
-      :visible-issue-overflow="visibleIssueOverflow"
       :high-risk-visible-issue-count="highRiskVisibleIssueCount"
       :batch-decision-error="batchDecisionError"
       :bulk-action-pending="bulkActionPending"

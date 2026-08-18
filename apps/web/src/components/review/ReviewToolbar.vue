@@ -18,7 +18,6 @@ const props = defineProps<{
   checkerFailures: CheckerFailureMap
   batchLimit: number
   visibleIssueCount: number
-  visibleIssueOverflow: boolean
   highRiskVisibleIssueCount: number
   batchDecisionError: string | null
   bulkActionPending: boolean
