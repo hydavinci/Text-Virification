@@ -353,7 +353,7 @@ describe('WorkspaceView', () => {
       buildJobRead({
         source_name: 'limit.txt',
         size_bytes: 25 * 1024 * 1024
-      })
+      }, 15_000)
     )
     const wrapper = mount(WorkspaceView, {
       global: {
