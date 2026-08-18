@@ -11,7 +11,13 @@ import {
 interface TextSegment {
   key: string
   text: string
-  issueId: string | null
+  issueIds: string[]
+  endingIssues: Issue[]
+}
+
+interface BlockRenderModel {
+  leadingIssues: Issue[]
+  segments: TextSegment[]
 }
 
 const props = defineProps<{
@@ -34,60 +40,82 @@ const observerFactory = inject(
   reviewIntersectionObserverFactoryKey,
   browserReviewIntersectionObserverFactory
 )
+const viewer = ref<HTMLElement | null>(null)
 const sentinel = ref<Element | null>(null)
 let observer: ReviewIntersectionObserver | null = null
 let requestedCursor: string | null = null
+let active = true
 
 function issuesForBlock(blockId: string): Issue[] {
   return props.issues.filter((issue) => issue.block_id === blockId)
 }
 
-function segmentsForBlock(block: DocumentBlock): TextSegment[] {
+function renderModelForBlock(block: DocumentBlock): BlockRenderModel {
   const points = Array.from(block.text)
-  const issues = issuesForBlock(block.block_id).sort(
-    (left, right) => left.start - right.start || left.end - right.end
-  )
+  const normalizedIssues = issuesForBlock(block.block_id)
+    .map((issue) => {
+      const start = Math.max(0, Math.min(points.length, issue.start))
+      const end = Math.max(start, Math.min(points.length, issue.end))
+      return { issue, start, end }
+    })
+    .sort(
+      (left, right) =>
+        left.start - right.start ||
+        left.end - right.end ||
+        left.issue.issue_id.localeCompare(right.issue.issue_id)
+    )
 
-  if (!issues.length) {
-    return [{ key: `${block.block_id}-text`, text: block.text, issueId: null }]
+  if (!normalizedIssues.length) {
+    return {
+      leadingIssues: [],
+      segments: [
+        {
+          key: `${block.block_id}-text`,
+          text: block.text,
+          issueIds: [],
+          endingIssues: []
+        }
+      ]
+    }
   }
 
+  const boundaries = Array.from(
+    new Set([
+      0,
+      points.length,
+      ...normalizedIssues.flatMap(({ start, end }) => [start, end])
+    ])
+  ).sort((left, right) => left - right)
   const segments: TextSegment[] = []
-  let cursor = 0
 
-  for (const issue of issues) {
-    const start = Math.max(0, Math.min(points.length, issue.start))
-    const end = Math.max(start, Math.min(points.length, issue.end))
+  for (let index = 1; index < boundaries.length; index += 1) {
+    const start = boundaries[index - 1] ?? 0
+    const end = boundaries[index] ?? start
+    const issueIds = normalizedIssues
+      .filter((normalized) => normalized.start < end && normalized.end > start)
+      .map(({ issue }) => issue.issue_id)
+    const endingIssues = normalizedIssues
+      .filter((normalized) => normalized.end === end)
+      .map(({ issue }) => issue)
 
-    if (end <= cursor || start < cursor) {
-      continue
-    }
-    if (start > cursor) {
-      segments.push({
-        key: `${block.block_id}-text-${cursor}`,
-        text: points.slice(cursor, start).join(''),
-        issueId: null
-      })
-    }
-    if (end > start) {
-      segments.push({
-        key: issue.issue_id,
-        text: points.slice(start, end).join(''),
-        issueId: issue.issue_id
-      })
-    }
-    cursor = end
-  }
-
-  if (cursor < points.length) {
     segments.push({
-      key: `${block.block_id}-text-${cursor}`,
-      text: points.slice(cursor).join(''),
-      issueId: null
+      key: `${block.block_id}-${start}-${end}`,
+      text: points.slice(start, end).join(''),
+      issueIds,
+      endingIssues
     })
   }
 
-  return segments
+  return {
+    leadingIssues: normalizedIssues
+      .filter((normalized) => normalized.end === 0)
+      .map(({ issue }) => issue),
+    segments
+  }
+}
+
+function isSelectedRange(issueIds: string[]): boolean {
+  return props.selectedIssueId !== null && issueIds.includes(props.selectedIssueId)
 }
 
 function connectObserver(element: Element | null): void {
@@ -115,26 +143,31 @@ function connectObserver(element: Element | null): void {
 watch(sentinel, connectObserver)
 
 watch(
-  () => props.selectedIssueId,
-  async (issueId) => {
+  () => [props.selectedIssueId, props.blocks] as const,
+  async ([issueId]) => {
     if (!issueId) {
       return
     }
     await nextTick()
+    if (!active) {
+      return
+    }
     const highlight = Array.from(
-      document.querySelectorAll<HTMLElement>('[data-highlight-issue-id]')
+      viewer.value?.querySelectorAll<HTMLElement>('[data-highlight-issue-id]') ?? []
     ).find((element) => element.dataset.highlightIssueId === issueId)
     highlight?.scrollIntoView?.({ block: 'center' })
-  }
+  },
+  { flush: 'post' }
 )
 
 onBeforeUnmount(() => {
+  active = false
   observer?.disconnect()
 })
 </script>
 
 <template>
-  <article class="document-viewer" aria-label="文档内容">
+  <article ref="viewer" class="document-viewer" aria-label="文档内容">
     <div class="document-viewer__heading">
       <div>
         <p>文档内容</p>
@@ -158,19 +191,47 @@ onBeforeUnmount(() => {
         :class="{ 'document-block--active': block.block_id === selectedBlockId }"
         :data-block-id="block.block_id"
       >
-        <template v-for="segment in segmentsForBlock(block)" :key="segment.key">
+        <template
+          v-for="issue in renderModelForBlock(block).leadingIssues"
+          :key="`leading-${issue.issue_id}`"
+        >
           <button
-            v-if="segment.issueId"
             type="button"
-            class="document-highlight"
-            :class="{ 'document-highlight--active': segment.issueId === selectedIssueId }"
-            :data-highlight-issue-id="segment.issueId"
-            :aria-current="segment.issueId === selectedIssueId ? 'true' : 'false'"
-            @click="emit('selectHighlight', segment.issueId)"
-          >
-            {{ segment.text }}
-          </button>
+            class="document-highlight-control"
+            :class="{
+              'document-highlight-control--active': issue.issue_id === selectedIssueId
+            }"
+            :data-highlight-issue-id="issue.issue_id"
+            :aria-label="`选择问题：${issue.original || issue.message}`"
+            :aria-current="issue.issue_id === selectedIssueId ? 'true' : 'false'"
+            :title="issue.message"
+            @click="emit('selectHighlight', issue.issue_id)"
+          />
+        </template>
+        <template v-for="segment in renderModelForBlock(block).segments" :key="segment.key">
+          <span
+            v-if="segment.issueIds.length"
+            class="document-highlight-range"
+            :class="{
+              'document-highlight-range--active': isSelectedRange(segment.issueIds)
+            }"
+            :data-highlight-range-issue-ids="segment.issueIds.join(' ')"
+          >{{ segment.text }}</span>
           <template v-else>{{ segment.text }}</template>
+          <button
+            v-for="issue in segment.endingIssues"
+            :key="issue.issue_id"
+            type="button"
+            class="document-highlight-control"
+            :class="{
+              'document-highlight-control--active': issue.issue_id === selectedIssueId
+            }"
+            :data-highlight-issue-id="issue.issue_id"
+            :aria-label="`选择问题：${issue.original || issue.message}`"
+            :aria-current="issue.issue_id === selectedIssueId ? 'true' : 'false'"
+            :title="issue.message"
+            @click="emit('selectHighlight', issue.issue_id)"
+          />
         </template>
       </p>
 
@@ -249,23 +310,36 @@ onBeforeUnmount(() => {
   border-left-color: #6579e8;
 }
 
-.document-highlight {
-  display: inline;
-  margin: 0;
-  padding: 1px 0;
-  color: inherit;
-  font: inherit;
-  line-height: inherit;
+.document-highlight-range {
   background: #fff0a8;
-  border: 0;
   border-radius: 2px;
+}
+
+.document-highlight-range--active {
+  background: #ffd56a;
+  outline: 2px solid #bd7d18;
+  outline-offset: 1px;
+}
+
+.document-highlight-control {
+  display: inline-grid;
+  width: 0.82em;
+  height: 0.82em;
+  margin: 0 0.12em;
+  padding: 0;
+  place-items: center;
+  vertical-align: super;
+  background: #d99425;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px #bd7d18;
   cursor: pointer;
 }
 
-.document-highlight:hover,
-.document-highlight:focus-visible,
-.document-highlight--active {
-  background: #ffd56a;
+.document-highlight-control:hover,
+.document-highlight-control:focus-visible,
+.document-highlight-control--active {
+  background: #8054d6;
   outline: 2px solid #bd7d18;
   outline-offset: 1px;
 }

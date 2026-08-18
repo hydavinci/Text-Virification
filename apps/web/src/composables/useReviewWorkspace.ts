@@ -99,6 +99,11 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
   let summaryGeneration = 0
   let documentGeneration = 0
   let issueGeneration = 0
+  let localizationGeneration = 0
+  let summaryRequest: Promise<void> | null = null
+  let documentRequest: Promise<void> | null = null
+  let issueRequest: Promise<void> | null = null
+  let explicitlySelectedIssueId: string | null = null
   let lastDocumentRequest: PageRequest = { cursor: null, append: false }
   let lastIssueRequest: PageRequest = { cursor: null, append: false }
 
@@ -129,53 +134,167 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     return active && generation === currentGeneration
   }
 
-  async function loadSummary(): Promise<void> {
+  function loadSummary(): Promise<void> {
     const generation = ++summaryGeneration
     loading.summary = true
     errors.summary = null
 
-    try {
-      const response = await analysisApi.getSummary(jobId)
-      if (!isCurrent(generation, summaryGeneration)) {
-        return
+    const request = (async () => {
+      try {
+        const response = await analysisApi.getSummary(jobId)
+        if (!isCurrent(generation, summaryGeneration)) {
+          return
+        }
+        summary.value = response
+      } catch (error) {
+        if (!isCurrent(generation, summaryGeneration)) {
+          return
+        }
+        errors.summary = errorMessage(error, '无法加载问题总览。')
+      } finally {
+        if (isCurrent(generation, summaryGeneration)) {
+          loading.summary = false
+        }
       }
-      summary.value = response
-    } catch (error) {
-      if (!isCurrent(generation, summaryGeneration)) {
-        return
+    })()
+
+    summaryRequest = request
+    void request.finally(() => {
+      if (summaryRequest === request) {
+        summaryRequest = null
       }
-      errors.summary = errorMessage(error, '无法加载问题总览。')
-    } finally {
-      if (isCurrent(generation, summaryGeneration)) {
-        loading.summary = false
-      }
-    }
+    })
+    return request
   }
 
-  async function loadDocumentPage(cursor: string | null, append: boolean): Promise<void> {
+  function loadDocumentPage(cursor: string | null, append: boolean): Promise<void> {
     const generation = ++documentGeneration
     lastDocumentRequest = { cursor, append }
     loading.document = true
     errors.document = null
 
-    try {
-      const response = await analysisApi.getDocumentPage(jobId, {
-        cursor,
-        limit: DOCUMENT_PAGE_LIMIT
-      })
-      if (!isCurrent(generation, documentGeneration)) {
+    const request = (async () => {
+      try {
+        const response = await analysisApi.getDocumentPage(jobId, {
+          cursor,
+          limit: DOCUMENT_PAGE_LIMIT
+        })
+        if (!isCurrent(generation, documentGeneration)) {
+          return
+        }
+        applyDocumentPage(response, append)
+      } catch (error) {
+        if (!isCurrent(generation, documentGeneration)) {
+          return
+        }
+        errors.document = errorMessage(error, '无法加载文档内容。')
+      } finally {
+        if (isCurrent(generation, documentGeneration)) {
+          loading.document = false
+        }
+      }
+    })()
+
+    documentRequest = request
+    void request.finally(() => {
+      if (documentRequest === request) {
+        documentRequest = null
+      }
+    })
+    return request
+  }
+
+  function loadIssuePage(cursor: string | null, append: boolean): Promise<void> {
+    const generation = ++issueGeneration
+    lastIssueRequest = { cursor, append }
+    loading.issues = true
+    errors.issues = null
+
+    const request = (async () => {
+      try {
+        const response = await analysisApi.getIssues(jobId, {
+          ...filters.value,
+          cursor,
+          limit: ISSUE_PAGE_LIMIT
+        })
+        if (!isCurrent(generation, issueGeneration)) {
+          return
+        }
+        applyIssuePage(response, append)
+      } catch (error) {
+        if (!isCurrent(generation, issueGeneration)) {
+          return
+        }
+        errors.issues = errorMessage(error, '无法加载问题列表。')
+      } finally {
+        if (isCurrent(generation, issueGeneration)) {
+          loading.issues = false
+        }
+      }
+    })()
+
+    issueRequest = request
+    void request.finally(() => {
+      if (issueRequest === request) {
+        issueRequest = null
+      }
+    })
+    return request
+  }
+
+  async function localizeSelectedIssue(
+    issueId: string,
+    generation: number
+  ): Promise<void> {
+    const visitedCursors = new Set<string>()
+
+    while (isLocalizationCurrent(issueId, generation)) {
+      const issue = issuesById.value[issueId]
+      if (!issue) {
         return
       }
-      applyDocumentPage(response, append)
-    } catch (error) {
-      if (!isCurrent(generation, documentGeneration)) {
+      if (blocksById.value[issue.block_id]) {
+        if (explicitlySelectedIssueId === issueId) {
+          explicitlySelectedIssueId = null
+        }
         return
       }
-      errors.document = errorMessage(error, '无法加载文档内容。')
-    } finally {
-      if (isCurrent(generation, documentGeneration)) {
-        loading.document = false
+      if (documentRequest) {
+        await documentRequest
+        continue
       }
+      if (errors.document) {
+        return
+      }
+
+      const cursor = blockCursor.value
+      if (!cursor || visitedCursors.has(cursor)) {
+        return
+      }
+
+      visitedCursors.add(cursor)
+      await loadDocumentPage(cursor, true)
+    }
+  }
+
+  function isLocalizationCurrent(issueId: string, generation: number): boolean {
+    return (
+      active &&
+      generation === localizationGeneration &&
+      explicitlySelectedIssueId === issueId &&
+      selectedIssueId.value === issueId
+    )
+  }
+
+  function startSelectedIssueLocalization(issueId: string): void {
+    const generation = ++localizationGeneration
+    void localizeSelectedIssue(issueId, generation)
+  }
+
+  function resumeSelectedIssueLocalization(): void {
+    const issueId = explicitlySelectedIssueId
+    if (issueId && selectedIssueId.value === issueId) {
+      startSelectedIssueLocalization(issueId)
     }
   }
 
@@ -196,34 +315,6 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     blockIds.value = nextIds
     blockCursor.value = response.next_cursor
     documentCheckerFailures.value = response.checker_failures
-  }
-
-  async function loadIssuePage(cursor: string | null, append: boolean): Promise<void> {
-    const generation = ++issueGeneration
-    lastIssueRequest = { cursor, append }
-    loading.issues = true
-    errors.issues = null
-
-    try {
-      const response = await analysisApi.getIssues(jobId, {
-        ...filters.value,
-        cursor,
-        limit: ISSUE_PAGE_LIMIT
-      })
-      if (!isCurrent(generation, issueGeneration)) {
-        return
-      }
-      applyIssuePage(response, append)
-    } catch (error) {
-      if (!isCurrent(generation, issueGeneration)) {
-        return
-      }
-      errors.issues = errorMessage(error, '无法加载问题列表。')
-    } finally {
-      if (isCurrent(generation, issueGeneration)) {
-        loading.issues = false
-      }
-    }
   }
 
   function applyIssuePage(response: IssuePageResponse, append: boolean): void {
@@ -255,11 +346,17 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
   function selectIssue(issueId: string): void {
     if (issuesById.value[issueId]) {
       selectedIssueId.value = issueId
+      explicitlySelectedIssueId = issueId
+      startSelectedIssueLocalization(issueId)
     }
   }
 
   function selectHighlight(issueId: string): void {
-    selectIssue(issueId)
+    if (issuesById.value[issueId]) {
+      localizationGeneration += 1
+      explicitlySelectedIssueId = null
+      selectedIssueId.value = issueId
+    }
   }
 
   async function setFilters(nextFilters: ReviewIssueFilters): Promise<void> {
@@ -268,29 +365,45 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
   }
 
   async function loadNextBlocks(): Promise<void> {
-    if (loading.document || !blockCursor.value) {
+    if (documentRequest) {
+      await documentRequest
+      return
+    }
+    if (!blockCursor.value) {
       return
     }
     await loadDocumentPage(blockCursor.value, true)
   }
 
   async function loadNextIssues(): Promise<void> {
-    if (loading.issues || !issueCursor.value) {
+    if (issueRequest) {
+      await issueRequest
+      return
+    }
+    if (!issueCursor.value) {
       return
     }
     await loadIssuePage(issueCursor.value, true)
   }
 
   function retrySummary(): Promise<void> {
-    return loadSummary()
+    return summaryRequest ?? loadSummary()
   }
 
-  function retryDocument(): Promise<void> {
-    return loadDocumentPage(lastDocumentRequest.cursor, lastDocumentRequest.append)
+  async function retryDocument(): Promise<void> {
+    if (documentRequest) {
+      await documentRequest
+      return
+    }
+
+    await loadDocumentPage(lastDocumentRequest.cursor, lastDocumentRequest.append)
+    if (!errors.document) {
+      resumeSelectedIssueLocalization()
+    }
   }
 
   function retryIssues(): Promise<void> {
-    return loadIssuePage(lastIssueRequest.cursor, lastIssueRequest.append)
+    return issueRequest ?? loadIssuePage(lastIssueRequest.cursor, lastIssueRequest.append)
   }
 
   void Promise.allSettled([
@@ -304,6 +417,7 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     summaryGeneration += 1
     documentGeneration += 1
     issueGeneration += 1
+    localizationGeneration += 1
   })
 
   return {

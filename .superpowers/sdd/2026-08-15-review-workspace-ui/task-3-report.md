@@ -55,3 +55,57 @@
 ## Concerns
 
 - None.
+
+---
+
+## Round 1/5 fix
+
+### Status
+
+- Coordinated explicit issue selection with sequential document pagination. It waits for any active page, loads only successive cursors until the selected block is found or pagination ends, and never starts bounded scanning for automatic selection.
+- Re-localizes the selected highlight when blocks arrive, scopes lookup to the component article, and suppresses lifecycle work after unmount.
+- Renders overlapping, identical, and nested issue ranges as code-point-safe text segments plus one keyboard-operable marker per issue ID, preserving document text exactly once.
+- Coalesces summary/document/issue retries while loading, retains issue cards beside append errors, and preserves generation guards for stale filter/page responses.
+
+### RED
+
+- Command: `Set-Location apps\web; npm test -- tests\ReviewWorkspace.spec.ts tests\WorkspaceView.spec.ts --reporter=dot`
+- Result: expected RED with 8 failures and 21 passes.
+- Failures covered late highlight localization, selected later-page pagination, identical/nested overlap hooks, component-scoped lookup, retained cards after append failure, retry coalescing, range-hook rendering, and partial-transition checker failures.
+
+### GREEN
+
+- Command: `Set-Location apps\web; npm test -- tests\ReviewWorkspace.spec.ts tests\WorkspaceView.spec.ts --reporter=dot`
+- Result: 2 test files passed; 29 tests passed.
+- Command: `Set-Location apps\web; npm run build`
+- Initial result: TypeScript rejected deleting a non-optional DOM prototype property in test cleanup.
+- Minimal correction: replaced the test cleanup `delete` expression with `Reflect.deleteProperty`.
+- Final result: production build passed; Vite transformed 48 modules.
+
+### Added regression coverage
+
+- Issue response before document blocks, including deferred scroll localization.
+- User-selected issue whose block requires multiple sequential document pages.
+- Identical and nested overlapping ranges with exact-once document text and independently selectable issue markers.
+- Out-of-order append/filter issue responses.
+- Issue append failure, retained cards, and retry of the same cursor.
+- Duplicate observer notifications and concurrent retry coalescing.
+- Selected-issue document completion after unmount.
+- Partial workspace transition with an actual checker failure.
+- Highlight lookup isolation across multiple mounted workspaces.
+
+### Self-review
+
+- Confirmed automatic first-issue selection does not recursively load document pages.
+- Confirmed explicit selection stops on target block, missing cursor, request error, repeated cursor, superseding selection, or unmount.
+- Confirmed observer and retry paths share active requests instead of issuing duplicate calls.
+- Confirmed stale issue append responses cannot overwrite newer filtered state.
+- Confirmed append errors do not replace already loaded issue cards.
+- Confirmed every valid issue range receives a button hook with `data-highlight-issue-id`, `aria-label`, and synchronized `aria-current`.
+- Confirmed visible text uses `Array.from` code points and overlap segmentation does not duplicate source text.
+- Confirmed scoped whitespace validation passed with CRLF-aware checking.
+- Confirmed unrelated dirty `apps/web/src/App.vue` and `apps/web/src/components/JobProgress.vue` remain untouched and will not be staged.
+
+### Concerns
+
+- None within Task 3 scope. Filter controls remain intentionally deferred to Task 4.

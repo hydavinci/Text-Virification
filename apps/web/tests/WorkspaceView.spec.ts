@@ -77,7 +77,9 @@ function createDeferred<T>() {
   return { promise, resolve, reject }
 }
 
-function createAnalysisApiMock(): AnalysisApi {
+function createAnalysisApiMock(
+  overrides: Partial<AnalysisApi> = {}
+): AnalysisApi {
   return {
     getSummary: vi.fn().mockResolvedValue({
       job_id: '6d96fe0f-f4fc-4b43-90fd-68e5bd09f21f',
@@ -116,7 +118,8 @@ function createAnalysisApiMock(): AnalysisApi {
       next_cursor: null,
       checker_failures: {}
     }),
-    putDecisions: vi.fn()
+    putDecisions: vi.fn(),
+    ...overrides
   }
 }
 
@@ -287,7 +290,29 @@ describe('WorkspaceView', () => {
       })
       return vi.fn()
     })
-    const analysisApi = createAnalysisApiMock()
+    const analysisApi = createAnalysisApiMock({
+      getSummary: vi.fn().mockResolvedValue({
+        job_id: '6d96fe0f-f4fc-4b43-90fd-68e5bd09f21f',
+        status: 'partial',
+        total_issues: 0,
+        by_category: {
+          character: 0,
+          vocabulary: 0,
+          sentence: 0,
+          format: 0,
+          discourse: 0,
+          security: 0
+        },
+        by_severity: { error: 0, warning: 0, info: 0 },
+        by_decision: { accepted: 0, ignored: 0, custom: 0, unreviewed: 0 },
+        checker_failures: {
+          security: {
+            code: 'checker_failed',
+            message: '安全检查器启动失败'
+          }
+        }
+      })
+    })
     const wrapper = mount(WorkspaceView, {
       global: {
         provide: {
@@ -305,6 +330,8 @@ describe('WorkspaceView', () => {
     expect(analysisApi.getSummary).toHaveBeenCalledWith(
       '6d96fe0f-f4fc-4b43-90fd-68e5bd09f21f'
     )
+    expect(wrapper.text()).toContain('security')
+    expect(wrapper.text()).toContain('安全检查器启动失败')
   })
 
   it('accepts files that are exactly 25 MiB', async () => {

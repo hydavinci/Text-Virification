@@ -37,14 +37,14 @@ const emit = defineEmits<{
     </div>
 
     <p
-      v-else-if="!loading && !issues.length"
+      v-if="!loading && !error && !issues.length"
       class="review-navigation__empty"
       data-testid="empty-issues"
     >
       未发现问题，可以继续阅读文档。
     </p>
 
-    <ol v-else class="issue-list">
+    <ol v-if="issues.length" class="issue-list">
       <li v-for="issue in issues" :key="issue.issue_id">
         <button
           type="button"
