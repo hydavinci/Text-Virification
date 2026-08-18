@@ -14,6 +14,7 @@ import type {
 import type { ExportCreateResponse, ExportResponse } from '../src/types/exports'
 import ReviewWorkspaceView from '../src/views/ReviewWorkspaceView.vue'
 import AppSource from '../src/App.vue?raw'
+import DocumentViewerSource from '../src/components/review/DocumentViewer.vue?raw'
 import ReviewNavigationSource from '../src/components/review/ReviewNavigation.vue?raw'
 import IssuePanelSource from '../src/components/review/IssuePanel.vue?raw'
 import ReviewWorkspaceViewSource from '../src/views/ReviewWorkspaceView.vue?raw'
@@ -192,6 +193,10 @@ function mountReviewWorkspace() {
 }
 
 describe('review workspace accessibility', () => {
+  function sourceRuleBody(source: string, selector: string) {
+    return source.match(new RegExp(`${selector}\\s*\\{([\\s\\S]*?)\\}`))?.[1] ?? ''
+  }
+
   it('keeps desktop document-centered DOM order and exposes icon-plus-text severity labels', async () => {
     const wrapper = mountReviewWorkspace()
     await flushPromises()
@@ -215,5 +220,18 @@ describe('review workspace accessibility', () => {
     expect(ReviewNavigationSource).toContain(':focus-visible')
     expect(IssuePanelSource).toContain('min-height: 44px')
     expect(IssuePanelSource).toContain(':focus-visible')
+  })
+
+  it('gives document highlight controls their own 44px touch-target contract', () => {
+    const highlightControlRule = sourceRuleBody(
+      DocumentViewerSource,
+      '\\.document-highlight-control'
+    )
+
+    expect(ReviewWorkspaceViewSource).toContain('button:not(.document-highlight-control)')
+    expect(highlightControlRule).toContain('min-width: 44px')
+    expect(highlightControlRule).toContain('min-height: 44px')
+    expect(highlightControlRule).not.toMatch(/\bwidth:\s*(?:0?\.\d+em|[0-3]?\dpx)\b/)
+    expect(highlightControlRule).not.toMatch(/\bheight:\s*(?:0?\.\d+em|[0-3]?\dpx)\b/)
   })
 })

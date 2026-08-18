@@ -163,3 +163,73 @@ Result: PASS — `{"status":"ok","service":"text-verification-api","version":"0.
 ## Concerns
 
 - `docker compose up --build -d` did not complete because external package downloads from `files.pythonhosted.org` failed with TLS handshake errors. Current source was still validated deterministically via temporary source-mounted backend containers, but the long-running Compose services remain the pre-existing images rather than a fresh rebuild from this task's source.
+
+## Fix Round 1
+
+### Files
+
+- `apps/web/src/components/review/DocumentViewer.vue`
+- `apps/web/tests/reviewAccessibility.spec.ts`
+- `apps/web/tests/WorkspaceView.spec.ts`
+- `.superpowers/sdd/2026-08-15-review-workspace-ui/task-7-report.md`
+
+### RED evidence
+
+Command:
+
+```powershell
+Set-Location C:\Work\text-verification\apps\web
+npm test -- --run tests/reviewAccessibility.spec.ts tests/ReviewWorkspace.spec.ts
+```
+
+Observed RED before the CSS change:
+
+- `review workspace accessibility > gives document highlight controls their own 44px touch-target contract`
+  - expected `.document-highlight-control` to contain `min-width: 44px`
+  - received the old compact-only rule with `width: 0.82em` and `height: 0.82em`
+
+Root cause: `ReviewWorkspaceView.vue` intentionally excludes `.document-highlight-control` from the shared 44px button rule, and `DocumentViewer.vue` still defined the control itself as an approximately 13px marker.
+
+### GREEN evidence
+
+Focused accessibility/review specs:
+
+```powershell
+Set-Location C:\Work\text-verification\apps\web
+npm test -- --run tests/reviewAccessibility.spec.ts tests/ReviewWorkspace.spec.ts
+```
+
+Result: PASS — `2` files, `45` tests passed.
+
+Full frontend suite:
+
+```powershell
+Set-Location C:\Work\text-verification\apps\web
+npm test
+```
+
+Result: PASS — `6` files, `89` tests passed.
+
+Production build:
+
+```powershell
+Set-Location C:\Work\text-verification\apps\web
+npm run build
+```
+
+Result: PASS — `vue-tsc -b && vite build` succeeded; Vite emitted `dist/index.html`, `dist/assets/index-Cq3brY7x.css`, and `dist/assets/index-DjRLCRd_.js`.
+
+### EOL outcome
+
+- Restaged `apps/web/tests/WorkspaceView.spec.ts` with CRLF to match `main` while preserving the existing Task 7 content.
+- Verified the branch-vs-`main` diff for that file became focused again:
+  - before restoration: `1049`-line diff (`591` insertions / `458` deletions)
+  - after staged CRLF restoration: `153`-line diff (`143` insertions / `10` deletions)
+  - `git diff --cached main -- apps\web\tests\WorkspaceView.spec.ts` now matches `git diff --cached --ignore-space-at-eol main -- apps\web\tests\WorkspaceView.spec.ts`
+
+### Self-review
+
+- `DocumentViewer.vue` now gives `.document-highlight-control` its own `min-width`/`min-height` `44px` hit area instead of relying on the excluded shared button rule.
+- The visible marker stays compact through a `13px` `::before` pseudo-element, so the control remains a small inline marker while the actual touch target is larger.
+- The change stayed CSS-only in the component, so button semantics, focusability, and existing click handlers were preserved.
+- The regression assertion is target-specific: it checks the exact `.document-highlight-control` source contract and confirms the generic exclusion path is compensated locally.

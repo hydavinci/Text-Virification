@@ -355,26 +355,48 @@ onBeforeUnmount(() => {
 }
 
 .document-highlight-control {
-  display: inline-grid;
-  width: 0.82em;
-  height: 0.82em;
-  margin: 0 0.12em;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  margin: -12px -14px;
   padding: 0;
-  place-items: center;
-  vertical-align: super;
+  color: inherit;
+  font: inherit;
+  line-height: inherit;
+  text-align: inherit;
+  vertical-align: middle;
+  background: transparent;
+  border: 0;
+  border-radius: 999px;
+  box-sizing: border-box;
+  cursor: pointer;
+}
+
+.document-highlight-control::before {
+  content: "";
+  flex: none;
+  inline-size: 13px;
+  block-size: 13px;
+  margin-block-start: -0.55em;
   background: #d99425;
   border: 2px solid #fff;
   border-radius: 50%;
   box-shadow: 0 0 0 1px #bd7d18;
-  cursor: pointer;
 }
 
-.document-highlight-control:hover,
+.document-highlight-control:hover::before,
+.document-highlight-control:focus-visible::before,
+.document-highlight-control--active::before {
+  background: #8054d6;
+}
+
 .document-highlight-control:focus-visible,
 .document-highlight-control--active {
-  background: #8054d6;
   outline: 2px solid #bd7d18;
-  outline-offset: 1px;
+  outline-offset: -10px;
 }
 
 .document-viewer__error {
