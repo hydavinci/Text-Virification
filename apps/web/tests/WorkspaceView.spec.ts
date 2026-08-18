@@ -2,6 +2,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { describe, expect, it, vi } from 'vitest'
 
 import { analysisApiKey, type AnalysisApi } from '../src/api/analysis'
+import { exportsApiKey, type ExportsApi } from '../src/api/exports'
 import { jobsApiKey, type JobsApi } from '../src/api/jobs'
 import UploadWorkspace from '../src/components/UploadWorkspace.vue'
 import { type JobCreateOptions } from '../src/types/jobs'
@@ -119,6 +120,17 @@ function createAnalysisApiMock(
       checker_failures: {}
     }),
     putDecisions: vi.fn(),
+    ...overrides
+  }
+}
+
+function createExportsApiMock(overrides: Partial<ExportsApi> = {}): ExportsApi {
+  return {
+    create: vi.fn(),
+    get: vi.fn(),
+    downloadUrl: vi
+      .fn()
+      .mockReturnValue('/api/v1/jobs/6d96fe0f-f4fc-4b43-90fd-68e5bd09f21f/exports/export-1/download'),
     ...overrides
   }
 }
@@ -256,7 +268,8 @@ describe('WorkspaceView', () => {
       global: {
         provide: {
           [jobsApiKey as symbol]: { createJob, subscribe },
-          [analysisApiKey as symbol]: analysisApi
+          [analysisApiKey as symbol]: analysisApi,
+          [exportsApiKey as symbol]: createExportsApiMock()
         }
       }
     })
@@ -317,7 +330,8 @@ describe('WorkspaceView', () => {
       global: {
         provide: {
           [jobsApiKey as symbol]: { createJob, subscribe },
-          [analysisApiKey as symbol]: analysisApi
+          [analysisApiKey as symbol]: analysisApi,
+          [exportsApiKey as symbol]: createExportsApiMock()
         }
       }
     })
@@ -445,7 +459,8 @@ describe('WorkspaceView', () => {
       global: {
         provide: {
           [jobsApiKey as symbol]: { createJob, subscribe },
-          [analysisApiKey as symbol]: analysisApi
+          [analysisApiKey as symbol]: analysisApi,
+          [exportsApiKey as symbol]: createExportsApiMock()
         }
       }
     })

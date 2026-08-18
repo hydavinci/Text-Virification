@@ -123,6 +123,7 @@ function requestAcceptVisible(): void {
 }
 
 .batch-actions__buttons button {
+  min-height: 44px;
   padding: 9px 11px;
   color: #4256c9;
   font-weight: 700;

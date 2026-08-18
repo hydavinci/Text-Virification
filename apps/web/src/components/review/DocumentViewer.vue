@@ -391,6 +391,7 @@ onBeforeUnmount(() => {
 }
 
 .document-viewer__error button {
+  min-height: 44px;
   padding: 7px 10px;
   color: #4256c9;
   font-weight: 700;

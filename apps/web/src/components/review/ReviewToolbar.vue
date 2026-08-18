@@ -160,6 +160,7 @@ h1 {
 }
 
 button {
+  min-height: 44px;
   padding: 7px 11px;
   color: #4256c9;
   font-weight: 700;

@@ -1,6 +1,6 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { defineComponent } from 'vue'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { analysisApiKey, type AnalysisApi } from '../src/api/analysis'
 import { exportsApiKey, type ExportsApi } from '../src/api/exports'
@@ -36,6 +36,39 @@ function createDeferred<T>() {
   })
 
   return { promise, resolve, reject }
+}
+
+function mockViewportWidth(width: number) {
+  const originalMatchMedia = window.matchMedia
+
+  Object.defineProperty(window, 'innerWidth', {
+    configurable: true,
+    value: width
+  })
+
+  window.matchMedia = vi.fn().mockImplementation((query: string): MediaQueryList => {
+    const matches =
+      query === '(max-width: 900px)'
+        ? width <= 900
+        : query === '(prefers-reduced-motion: reduce)'
+          ? false
+          : false
+
+    return {
+      matches,
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn()
+    } as unknown as MediaQueryList
+  })
+
+  return () => {
+    window.matchMedia = originalMatchMedia
+  }
 }
 
 function buildBlock(overrides: Partial<DocumentBlock> = {}): DocumentBlock {
@@ -226,7 +259,8 @@ function mountReviewWorkspaceWithConfig({
   analysisApi = createAnalysisApiMock(),
   observerFactory,
   exportsApi = createExportsApiMock(),
-  props = {}
+  props = {},
+  attachTo
 }: {
   analysisApi?: AnalysisApi
   observerFactory?: ReviewIntersectionObserverFactory
@@ -236,6 +270,7 @@ function mountReviewWorkspaceWithConfig({
     sourceName: string
     fileType: FileType
   }>
+  attachTo?: HTMLElement
 } = {}) {
   const provide: Record<symbol, unknown> = {
     [analysisApiKey as symbol]: analysisApi,
@@ -253,7 +288,8 @@ function mountReviewWorkspaceWithConfig({
       fileType: 'txt',
       ...props
     },
-    global: { provide }
+    global: { provide },
+    attachTo
   })
 }
 
@@ -310,6 +346,10 @@ function mountReviewWorkspaceState(analysisApi: AnalysisApi) {
     }
   })
 }
+
+afterEach(() => {
+  vi.restoreAllMocks()
+})
 
 describe('ReviewWorkspaceView', () => {
   it('does not offer modified document export for PDF', async () => {
@@ -629,6 +669,78 @@ describe('ReviewWorkspaceView', () => {
     expect(wrapper.get('[data-issue-id="issue-1"]').attributes('aria-current')).toBe('true')
     expect(wrapper.get('[data-block-id="block-1"]').classes()).toContain(
       'document-block--active'
+    )
+  })
+
+  it('uses 文档/问题 tabs on narrow screens and preserves focus after switching', async () => {
+    const restoreViewport = mockViewportWidth(480)
+
+    try {
+      const wrapper = mountReviewWorkspaceWithConfig({ attachTo: document.body })
+      await flushPromises()
+
+      const issueTab = wrapper.get('[role="tab"][aria-controls="review-issues-panel"]')
+
+      expect(wrapper.get('[role="tablist"]').attributes('aria-label')).toBe('工作台视图')
+      expect(issueTab.attributes('aria-selected')).toBe('false')
+      expect(wrapper.get('[role="tabpanel"][aria-label="文档"]').attributes('aria-hidden')).toBe(
+        'false'
+      )
+      expect(wrapper.get('[role="tabpanel"][aria-label="问题"]').attributes('aria-hidden')).toBe(
+        'true'
+      )
+
+      await issueTab.trigger('click')
+      await flushPromises()
+
+      expect(issueTab.attributes('aria-selected')).toBe('true')
+      expect(wrapper.get('[role="tabpanel"][aria-label="问题"]').attributes('aria-hidden')).toBe(
+        'false'
+      )
+      expect(wrapper.get('[role="tabpanel"][aria-label="文档"]').attributes('aria-hidden')).toBe(
+        'true'
+      )
+      expect(document.activeElement).toBe(issueTab.element)
+      expect(wrapper.get('nav[aria-label="问题筛选"]').isVisible()).toBe(true)
+      expect(wrapper.get('aside[aria-label="问题详情"]').isVisible()).toBe(true)
+      wrapper.unmount()
+    } finally {
+      restoreViewport()
+    }
+  })
+
+  it('moves between issues with j/k shortcuts and keeps selection synchronized', async () => {
+    const wrapper = mountReviewWorkspace()
+    await flushPromises()
+
+    await wrapper.get('[aria-label="文档审阅工作台"]').trigger('keydown', { key: 'j' })
+
+    expect(wrapper.get('[data-issue-id="issue-2"]').attributes('aria-current')).toBe('true')
+    expect(wrapper.get('[data-block-id="block-2"]').classes()).toContain(
+      'document-block--active'
+    )
+    expect(wrapper.get('[data-highlight-issue-id="issue-2"]').attributes('aria-current')).toBe(
+      'true'
+    )
+
+    await wrapper.get('[aria-label="文档审阅工作台"]').trigger('keydown', { key: 'k' })
+
+    expect(wrapper.get('[data-issue-id="issue-1"]').attributes('aria-current')).toBe('true')
+    expect(wrapper.get('[data-highlight-issue-id="issue-1"]').attributes('aria-current')).toBe(
+      'true'
+    )
+  })
+
+  it('does not trigger j/k issue navigation while typing in editable controls', async () => {
+    const wrapper = mountReviewWorkspace()
+    await flushPromises()
+
+    await wrapper.get('[aria-label="搜索问题"]').trigger('keydown', { key: 'j' })
+    await wrapper.get('[aria-label="自定义替换"]').trigger('keydown', { key: 'k' })
+
+    expect(wrapper.get('[data-issue-id="issue-1"]').attributes('aria-current')).toBe('true')
+    expect(wrapper.get('[data-highlight-issue-id="issue-1"]').attributes('aria-current')).toBe(
+      'true'
     )
   })
 

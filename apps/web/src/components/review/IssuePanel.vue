@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue'
 
 import type { Issue } from '../../types/analysis'
 import type { DecisionAction } from '../../types/review'
+import { describeSeverity } from './severity'
 
 const props = defineProps<{
   issue: Issue | null
@@ -28,6 +29,14 @@ const decisionLabel = computed(() => {
     default:
       return '未处理'
   }
+})
+const severityLabel = computed(() => {
+  if (!props.issue) {
+    return null
+  }
+
+  const presentation = describeSeverity(props.issue.severity)
+  return `${presentation.icon} ${presentation.text}`
 })
 
 watch(
@@ -76,7 +85,12 @@ function validateCustomReplacement(replacement: string): string | null {
           <p>{{ issue.type }}</p>
           <h2>{{ issue.message }}</h2>
         </div>
-        <span>{{ issue.severity }}</span>
+        <span
+          class="issue-panel__severity"
+          :class="`issue-panel__severity--${issue.severity}`"
+        >
+          {{ severityLabel }}
+        </span>
       </div>
 
       <dl>
@@ -198,12 +212,25 @@ h2 {
 
 .issue-panel__heading > span {
   padding: 5px 8px;
-  color: #9a4a21;
   font-size: 0.68rem;
   font-weight: 800;
-  background: #fff0e6;
   border-radius: 999px;
   text-transform: uppercase;
+}
+
+.issue-panel__severity--error {
+  color: #b42318;
+  background: #fee4e2;
+}
+
+.issue-panel__severity--warning {
+  color: #9a4a21;
+  background: #fff0e6;
+}
+
+.issue-panel__severity--info {
+  color: #175cd3;
+  background: #d1e9ff;
 }
 
 dl {
@@ -284,6 +311,7 @@ dd {
 }
 
 .issue-panel__decisions button {
+  min-height: 44px;
   padding: 9px 10px;
   color: #4256c9;
   font-weight: 700;
@@ -308,6 +336,7 @@ dd {
 
 .issue-panel__decisions textarea {
   width: 100%;
+  min-height: 44px;
   padding: 9px;
   color: #30394d;
   font: inherit;
@@ -319,6 +348,12 @@ dd {
 
 .issue-panel__custom-button {
   justify-self: start;
+}
+
+.issue-panel__decisions button:focus-visible,
+.issue-panel__decisions textarea:focus-visible {
+  outline: 3px solid #8ea2ff;
+  outline-offset: 2px;
 }
 
 .issue-panel__validation-error,

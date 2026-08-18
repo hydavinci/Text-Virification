@@ -504,7 +504,7 @@ onBeforeUnmount(() => {
 .export-panel__download,
 .export-panel__error button,
 .export-panel__warnings button {
-  min-height: 40px;
+  min-height: 44px;
   border-radius: 10px;
 }
 

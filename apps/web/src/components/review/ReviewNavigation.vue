@@ -8,6 +8,7 @@ import type {
   IssueSeverity
 } from '../../types/review'
 import type { ReviewIssueFilters } from '../../composables/useReviewWorkspace'
+import { describeSeverity } from './severity'
 
 const props = defineProps<{
   summary: AnalysisSummaryResponse | null
@@ -83,6 +84,11 @@ onBeforeUnmount(() => {
     clearTimeout(searchTimer)
   }
 })
+
+function severityLabel(severityLevel: IssueSeverity): string {
+  const presentation = describeSeverity(severityLevel)
+  return `${presentation.icon} ${presentation.text}`
+}
 </script>
 
 <template>
@@ -182,7 +188,12 @@ onBeforeUnmount(() => {
         >
           <span class="issue-card__meta">
             <span>{{ issue.type }}</span>
-            <span>{{ issue.severity }}</span>
+            <span
+              class="issue-card__severity"
+              :class="`issue-card__severity--${issue.severity}`"
+            >
+              {{ severityLabel(issue.severity) }}
+            </span>
           </span>
           <strong>{{ issue.original }}</strong>
           <span class="issue-card__status">{{ issueStatusById[issue.issue_id] ?? '未处理' }}</span>
@@ -249,6 +260,7 @@ onBeforeUnmount(() => {
   width: 100%;
   min-width: 0;
   padding: 8px 9px;
+  min-height: 44px;
   color: #30394d;
   font-size: 0.78rem;
   background: #f8f9fc;
@@ -283,6 +295,7 @@ onBeforeUnmount(() => {
 }
 
 .review-navigation__error button {
+  min-height: 44px;
   padding: 7px 10px;
   color: #4256c9;
   font-weight: 700;
@@ -303,6 +316,7 @@ onBeforeUnmount(() => {
 .issue-card {
   display: grid;
   width: 100%;
+  min-height: 44px;
   gap: 7px;
   padding: 13px;
   color: #596276;
@@ -316,7 +330,8 @@ onBeforeUnmount(() => {
 .issue-card:hover,
 .issue-card:focus-visible {
   border-color: #aeb9f5;
-  outline: none;
+  outline: 3px solid #8ea2ff;
+  outline-offset: 2px;
 }
 
 .issue-card--active {
@@ -332,6 +347,24 @@ onBeforeUnmount(() => {
   font-size: 0.68rem;
   font-weight: 800;
   text-transform: uppercase;
+}
+
+.issue-card__severity {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.issue-card__severity--error {
+  color: #b42318;
+}
+
+.issue-card__severity--warning {
+  color: #b54708;
+}
+
+.issue-card__severity--info {
+  color: #155eef;
 }
 
 .issue-card strong {

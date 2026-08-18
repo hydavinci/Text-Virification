@@ -127,6 +127,7 @@ const emit = defineEmits<{
 .find-replace__fields input {
   width: 100%;
   min-width: 0;
+  min-height: 44px;
   padding: 8px 9px;
   color: #30394d;
   font-size: 0.78rem;
@@ -154,6 +155,7 @@ const emit = defineEmits<{
 }
 
 .find-replace__actions button {
+  min-height: 44px;
   padding: 9px 11px;
   color: #4256c9;
   font-weight: 700;
