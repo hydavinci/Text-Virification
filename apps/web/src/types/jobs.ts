@@ -34,8 +34,8 @@ export interface JobRead {
   progress: number
   error_code: string | null
   error_message: string | null
-  scenario?: CheckScenario
-  enabled_categories?: CheckCategory[]
+  scenario: CheckScenario
+  enabled_categories: CheckCategory[]
   created_at: string
   expires_at: string
 }

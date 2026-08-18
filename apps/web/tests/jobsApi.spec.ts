@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { createJobsApi } from '../src/api/jobs'
 import { ApiError } from '../src/types/api'
-import { JOB_STATUS_VALUES } from '../src/types/jobs'
+import { JOB_STATUS_VALUES, type JobRead } from '../src/types/jobs'
 
 class FakeEventSource {
   public onerror: ((event: Event) => void) | null = null
@@ -77,6 +77,24 @@ class FakeEventSource {
   }
 }
 
+function buildJobRead(overrides: Partial<JobRead> = {}): JobRead {
+  return {
+    job_id: '6d96fe0f-f4fc-4b43-90fd-68e5bd09f21f',
+    source_name: 'sample.txt',
+    file_type: 'txt',
+    size_bytes: 6,
+    status: 'queued',
+    progress: 0,
+    error_code: null,
+    error_message: null,
+    scenario: 'general',
+    enabled_categories: ['character', 'vocabulary', 'sentence', 'format', 'discourse', 'security'],
+    created_at: '2026-08-14T00:00:00Z',
+    expires_at: '2026-08-15T00:00:00Z',
+    ...overrides
+  }
+}
+
 describe('createJobsApi', () => {
   it('calls the browser fetch function with the global receiver', async () => {
     const browserFetch = vi.fn(function (
@@ -89,21 +107,10 @@ describe('createJobsApi', () => {
       }
 
       return Promise.resolve(
-        new Response(
-          JSON.stringify({
-            job_id: '6d96fe0f-f4fc-4b43-90fd-68e5bd09f21f',
-            source_name: 'sample.txt',
-            file_type: 'txt',
-            size_bytes: 6,
-            status: 'queued',
-            progress: 0,
-            error_code: null,
-            error_message: null,
-            created_at: '2026-08-14T00:00:00Z',
-            expires_at: '2026-08-15T00:00:00Z'
-          }),
-          { status: 201, headers: { 'Content-Type': 'application/json' } }
-        )
+        new Response(JSON.stringify(buildJobRead()), {
+          status: 201,
+          headers: { 'Content-Type': 'application/json' }
+        })
       )
     })
     vi.stubGlobal('fetch', browserFetch)
@@ -124,18 +131,7 @@ describe('createJobsApi', () => {
   it('posts uploads to the relative API base and returns the job payload', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({
-        job_id: '6d96fe0f-f4fc-4b43-90fd-68e5bd09f21f',
-        source_name: 'sample.txt',
-        file_type: 'txt',
-        size_bytes: 6,
-        status: 'queued',
-        progress: 0,
-        error_code: null,
-        error_message: null,
-        created_at: '2026-08-14T00:00:00Z',
-        expires_at: '2026-08-15T00:00:00Z'
-      })
+      json: async () => buildJobRead()
     })
     const api = createJobsApi({
       fetch: fetchMock,
@@ -152,20 +148,11 @@ describe('createJobsApi', () => {
   it('posts scenario and enabled categories with the upload', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({
-        job_id: '6d96fe0f-f4fc-4b43-90fd-68e5bd09f21f',
-        source_name: 'sample.txt',
-        file_type: 'txt',
-        size_bytes: 6,
-        status: 'queued',
-        progress: 0,
-        error_code: null,
-        error_message: null,
-        created_at: '2026-08-14T00:00:00Z',
-        expires_at: '2026-08-15T00:00:00Z',
+      json: async () =>
+        buildJobRead({
         scenario: 'legal',
         enabled_categories: ['character', 'security']
-      })
+        })
     })
     const api = createJobsApi({
       fetch: fetchMock,

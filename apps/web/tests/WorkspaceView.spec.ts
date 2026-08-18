@@ -5,7 +5,9 @@ import { jobsApiKey, type JobsApi } from '../src/api/jobs'
 import UploadWorkspace from '../src/components/UploadWorkspace.vue'
 import WorkspaceView from '../src/views/WorkspaceView.vue'
 
-function buildJobRead(overrides: Partial<Awaited<ReturnType<JobsApi['createJob']>>> = {}) {
+function buildJobRead(
+  overrides: Partial<Awaited<ReturnType<JobsApi['createJob']>>> = {}
+): Awaited<ReturnType<JobsApi['createJob']>> {
   return {
     job_id: '6d96fe0f-f4fc-4b43-90fd-68e5bd09f21f',
     source_name: 'sample.txt',
@@ -15,6 +17,8 @@ function buildJobRead(overrides: Partial<Awaited<ReturnType<JobsApi['createJob']
     progress: 0,
     error_code: null,
     error_message: null,
+    scenario: 'general' as const,
+    enabled_categories: ['character', 'vocabulary', 'sentence', 'format', 'discourse', 'security'],
     created_at: '2026-08-14T00:00:00Z',
     expires_at: '2026-08-15T00:00:00Z',
     ...overrides

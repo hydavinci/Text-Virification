@@ -55,7 +55,20 @@ function isStructuredApiErrorResponse(value: unknown): value is StructuredApiErr
     return false
   }
 
-  return value.detail.warnings === undefined || Array.isArray(value.detail.warnings)
+  return (
+    value.detail.warnings === undefined ||
+    (Array.isArray(value.detail.warnings) && value.detail.warnings.every(isStructuredWarning))
+  )
+}
+
+function isStructuredWarning(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value.code === 'string' &&
+    typeof value.message === 'string' &&
+    typeof value.issue_id === 'string' &&
+    typeof value.block_id === 'string'
+  )
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

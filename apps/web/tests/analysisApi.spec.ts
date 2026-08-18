@@ -1,13 +1,42 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import { createAnalysisApi } from '../src/api/analysis'
-import type { DecisionCommand } from '../src/types/analysis'
+import type { DecisionCommand, IssueDecision } from '../src/types/analysis'
 
-function buildDecisionCommand(overrides: Partial<DecisionCommand> = {}): DecisionCommand {
+type AcceptedDecisionCommand = Extract<DecisionCommand, { action: 'accepted' }>
+type IgnoredDecisionCommand = Extract<DecisionCommand, { action: 'ignored' }>
+type CustomDecisionCommand = Extract<DecisionCommand, { action: 'custom' }>
+
+function buildAcceptedDecisionCommand(
+  overrides: Partial<Omit<AcceptedDecisionCommand, 'action'>> = {}
+): AcceptedDecisionCommand {
   return {
     issue_id: '11111111-1111-1111-1111-111111111111',
     issue_version: 3,
     action: 'accepted',
+    ...overrides
+  }
+}
+
+function buildIgnoredDecisionCommand(
+  overrides: Partial<Omit<IgnoredDecisionCommand, 'action'>> = {}
+): IgnoredDecisionCommand {
+  return {
+    issue_id: '11111111-1111-1111-1111-111111111111',
+    issue_version: 3,
+    action: 'ignored',
+    ...overrides
+  }
+}
+
+function buildCustomDecisionCommand(
+  overrides: Partial<Omit<CustomDecisionCommand, 'action'>> = {}
+): CustomDecisionCommand {
+  return {
+    issue_id: '11111111-1111-1111-1111-111111111111',
+    issue_version: 3,
+    action: 'custom',
+    replacement: '替换建议',
     ...overrides
   }
 }
@@ -111,16 +140,21 @@ describe('createAnalysisApi', () => {
   })
 
   it('returns every decision outcome', async () => {
-    const acceptedDecision = buildDecisionCommand()
-    const staleDecision = buildDecisionCommand({
+    const acceptedDecision = buildAcceptedDecisionCommand()
+    const staleDecision = buildCustomDecisionCommand({
       issue_id: '22222222-2222-2222-2222-222222222222',
-      action: 'custom',
       replacement: '替换建议'
     })
-    const missingDecision = buildDecisionCommand({
-      issue_id: '33333333-3333-3333-3333-333333333333',
-      action: 'ignored'
+    const missingDecision = buildIgnoredDecisionCommand({
+      issue_id: '33333333-3333-3333-3333-333333333333'
     })
+    const appliedDecision = {
+      issue_id: acceptedDecision.issue_id,
+      issue_version: acceptedDecision.issue_version,
+      action: acceptedDecision.action,
+      replacement: null,
+      updated_at: '2026-08-15T12:00:00Z'
+    } satisfies IssueDecision
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
@@ -129,13 +163,7 @@ describe('createAnalysisApi', () => {
             issue_id: acceptedDecision.issue_id,
             status: 'applied',
             code: null,
-            decision: {
-              issue_id: acceptedDecision.issue_id,
-              issue_version: acceptedDecision.issue_version,
-              action: acceptedDecision.action,
-              replacement: null,
-              updated_at: '2026-08-15T12:00:00Z'
-            }
+            decision: appliedDecision
           },
           {
             issue_id: staleDecision.issue_id,
@@ -175,7 +203,7 @@ describe('createAnalysisApi', () => {
   it('rejects decision batches larger than 500 items', async () => {
     const fetchMock = vi.fn()
     const decisions = Array.from({ length: 501 }, (_, index) =>
-      buildDecisionCommand({
+      buildAcceptedDecisionCommand({
         issue_id: `00000000-0000-0000-0000-${String(index).padStart(12, '0')}`
       })
     )

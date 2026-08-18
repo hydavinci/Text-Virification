@@ -87,6 +87,49 @@ describe('createExportsApi', () => {
     })
   })
 
+  it('falls back when confirmation warnings are malformed', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 409,
+      json: async () => ({
+        detail: {
+          code: 'export_confirmation_required',
+          message: '检测到无法自动应用的 DOCX 修改，请确认警告后重试。',
+          warnings: [
+            {
+              code: 'cannot_apply_run_split',
+              message: '该段落跨多个样式片段，暂不支持自动替换。',
+              issue_id: 123,
+              block_id: 'b-1'
+            }
+          ]
+        }
+      })
+    })
+
+    const error = await createExportsApi({ fetch: fetchMock })
+      .create('job-1', {
+        type: 'modified_document',
+        confirm_warnings: false
+      })
+      .then(
+        () => {
+          throw new Error('Expected export confirmation request to reject.')
+        },
+        (reason) => reason as ApiError
+      )
+
+    expect(error).toBeInstanceOf(ApiError)
+    expect(error).toMatchObject({
+      status: 409,
+      detail: {
+        code: 'request_failed',
+        message: 'Request failed with status 409.'
+      }
+    })
+    expect(error.detail.warnings).toBeUndefined()
+  })
+
   it('gets export status', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,

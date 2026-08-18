@@ -2,7 +2,6 @@ import type { JobStatus } from './jobs'
 import type {
   CheckCategory,
   CheckerFailure,
-  DecisionAction,
   DecisionOutcomeStatus,
   FileType,
   IssueDecisionState,
@@ -26,27 +25,64 @@ export interface IssuesQuery {
   limit?: number
 }
 
-export interface DecisionCommand {
+interface DecisionCommandFields {
   issue_id: string
   issue_version: number
-  action: DecisionAction
-  replacement?: string | null
 }
 
-export interface IssueDecisionSummary {
+interface IssueDecisionSummaryFields {
   issue_version: number
-  action: DecisionAction
-  replacement: string | null
   updated_at: string
 }
 
-export interface IssueDecision {
+interface IssueDecisionFields extends IssueDecisionSummaryFields {
   issue_id: string
-  issue_version: number
-  action: DecisionAction
-  replacement: string | null
-  updated_at: string
 }
+
+type AcceptedRequestedDecision<TFields> = TFields & {
+  action: 'accepted'
+  replacement?: null
+}
+
+type IgnoredRequestedDecision<TFields> = TFields & {
+  action: 'ignored'
+  replacement?: null
+}
+
+type CustomRequestedDecision<TFields> = TFields & {
+  action: 'custom'
+  replacement: string
+}
+
+type AcceptedPersistedDecision<TFields> = TFields & {
+  action: 'accepted'
+  replacement: null
+}
+
+type IgnoredPersistedDecision<TFields> = TFields & {
+  action: 'ignored'
+  replacement: null
+}
+
+type CustomPersistedDecision<TFields> = TFields & {
+  action: 'custom'
+  replacement: string
+}
+
+export type DecisionCommand =
+  | AcceptedRequestedDecision<DecisionCommandFields>
+  | IgnoredRequestedDecision<DecisionCommandFields>
+  | CustomRequestedDecision<DecisionCommandFields>
+
+export type IssueDecisionSummary =
+  | AcceptedPersistedDecision<IssueDecisionSummaryFields>
+  | IgnoredPersistedDecision<IssueDecisionSummaryFields>
+  | CustomPersistedDecision<IssueDecisionSummaryFields>
+
+export type IssueDecision =
+  | AcceptedPersistedDecision<IssueDecisionFields>
+  | IgnoredPersistedDecision<IssueDecisionFields>
+  | CustomPersistedDecision<IssueDecisionFields>
 
 export interface DocumentBlock {
   block_id: string
