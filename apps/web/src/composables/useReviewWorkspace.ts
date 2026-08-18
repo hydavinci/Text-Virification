@@ -701,6 +701,13 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
       if (outcome.status === 'applied') {
         authoritativeDecisions.set(command.issue_id, outcome.decision)
         setIssueDecision(command.issue_id, outcome.decision)
+        await Promise.all([
+          reloadAuthoritativeIssues({
+            issueId: command.issue_id,
+            generation
+          }),
+          loadSummary()
+        ])
         return
       }
 
@@ -796,6 +803,11 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
           throw new Error('保存处理结果失败：服务器未返回对应结果。')
         }
 
+        authoritativeReloadGuards.push({
+          issueId: command.issue_id,
+          generation
+        })
+
         if (outcome.status === 'applied') {
           authoritativeDecisions.set(command.issue_id, outcome.decision)
           setIssueDecision(command.issue_id, outcome.decision)
@@ -807,10 +819,6 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
           command.issue_id,
           authoritativeDecisions.get(command.issue_id) ?? null
         )
-        authoritativeReloadGuards.push({
-          issueId: command.issue_id,
-          generation
-        })
         needsReviewCount += 1
       }
 
@@ -1131,7 +1139,7 @@ function findDocumentMatches(
 }
 
 function isHighRiskSecurityIssue(issue: Issue): boolean {
-  return issue.type === 'security' && issue.severity === 'error'
+  return issue.layer === 'security' && issue.severity === 'error'
 }
 
 function decisionStatusLabel(decision: IssueDecisionSummary | null): string {

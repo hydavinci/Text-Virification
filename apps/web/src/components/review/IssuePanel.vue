@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue'
 
 import type { Issue } from '../../types/analysis'
 import type { DecisionAction } from '../../types/review'
+import { categoryLabel, issueTypeLabel } from './presentation'
 import { describeSeverity } from './severity'
 
 const props = defineProps<{
@@ -82,7 +83,7 @@ function validateCustomReplacement(replacement: string): string | null {
     <template v-if="issue">
       <div class="issue-panel__heading">
         <div>
-          <p>{{ issue.type }}</p>
+          <p class="issue-panel__type">{{ issueTypeLabel(issue.type) }}</p>
           <h2>{{ issue.message }}</h2>
         </div>
         <span
@@ -103,8 +104,8 @@ function validateCustomReplacement(replacement: string): string | null {
           <dd>{{ issue.suggestion ?? '暂无替换建议' }}</dd>
         </div>
         <div>
-          <dt>规则</dt>
-          <dd>{{ issue.rule_id }}</dd>
+          <dt>检查类别</dt>
+          <dd>{{ categoryLabel(issue.layer) }}</dd>
         </div>
         <div>
           <dt>上下文</dt>

@@ -75,6 +75,11 @@ watch(
 )
 
 watch(selectedType, () => {
+  stopPolling()
+  clearExpiryTimer()
+  currentExport.value = null
+  dispatchStatus.value = null
+  requestError.value = null
   confirmationMessage.value = null
   confirmationWarnings.value = []
 })

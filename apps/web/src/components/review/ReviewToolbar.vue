@@ -9,6 +9,7 @@ import type {
   CheckerFailureMap
 } from '../../types/analysis'
 import type { FileType } from '../../types/review'
+import { categoryLabel } from './presentation'
 
 const props = defineProps<{
   jobId: string
@@ -103,7 +104,7 @@ const failures = computed(() =>
     <strong>部分检查未完成</strong>
     <ul>
       <li v-for="{ category, failure } in failures" :key="category">
-        <code>{{ category }}</code>
+        <span class="checker-failures__category">{{ categoryLabel(category) }}</span>
         <span>{{ failure.message }}</span>
       </li>
     </ul>
@@ -209,7 +210,7 @@ button {
   font-size: 0.8rem;
 }
 
-.checker-failures code {
+.checker-failures__category {
   font-weight: 800;
 }
 

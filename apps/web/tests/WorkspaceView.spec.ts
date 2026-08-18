@@ -344,7 +344,7 @@ describe('WorkspaceView', () => {
     expect(analysisApi.getSummary).toHaveBeenCalledWith(
       '6d96fe0f-f4fc-4b43-90fd-68e5bd09f21f'
     )
-    expect(wrapper.text()).toContain('security')
+    expect(wrapper.get('.checker-failures__category').text()).toBe('安全')
     expect(wrapper.text()).toContain('安全检查器启动失败')
   })
 

@@ -324,8 +324,10 @@ const ReviewWorkspaceStateHarness = defineComponent({
       :loading="loading.issues"
       :error="errors.issues"
       :filters="filters"
+      :next-cursor="issueCursor"
       @select="selectIssue"
       @retry="retryIssues"
+      @load-next="loadNextIssues"
       @filter-change="setFilters"
     />
     <button type="button" data-testid="load-next-issues" @click="loadNextIssues">
@@ -476,6 +478,47 @@ describe('ReviewWorkspaceView', () => {
         '导出文件已过期，请重新创建。'
       )
       expect(wrapper.get('button[name="retry-export"]').text()).toContain('重新导出')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('clears a completed export when the selected format changes', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-18T00:00:00Z'))
+
+    try {
+      const create = vi.fn().mockResolvedValue(
+        buildCreatedExport({
+          export_id: 'export-1',
+          export_type: 'html_report',
+          status: 'completed',
+          file_name: 'report.html',
+          expires_at: '2026-08-18T00:00:02Z'
+        })
+      )
+      const wrapper = mountReviewWorkspaceWithConfig({
+        exportsApi: createExportsApiMock({ create })
+      })
+      await flushPromises()
+
+      await wrapper.get('select[name="export-type"]').setValue('html_report')
+      await wrapper.get('button[name="create-export"]').trigger('click')
+      await flushPromises()
+
+      expect(wrapper.get('[data-testid="export-status"]').text()).toContain('已生成')
+      expect(wrapper.find('[data-testid="export-download-link"]').exists()).toBe(true)
+
+      await wrapper.get('select[name="export-type"]').setValue('pdf_report')
+      await flushPromises()
+
+      expect(wrapper.find('[data-testid="export-status"]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="export-download-link"]').exists()).toBe(false)
+
+      await vi.advanceTimersByTimeAsync(2000)
+      await flushPromises()
+
+      expect(wrapper.find('[data-testid="export-error"]').exists()).toBe(false)
     } finally {
       vi.useRealTimers()
     }
@@ -670,6 +713,118 @@ describe('ReviewWorkspaceView', () => {
     expect(wrapper.get('[data-block-id="block-1"]').classes()).toContain(
       'document-block--active'
     )
+  })
+
+  it('renders authoritative category, status, and footer statistics', async () => {
+    const wrapper = mountReviewWorkspace(
+      createAnalysisApiMock({
+        getSummary: vi.fn().mockResolvedValue(
+          buildSummary({
+            total_issues: 21,
+            by_category: {
+              character: 1,
+              vocabulary: 2,
+              sentence: 3,
+              format: 4,
+              discourse: 5,
+              security: 6
+            },
+            by_severity: { error: 7, warning: 8, info: 6 },
+            by_decision: { accepted: 2, ignored: 3, custom: 4, unreviewed: 12 }
+          })
+        )
+      })
+    )
+    await flushPromises()
+
+    const categoryOverview = wrapper.get('dl[aria-label="问题类别统计"]')
+    expect(categoryOverview.get('[data-summary-category="character"]').text()).toContain(
+      '文字'
+    )
+    expect(categoryOverview.get('[data-summary-category="character"]').text()).toContain(
+      '1'
+    )
+    expect(categoryOverview.get('[data-summary-category="security"]').text()).toContain(
+      '安全'
+    )
+    expect(categoryOverview.get('[data-summary-category="security"]').text()).toContain(
+      '6'
+    )
+
+    const decisionOverview = wrapper.get('dl[aria-label="问题处理状态统计"]')
+    expect(decisionOverview.get('[data-summary-decision="accepted"]').text()).toContain(
+      '已接受'
+    )
+    expect(decisionOverview.get('[data-summary-decision="accepted"]').text()).toContain(
+      '2'
+    )
+    expect(decisionOverview.get('[data-summary-decision="unreviewed"]').text()).toContain(
+      '未处理'
+    )
+    expect(decisionOverview.get('[data-summary-decision="unreviewed"]').text()).toContain(
+      '12'
+    )
+
+    const footer = wrapper.get('footer[aria-label="审阅统计"]')
+    expect(footer.get('[data-review-counter="processed"]').text()).toContain('9')
+    expect(footer.get('[data-review-counter="unprocessed"]').text()).toContain('12')
+    expect(footer.get('[data-review-counter="high-risk"]').text()).toContain('7')
+  })
+
+  it('presents API issue types and checker categories with Chinese labels', async () => {
+    const wrapper = mountReviewWorkspace(
+      createAnalysisApiMock({
+        getSummary: vi.fn().mockResolvedValue(
+          buildSummary({
+            checker_failures: {
+              security: {
+                code: 'checker_failed',
+                message: '安全检查器启动失败'
+              }
+            }
+          })
+        ),
+        getIssues: vi.fn().mockResolvedValue(
+          buildIssuePage({
+            total: 2,
+            items: [
+              buildIssue({
+                issue_id: 'issue-literal',
+                type: 'literal',
+                layer: 'character'
+              }),
+              buildIssue({
+                issue_id: 'issue-dictionary',
+                block_id: 'block-2',
+                start: 3,
+                end: 5,
+                original: '错误',
+                type: 'dictionary_regex',
+                layer: 'security'
+              })
+            ]
+          })
+        )
+      })
+    )
+    await flushPromises()
+
+    expect(
+      wrapper.get('[data-issue-id="issue-literal"] .issue-card__type').text()
+    ).toBe('规则匹配')
+    expect(
+      wrapper.get('[data-issue-id="issue-dictionary"] .issue-card__type').text()
+    ).toBe('词典正则')
+
+    await wrapper.get('[data-issue-id="issue-dictionary"]').trigger('click')
+
+    expect(wrapper.get('.issue-panel__type').text()).toBe('词典正则')
+    expect(wrapper.get('aside[aria-label="问题详情"]').text()).toContain('检查类别安全')
+    expect(wrapper.get('aside[aria-label="问题详情"]').text()).not.toContain(
+      'character-1'
+    )
+    expect(wrapper.get('.checker-failures__category').text()).toBe('安全')
+    expect(wrapper.get('.checker-failures__category').text()).not.toContain('security')
   })
 
   it('uses 文档/问题 tabs on narrow screens and preserves focus after switching', async () => {
@@ -1025,6 +1180,65 @@ describe('ReviewWorkspaceView', () => {
     expect(disconnect).toHaveBeenCalledTimes(1)
   })
 
+  it('loads the next issue page from production navigation and announces completion', async () => {
+    const nextPage = createDeferred<IssuePageResponse>()
+    const getIssues = vi
+      .fn()
+      .mockResolvedValueOnce(
+        buildIssuePage({
+          total: 2,
+          items: [buildIssue()],
+          next_cursor: 'issues-2'
+        })
+      )
+      .mockReturnValueOnce(nextPage.promise)
+    const wrapper = mountReviewWorkspace(createAnalysisApiMock({ getIssues }))
+    await flushPromises()
+
+    const loadMore = wrapper.get('[data-testid="load-more-issues"]')
+    expect(loadMore.attributes('aria-label')).toBe('加载更多问题')
+
+    await loadMore.trigger('click')
+
+    expect(wrapper.get('[data-testid="issue-pagination-status"]').text()).toContain(
+      '正在加载更多问题'
+    )
+    expect(wrapper.get('[data-issue-id="issue-1"]').attributes('aria-current')).toBe(
+      'true'
+    )
+
+    nextPage.resolve(
+      buildIssuePage({
+        total: 2,
+        items: [
+          buildIssue({
+            issue_id: 'issue-2',
+            block_id: 'block-2',
+            start: 3,
+            end: 5,
+            original: '第二页问题'
+          })
+        ],
+        next_cursor: null
+      })
+    )
+    await flushPromises()
+
+    expect(getIssues).toHaveBeenLastCalledWith(jobId, {
+      cursor: 'issues-2',
+      limit: 50
+    })
+    expect(wrapper.find('[data-issue-id="issue-1"]').exists()).toBe(true)
+    expect(wrapper.find('[data-issue-id="issue-2"]').exists()).toBe(true)
+    expect(wrapper.get('[data-issue-id="issue-1"]').attributes('aria-current')).toBe(
+      'true'
+    )
+    expect(wrapper.find('[data-testid="load-more-issues"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="issue-pagination-status"]').text()).toContain(
+      '已加载全部问题'
+    )
+  })
+
   it('keeps filtered issue state when an older append response resolves last', async () => {
     const appendedPage = createDeferred<IssuePageResponse>()
     const filteredPage = createDeferred<IssuePageResponse>()
@@ -1221,7 +1435,34 @@ describe('ReviewWorkspaceView', () => {
   it('reconciles an applied decision with the returned server decision', async () => {
     const decisionResponse = createDeferred<DecisionBatchResponse>()
     const putDecisions = vi.fn().mockReturnValue(decisionResponse.promise)
-    const wrapper = mountReviewWorkspace(createAnalysisApiMock({ putDecisions }))
+    const authoritativeDecision = {
+      issue_version: 1,
+      action: 'custom' as const,
+      replacement: '服务器替换',
+      updated_at: '2026-08-18T01:00:00Z'
+    }
+    const getIssues = vi
+      .fn()
+      .mockResolvedValueOnce(buildIssuePage())
+      .mockResolvedValueOnce(
+        buildIssuePage({
+          items: [
+            buildIssue({ decision: authoritativeDecision }),
+            buildIssue({
+              issue_id: 'issue-2',
+              block_id: 'block-2',
+              start: 3,
+              end: 5,
+              original: '错误',
+              message: '发现错词',
+              context: '甲😀乙错误'
+            })
+          ]
+        })
+      )
+    const wrapper = mountReviewWorkspace(
+      createAnalysisApiMock({ getIssues, putDecisions })
+    )
     await flushPromises()
 
     await wrapper.get('[aria-label="自定义替换"]').setValue('客户端替换')
@@ -1233,10 +1474,7 @@ describe('ReviewWorkspaceView', () => {
     decisionResponse.resolve(
       buildAppliedResponse({
         issue_id: 'issue-1',
-        issue_version: 1,
-        action: 'custom',
-        replacement: '服务器替换',
-        updated_at: '2026-08-18T01:00:00Z'
+        ...authoritativeDecision
       })
     )
     await flushPromises()
@@ -1245,6 +1483,127 @@ describe('ReviewWorkspaceView', () => {
       '服务器替换'
     )
     expect(wrapper.get('aside[aria-label="问题详情"]').text()).toContain('已自定义')
+  })
+
+  it('removes a successful single decision from the unreviewed filter and refreshes summary', async () => {
+    const getIssues = vi
+      .fn()
+      .mockResolvedValueOnce(buildIssuePage())
+      .mockResolvedValueOnce(
+        buildIssuePage({
+          total: 1,
+          items: [buildIssue()]
+        })
+      )
+      .mockResolvedValueOnce(
+        buildIssuePage({
+          total: 0,
+          items: []
+        })
+      )
+    const getSummary = vi
+      .fn()
+      .mockResolvedValueOnce(buildSummary())
+      .mockResolvedValueOnce(
+        buildSummary({
+          by_decision: { accepted: 1, ignored: 0, custom: 0, unreviewed: 1 }
+        })
+      )
+    const putDecisions = vi.fn().mockResolvedValue(
+      buildAppliedResponse({
+        issue_id: 'issue-1',
+        issue_version: 1,
+        action: 'accepted',
+        replacement: null,
+        updated_at: '2026-08-18T01:00:00Z'
+      })
+    )
+    const wrapper = mountReviewWorkspace(
+      createAnalysisApiMock({ getIssues, getSummary, putDecisions })
+    )
+    await flushPromises()
+
+    await wrapper.get('[aria-label="问题处理状态"]').setValue('unreviewed')
+    await flushPromises()
+    await wrapper.get('button[name="accept"]').trigger('click')
+    await flushPromises()
+
+    expect(getIssues).toHaveBeenCalledTimes(3)
+    expect(getIssues).toHaveBeenLastCalledWith(jobId, {
+      decision: 'unreviewed',
+      cursor: null,
+      limit: 50
+    })
+    expect(getSummary).toHaveBeenCalledTimes(2)
+    expect(wrapper.find('[data-issue-id="issue-1"]').exists()).toBe(false)
+  })
+
+  it('removes an all-applied batch from the unreviewed filter and refreshes summary', async () => {
+    const filteredIssues = [
+      buildIssue(),
+      buildIssue({
+        issue_id: 'issue-2',
+        block_id: 'block-2',
+        start: 3,
+        end: 5,
+        original: '错误'
+      })
+    ]
+    const getIssues = vi
+      .fn()
+      .mockResolvedValueOnce(buildIssuePage())
+      .mockResolvedValueOnce(
+        buildIssuePage({
+          total: 2,
+          items: filteredIssues
+        })
+      )
+      .mockResolvedValueOnce(
+        buildIssuePage({
+          total: 0,
+          items: []
+        })
+      )
+    const getSummary = vi
+      .fn()
+      .mockResolvedValueOnce(buildSummary())
+      .mockResolvedValueOnce(
+        buildSummary({
+          by_decision: { accepted: 2, ignored: 0, custom: 0, unreviewed: 0 }
+        })
+      )
+    const putDecisions = vi.fn().mockResolvedValue({
+      outcomes: filteredIssues.map((issue) => ({
+        issue_id: issue.issue_id,
+        status: 'applied' as const,
+        code: null,
+        decision: {
+          issue_id: issue.issue_id,
+          issue_version: 1,
+          action: 'accepted' as const,
+          replacement: null,
+          updated_at: '2026-08-18T01:00:00Z'
+        }
+      }))
+    } satisfies DecisionBatchResponse)
+    const wrapper = mountReviewWorkspace(
+      createAnalysisApiMock({ getIssues, getSummary, putDecisions })
+    )
+    await flushPromises()
+
+    await wrapper.get('[aria-label="问题处理状态"]').setValue('unreviewed')
+    await flushPromises()
+    await wrapper.get('button[name="accept-visible"]').trigger('click')
+    await flushPromises()
+
+    expect(getIssues).toHaveBeenCalledTimes(3)
+    expect(getIssues).toHaveBeenLastCalledWith(jobId, {
+      decision: 'unreviewed',
+      cursor: null,
+      limit: 50
+    })
+    expect(getSummary).toHaveBeenCalledTimes(2)
+    expect(wrapper.findAll('[data-issue-id]')).toHaveLength(0)
   })
 
   it('reloads authoritative state and announces a decision conflict', async () => {
@@ -1520,6 +1879,25 @@ describe('ReviewWorkspaceView', () => {
         })
       )
       .mockReturnValueOnce(authoritativeBatchReload.promise)
+      .mockResolvedValueOnce(
+        buildIssuePage({
+          total: 2,
+          items: [
+            buildIssue({
+              decision: batchAcceptedDecision
+            }),
+            buildIssue({
+              issue_id: 'issue-2',
+              block_id: 'block-2',
+              start: 3,
+              end: 5,
+              original: '冲突项',
+              message: '服务器已保存新决定',
+              decision: newerIgnoredDecision
+            })
+          ]
+        })
+      )
     const putDecisions = vi
       .fn()
       .mockResolvedValueOnce({
@@ -1554,6 +1932,7 @@ describe('ReviewWorkspaceView', () => {
         getSummary: vi
           .fn()
           .mockResolvedValueOnce(buildSummary({ total_issues: 3 }))
+          .mockResolvedValueOnce(buildSummary({ total_issues: 2 }))
           .mockResolvedValueOnce(buildSummary({ total_issues: 2 })),
         putDecisions
       })
@@ -1663,7 +2042,7 @@ describe('ReviewWorkspaceView', () => {
     ])
   })
 
-  it('asks confirmation before accepting visible high-risk security issues', async () => {
+  it('asks confirmation for API-shaped high-risk security issues', async () => {
     const originalConfirm = globalThis.confirm
     const confirm = vi.fn().mockReturnValue(false)
     globalThis.confirm = confirm
@@ -1678,7 +2057,8 @@ describe('ReviewWorkspaceView', () => {
               items: [
                 buildIssue({
                   issue_id: 'issue-security',
-                  type: 'security',
+                  type: 'literal',
+                  layer: 'security',
                   severity: 'error',
                   original: '敏感信息'
                 }),
@@ -1724,7 +2104,8 @@ describe('ReviewWorkspaceView', () => {
               items: [
                 buildIssue({
                   issue_id: 'issue-security',
-                  type: 'security',
+                  type: 'literal',
+                  layer: 'security',
                   severity: 'error',
                   original: '敏感信息'
                 })
@@ -1856,7 +2237,35 @@ describe('ReviewWorkspaceView', () => {
       .fn()
       .mockReturnValueOnce(acceptedResponse.promise)
       .mockReturnValueOnce(ignoredResponse.promise)
-    const wrapper = mountReviewWorkspace(createAnalysisApiMock({ putDecisions }))
+    const getIssues = vi
+      .fn()
+      .mockResolvedValueOnce(buildIssuePage())
+      .mockResolvedValueOnce(
+        buildIssuePage({
+          items: [
+            buildIssue({
+              decision: {
+                issue_version: 1,
+                action: 'ignored',
+                replacement: null,
+                updated_at: '2026-08-18T01:01:00Z'
+              }
+            }),
+            buildIssue({
+              issue_id: 'issue-2',
+              block_id: 'block-2',
+              start: 3,
+              end: 5,
+              original: '错误',
+              message: '发现错词',
+              context: '甲😀乙错误'
+            })
+          ]
+        })
+      )
+    const wrapper = mountReviewWorkspace(
+      createAnalysisApiMock({ getIssues, putDecisions })
+    )
     await flushPromises()
 
     await wrapper.get('button[name="accept"]').trigger('click')
@@ -2049,7 +2458,7 @@ describe('ReviewWorkspaceView', () => {
     expect(rawBlock.text).toBe('甲😀项目乙😀项目丙项目')
   })
 
-  it('retains loaded issue cards when append fails and retries that page', async () => {
+  it('retains loaded issue cards when production pagination fails and retries that page', async () => {
     const getIssues = vi
       .fn()
       .mockResolvedValueOnce(
@@ -2066,10 +2475,10 @@ describe('ReviewWorkspaceView', () => {
           items: [buildIssue({ issue_id: 'issue-2', original: '第二页问题' })]
         })
       )
-    const wrapper = mountReviewWorkspaceState(createAnalysisApiMock({ getIssues }))
+    const wrapper = mountReviewWorkspace(createAnalysisApiMock({ getIssues }))
     await flushPromises()
 
-    await wrapper.get('[data-testid="load-next-issues"]').trigger('click')
+    await wrapper.get('[data-testid="load-more-issues"]').trigger('click')
     await flushPromises()
 
     expect(wrapper.get('[role="alert"]').text()).toContain('问题分页暂时不可用')
@@ -2172,7 +2581,7 @@ describe('ReviewWorkspaceView', () => {
     expect(wrapper.get('[data-testid="document-error"]').text()).toContain(
       '文档分页暂时不可用'
     )
-    expect(wrapper.text()).toContain('security')
+    expect(wrapper.get('.checker-failures__category').text()).toBe('安全')
     expect(wrapper.text()).toContain('安全检查器启动失败')
 
     await wrapper.get('[data-testid="retry-document"]').trigger('click')

@@ -7,7 +7,13 @@ import type {
   IssueDecisionState,
   IssueSeverity
 } from '../../types/review'
+import { CHECK_CATEGORY_VALUES } from '../../types/review'
 import type { ReviewIssueFilters } from '../../composables/useReviewWorkspace'
+import {
+  categoryLabel,
+  decisionStateLabel,
+  issueTypeLabel
+} from './presentation'
 import { describeSeverity } from './severity'
 
 const props = defineProps<{
@@ -18,14 +24,23 @@ const props = defineProps<{
   loading: boolean
   error: string | null
   filters: ReviewIssueFilters
+  nextCursor: string | null
 }>()
 
 const emit = defineEmits<{
   select: [issueId: string]
   retry: []
+  loadNext: []
   filterChange: [filters: ReviewIssueFilters]
 }>()
 
+const categoryOrder = CHECK_CATEGORY_VALUES
+const decisionOrder: IssueDecisionState[] = [
+  'unreviewed',
+  'accepted',
+  'ignored',
+  'custom'
+]
 const category = ref<CheckCategory | ''>(props.filters.category ?? '')
 const severity = ref<IssueSeverity | ''>(props.filters.severity ?? '')
 const decision = ref<IssueDecisionState | ''>(props.filters.decision ?? '')
@@ -100,6 +115,40 @@ function severityLabel(severityLevel: IssueSeverity): string {
       </div>
       <span>当前页 {{ issues.length }}</span>
     </div>
+
+    <section
+      v-if="summary"
+      class="review-navigation__overview"
+      aria-labelledby="review-overview-heading"
+    >
+      <h2 id="review-overview-heading">问题总览</h2>
+      <div class="review-navigation__overview-group">
+        <h3>类别</h3>
+        <dl aria-label="问题类别统计">
+          <div
+            v-for="categoryId in categoryOrder"
+            :key="categoryId"
+            :data-summary-category="categoryId"
+          >
+            <dt>{{ categoryLabel(categoryId) }}</dt>
+            <dd>{{ summary.by_category[categoryId] }}</dd>
+          </div>
+        </dl>
+      </div>
+      <div class="review-navigation__overview-group">
+        <h3>处理状态</h3>
+        <dl aria-label="问题处理状态统计">
+          <div
+            v-for="decisionId in decisionOrder"
+            :key="decisionId"
+            :data-summary-decision="decisionId"
+          >
+            <dt>{{ decisionStateLabel(decisionId) }}</dt>
+            <dd>{{ summary.by_decision[decisionId] }}</dd>
+          </div>
+        </dl>
+      </div>
+    </section>
 
     <div class="review-navigation__filters">
       <label>
@@ -187,7 +236,7 @@ function severityLabel(severityLevel: IssueSeverity): string {
           @click="emit('select', issue.issue_id)"
         >
           <span class="issue-card__meta">
-            <span>{{ issue.type }}</span>
+            <span class="issue-card__type">{{ issueTypeLabel(issue.type) }}</span>
             <span
               class="issue-card__severity"
               :class="`issue-card__severity--${issue.severity}`"
@@ -201,6 +250,34 @@ function severityLabel(severityLevel: IssueSeverity): string {
         </button>
       </li>
     </ol>
+
+    <div v-if="issues.length" class="review-navigation__pagination">
+      <p
+        v-if="loading"
+        class="review-navigation__status"
+        data-testid="issue-pagination-status"
+        role="status"
+      >
+        正在加载更多问题…
+      </p>
+      <button
+        v-else-if="nextCursor && !error"
+        type="button"
+        data-testid="load-more-issues"
+        aria-label="加载更多问题"
+        @click="emit('loadNext')"
+      >
+        加载更多问题
+      </button>
+      <p
+        v-else-if="!error"
+        class="review-navigation__status"
+        data-testid="issue-pagination-status"
+        role="status"
+      >
+        已加载全部问题
+      </p>
+    </div>
   </nav>
 </template>
 
@@ -245,6 +322,61 @@ function severityLabel(severityLevel: IssueSeverity): string {
   gap: 10px;
   padding: 14px 12px;
   border-bottom: 1px solid #edf0f5;
+}
+
+.review-navigation__overview {
+  display: grid;
+  gap: 12px;
+  padding: 14px 12px;
+  border-bottom: 1px solid #edf0f5;
+}
+
+.review-navigation__overview h2,
+.review-navigation__overview h3 {
+  margin: 0;
+  color: #30394d;
+}
+
+.review-navigation__overview h2 {
+  font-size: 0.86rem;
+}
+
+.review-navigation__overview h3 {
+  font-size: 0.72rem;
+}
+
+.review-navigation__overview-group {
+  display: grid;
+  gap: 7px;
+}
+
+.review-navigation__overview dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin: 0;
+}
+
+.review-navigation__overview dl > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 8px;
+  color: #596276;
+  font-size: 0.72rem;
+  background: #f8f9fc;
+  border-radius: 8px;
+}
+
+.review-navigation__overview dt,
+.review-navigation__overview dd {
+  margin: 0;
+}
+
+.review-navigation__overview dd {
+  color: #30394d;
+  font-weight: 800;
 }
 
 .review-navigation__filters label {
@@ -303,6 +435,32 @@ function severityLabel(severityLevel: IssueSeverity): string {
   border: 0;
   border-radius: 8px;
   cursor: pointer;
+}
+
+.review-navigation__pagination {
+  display: grid;
+  padding: 4px 10px 14px;
+}
+
+.review-navigation__pagination .review-navigation__status {
+  margin: 6px;
+  text-align: center;
+}
+
+.review-navigation__pagination button {
+  min-height: 44px;
+  padding: 8px 12px;
+  color: #4256c9;
+  font-weight: 800;
+  background: #eef0ff;
+  border: 1px solid #d4dcff;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.review-navigation__pagination button:focus-visible {
+  outline: 3px solid #8ea2ff;
+  outline-offset: 2px;
 }
 
 .issue-list {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref } from 'vue'
 
 import DocumentViewer from '../components/review/DocumentViewer.vue'
 import IssuePanel from '../components/review/IssuePanel.vue'
@@ -26,6 +26,7 @@ const {
   selectedIssue,
   selectedBlockId,
   blockCursor,
+  issueCursor,
   loading,
   errors,
   checkerFailures,
@@ -50,6 +51,7 @@ const {
   decideVisible,
   retryDecision,
   loadNextBlocks,
+  loadNextIssues,
   setFindQuery,
   setReplaceText,
   goToPreviousMatch,
@@ -59,6 +61,19 @@ const {
   retryDocument,
   retryIssues
 } = useReviewWorkspace(props.jobId)
+
+const processedIssueCount = computed(() => {
+  const decisions = summary.value?.by_decision
+  return decisions
+    ? decisions.accepted + decisions.ignored + decisions.custom
+    : 0
+})
+const unprocessedIssueCount = computed(
+  () => summary.value?.by_decision.unreviewed ?? 0
+)
+const highRiskIssueCount = computed(
+  () => summary.value?.by_severity.error ?? 0
+)
 
 const MOBILE_BREAKPOINT_QUERY = '(max-width: 900px)'
 const mediaQuery =
@@ -285,8 +300,10 @@ onBeforeUnmount(() => {
           :loading="loading.issues"
           :error="errors.issues"
           :filters="filters"
+          :next-cursor="issueCursor"
           @select="selectIssue"
           @retry="retryIssues"
+          @load-next="loadNextIssues"
           @filter-change="setFilters"
         />
         <IssuePanel
@@ -308,8 +325,10 @@ onBeforeUnmount(() => {
         :loading="loading.issues"
         :error="errors.issues"
         :filters="filters"
+        :next-cursor="issueCursor"
         @select="selectIssue"
         @retry="retryIssues"
+        @load-next="loadNextIssues"
         @filter-change="setFilters"
       />
       <DocumentViewer
@@ -332,6 +351,22 @@ onBeforeUnmount(() => {
         @retry-decision="retryDecision"
       />
     </div>
+    <footer v-if="summary" class="review-workspace__statistics" aria-label="审阅统计">
+      <dl>
+        <div data-review-counter="processed">
+          <dt>已处理</dt>
+          <dd>{{ processedIssueCount }}</dd>
+        </div>
+        <div data-review-counter="unprocessed">
+          <dt>未处理</dt>
+          <dd>{{ unprocessedIssueCount }}</dd>
+        </div>
+        <div data-review-counter="high-risk">
+          <dt>高风险</dt>
+          <dd>{{ highRiskIssueCount }}</dd>
+        </div>
+      </dl>
+    </footer>
     <p
       class="review-workspace__announcement"
       data-testid="decision-announcement"
@@ -402,6 +437,43 @@ onBeforeUnmount(() => {
   margin-top: 14px;
 }
 
+.review-workspace__statistics {
+  margin-top: 14px;
+  padding: 14px 18px;
+  background: #fff;
+  border: 1px solid #e2e7f0;
+  border-radius: 16px;
+}
+
+.review-workspace__statistics dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin: 0;
+}
+
+.review-workspace__statistics dl > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  color: #596276;
+  background: #f8f9fc;
+  border-radius: 10px;
+}
+
+.review-workspace__statistics dt,
+.review-workspace__statistics dd {
+  margin: 0;
+}
+
+.review-workspace__statistics dd {
+  color: #252e42;
+  font-size: 1.15rem;
+  font-weight: 800;
+}
+
 .review-workspace__announcement {
   position: absolute;
   width: 1px;
@@ -418,6 +490,10 @@ onBeforeUnmount(() => {
   .review-workspace {
     width: min(100% - 24px, 100%);
     padding-top: 18px;
+  }
+
+  .review-workspace__statistics dl {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 </style>

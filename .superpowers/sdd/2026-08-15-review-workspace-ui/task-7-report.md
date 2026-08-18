@@ -233,3 +233,97 @@ Result: PASS — `vue-tsc -b && vite build` succeeded; Vite emitted `dist/index.
 - The visible marker stays compact through a `13px` `::before` pseudo-element, so the control remains a small inline marker while the actual touch target is larger.
 - The change stayed CSS-only in the component, so button semantics, focusability, and existing click handlers were preserved.
 - The regression assertion is target-specific: it checks the exact `.document-highlight-control` source contract and confirms the generic exclusion path is compensated locally.
+
+## Final review fix wave
+
+### Status
+
+- Corrected high-risk security detection to use the API category field `layer`.
+- Wired accessible issue pagination through the production workspace with loading, retry, and terminal states.
+- Reconciled successful single and batch decisions against the current filtered page and refreshed authoritative summary data with existing generation and per-issue guards.
+- Added semantic category/status summaries and bottom processed, unprocessed, and high-risk counters from the API summary.
+- Cleared completed export state, links, errors, polling, and expiry timing when the export type changes.
+- Localized issue types, checker categories, summary categories, and issue-detail categories in Simplified Chinese.
+
+### Files
+
+- `apps/web/src/components/review/ExportPanel.vue`
+- `apps/web/src/components/review/IssuePanel.vue`
+- `apps/web/src/components/review/ReviewNavigation.vue`
+- `apps/web/src/components/review/ReviewToolbar.vue`
+- `apps/web/src/components/review/presentation.ts`
+- `apps/web/src/composables/useReviewWorkspace.ts`
+- `apps/web/src/views/ReviewWorkspaceView.vue`
+- `apps/web/tests/ReviewWorkspace.spec.ts`
+- `apps/web/tests/WorkspaceView.spec.ts`
+- `.superpowers/sdd/2026-08-15-review-workspace-ui/task-7-report.md`
+
+### RED evidence
+
+Initial final-review regressions:
+
+```powershell
+Set-Location C:\Work\text-verification\apps\web
+npm test -- --run tests\ReviewWorkspace.spec.ts --reporter=dot
+```
+
+Result: expected RED — `1` file failed; `8` tests failed and `40` passed.
+
+The failures proved the stale completed export, absent API summary statistics, raw API identifiers, unwired production issue pagination and retry, stale unreviewed results after successful single/batch decisions, and missing confirmation for an API-shaped `{ type: "literal", layer: "security", severity: "error" }` issue.
+
+The issue-detail presentation was then tightened with a focused regression:
+
+```powershell
+npm test -- --run tests\ReviewWorkspace.spec.ts -t "presents API issue types and checker categories with Chinese labels" --reporter=dot
+```
+
+Result: expected RED — the detail panel still rendered `character-1` and did not present the localized `安全` category.
+
+### GREEN evidence
+
+Focused review and accessibility verification:
+
+```powershell
+Set-Location C:\Work\text-verification\apps\web
+npm test -- --run tests\ReviewWorkspace.spec.ts tests\reviewAccessibility.spec.ts --reporter=dot
+```
+
+Result: PASS — `2` files and `51` tests passed.
+
+Full frontend suite:
+
+```powershell
+npm test -- --reporter=dot
+```
+
+Result: PASS — `6` files and `95` tests passed.
+
+Production build:
+
+```powershell
+npm run build
+```
+
+Result: PASS — `vue-tsc -b && vite build` succeeded; Vite transformed `59` modules.
+
+Whitespace verification:
+
+```powershell
+git -c core.whitespace=cr-at-eol diff --check
+```
+
+Result: PASS. The CRLF-aware mode preserves the repository's focused `WorkspaceView.spec.ts` line-ending contract.
+
+Backend E2E was not rerun because this wave did not touch backend code.
+
+### Self-review
+
+- Preserved the 500-item batch cap, loaded-page-only batching, Unicode offsets, lazy document/issue paging, and selection across appended issue pages.
+- Applied filtered-page reconciliation only through request-generation and per-issue decision guards, so stale reloads cannot overwrite newer decisions.
+- Kept export polling/unmount behavior and added type-change cleanup without changing export API contracts.
+- Kept desktop DOM order, mobile tabs, keyboard behavior, semantic landmarks, live statuses, and 44px controls intact.
+- Internal issue/category identifiers remain only in API values or non-user-facing attributes; visible labels are Simplified Chinese.
+
+### Concerns
+
+- None.
