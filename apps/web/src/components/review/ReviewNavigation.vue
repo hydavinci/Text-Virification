@@ -218,7 +218,7 @@ function severityLabel(severityLevel: IssueSeverity): string {
     </div>
 
     <p
-      v-if="!loading && !error && !issues.length"
+      v-if="!loading && !error && !issues.length && !nextCursor"
       class="review-navigation__empty"
       data-testid="empty-issues"
     >
@@ -251,7 +251,7 @@ function severityLabel(severityLevel: IssueSeverity): string {
       </li>
     </ol>
 
-    <div v-if="issues.length" class="review-navigation__pagination">
+    <div v-if="issues.length || nextCursor" class="review-navigation__pagination">
       <p
         v-if="loading"
         class="review-navigation__status"

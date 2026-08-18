@@ -507,34 +507,75 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     response: IssuePageResponse,
     decisionGuards: DecisionRequestGuard | DecisionRequestGuard[]
   ): void {
-    const guards = currentDecisionGuards(decisionGuards)
-    if (!guards.length) {
+    const requestedGuards = Array.isArray(decisionGuards)
+      ? decisionGuards
+      : [decisionGuards]
+    const currentGuards = currentDecisionGuards(requestedGuards)
+    if (!currentGuards.length) {
       return
     }
 
-    const nextById = { ...issuesById.value }
-    const nextIds = [...issueIds.value]
-    const authoritativeIssues = new Map(
-      response.items.map((issue) => [issue.issue_id, issue] as const)
+    const protectedIssueIds = new Set(
+      requestedGuards
+        .filter((guard) => !isDecisionCurrent(guard.issueId, guard.generation))
+        .map((guard) => guard.issueId)
     )
+    const previousById = issuesById.value
+    const previousIds = issueIds.value
+    const previousAuthoritativeDecisions = new Map(authoritativeDecisions)
+    const nextById: Record<string, Issue> = {}
+    const nextIds: string[] = []
+    const seen = new Set<string>()
 
-    for (const guard of guards) {
-      const authoritativeIssue = authoritativeIssues.get(guard.issueId)
+    authoritativeDecisions.clear()
 
-      if (authoritativeIssue) {
-        nextById[guard.issueId] = authoritativeIssue
-        authoritativeDecisions.set(guard.issueId, authoritativeIssue.decision)
+    for (const issue of response.items) {
+      if (seen.has(issue.issue_id)) {
         continue
       }
 
-      delete nextById[guard.issueId]
-      authoritativeDecisions.delete(guard.issueId)
+      const protectedIssue = protectedIssueIds.has(issue.issue_id)
+        ? previousById[issue.issue_id]
+        : undefined
+      if (protectedIssue) {
+        nextById[issue.issue_id] = protectedIssue
+        if (previousAuthoritativeDecisions.has(issue.issue_id)) {
+          authoritativeDecisions.set(
+            issue.issue_id,
+            previousAuthoritativeDecisions.get(issue.issue_id) ?? null
+          )
+        }
+      } else if (!protectedIssueIds.has(issue.issue_id)) {
+        nextById[issue.issue_id] = issue
+        authoritativeDecisions.set(issue.issue_id, issue.decision)
+      }
+
+      if (nextById[issue.issue_id]) {
+        nextIds.push(issue.issue_id)
+      }
+      seen.add(issue.issue_id)
+    }
+
+    for (const issueId of previousIds) {
+      const protectedIssue = protectedIssueIds.has(issueId)
+        ? previousById[issueId]
+        : undefined
+      if (!protectedIssue || seen.has(issueId)) {
+        continue
+      }
+
+      nextById[issueId] = protectedIssue
+      nextIds.push(issueId)
+      if (previousAuthoritativeDecisions.has(issueId)) {
+        authoritativeDecisions.set(
+          issueId,
+          previousAuthoritativeDecisions.get(issueId) ?? null
+        )
+      }
     }
 
     issuesById.value = nextById
-    issueIds.value = nextIds.filter((issueId) =>
-      Object.prototype.hasOwnProperty.call(nextById, issueId)
-    )
+    issueIds.value = nextIds
     issueCursor.value = response.next_cursor
     issueCheckerFailures.value = response.checker_failures
 

@@ -183,6 +183,17 @@ function buildIssuePage(overrides: Partial<IssuePageResponse> = {}): IssuePageRe
   }
 }
 
+function buildIssueSequence(start: number, end: number): Issue[] {
+  return Array.from({ length: end - start + 1 }, (_, index) => {
+    const issueNumber = start + index
+    return buildIssue({
+      issue_id: `issue-${issueNumber}`,
+      original: `问题 ${issueNumber}`,
+      message: `问题说明 ${issueNumber}`
+    })
+  })
+}
+
 function buildAppliedResponse(decision: IssueDecision): DecisionBatchResponse {
   return {
     outcomes: [
@@ -1538,6 +1549,73 @@ describe('ReviewWorkspaceView', () => {
     expect(wrapper.find('[data-issue-id="issue-1"]').exists()).toBe(false)
   })
 
+  it('applies the authoritative filtered first page before advancing its cursor', async () => {
+    const filteredIssues = buildIssueSequence(1, 50)
+    const authoritativeIssues = [
+      ...buildIssueSequence(3, 50),
+      ...buildIssueSequence(2, 2),
+      ...buildIssueSequence(51, 51)
+    ]
+    const getIssues = vi
+      .fn()
+      .mockResolvedValueOnce(buildIssuePage())
+      .mockResolvedValueOnce(
+        buildIssuePage({
+          total: 52,
+          items: filteredIssues,
+          next_cursor: 'issues-before-decision'
+        })
+      )
+      .mockResolvedValueOnce(
+        buildIssuePage({
+          total: 51,
+          items: authoritativeIssues,
+          next_cursor: 'issues-after-decision'
+        })
+      )
+      .mockResolvedValueOnce(
+        buildIssuePage({
+          total: 51,
+          items: buildIssueSequence(52, 52),
+          next_cursor: null
+        })
+      )
+    const putDecisions = vi.fn().mockResolvedValue(
+      buildAppliedResponse({
+        issue_id: 'issue-1',
+        issue_version: 1,
+        action: 'accepted',
+        replacement: null,
+        updated_at: '2026-08-18T01:00:00Z'
+      })
+    )
+    const wrapper = mountReviewWorkspace(
+      createAnalysisApiMock({ getIssues, putDecisions })
+    )
+    await flushPromises()
+
+    await wrapper.get('[aria-label="问题处理状态"]').setValue('unreviewed')
+    await flushPromises()
+    await wrapper.get('button[name="accept"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-issue-id="issue-1"]').exists()).toBe(false)
+    expect(wrapper.find('[data-issue-id="issue-51"]').exists()).toBe(true)
+    expect(
+      wrapper.findAll('[data-issue-id]').map((issue) => issue.attributes('data-issue-id'))
+    ).toEqual(authoritativeIssues.map((issue) => issue.issue_id))
+
+    await wrapper.get('[data-testid="load-more-issues"]').trigger('click')
+    await flushPromises()
+
+    expect(getIssues).toHaveBeenLastCalledWith(jobId, {
+      decision: 'unreviewed',
+      cursor: 'issues-after-decision',
+      limit: 50
+    })
+    expect(wrapper.find('[data-issue-id="issue-52"]').exists()).toBe(true)
+  })
+
   it('removes an all-applied batch from the unreviewed filter and refreshes summary', async () => {
     const filteredIssues = [
       buildIssue(),
@@ -1604,6 +1682,70 @@ describe('ReviewWorkspaceView', () => {
     })
     expect(getSummary).toHaveBeenCalledTimes(2)
     expect(wrapper.findAll('[data-issue-id]')).toHaveLength(0)
+  })
+
+  it('keeps authoritative pagination reachable when all applied rows leave the page empty', async () => {
+    const filteredIssues = buildIssueSequence(1, 2)
+    const getIssues = vi
+      .fn()
+      .mockResolvedValueOnce(buildIssuePage())
+      .mockResolvedValueOnce(
+        buildIssuePage({
+          total: 3,
+          items: filteredIssues,
+          next_cursor: 'issues-before-decision'
+        })
+      )
+      .mockResolvedValueOnce(
+        buildIssuePage({
+          total: 1,
+          items: [],
+          next_cursor: 'issues-after-empty-page'
+        })
+      )
+      .mockResolvedValueOnce(
+        buildIssuePage({
+          total: 1,
+          items: buildIssueSequence(3, 3),
+          next_cursor: null
+        })
+      )
+    const putDecisions = vi.fn().mockResolvedValue({
+      outcomes: filteredIssues.map((issue) => ({
+        issue_id: issue.issue_id,
+        status: 'applied' as const,
+        code: null,
+        decision: {
+          issue_id: issue.issue_id,
+          issue_version: 1,
+          action: 'accepted' as const,
+          replacement: null,
+          updated_at: '2026-08-18T01:00:00Z'
+        }
+      }))
+    } satisfies DecisionBatchResponse)
+    const wrapper = mountReviewWorkspace(
+      createAnalysisApiMock({ getIssues, putDecisions })
+    )
+    await flushPromises()
+
+    await wrapper.get('[aria-label="问题处理状态"]').setValue('unreviewed')
+    await flushPromises()
+    await wrapper.get('button[name="accept-visible"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.findAll('[data-issue-id]')).toHaveLength(0)
+    expect(wrapper.find('[data-testid="empty-issues"]').exists()).toBe(false)
+
+    await wrapper.get('[data-testid="load-more-issues"]').trigger('click')
+    await flushPromises()
+
+    expect(getIssues).toHaveBeenLastCalledWith(jobId, {
+      decision: 'unreviewed',
+      cursor: 'issues-after-empty-page',
+      limit: 50
+    })
+    expect(wrapper.find('[data-issue-id="issue-3"]').exists()).toBe(true)
   })
 
   it('reloads authoritative state and announces a decision conflict', async () => {
