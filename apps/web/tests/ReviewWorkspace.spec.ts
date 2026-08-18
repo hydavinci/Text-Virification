@@ -865,6 +865,29 @@ describe('ReviewWorkspaceView', () => {
     )
   })
 
+  it('hides retry UI after a failed save when switching to another issue', async () => {
+    const putDecisions = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('保存处理结果失败'))
+    const wrapper = mountReviewWorkspace(createAnalysisApiMock({ putDecisions }))
+    await flushPromises()
+
+    await wrapper.get('button[name="accept"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="decision-error"]').text()).toContain(
+      '保存处理结果失败'
+    )
+
+    await wrapper.get('[data-issue-id="issue-2"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('aside[aria-label="问题详情"]').text()).toContain('发现错词')
+    expect(wrapper.find('[data-testid="decision-error"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="retry-decision"]').exists()).toBe(false)
+    expect(putDecisions).toHaveBeenCalledTimes(1)
+  })
+
   it('rolls back a failed decision and exposes an explicit retry', async () => {
     const retryResponse = createDeferred<DecisionBatchResponse>()
     const putDecisions = vi

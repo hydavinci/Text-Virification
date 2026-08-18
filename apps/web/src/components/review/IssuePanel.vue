@@ -7,6 +7,7 @@ import type { DecisionAction } from '../../types/review'
 const props = defineProps<{
   issue: Issue | null
   decisionError: string | null
+  canRetryDecision: boolean
 }>()
 
 const emit = defineEmits<{
@@ -143,6 +144,7 @@ function validateCustomReplacement(replacement: string): string | null {
         >
           <p>{{ decisionError }}</p>
           <button
+            v-if="canRetryDecision"
             type="button"
             data-testid="retry-decision"
             @click="emit('retryDecision')"

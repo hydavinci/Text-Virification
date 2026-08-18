@@ -52,3 +52,33 @@
 ## Concerns
 
 - None.
+
+## Fix Round 1
+
+### Reviewer finding
+
+- Fixed the failed-decision leak so retry/error state is tracked per `issue_id`; switching from a failed issue to another selected issue no longer renders retry UI that still targets the original issue.
+
+### RED
+
+- Added regression test: fail save on issue A, switch to issue B, verify the retry/error UI is hidden for B and does not silently target A.
+- Command: `Set-Location C:\Work\text-verification\apps\web; npm test -- tests\ReviewWorkspace.spec.ts -t "hides retry UI after a failed save when switching to another issue"`
+- Result: expected RED; 1 test ran and failed because `[data-testid="decision-error"]` still existed after selecting issue B.
+
+### GREEN
+
+- Implemented per-issue failed-decision storage in `useReviewWorkspace`, exposed selected-issue retry visibility to `IssuePanel`, and kept existing server-authoritative reconciliation and stale-response guards intact.
+- Command: `Set-Location C:\Work\text-verification\apps\web; npm test -- tests\ReviewWorkspace.spec.ts -t "hides retry UI after a failed save when switching to another issue"`
+- Result: GREEN; 1 focused regression test passed.
+- Command: `Set-Location C:\Work\text-verification\apps\web; npm test -- tests\ReviewWorkspace.spec.ts`
+- Result: GREEN; 1 test file passed with 25 tests passed.
+- Command: `Set-Location C:\Work\text-verification\apps\web; npm run build`
+- Result: GREEN; production build passed and Vite transformed 48 modules.
+
+### Files changed
+
+- `apps/web/src/composables/useReviewWorkspace.ts`
+- `apps/web/src/components/review/IssuePanel.vue`
+- `apps/web/src/views/ReviewWorkspaceView.vue`
+- `apps/web/tests/ReviewWorkspace.spec.ts`
+- `.superpowers/sdd/2026-08-15-review-workspace-ui/task-4-report.md`

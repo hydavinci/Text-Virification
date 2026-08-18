@@ -45,7 +45,8 @@ interface PageRequest {
 }
 
 interface FailedDecision {
-  command: DecisionCommand
+  message: string
+  command?: DecisionCommand
 }
 
 interface DecisionRequestGuard {
@@ -66,7 +67,8 @@ export interface ReviewWorkspaceState {
   loading: LoadingState
   errors: ErrorState
   checkerFailures: ComputedRef<CheckerFailureMap>
-  decisionError: Ref<string | null>
+  decisionError: ComputedRef<string | null>
+  canRetryDecision: ComputedRef<boolean>
   decisionAnnouncement: Ref<string>
   selectIssue(issueId: string): void
   selectHighlight(issueId: string): void
@@ -98,7 +100,6 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
   const selectedIssueId = ref<string | null>(null)
   const blockCursor = ref<string | null>(null)
   const issueCursor = ref<string | null>(null)
-  const decisionError = ref<string | null>(null)
   const decisionAnnouncement = ref('')
   const documentCheckerFailures = ref<CheckerFailureMap>({})
   const issueCheckerFailures = ref<CheckerFailureMap>({})
@@ -121,12 +122,12 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
   let summaryRequest: Promise<void> | null = null
   let documentRequest: Promise<void> | null = null
   let issueRequest: Promise<void> | null = null
-  let failedDecision: FailedDecision | null = null
   let explicitlySelectedIssueId: string | null = null
   let lastDocumentRequest: PageRequest = { cursor: null, append: false }
   let lastIssueRequest: PageRequest = { cursor: null, append: false }
   const authoritativeDecisions = new Map<string, IssueDecisionSummary | null>()
   const decisionGenerations = new Map<string, number>()
+  const failedDecisions = ref<Record<string, FailedDecision | undefined>>({})
 
   const blocks = computed(() =>
     blockIds.value.flatMap((blockId) => {
@@ -150,6 +151,14 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     ...documentCheckerFailures.value,
     ...issueCheckerFailures.value
   }))
+  const selectedFailedDecision = computed(() => {
+    const issueId = selectedIssueId.value
+    return issueId ? failedDecisions.value[issueId] ?? null : null
+  })
+  const decisionError = computed(() => selectedFailedDecision.value?.message ?? null)
+  const canRetryDecision = computed(
+    () => selectedFailedDecision.value?.command !== undefined
+  )
 
   function isCurrent(generation: number, currentGeneration: number): boolean {
     return active && generation === currentGeneration
@@ -431,6 +440,23 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     }
   }
 
+  function setFailedDecision(issueId: string, failure: FailedDecision): void {
+    failedDecisions.value = {
+      ...failedDecisions.value,
+      [issueId]: failure
+    }
+  }
+
+  function clearFailedDecision(issueId: string): void {
+    if (!Object.prototype.hasOwnProperty.call(failedDecisions.value, issueId)) {
+      return
+    }
+
+    const nextFailedDecisions = { ...failedDecisions.value }
+    delete nextFailedDecisions[issueId]
+    failedDecisions.value = nextFailedDecisions
+  }
+
   function optimisticDecision(command: DecisionCommand): IssueDecisionSummary {
     const fields = {
       issue_version: command.issue_version,
@@ -485,9 +511,8 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
 
   async function submitDecision(command: DecisionCommand): Promise<void> {
     const generation = nextDecisionGeneration(command.issue_id)
-    decisionError.value = null
     decisionAnnouncement.value = ''
-    failedDecision = null
+    clearFailedDecision(command.issue_id)
     setIssueDecision(command.issue_id, optimisticDecision(command))
 
     try {
@@ -530,8 +555,10 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
         command.issue_id,
         authoritativeDecisions.get(command.issue_id) ?? null
       )
-      decisionError.value = errorMessage(error, '保存处理结果失败。')
-      failedDecision = { command }
+      setFailedDecision(command.issue_id, {
+        message: errorMessage(error, '保存处理结果失败。'),
+        command
+      })
     }
   }
 
@@ -546,11 +573,12 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
 
     const command = decisionCommand(issue, action, replacement)
     if (!command) {
-      decisionError.value =
-        issue.document_version === null
-          ? '问题版本不可用，请重新加载问题列表。'
-          : '自定义替换内容无效。'
-      failedDecision = null
+      setFailedDecision(issue.issue_id, {
+        message:
+          issue.document_version === null
+            ? '问题版本不可用，请重新加载问题列表。'
+            : '自定义替换内容无效。'
+      })
       return
     }
 
@@ -558,8 +586,9 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
   }
 
   async function retryDecision(): Promise<void> {
-    const retry = failedDecision
-    if (!retry) {
+    const issueId = selectedIssueId.value
+    const retry = issueId ? failedDecisions.value[issueId] : null
+    if (!retry?.command) {
       return
     }
     await submitDecision(retry.command)
@@ -635,6 +664,7 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     errors,
     checkerFailures,
     decisionError,
+    canRetryDecision,
     decisionAnnouncement,
     selectIssue,
     selectHighlight,

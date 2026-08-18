@@ -25,6 +25,7 @@ const {
   errors,
   checkerFailures,
   decisionError,
+  canRetryDecision,
   decisionAnnouncement,
   selectIssue,
   selectHighlight,
@@ -77,6 +78,7 @@ const {
       <IssuePanel
         :issue="selectedIssue"
         :decision-error="decisionError"
+        :can-retry-decision="canRetryDecision"
         @decide="decide"
         @retry-decision="retryDecision"
       />
