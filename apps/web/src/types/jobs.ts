@@ -1,3 +1,5 @@
+import type { CheckCategory, CheckScenario, FileType } from './review'
+
 export const JOB_STATUS_VALUES = [
   'queued',
   'upload_validated',
@@ -18,15 +20,22 @@ export const TERMINAL_JOB_STATUSES = ['completed', 'partial', 'failed', 'expired
 
 export type JobTerminalStatus = (typeof TERMINAL_JOB_STATUSES)[number]
 
+export interface JobCreateOptions {
+  scenario?: CheckScenario
+  enabledCategories?: CheckCategory[]
+}
+
 export interface JobRead {
   job_id: string
   source_name: string
-  file_type: 'docx' | 'pdf' | 'txt'
+  file_type: FileType
   size_bytes: number
   status: JobStatus
   progress: number
   error_code: string | null
   error_message: string | null
+  scenario?: CheckScenario
+  enabled_categories?: CheckCategory[]
   created_at: string
   expires_at: string
 }

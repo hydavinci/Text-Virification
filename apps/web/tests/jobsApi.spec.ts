@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import { createJobsApi } from '../src/api/jobs'
+import { ApiError } from '../src/types/api'
 import { JOB_STATUS_VALUES } from '../src/types/jobs'
 
 class FakeEventSource {
@@ -77,6 +78,49 @@ class FakeEventSource {
 }
 
 describe('createJobsApi', () => {
+  it('calls the browser fetch function with the global receiver', async () => {
+    const browserFetch = vi.fn(function (
+      this: unknown,
+      _input: RequestInfo | URL,
+      _init?: RequestInit
+    ): Promise<Response> {
+      if (this !== globalThis) {
+        throw new TypeError("Failed to execute 'fetch' on 'Window': Illegal invocation")
+      }
+
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            job_id: '6d96fe0f-f4fc-4b43-90fd-68e5bd09f21f',
+            source_name: 'sample.txt',
+            file_type: 'txt',
+            size_bytes: 6,
+            status: 'queued',
+            progress: 0,
+            error_code: null,
+            error_message: null,
+            created_at: '2026-08-14T00:00:00Z',
+            expires_at: '2026-08-15T00:00:00Z'
+          }),
+          { status: 201, headers: { 'Content-Type': 'application/json' } }
+        )
+      )
+    })
+    vi.stubGlobal('fetch', browserFetch)
+
+    try {
+      const api = createJobsApi({
+        eventSourceFactory: (url) => new FakeEventSource(url) as unknown as EventSource
+      })
+
+      await api.createJob(new File(['body'], 'sample.txt', { type: 'text/plain' }))
+
+      expect(browserFetch).toHaveBeenCalledOnce()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('posts uploads to the relative API base and returns the job payload', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
@@ -105,6 +149,42 @@ describe('createJobsApi', () => {
     expect(job.job_id).toBe('6d96fe0f-f4fc-4b43-90fd-68e5bd09f21f')
   })
 
+  it('posts scenario and enabled categories with the upload', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        job_id: '6d96fe0f-f4fc-4b43-90fd-68e5bd09f21f',
+        source_name: 'sample.txt',
+        file_type: 'txt',
+        size_bytes: 6,
+        status: 'queued',
+        progress: 0,
+        error_code: null,
+        error_message: null,
+        created_at: '2026-08-14T00:00:00Z',
+        expires_at: '2026-08-15T00:00:00Z',
+        scenario: 'legal',
+        enabled_categories: ['character', 'security']
+      })
+    })
+    const api = createJobsApi({
+      fetch: fetchMock,
+      eventSourceFactory: (url) => new FakeEventSource(url) as unknown as EventSource
+    })
+    const file = new File(['body'], 'sample.txt', { type: 'text/plain' })
+
+    await api.createJob(file, {
+      scenario: 'legal',
+      enabledCategories: ['character', 'security']
+    })
+
+    const [, request] = fetchMock.mock.calls[0]
+    const body = request?.body as FormData
+
+    expect(body.get('scenario')).toBe('legal')
+    expect(body.getAll('enabled_categories')).toEqual(['character', 'security'])
+  })
+
   it('parses shaped backend errors from create-job responses', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: false,
@@ -121,9 +201,17 @@ describe('createJobsApi', () => {
       eventSourceFactory: (url) => new FakeEventSource(url) as unknown as EventSource
     })
 
-    await expect(
-      api.createJob(new File(['body'], 'large.txt', { type: 'text/plain' }))
-    ).rejects.toThrow('Upload exceeds the configured maximum size.')
+    const request = api.createJob(new File(['body'], 'large.txt', { type: 'text/plain' }))
+
+    await expect(request).rejects.toThrow('Upload exceeds the configured maximum size.')
+    await expect(request).rejects.toBeInstanceOf(ApiError)
+    await expect(request).rejects.toMatchObject({
+      status: 413,
+      detail: {
+        code: 'upload_too_large',
+        message: 'Upload exceeds the configured maximum size.'
+      }
+    })
   })
 
   it('keeps the stream open across transient errors and accepts later progress', () => {

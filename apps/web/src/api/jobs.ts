@@ -1,9 +1,16 @@
 import type { InjectionKey } from 'vue'
 
-import { JOB_STATUS_VALUES, type JobProgressEvent, type JobRead, type JobStatus } from '../types/jobs'
+import { buildApiPath, requestJson, type RequestJsonDependencies } from './client'
+import {
+  JOB_STATUS_VALUES,
+  type JobCreateOptions,
+  type JobProgressEvent,
+  type JobRead,
+  type JobStatus
+} from '../types/jobs'
 
 export interface JobsApi {
-  createJob(file: File): Promise<JobRead>
+  createJob(file: File, options?: JobCreateOptions): Promise<JobRead>
   subscribe(
     jobId: string,
     onEvent: (event: JobProgressEvent) => void,
@@ -11,12 +18,10 @@ export interface JobsApi {
   ): () => void
 }
 
-interface JobsApiDependencies {
-  fetch: typeof fetch
+interface JobsApiDependencies extends RequestJsonDependencies {
   eventSourceFactory: (url: string) => EventSource
 }
 
-const API_BASE = '/api/v1'
 const TEMPORARY_CONNECTION_NOTICE = 'Connection interrupted. Waiting to reconnect…'
 const PROGRESS_CONNECTION_ERROR = 'Unable to receive job progress updates.'
 const EXPIRED_MESSAGE = '任务已过期'
@@ -32,24 +37,20 @@ export function createJobsApi(
   }
 
   return {
-    async createJob(file) {
+    async createJob(file, options) {
       const body = new FormData()
       body.append('file', file, file.name)
+      appendScenario(body, options?.scenario)
+      appendEnabledCategories(body, options?.enabledCategories)
 
-      const response = await dependencies.fetch(`${API_BASE}/jobs`, {
+      return requestJson<JobRead>(dependencies, '/jobs', {
         method: 'POST',
         body
       })
-
-      if (!response.ok) {
-        throw new Error(await extractErrorMessage(response))
-      }
-
-      return (await response.json()) as JobRead
     },
     subscribe(jobId, onEvent, onError) {
       const eventSource = dependencies.eventSourceFactory(
-        `${API_BASE}/jobs/${encodeURIComponent(jobId)}/events`
+        buildApiPath(`/jobs/${encodeURIComponent(jobId)}/events`)
       )
       let closed = false
       let lastSequence = 0
@@ -127,22 +128,6 @@ export function createJobsApi(
   }
 }
 
-async function extractErrorMessage(response: Response): Promise<string> {
-  const fallback = `Request failed with status ${response.status}.`
-
-  try {
-    const payload = (await response.json()) as { detail?: { message?: string } }
-    const detailMessage = payload.detail?.message
-    if (typeof detailMessage === 'string' && detailMessage.trim()) {
-      return detailMessage
-    }
-  } catch {
-    return fallback
-  }
-
-  return fallback
-}
-
 function parseProgressPayload(data: string): JobProgressEvent {
   const parsed = JSON.parse(data) as unknown
 
@@ -188,4 +173,27 @@ function isJobStatus(value: unknown): value is JobStatus {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
+}
+
+function appendScenario(body: FormData, scenario: JobCreateOptions['scenario']): void {
+  if (scenario) {
+    body.append('scenario', scenario)
+  }
+}
+
+function appendEnabledCategories(
+  body: FormData,
+  enabledCategories: JobCreateOptions['enabledCategories']
+): void {
+  if (enabledCategories === undefined) {
+    return
+  }
+
+  if (enabledCategories.length < 1) {
+    throw new RangeError('At least one check category must be enabled.')
+  }
+
+  for (const category of enabledCategories) {
+    body.append('enabled_categories', category)
+  }
 }
