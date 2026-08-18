@@ -1,6 +1,7 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { describe, expect, it, vi } from 'vitest'
 
+import { analysisApiKey, type AnalysisApi } from '../src/api/analysis'
 import { jobsApiKey, type JobsApi } from '../src/api/jobs'
 import UploadWorkspace from '../src/components/UploadWorkspace.vue'
 import { type JobCreateOptions } from '../src/types/jobs'
@@ -74,6 +75,49 @@ function createDeferred<T>() {
   })
 
   return { promise, resolve, reject }
+}
+
+function createAnalysisApiMock(): AnalysisApi {
+  return {
+    getSummary: vi.fn().mockResolvedValue({
+      job_id: '6d96fe0f-f4fc-4b43-90fd-68e5bd09f21f',
+      status: 'completed',
+      total_issues: 0,
+      by_category: {
+        character: 0,
+        vocabulary: 0,
+        sentence: 0,
+        format: 0,
+        discourse: 0,
+        security: 0
+      },
+      by_severity: { error: 0, warning: 0, info: 0 },
+      by_decision: { accepted: 0, ignored: 0, custom: 0, unreviewed: 0 },
+      checker_failures: {}
+    }),
+    getDocumentPage: vi.fn().mockResolvedValue({
+      job_id: '6d96fe0f-f4fc-4b43-90fd-68e5bd09f21f',
+      status: 'completed',
+      document_id: 'document-1',
+      file_type: 'txt',
+      source_name: 'sample.txt',
+      version: 1,
+      metadata: {},
+      blocks: [],
+      total_blocks: 0,
+      next_cursor: null,
+      checker_failures: {}
+    }),
+    getIssues: vi.fn().mockResolvedValue({
+      job_id: '6d96fe0f-f4fc-4b43-90fd-68e5bd09f21f',
+      status: 'completed',
+      total: 0,
+      items: [],
+      next_cursor: null,
+      checker_failures: {}
+    }),
+    putDecisions: vi.fn()
+  }
 }
 
 describe('WorkspaceView', () => {
@@ -185,7 +229,7 @@ describe('WorkspaceView', () => {
     expect(createJob).toHaveBeenCalledWith(file, buildUploadOptions())
   })
 
-  it('uploads an allowed file and displays durable progress', async () => {
+  it('opens the review workspace after analysis completes', async () => {
     const createJob = vi.fn().mockResolvedValue(buildJobRead())
     const subscribe = vi.fn((_jobId, onEvent) => {
       onEvent({
@@ -204,8 +248,14 @@ describe('WorkspaceView', () => {
       })
       return vi.fn()
     })
+    const analysisApi = createAnalysisApiMock()
     const wrapper = mount(WorkspaceView, {
-      global: { provide: { [jobsApiKey as symbol]: { createJob, subscribe } } }
+      global: {
+        provide: {
+          [jobsApiKey as symbol]: { createJob, subscribe },
+          [analysisApiKey as symbol]: analysisApi
+        }
+      }
     })
     const file = new File(['检查'], 'sample.txt', { type: 'text/plain' })
 
@@ -213,12 +263,48 @@ describe('WorkspaceView', () => {
     await flushPromises()
 
     expect(createJob).toHaveBeenCalledWith(file, buildUploadOptions())
+    expect(wrapper.find('[aria-label="文档审阅工作台"]').exists()).toBe(true)
     expect(wrapper.text()).toContain('sample.txt')
-    expect(wrapper.text()).toContain('100%')
-    expect(wrapper.text()).toContain('处理完成')
-    expect(wrapper.text()).toContain('completed')
-    expect(wrapper.get('progress').attributes('aria-label')).toBe('任务进度')
-    expect(wrapper.get('[role="status"]').attributes('aria-live')).toBe('polite')
+    expect(analysisApi.getDocumentPage).toHaveBeenCalledWith(
+      '6d96fe0f-f4fc-4b43-90fd-68e5bd09f21f',
+      { cursor: null, limit: 100 }
+    )
+    expect(analysisApi.getIssues).toHaveBeenCalledWith(
+      '6d96fe0f-f4fc-4b43-90fd-68e5bd09f21f',
+      { cursor: null, limit: 50 }
+    )
+  })
+
+  it('opens the review workspace when analysis partially completes', async () => {
+    const createJob = vi.fn().mockResolvedValue(buildJobRead())
+    const subscribe = vi.fn((_jobId, onEvent) => {
+      onEvent({
+        sequence: 2,
+        status: 'partial',
+        progress: 100,
+        message: '部分检查器失败',
+        created_at: '2026-08-14T00:02:00Z'
+      })
+      return vi.fn()
+    })
+    const analysisApi = createAnalysisApiMock()
+    const wrapper = mount(WorkspaceView, {
+      global: {
+        provide: {
+          [jobsApiKey as symbol]: { createJob, subscribe },
+          [analysisApiKey as symbol]: analysisApi
+        }
+      }
+    })
+
+    await selectFile(wrapper, new File(['检查'], 'partial.txt', { type: 'text/plain' }))
+    await flushPromises()
+
+    expect(wrapper.find('[aria-label="文档审阅工作台"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('sample.txt')
+    expect(analysisApi.getSummary).toHaveBeenCalledWith(
+      '6d96fe0f-f4fc-4b43-90fd-68e5bd09f21f'
+    )
   })
 
   it('accepts files that are exactly 25 MiB', async () => {
@@ -327,15 +413,20 @@ describe('WorkspaceView', () => {
       onError('无法接收任务进度，请稍后重试。')
       return vi.fn()
     })
+    const analysisApi = createAnalysisApiMock()
     const wrapper = mount(WorkspaceView, {
-      global: { provide: { [jobsApiKey as symbol]: { createJob, subscribe } } }
+      global: {
+        provide: {
+          [jobsApiKey as symbol]: { createJob, subscribe },
+          [analysisApiKey as symbol]: analysisApi
+        }
+      }
     })
 
     await selectFile(wrapper, new File(['done'], 'done.txt', { type: 'text/plain' }))
     await flushPromises()
 
-    expect(wrapper.text()).toContain('处理完成')
-    expect(wrapper.text()).toContain('completed')
+    expect(wrapper.find('[aria-label="文档审阅工作台"]').exists()).toBe(true)
     expect(wrapper.text()).not.toContain('无法接收任务进度，请稍后重试。')
   })
 

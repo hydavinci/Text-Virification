@@ -12,7 +12,7 @@ import type {
 export type CheckerFailureMap = Partial<Record<CheckCategory, CheckerFailure>>
 
 export interface DocumentPageQuery {
-  cursor?: string
+  cursor?: string | null
   limit?: number
 }
 
@@ -21,7 +21,7 @@ export interface IssuesQuery {
   severity?: IssueSeverity
   decision?: IssueDecisionState
   search?: string
-  cursor?: string
+  cursor?: string | null
   limit?: number
 }
 

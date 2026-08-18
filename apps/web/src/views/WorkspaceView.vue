@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { inject, onBeforeUnmount, ref } from 'vue'
+import { computed, inject, onBeforeUnmount, ref } from 'vue'
 
 import { jobsApiKey } from '../api/jobs'
 import JobProgress from '../components/JobProgress.vue'
@@ -11,6 +11,8 @@ import {
   type JobRead,
   type JobStatus
 } from '../types/jobs'
+import type { FileType } from '../types/review'
+import ReviewWorkspaceView from './ReviewWorkspaceView.vue'
 
 interface JobProgressState {
   sourceName: string
@@ -19,6 +21,12 @@ interface JobProgressState {
   message: string
   failureMessage: string | null
   connectionMessage: string | null
+}
+
+interface ActiveJob {
+  jobId: string
+  sourceName: string
+  fileType: FileType
 }
 
 const injectedJobsApi = inject(jobsApiKey)
@@ -32,6 +40,12 @@ const jobsApi = injectedJobsApi
 const uploadError = ref<string | null>(null)
 const isCreating = ref(false)
 const jobState = ref<JobProgressState | null>(null)
+const activeJob = ref<ActiveJob | null>(null)
+const showsReviewWorkspace = computed(
+  () =>
+    activeJob.value !== null &&
+    (jobState.value?.status === 'completed' || jobState.value?.status === 'partial')
+)
 
 let unsubscribe: (() => void) | null = null
 let requestGeneration = 0
@@ -91,6 +105,11 @@ async function handleUpload(file: File, options: UploadOptionsSnapshot) {
     const job = await jobsApi.createJob(file, options)
     if (!isRequestCurrent(generation)) {
       return
+    }
+    activeJob.value = {
+      jobId: job.job_id,
+      sourceName: job.source_name,
+      fileType: job.file_type
     }
     jobState.value = buildInitialState(job)
     unsubscribe = jobsApi.subscribe(
@@ -160,32 +179,41 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <main class="workspace">
-    <header class="workspace__header">
-      <div class="workspace__brand" aria-hidden="true">
-        <svg viewBox="0 0 24 24" role="img">
-          <path d="M8 3h6l4 4v14H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" />
-          <path d="M14 3v5h5M9.5 13l1.7 1.7 3.8-4" />
+  <main :class="['workspace', { 'workspace--review': showsReviewWorkspace }]">
+    <ReviewWorkspaceView
+      v-if="showsReviewWorkspace && activeJob"
+      :job-id="activeJob.jobId"
+      :source-name="activeJob.sourceName"
+      :file-type="activeJob.fileType"
+    />
+
+    <template v-else>
+      <header class="workspace__header">
+        <div class="workspace__brand" aria-hidden="true">
+          <svg viewBox="0 0 24 24" role="img">
+            <path d="M8 3h6l4 4v14H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" />
+            <path d="M14 3v5h5M9.5 13l1.7 1.7 3.8-4" />
+          </svg>
+        </div>
+        <div>
+          <h1>文档智能核验</h1>
+          <p>上传文档，自动完成格式、内容与语言规范检查</p>
+        </div>
+      </header>
+
+      <section class="workspace__card" aria-label="文档核验工作台">
+        <UploadWorkspace :busy="isCreating" :server-error="uploadError" @upload="handleUpload" />
+        <JobProgress v-if="jobState" :state="jobState" />
+      </section>
+
+      <p class="workspace__privacy">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 3 5 6v5c0 4.6 2.9 8.2 7 10 4.1-1.8 7-5.4 7-10V6l-7-3Z" />
+          <path d="m9 12 2 2 4-4" />
         </svg>
-      </div>
-      <div>
-        <h1>文档智能核验</h1>
-        <p>上传文档，自动完成格式、内容与语言规范检查</p>
-      </div>
-    </header>
-
-    <section class="workspace__card" aria-label="文档核验工作台">
-      <UploadWorkspace :busy="isCreating" :server-error="uploadError" @upload="handleUpload" />
-      <JobProgress v-if="jobState" :state="jobState" />
-    </section>
-
-    <p class="workspace__privacy">
-      <svg viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M12 3 5 6v5c0 4.6 2.9 8.2 7 10 4.1-1.8 7-5.4 7-10V6l-7-3Z" />
-        <path d="m9 12 2 2 4-4" />
-      </svg>
-      文件仅用于本次核验，任务到期后将自动清理
-    </p>
+        文件仅用于本次核验，任务到期后将自动清理
+      </p>
+    </template>
   </main>
 </template>
 
@@ -194,6 +222,11 @@ onBeforeUnmount(() => {
   width: min(100% - 32px, 760px);
   margin: 0 auto;
   padding: 64px 0 40px;
+}
+
+.workspace--review {
+  width: 100%;
+  padding: 0;
 }
 
 .workspace__header {
