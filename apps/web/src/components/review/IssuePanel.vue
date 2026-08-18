@@ -1,9 +1,70 @@
 <script setup lang="ts">
-import type { Issue } from '../../types/analysis'
+import { computed, ref, watch } from 'vue'
 
-defineProps<{
+import type { Issue } from '../../types/analysis'
+import type { DecisionAction } from '../../types/review'
+
+const props = defineProps<{
   issue: Issue | null
+  decisionError: string | null
 }>()
+
+const emit = defineEmits<{
+  decide: [action: DecisionAction, replacement?: string]
+  retryDecision: []
+}>()
+
+const customReplacement = ref('')
+const customReplacementError = ref<string | null>(null)
+const decisionLabel = computed(() => {
+  switch (props.issue?.decision?.action) {
+    case 'accepted':
+      return '已接受'
+    case 'ignored':
+      return '已忽略'
+    case 'custom':
+      return '已自定义'
+    default:
+      return '未处理'
+  }
+})
+
+watch(
+  () => props.issue,
+  (issue) => {
+    customReplacement.value =
+      issue?.decision?.action === 'custom' ? issue.decision.replacement : ''
+    customReplacementError.value = null
+  },
+  { immediate: true }
+)
+
+function submitDecision(action: Exclude<DecisionAction, 'custom'>): void {
+  customReplacementError.value = null
+  emit('decide', action)
+}
+
+function submitCustomDecision(): void {
+  const error = validateCustomReplacement(customReplacement.value)
+  customReplacementError.value = error
+  if (error) {
+    return
+  }
+  emit('decide', 'custom', customReplacement.value)
+}
+
+function validateCustomReplacement(replacement: string): string | null {
+  if (!replacement.trim()) {
+    return '请输入自定义替换内容。'
+  }
+  if (replacement.includes('\u0000')) {
+    return '自定义替换不能包含 NUL 字符。'
+  }
+  if (Array.from(replacement).length > 10_000) {
+    return '自定义替换不能超过 10,000 个 Unicode 字符。'
+  }
+  return null
+}
 </script>
 
 <template>
@@ -35,6 +96,61 @@ defineProps<{
           <dd>{{ issue.context }}</dd>
         </div>
       </dl>
+
+      <section class="issue-panel__decisions" aria-label="问题处理">
+        <div class="issue-panel__decision-heading">
+          <h3>处理决定</h3>
+          <span>{{ decisionLabel }}</span>
+        </div>
+        <div class="issue-panel__decision-buttons">
+          <button type="button" name="accept" @click="submitDecision('accepted')">
+            接受建议
+          </button>
+          <button type="button" name="ignore" @click="submitDecision('ignored')">
+            忽略问题
+          </button>
+        </div>
+        <label>
+          <span>自定义替换</span>
+          <textarea
+            v-model="customReplacement"
+            aria-label="自定义替换"
+            rows="4"
+            @input="customReplacementError = null"
+          />
+        </label>
+        <button
+          type="button"
+          name="custom-decision"
+          class="issue-panel__custom-button"
+          @click="submitCustomDecision"
+        >
+          保存自定义替换
+        </button>
+        <p
+          v-if="customReplacementError"
+          class="issue-panel__validation-error"
+          data-testid="custom-replacement-error"
+          role="alert"
+        >
+          {{ customReplacementError }}
+        </p>
+        <div
+          v-if="decisionError"
+          class="issue-panel__decision-error"
+          data-testid="decision-error"
+          role="alert"
+        >
+          <p>{{ decisionError }}</p>
+          <button
+            type="button"
+            data-testid="retry-decision"
+            @click="emit('retryDecision')"
+          >
+            重试保存
+          </button>
+        </div>
+      </section>
     </template>
 
     <div v-else class="issue-panel__empty">
@@ -130,5 +246,94 @@ dd {
   margin: 8px 0 0;
   font-size: 0.8rem;
   line-height: 1.55;
+}
+
+.issue-panel__decisions {
+  display: grid;
+  gap: 12px;
+  margin-top: 22px;
+  padding-top: 18px;
+  border-top: 1px solid #edf0f5;
+}
+
+.issue-panel__decision-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.issue-panel__decision-heading h3 {
+  margin: 0;
+  color: #30394d;
+  font-size: 0.86rem;
+}
+
+.issue-panel__decision-heading span {
+  color: #596bd9;
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.issue-panel__decision-buttons {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.issue-panel__decisions button {
+  padding: 9px 10px;
+  color: #4256c9;
+  font-weight: 700;
+  background: #eef0ff;
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.issue-panel__decision-buttons button:last-child {
+  color: #596276;
+  background: #f0f2f6;
+}
+
+.issue-panel__decisions label {
+  display: grid;
+  gap: 6px;
+  color: #667085;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.issue-panel__decisions textarea {
+  width: 100%;
+  padding: 9px;
+  color: #30394d;
+  font: inherit;
+  line-height: 1.5;
+  resize: vertical;
+  border: 1px solid #dfe4ee;
+  border-radius: 8px;
+}
+
+.issue-panel__custom-button {
+  justify-self: start;
+}
+
+.issue-panel__validation-error,
+.issue-panel__decision-error {
+  margin: 0;
+  color: #a53636;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.issue-panel__decision-error {
+  padding: 11px;
+  background: #fff2f2;
+  border-radius: 8px;
+}
+
+.issue-panel__decision-error p {
+  margin: 0 0 9px;
 }
 </style>

@@ -1,18 +1,87 @@
 <script setup lang="ts">
-import type { AnalysisSummaryResponse, Issue } from '../../types/analysis'
+import { onBeforeUnmount, ref, watch } from 'vue'
 
-defineProps<{
+import type { AnalysisSummaryResponse, Issue } from '../../types/analysis'
+import type {
+  CheckCategory,
+  IssueDecisionState,
+  IssueSeverity
+} from '../../types/review'
+import type { ReviewIssueFilters } from '../../composables/useReviewWorkspace'
+
+const props = defineProps<{
   summary: AnalysisSummaryResponse | null
   issues: Issue[]
   selectedIssueId: string | null
   loading: boolean
   error: string | null
+  filters: ReviewIssueFilters
 }>()
 
 const emit = defineEmits<{
   select: [issueId: string]
   retry: []
+  filterChange: [filters: ReviewIssueFilters]
 }>()
+
+const category = ref<CheckCategory | ''>(props.filters.category ?? '')
+const severity = ref<IssueSeverity | ''>(props.filters.severity ?? '')
+const decision = ref<IssueDecisionState | ''>(props.filters.decision ?? '')
+const searchInput = ref(props.filters.search ?? '')
+const appliedSearch = ref(props.filters.search ?? '')
+let searchTimer: ReturnType<typeof setTimeout> | null = null
+
+function currentFilters(search = appliedSearch.value): ReviewIssueFilters {
+  const filters: ReviewIssueFilters = {}
+  if (category.value) {
+    filters.category = category.value
+  }
+  if (severity.value) {
+    filters.severity = severity.value
+  }
+  if (decision.value) {
+    filters.decision = decision.value
+  }
+  if (search) {
+    filters.search = search
+  }
+  return filters
+}
+
+function applyCategoricalFilters(): void {
+  emit('filterChange', currentFilters())
+}
+
+function scheduleSearch(): void {
+  if (searchTimer) {
+    clearTimeout(searchTimer)
+  }
+
+  searchTimer = setTimeout(() => {
+    searchTimer = null
+    appliedSearch.value = searchInput.value
+    emit('filterChange', currentFilters(searchInput.value))
+  }, 250)
+}
+
+watch(
+  () => props.filters,
+  (filters) => {
+    category.value = filters.category ?? ''
+    severity.value = filters.severity ?? ''
+    decision.value = filters.decision ?? ''
+    appliedSearch.value = filters.search ?? ''
+    if (!searchTimer) {
+      searchInput.value = appliedSearch.value
+    }
+  }
+)
+
+onBeforeUnmount(() => {
+  if (searchTimer) {
+    clearTimeout(searchTimer)
+  }
+})
 </script>
 
 <template>
@@ -23,6 +92,62 @@ const emit = defineEmits<{
         <strong>{{ summary?.total_issues ?? issues.length }}</strong>
       </div>
       <span>当前页 {{ issues.length }}</span>
+    </div>
+
+    <div class="review-navigation__filters">
+      <label>
+        <span>类别</span>
+        <select
+          v-model="category"
+          aria-label="问题类别"
+          @change="applyCategoricalFilters"
+        >
+          <option value="">全部类别</option>
+          <option value="character">文字</option>
+          <option value="vocabulary">词汇</option>
+          <option value="sentence">句子</option>
+          <option value="format">格式</option>
+          <option value="discourse">篇章</option>
+          <option value="security">安全</option>
+        </select>
+      </label>
+      <label>
+        <span>严重程度</span>
+        <select
+          v-model="severity"
+          aria-label="问题严重程度"
+          @change="applyCategoricalFilters"
+        >
+          <option value="">全部程度</option>
+          <option value="error">错误</option>
+          <option value="warning">警告</option>
+          <option value="info">提示</option>
+        </select>
+      </label>
+      <label>
+        <span>处理状态</span>
+        <select
+          v-model="decision"
+          aria-label="问题处理状态"
+          @change="applyCategoricalFilters"
+        >
+          <option value="">全部状态</option>
+          <option value="unreviewed">未处理</option>
+          <option value="accepted">已接受</option>
+          <option value="ignored">已忽略</option>
+          <option value="custom">已自定义</option>
+        </select>
+      </label>
+      <label class="review-navigation__search">
+        <span>关键词</span>
+        <input
+          v-model="searchInput"
+          type="search"
+          aria-label="搜索问题"
+          placeholder="搜索原文或说明"
+          @input="scheduleSearch"
+        />
+      </label>
     </div>
 
     <p v-if="loading && !issues.length" class="review-navigation__status" role="status">
@@ -99,6 +224,44 @@ const emit = defineEmits<{
 .review-navigation__heading > span {
   color: #758096;
   font-size: 0.72rem;
+}
+
+.review-navigation__filters {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  padding: 14px 12px;
+  border-bottom: 1px solid #edf0f5;
+}
+
+.review-navigation__filters label {
+  display: grid;
+  gap: 5px;
+  color: #667085;
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.review-navigation__filters select,
+.review-navigation__filters input {
+  width: 100%;
+  min-width: 0;
+  padding: 8px 9px;
+  color: #30394d;
+  font-size: 0.78rem;
+  background: #f8f9fc;
+  border: 1px solid #dfe4ee;
+  border-radius: 8px;
+}
+
+.review-navigation__filters select:focus-visible,
+.review-navigation__filters input:focus-visible {
+  border-color: #6579e8;
+  outline: 2px solid rgba(101, 121, 232, 0.22);
+}
+
+.review-navigation__search {
+  grid-column: 1 / -1;
 }
 
 .review-navigation__status,

@@ -12,9 +12,11 @@ import ReviewNavigation from '../src/components/review/ReviewNavigation.vue'
 import { useReviewWorkspace } from '../src/composables/useReviewWorkspace'
 import type {
   AnalysisSummaryResponse,
+  DecisionBatchResponse,
   DocumentBlock,
   DocumentPageResponse,
   Issue,
+  IssueDecision,
   IssuePageResponse
 } from '../src/types/analysis'
 import ReviewWorkspaceView from '../src/views/ReviewWorkspaceView.vue'
@@ -144,6 +146,19 @@ function buildIssuePage(overrides: Partial<IssuePageResponse> = {}): IssuePageRe
   }
 }
 
+function buildAppliedResponse(decision: IssueDecision): DecisionBatchResponse {
+  return {
+    outcomes: [
+      {
+        issue_id: decision.issue_id,
+        status: 'applied',
+        code: null,
+        decision
+      }
+    ]
+  }
+}
+
 function createAnalysisApiMock(overrides: Partial<AnalysisApi> = {}): AnalysisApi {
   return {
     getSummary: vi.fn().mockResolvedValue(buildSummary()),
@@ -193,8 +208,10 @@ const ReviewWorkspaceStateHarness = defineComponent({
       :selected-issue-id="selectedIssueId"
       :loading="loading.issues"
       :error="errors.issues"
+      :filters="filters"
       @select="selectIssue"
       @retry="retryIssues"
+      @filter-change="setFilters"
     />
     <button type="button" data-testid="load-next-issues" @click="loadNextIssues">
       Load next issues
@@ -580,6 +597,379 @@ describe('ReviewWorkspaceView', () => {
     expect(wrapper.find('[data-issue-id="issue-filtered"]').exists()).toBe(true)
     expect(wrapper.find('[data-issue-id="issue-stale"]').exists()).toBe(false)
     expect(wrapper.find('[data-issue-id="issue-1"]').exists()).toBe(false)
+  })
+
+  it('keeps the newest issue filter response and applies categorical filters immediately', async () => {
+    const categoryPage = createDeferred<IssuePageResponse>()
+    const severityPage = createDeferred<IssuePageResponse>()
+    const decisionPage = createDeferred<IssuePageResponse>()
+    const getIssues = vi
+      .fn()
+      .mockResolvedValueOnce(buildIssuePage())
+      .mockReturnValueOnce(categoryPage.promise)
+      .mockReturnValueOnce(severityPage.promise)
+      .mockReturnValueOnce(decisionPage.promise)
+    const wrapper = mountReviewWorkspace(createAnalysisApiMock({ getIssues }))
+    await flushPromises()
+
+    await wrapper.get('[aria-label="问题类别"]').setValue('security')
+    expect(wrapper.find('[aria-current="true"]').exists()).toBe(false)
+    await wrapper.get('[aria-label="问题严重程度"]').setValue('error')
+    await wrapper.get('[aria-label="问题处理状态"]').setValue('unreviewed')
+
+    expect(getIssues).toHaveBeenNthCalledWith(2, jobId, {
+      category: 'security',
+      cursor: null,
+      limit: 50
+    })
+    expect(getIssues).toHaveBeenNthCalledWith(3, jobId, {
+      category: 'security',
+      severity: 'error',
+      cursor: null,
+      limit: 50
+    })
+    expect(getIssues).toHaveBeenNthCalledWith(4, jobId, {
+      category: 'security',
+      severity: 'error',
+      decision: 'unreviewed',
+      cursor: null,
+      limit: 50
+    })
+
+    decisionPage.resolve(
+      buildIssuePage({
+        total: 1,
+        items: [
+          buildIssue({
+            issue_id: 'issue-newest-filter',
+            type: 'security',
+            severity: 'error',
+            original: '最新筛选结果'
+          })
+        ]
+      })
+    )
+    await flushPromises()
+    categoryPage.resolve(
+      buildIssuePage({
+        items: [buildIssue({ issue_id: 'issue-stale-category', original: '过期类别' })]
+      })
+    )
+    severityPage.resolve(
+      buildIssuePage({
+        items: [buildIssue({ issue_id: 'issue-stale-severity', original: '过期严重程度' })]
+      })
+    )
+    await flushPromises()
+
+    expect(wrapper.find('[data-issue-id="issue-newest-filter"]').exists()).toBe(true)
+    expect(wrapper.find('[data-issue-id="issue-stale-category"]').exists()).toBe(false)
+    expect(wrapper.find('[data-issue-id="issue-stale-severity"]').exists()).toBe(false)
+  })
+
+  it('debounces keyword issue search by exactly 250 ms', async () => {
+    vi.useFakeTimers()
+    try {
+      const getIssues = vi.fn().mockResolvedValue(buildIssuePage())
+      const wrapper = mountReviewWorkspace(createAnalysisApiMock({ getIssues }))
+      await flushPromises()
+
+      await wrapper.get('[aria-label="搜索问题"]').setValue('专业')
+      expect(getIssues).toHaveBeenCalledTimes(1)
+
+      await vi.advanceTimersByTimeAsync(249)
+      expect(getIssues).toHaveBeenCalledTimes(1)
+
+      await vi.advanceTimersByTimeAsync(1)
+      await flushPromises()
+
+      expect(getIssues).toHaveBeenCalledTimes(2)
+      expect(getIssues).toHaveBeenLastCalledWith(jobId, {
+        search: '专业',
+        cursor: null,
+        limit: 50
+      })
+      wrapper.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('sends and optimistically previews a custom replacement without mutating raw blocks', async () => {
+    const decisionResponse = createDeferred<DecisionBatchResponse>()
+    const putDecisions = vi.fn().mockReturnValue(decisionResponse.promise)
+    const rawBlock = buildBlock()
+    const wrapper = mountReviewWorkspace(
+      createAnalysisApiMock({
+        getDocumentPage: vi.fn().mockResolvedValue(
+          buildDocumentPage({
+            blocks: [rawBlock],
+            total_blocks: 1
+          })
+        ),
+        getIssues: vi.fn().mockResolvedValue(
+          buildIssuePage({
+            total: 1,
+            items: [buildIssue()]
+          })
+        ),
+        putDecisions
+      })
+    )
+    await flushPromises()
+
+    await wrapper.get('[aria-label="自定义替换"]').setValue('专业')
+    await wrapper.get('button[name="custom-decision"]').trigger('click')
+
+    expect(putDecisions).toHaveBeenCalledWith(jobId, [
+      {
+        issue_id: 'issue-1',
+        issue_version: 1,
+        action: 'custom',
+        replacement: '专业'
+      }
+    ])
+    expect(wrapper.get('[data-highlight-range-issue-ids~="issue-1"]').text()).toBe(
+      '专业'
+    )
+    expect(rawBlock.text).toBe('第一段文字')
+    wrapper.unmount()
+  })
+
+  it('reconciles an applied decision with the returned server decision', async () => {
+    const decisionResponse = createDeferred<DecisionBatchResponse>()
+    const putDecisions = vi.fn().mockReturnValue(decisionResponse.promise)
+    const wrapper = mountReviewWorkspace(createAnalysisApiMock({ putDecisions }))
+    await flushPromises()
+
+    await wrapper.get('[aria-label="自定义替换"]').setValue('客户端替换')
+    await wrapper.get('button[name="custom-decision"]').trigger('click')
+    expect(wrapper.get('[data-highlight-range-issue-ids~="issue-1"]').text()).toBe(
+      '客户端替换'
+    )
+
+    decisionResponse.resolve(
+      buildAppliedResponse({
+        issue_id: 'issue-1',
+        issue_version: 1,
+        action: 'custom',
+        replacement: '服务器替换',
+        updated_at: '2026-08-18T01:00:00Z'
+      })
+    )
+    await flushPromises()
+
+    expect(wrapper.get('[data-highlight-range-issue-ids~="issue-1"]').text()).toBe(
+      '服务器替换'
+    )
+    expect(wrapper.get('aside[aria-label="问题详情"]').text()).toContain('已自定义')
+  })
+
+  it('reloads authoritative state and announces a decision conflict', async () => {
+    const authoritativeIssue = buildIssue({
+      decision: {
+        issue_version: 1,
+        action: 'ignored',
+        replacement: null,
+        updated_at: '2026-08-18T01:00:00Z'
+      }
+    })
+    const getIssues = vi
+      .fn()
+      .mockResolvedValueOnce(
+        buildIssuePage({
+          total: 1,
+          items: [buildIssue()]
+        })
+      )
+      .mockResolvedValueOnce(
+        buildIssuePage({
+          total: 1,
+          items: [authoritativeIssue]
+        })
+      )
+    const getSummary = vi
+      .fn()
+      .mockResolvedValueOnce(buildSummary())
+      .mockResolvedValueOnce(
+        buildSummary({
+          by_decision: { accepted: 0, ignored: 1, custom: 0, unreviewed: 1 }
+        })
+      )
+    const putDecisions = vi.fn().mockResolvedValue({
+      outcomes: [
+        {
+          issue_id: 'issue-1',
+          status: 'conflict',
+          code: 'stale_issue_version',
+          decision: null
+        }
+      ]
+    } satisfies DecisionBatchResponse)
+    const wrapper = mountReviewWorkspace(
+      createAnalysisApiMock({ getIssues, getSummary, putDecisions })
+    )
+    await flushPromises()
+
+    await wrapper.get('button[name="accept"]').trigger('click')
+    await flushPromises()
+
+    expect(getIssues).toHaveBeenCalledTimes(2)
+    expect(getIssues).toHaveBeenLastCalledWith(jobId, {
+      cursor: null,
+      limit: 50
+    })
+    expect(getSummary).toHaveBeenCalledTimes(2)
+    expect(wrapper.get('[aria-live="polite"]').text()).toContain(
+      '结果已更新，请重新确认'
+    )
+    expect(wrapper.get('aside[aria-label="问题详情"]').text()).toContain('已忽略')
+  })
+
+  it('reloads authoritative issue and summary state after an invalid decision', async () => {
+    const getIssues = vi
+      .fn()
+      .mockResolvedValueOnce(buildIssuePage())
+      .mockResolvedValueOnce(
+        buildIssuePage({
+          total: 1,
+          items: [buildIssue({ suggestion: '服务器新建议' })]
+        })
+      )
+    const getSummary = vi
+      .fn()
+      .mockResolvedValueOnce(buildSummary())
+      .mockResolvedValueOnce(buildSummary({ total_issues: 1 }))
+    const putDecisions = vi.fn().mockResolvedValue({
+      outcomes: [
+        {
+          issue_id: 'issue-1',
+          status: 'invalid',
+          code: 'issue_not_found',
+          decision: null
+        }
+      ]
+    } satisfies DecisionBatchResponse)
+    const wrapper = mountReviewWorkspace(
+      createAnalysisApiMock({ getIssues, getSummary, putDecisions })
+    )
+    await flushPromises()
+
+    await wrapper.get('button[name="ignore"]').trigger('click')
+    await flushPromises()
+
+    expect(getIssues).toHaveBeenCalledTimes(2)
+    expect(getSummary).toHaveBeenCalledTimes(2)
+    expect(wrapper.get('[aria-live="polite"]').text()).toContain(
+      '结果已更新，请重新确认'
+    )
+  })
+
+  it('rolls back a failed decision and exposes an explicit retry', async () => {
+    const retryResponse = createDeferred<DecisionBatchResponse>()
+    const putDecisions = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('保存处理结果失败'))
+      .mockReturnValueOnce(retryResponse.promise)
+    const wrapper = mountReviewWorkspace(createAnalysisApiMock({ putDecisions }))
+    await flushPromises()
+
+    await wrapper.get('button[name="accept"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-highlight-range-issue-ids~="issue-1"]').text()).toBe(
+      '第一'
+    )
+    expect(wrapper.get('[data-testid="decision-error"]').attributes('role')).toBe('alert')
+    expect(wrapper.get('[data-testid="decision-error"]').text()).toContain(
+      '保存处理结果失败'
+    )
+
+    await wrapper.get('[data-testid="retry-decision"]').trigger('click')
+
+    expect(putDecisions).toHaveBeenCalledTimes(2)
+    expect(putDecisions).toHaveBeenLastCalledWith(jobId, [
+      {
+        issue_id: 'issue-1',
+        issue_version: 1,
+        action: 'accepted'
+      }
+    ])
+    expect(wrapper.get('[data-highlight-range-issue-ids~="issue-1"]').text()).toBe(
+      '首段'
+    )
+
+    retryResponse.resolve(
+      buildAppliedResponse({
+        issue_id: 'issue-1',
+        issue_version: 1,
+        action: 'accepted',
+        replacement: null,
+        updated_at: '2026-08-18T01:00:00Z'
+      })
+    )
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="decision-error"]').exists()).toBe(false)
+  })
+
+  it('ignores stale decision responses for the same issue', async () => {
+    const acceptedResponse = createDeferred<DecisionBatchResponse>()
+    const ignoredResponse = createDeferred<DecisionBatchResponse>()
+    const putDecisions = vi
+      .fn()
+      .mockReturnValueOnce(acceptedResponse.promise)
+      .mockReturnValueOnce(ignoredResponse.promise)
+    const wrapper = mountReviewWorkspace(createAnalysisApiMock({ putDecisions }))
+    await flushPromises()
+
+    await wrapper.get('button[name="accept"]').trigger('click')
+    await wrapper.get('button[name="ignore"]').trigger('click')
+
+    ignoredResponse.resolve(
+      buildAppliedResponse({
+        issue_id: 'issue-1',
+        issue_version: 1,
+        action: 'ignored',
+        replacement: null,
+        updated_at: '2026-08-18T01:01:00Z'
+      })
+    )
+    await flushPromises()
+    acceptedResponse.resolve(
+      buildAppliedResponse({
+        issue_id: 'issue-1',
+        issue_version: 1,
+        action: 'accepted',
+        replacement: null,
+        updated_at: '2026-08-18T01:00:00Z'
+      })
+    )
+    await flushPromises()
+
+    expect(wrapper.get('[data-highlight-range-issue-ids~="issue-1"]').text()).toBe(
+      '第一'
+    )
+    expect(wrapper.get('aside[aria-label="问题详情"]').text()).toContain('已忽略')
+  })
+
+  it.each([
+    ['empty', ''],
+    ['whitespace', '   '],
+    ['NUL', '有效\u0000替换'],
+    ['more than 10,000 code points', '😀'.repeat(10_001)]
+  ])('rejects an invalid custom replacement before request: %s', async (_, replacement) => {
+    const putDecisions = vi.fn()
+    const wrapper = mountReviewWorkspace(createAnalysisApiMock({ putDecisions }))
+    await flushPromises()
+
+    await wrapper.get('[aria-label="自定义替换"]').setValue(replacement)
+    await wrapper.get('button[name="custom-decision"]').trigger('click')
+
+    expect(putDecisions).not.toHaveBeenCalled()
+    expect(wrapper.get('[data-testid="custom-replacement-error"]').attributes('role')).toBe(
+      'alert'
+    )
   })
 
   it('retains loaded issue cards when append fails and retries that page', async () => {

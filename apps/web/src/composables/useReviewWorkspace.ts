@@ -12,12 +12,15 @@ import { analysisApiKey } from '../api/analysis'
 import type {
   AnalysisSummaryResponse,
   CheckerFailureMap,
+  DecisionCommand,
   DocumentBlock,
   DocumentPageResponse,
   Issue,
+  IssueDecisionSummary,
   IssuesQuery,
   IssuePageResponse
 } from '../types/analysis'
+import type { DecisionAction } from '../types/review'
 
 const DOCUMENT_PAGE_LIMIT = 100
 const ISSUE_PAGE_LIMIT = 50
@@ -41,6 +44,15 @@ interface PageRequest {
   append: boolean
 }
 
+interface FailedDecision {
+  command: DecisionCommand
+}
+
+interface DecisionRequestGuard {
+  issueId: string
+  generation: number
+}
+
 export interface ReviewWorkspaceState {
   summary: Ref<AnalysisSummaryResponse | null>
   filters: Ref<ReviewIssueFilters>
@@ -54,9 +66,13 @@ export interface ReviewWorkspaceState {
   loading: LoadingState
   errors: ErrorState
   checkerFailures: ComputedRef<CheckerFailureMap>
+  decisionError: Ref<string | null>
+  decisionAnnouncement: Ref<string>
   selectIssue(issueId: string): void
   selectHighlight(issueId: string): void
   setFilters(filters: ReviewIssueFilters): Promise<void>
+  decide(action: DecisionAction, replacement?: string): Promise<void>
+  retryDecision(): Promise<void>
   loadNextBlocks(): Promise<void>
   loadNextIssues(): Promise<void>
   retrySummary(): Promise<void>
@@ -82,6 +98,8 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
   const selectedIssueId = ref<string | null>(null)
   const blockCursor = ref<string | null>(null)
   const issueCursor = ref<string | null>(null)
+  const decisionError = ref<string | null>(null)
+  const decisionAnnouncement = ref('')
   const documentCheckerFailures = ref<CheckerFailureMap>({})
   const issueCheckerFailures = ref<CheckerFailureMap>({})
   const loading = reactive<LoadingState>({
@@ -103,9 +121,12 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
   let summaryRequest: Promise<void> | null = null
   let documentRequest: Promise<void> | null = null
   let issueRequest: Promise<void> | null = null
+  let failedDecision: FailedDecision | null = null
   let explicitlySelectedIssueId: string | null = null
   let lastDocumentRequest: PageRequest = { cursor: null, append: false }
   let lastIssueRequest: PageRequest = { cursor: null, append: false }
+  const authoritativeDecisions = new Map<string, IssueDecisionSummary | null>()
+  const decisionGenerations = new Map<string, number>()
 
   const blocks = computed(() =>
     blockIds.value.flatMap((blockId) => {
@@ -204,7 +225,11 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     return request
   }
 
-  function loadIssuePage(cursor: string | null, append: boolean): Promise<void> {
+  function loadIssuePage(
+    cursor: string | null,
+    append: boolean,
+    decisionGuard?: DecisionRequestGuard
+  ): Promise<void> {
     const generation = ++issueGeneration
     lastIssueRequest = { cursor, append }
     loading.issues = true
@@ -217,7 +242,11 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
           cursor,
           limit: ISSUE_PAGE_LIMIT
         })
-        if (!isCurrent(generation, issueGeneration)) {
+        if (
+          !isCurrent(generation, issueGeneration) ||
+          (decisionGuard &&
+            !isDecisionCurrent(decisionGuard.issueId, decisionGuard.generation))
+        ) {
           return
         }
         applyIssuePage(response, append)
@@ -322,8 +351,13 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     const nextIds = append ? [...issueIds.value] : []
     const seen = new Set(nextIds)
 
+    if (!append) {
+      authoritativeDecisions.clear()
+    }
+
     for (const issue of response.items) {
       nextById[issue.issue_id] = issue
+      authoritativeDecisions.set(issue.issue_id, issue.decision)
       if (!seen.has(issue.issue_id)) {
         nextIds.push(issue.issue_id)
         seen.add(issue.issue_id)
@@ -360,8 +394,175 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
   }
 
   async function setFilters(nextFilters: ReviewIssueFilters): Promise<void> {
-    filters.value = { ...nextFilters }
+    filters.value = normalizeFilters(nextFilters)
+    localizationGeneration += 1
+    explicitlySelectedIssueId = null
+    selectedIssueId.value = null
+    issueCursor.value = null
+    lastIssueRequest = { cursor: null, append: false }
     await loadIssuePage(null, false)
+  }
+
+  function nextDecisionGeneration(issueId: string): number {
+    const generation = (decisionGenerations.get(issueId) ?? 0) + 1
+    decisionGenerations.set(issueId, generation)
+    return generation
+  }
+
+  function isDecisionCurrent(issueId: string, generation: number): boolean {
+    return active && decisionGenerations.get(issueId) === generation
+  }
+
+  function setIssueDecision(
+    issueId: string,
+    decision: IssueDecisionSummary | null
+  ): void {
+    const issue = issuesById.value[issueId]
+    if (!issue) {
+      return
+    }
+
+    issuesById.value = {
+      ...issuesById.value,
+      [issueId]: {
+        ...issue,
+        decision
+      }
+    }
+  }
+
+  function optimisticDecision(command: DecisionCommand): IssueDecisionSummary {
+    const fields = {
+      issue_version: command.issue_version,
+      updated_at: new Date().toISOString()
+    }
+
+    if (command.action === 'custom') {
+      return {
+        ...fields,
+        action: 'custom',
+        replacement: command.replacement
+      }
+    }
+
+    return {
+      ...fields,
+      action: command.action,
+      replacement: null
+    }
+  }
+
+  function decisionCommand(
+    issue: Issue,
+    action: DecisionAction,
+    replacement?: string
+  ): DecisionCommand | null {
+    if (issue.document_version === null) {
+      return null
+    }
+
+    const fields = {
+      issue_id: issue.issue_id,
+      issue_version: issue.document_version
+    }
+
+    if (action === 'custom') {
+      if (!isValidCustomReplacement(replacement)) {
+        return null
+      }
+      return {
+        ...fields,
+        action: 'custom',
+        replacement
+      }
+    }
+
+    return {
+      ...fields,
+      action
+    }
+  }
+
+  async function submitDecision(command: DecisionCommand): Promise<void> {
+    const generation = nextDecisionGeneration(command.issue_id)
+    decisionError.value = null
+    decisionAnnouncement.value = ''
+    failedDecision = null
+    setIssueDecision(command.issue_id, optimisticDecision(command))
+
+    try {
+      const response = await analysisApi.putDecisions(jobId, [command])
+      if (!isDecisionCurrent(command.issue_id, generation)) {
+        return
+      }
+
+      const outcome = response.outcomes.find(
+        (item) => item.issue_id === command.issue_id
+      )
+      if (!outcome) {
+        throw new Error('保存处理结果失败：服务器未返回对应结果。')
+      }
+
+      if (outcome.status === 'applied') {
+        authoritativeDecisions.set(command.issue_id, outcome.decision)
+        setIssueDecision(command.issue_id, outcome.decision)
+        return
+      }
+
+      setIssueDecision(
+        command.issue_id,
+        authoritativeDecisions.get(command.issue_id) ?? null
+      )
+      decisionAnnouncement.value = '结果已更新，请重新确认'
+      await Promise.all([
+        loadIssuePage(null, false, {
+          issueId: command.issue_id,
+          generation
+        }),
+        loadSummary()
+      ])
+    } catch (error) {
+      if (!isDecisionCurrent(command.issue_id, generation)) {
+        return
+      }
+
+      setIssueDecision(
+        command.issue_id,
+        authoritativeDecisions.get(command.issue_id) ?? null
+      )
+      decisionError.value = errorMessage(error, '保存处理结果失败。')
+      failedDecision = { command }
+    }
+  }
+
+  async function decide(
+    action: DecisionAction,
+    replacement?: string
+  ): Promise<void> {
+    const issue = selectedIssue.value
+    if (!issue) {
+      return
+    }
+
+    const command = decisionCommand(issue, action, replacement)
+    if (!command) {
+      decisionError.value =
+        issue.document_version === null
+          ? '问题版本不可用，请重新加载问题列表。'
+          : '自定义替换内容无效。'
+      failedDecision = null
+      return
+    }
+
+    await submitDecision(command)
+  }
+
+  async function retryDecision(): Promise<void> {
+    const retry = failedDecision
+    if (!retry) {
+      return
+    }
+    await submitDecision(retry.command)
   }
 
   async function loadNextBlocks(): Promise<void> {
@@ -433,9 +634,13 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     loading,
     errors,
     checkerFailures,
+    decisionError,
+    decisionAnnouncement,
     selectIssue,
     selectHighlight,
     setFilters,
+    decide,
+    retryDecision,
     loadNextBlocks,
     loadNextIssues,
     retrySummary,
@@ -446,4 +651,21 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback
+}
+
+function normalizeFilters(filters: ReviewIssueFilters): ReviewIssueFilters {
+  return Object.fromEntries(
+    Object.entries(filters).filter(([, value]) => value !== undefined && value !== '')
+  ) as ReviewIssueFilters
+}
+
+function isValidCustomReplacement(
+  replacement: string | undefined
+): replacement is string {
+  return (
+    replacement !== undefined &&
+    replacement.trim().length > 0 &&
+    !replacement.includes('\u0000') &&
+    Array.from(replacement).length <= 10_000
+  )
 }

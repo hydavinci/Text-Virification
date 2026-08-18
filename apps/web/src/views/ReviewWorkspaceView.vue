@@ -14,6 +14,7 @@ const props = defineProps<{
 
 const {
   summary,
+  filters,
   blocks,
   issues,
   selectedIssueId,
@@ -23,8 +24,13 @@ const {
   loading,
   errors,
   checkerFailures,
+  decisionError,
+  decisionAnnouncement,
   selectIssue,
   selectHighlight,
+  setFilters,
+  decide,
+  retryDecision,
   loadNextBlocks,
   retrySummary,
   retryDocument,
@@ -51,8 +57,10 @@ const {
         :selected-issue-id="selectedIssueId"
         :loading="loading.issues"
         :error="errors.issues"
+        :filters="filters"
         @select="selectIssue"
         @retry="retryIssues"
+        @filter-change="setFilters"
       />
       <DocumentViewer
         :blocks="blocks"
@@ -66,8 +74,20 @@ const {
         @load-next="loadNextBlocks"
         @retry="retryDocument"
       />
-      <IssuePanel :issue="selectedIssue" />
+      <IssuePanel
+        :issue="selectedIssue"
+        :decision-error="decisionError"
+        @decide="decide"
+        @retry-decision="retryDecision"
+      />
     </div>
+    <p
+      class="review-workspace__announcement"
+      data-testid="decision-announcement"
+      aria-live="polite"
+    >
+      {{ decisionAnnouncement }}
+    </p>
   </section>
 </template>
 
@@ -84,6 +104,18 @@ const {
   grid-template-columns: minmax(220px, 0.8fr) minmax(480px, 2.3fr) minmax(240px, 0.9fr);
   gap: 14px;
   margin-top: 14px;
+}
+
+.review-workspace__announcement {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 @media (max-width: 980px) {

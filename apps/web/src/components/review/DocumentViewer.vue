@@ -118,6 +118,28 @@ function isSelectedRange(issueIds: string[]): boolean {
   return props.selectedIssueId !== null && issueIds.includes(props.selectedIssueId)
 }
 
+function previewText(issue: Issue): string {
+  if (issue.decision?.action === 'accepted') {
+    return issue.suggestion ?? issue.original
+  }
+  if (issue.decision?.action === 'custom') {
+    return issue.decision.replacement
+  }
+  return issue.original
+}
+
+function segmentText(segment: TextSegment): string {
+  const selectedIssueId = props.selectedIssueId
+  if (!selectedIssueId || !segment.issueIds.includes(selectedIssueId)) {
+    return segment.text
+  }
+
+  const endingIssue = segment.endingIssues.find(
+    (issue) => issue.issue_id === selectedIssueId
+  )
+  return endingIssue ? previewText(endingIssue) : ''
+}
+
 function connectObserver(element: Element | null): void {
   observer?.disconnect()
   observer = null
@@ -206,7 +228,7 @@ onBeforeUnmount(() => {
             :aria-current="issue.issue_id === selectedIssueId ? 'true' : 'false'"
             :title="issue.message"
             @click="emit('selectHighlight', issue.issue_id)"
-          />
+          >{{ issue.issue_id === selectedIssueId ? previewText(issue) : '' }}</button>
         </template>
         <template v-for="segment in renderModelForBlock(block).segments" :key="segment.key">
           <span
@@ -216,7 +238,7 @@ onBeforeUnmount(() => {
               'document-highlight-range--active': isSelectedRange(segment.issueIds)
             }"
             :data-highlight-range-issue-ids="segment.issueIds.join(' ')"
-          >{{ segment.text }}</span>
+          >{{ segmentText(segment) }}</span>
           <template v-else>{{ segment.text }}</template>
           <button
             v-for="issue in segment.endingIssues"
