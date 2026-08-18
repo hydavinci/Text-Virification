@@ -4,7 +4,13 @@ import { inject, onBeforeUnmount, ref } from 'vue'
 import { jobsApiKey } from '../api/jobs'
 import JobProgress from '../components/JobProgress.vue'
 import UploadWorkspace from '../components/UploadWorkspace.vue'
-import { isTerminalJobStatus, type JobProgressEvent, type JobRead, type JobStatus } from '../types/jobs'
+import {
+  isTerminalJobStatus,
+  type JobCreateOptions,
+  type JobProgressEvent,
+  type JobRead,
+  type JobStatus
+} from '../types/jobs'
 
 interface JobProgressState {
   sourceName: string
@@ -30,6 +36,8 @@ const jobState = ref<JobProgressState | null>(null)
 let unsubscribe: (() => void) | null = null
 let requestGeneration = 0
 let isMounted = true
+
+type UploadOptionsSnapshot = Readonly<Required<JobCreateOptions>>
 
 function closeSubscription() {
   unsubscribe?.()
@@ -73,14 +81,21 @@ function handleProgressError(message: string) {
   }
 }
 
-async function handleUpload(file: File) {
+function cloneJobOptions(options: UploadOptionsSnapshot): Required<JobCreateOptions> {
+  return {
+    scenario: options.scenario,
+    enabledCategories: [...options.enabledCategories]
+  }
+}
+
+async function handleUpload(file: File, options: UploadOptionsSnapshot) {
   const generation = ++requestGeneration
   uploadError.value = null
   closeSubscription()
   isCreating.value = true
 
   try {
-    const job = await jobsApi.createJob(file)
+    const job = await jobsApi.createJob(file, cloneJobOptions(options))
     if (!isRequestCurrent(generation)) {
       return
     }
@@ -152,9 +167,126 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section>
-    <h1>Upload and progress workspace</h1>
-    <UploadWorkspace :busy="isCreating" :server-error="uploadError" @upload="handleUpload" />
-    <JobProgress v-if="jobState" :state="jobState" />
-  </section>
+  <main class="workspace">
+    <header class="workspace__header">
+      <div class="workspace__brand" aria-hidden="true">
+        <svg viewBox="0 0 24 24" role="img">
+          <path d="M8 3h6l4 4v14H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" />
+          <path d="M14 3v5h5M9.5 13l1.7 1.7 3.8-4" />
+        </svg>
+      </div>
+      <div>
+        <h1>文档智能核验</h1>
+        <p>上传文档，自动完成格式、内容与语言规范检查</p>
+      </div>
+    </header>
+
+    <section class="workspace__card" aria-label="文档核验工作台">
+      <UploadWorkspace :busy="isCreating" :server-error="uploadError" @upload="handleUpload" />
+      <JobProgress v-if="jobState" :state="jobState" />
+    </section>
+
+    <p class="workspace__privacy">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M12 3 5 6v5c0 4.6 2.9 8.2 7 10 4.1-1.8 7-5.4 7-10V6l-7-3Z" />
+        <path d="m9 12 2 2 4-4" />
+      </svg>
+      文件仅用于本次核验，任务到期后将自动清理
+    </p>
+  </main>
 </template>
+
+<style scoped>
+.workspace {
+  width: min(100% - 32px, 760px);
+  margin: 0 auto;
+  padding: 64px 0 40px;
+}
+
+.workspace__header {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  margin-bottom: 30px;
+}
+
+.workspace__brand {
+  display: grid;
+  width: 56px;
+  height: 56px;
+  flex: 0 0 auto;
+  place-items: center;
+  color: #fff;
+  background: linear-gradient(135deg, #5c75f7, #7958d9);
+  border-radius: 16px;
+  box-shadow: 0 10px 24px rgba(88, 86, 220, 0.24);
+}
+
+.workspace__brand svg {
+  width: 30px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+h1 {
+  margin: 0;
+  color: #172033;
+  font-size: clamp(1.75rem, 4vw, 2.25rem);
+  line-height: 1.2;
+  letter-spacing: -0.03em;
+}
+
+.workspace__header p {
+  margin: 8px 0 0;
+  color: #5f687a;
+  font-size: 0.96rem;
+}
+
+.workspace__card {
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid rgba(221, 227, 239, 0.9);
+  border-radius: 24px;
+  box-shadow: 0 20px 60px rgba(40, 53, 85, 0.1);
+}
+
+.workspace__privacy {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  margin: 20px 0 0;
+  color: #667085;
+  font-size: 0.8rem;
+}
+
+.workspace__privacy svg {
+  width: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+@media (max-width: 560px) {
+  .workspace {
+    padding-top: 32px;
+  }
+
+  .workspace__header {
+    align-items: flex-start;
+    justify-content: flex-start;
+  }
+
+  .workspace__brand {
+    width: 48px;
+    height: 48px;
+    border-radius: 14px;
+  }
+}
+</style>

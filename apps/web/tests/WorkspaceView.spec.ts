@@ -3,6 +3,8 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { jobsApiKey, type JobsApi } from '../src/api/jobs'
 import UploadWorkspace from '../src/components/UploadWorkspace.vue'
+import { type JobCreateOptions } from '../src/types/jobs'
+import { CHECK_CATEGORY_VALUES } from '../src/types/review'
 import WorkspaceView from '../src/views/WorkspaceView.vue'
 
 function buildJobRead(
@@ -18,10 +20,26 @@ function buildJobRead(
     error_code: null,
     error_message: null,
     scenario: 'general' as const,
-    enabled_categories: ['character', 'vocabulary', 'sentence', 'format', 'discourse', 'security'],
+    enabled_categories: [
+      'character',
+      'vocabulary',
+      'sentence',
+      'format',
+      'discourse',
+      'security'
+    ],
     created_at: '2026-08-14T00:00:00Z',
     expires_at: '2026-08-15T00:00:00Z',
     ...overrides
+  }
+}
+
+function buildUploadOptions(overrides: JobCreateOptions = {}): Required<JobCreateOptions> {
+  return {
+    scenario: overrides.scenario ?? 'general',
+    enabledCategories: overrides.enabledCategories
+      ? [...overrides.enabledCategories]
+      : [...CHECK_CATEGORY_VALUES]
   }
 }
 
@@ -34,8 +52,12 @@ async function selectFile(wrapper: ReturnType<typeof mount>, file: File) {
   await input.trigger('change')
 }
 
-async function emitUpload(wrapper: ReturnType<typeof mount>, file: File) {
-  wrapper.getComponent(UploadWorkspace).vm.$emit('upload', file)
+async function emitUpload(
+  wrapper: ReturnType<typeof mount>,
+  file: File,
+  options: Required<JobCreateOptions> = buildUploadOptions()
+) {
+  wrapper.getComponent(UploadWorkspace).vm.$emit('upload', file, options)
   await flushPromises()
 }
 
@@ -51,6 +73,88 @@ function createDeferred<T>() {
 }
 
 describe('WorkspaceView', () => {
+  it('presents the upload workspace in Simplified Chinese', () => {
+    const wrapper = mount(WorkspaceView, {
+      global: {
+        provide: {
+          [jobsApiKey as symbol]: {
+            createJob: vi.fn(),
+            subscribe: vi.fn(() => vi.fn())
+          }
+        }
+      }
+    })
+
+    expect(wrapper.get('h1').text()).toBe('文档智能核验')
+    expect(wrapper.get('[data-testid="upload-dropzone"]').text()).toContain('点击选择或拖拽文件到此处')
+    expect(wrapper.text()).toContain('支持 DOCX、PDF、TXT 格式，文件大小不超过 25 MiB')
+  })
+
+  it('uploads the selected scenario and categories with the file', async () => {
+    const createJob = vi.fn().mockResolvedValue(buildJobRead())
+    const wrapper = mount(WorkspaceView, {
+      global: {
+        provide: {
+          [jobsApiKey as symbol]: { createJob, subscribe: vi.fn(() => vi.fn()) }
+        }
+      }
+    })
+    const file = new File(['检查'], 'sample.txt', { type: 'text/plain' })
+
+    await wrapper.get('select[name="scenario"]').setValue('legal')
+    await wrapper.get('input[name="category-character"]').setValue(false)
+    await wrapper.get('input[name="category-format"]').setValue(false)
+    await selectFile(wrapper, file)
+    await flushPromises()
+
+    expect(createJob).toHaveBeenCalledWith(
+      file,
+      buildUploadOptions({
+        scenario: 'legal',
+        enabledCategories: ['vocabulary', 'sentence', 'discourse', 'security']
+      })
+    )
+  })
+
+  it('rejects uploads when no check categories are selected', async () => {
+    const createJob = vi.fn()
+    const wrapper = mount(WorkspaceView, {
+      global: {
+        provide: {
+          [jobsApiKey as symbol]: { createJob, subscribe: vi.fn(() => vi.fn()) }
+        }
+      }
+    })
+
+    for (const category of CHECK_CATEGORY_VALUES) {
+      await wrapper.get(`input[name="category-${category}"]`).setValue(false)
+    }
+
+    await selectFile(wrapper, new File(['检查'], 'sample.txt', { type: 'text/plain' }))
+
+    expect(createJob).not.toHaveBeenCalled()
+    expect(wrapper.get('[role="alert"]').text()).toContain('至少选择一类检查')
+  })
+
+  it('uploads an allowed file dropped onto the upload area', async () => {
+    const createJob = vi.fn().mockResolvedValue(buildJobRead())
+    const wrapper = mount(WorkspaceView, {
+      global: {
+        provide: {
+          [jobsApiKey as symbol]: { createJob, subscribe: vi.fn(() => vi.fn()) }
+        }
+      }
+    })
+    const file = new File(['检查'], 'sample.txt', { type: 'text/plain' })
+
+    await wrapper.get('[data-testid="upload-dropzone"]').trigger('drop', {
+      dataTransfer: { files: [file] }
+    })
+    await flushPromises()
+
+    expect(createJob).toHaveBeenCalledWith(file, buildUploadOptions())
+  })
+
   it('uploads an allowed file and displays durable progress', async () => {
     const createJob = vi.fn().mockResolvedValue(buildJobRead())
     const subscribe = vi.fn((_jobId, onEvent) => {
@@ -78,12 +182,12 @@ describe('WorkspaceView', () => {
     await selectFile(wrapper, file)
     await flushPromises()
 
-    expect(createJob).toHaveBeenCalledWith(file)
+    expect(createJob).toHaveBeenCalledWith(file, buildUploadOptions())
     expect(wrapper.text()).toContain('sample.txt')
     expect(wrapper.text()).toContain('100%')
     expect(wrapper.text()).toContain('处理完成')
     expect(wrapper.text()).toContain('completed')
-    expect(wrapper.get('progress').attributes('aria-label')).toBe('Job progress')
+    expect(wrapper.get('progress').attributes('aria-label')).toBe('任务进度')
     expect(wrapper.get('[role="status"]').attributes('aria-live')).toBe('polite')
   })
 
@@ -108,7 +212,7 @@ describe('WorkspaceView', () => {
     await selectFile(wrapper, exactLimit)
     await flushPromises()
 
-    expect(createJob).toHaveBeenCalledWith(exactLimit)
+    expect(createJob).toHaveBeenCalledWith(exactLimit, buildUploadOptions())
     expect(wrapper.find('[role="alert"]').exists()).toBe(false)
   })
 
