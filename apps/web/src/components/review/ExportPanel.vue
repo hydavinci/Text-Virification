@@ -55,9 +55,11 @@ const polling = ref(false)
 const requestError = ref<string | null>(null)
 const confirmationMessage = ref<string | null>(null)
 const confirmationWarnings = ref<ExportWarning[]>([])
+const expirySignal = ref(0)
 
 let active = true
-let timerId: ReturnType<typeof setTimeout> | null = null
+let pollTimerId: ReturnType<typeof setTimeout> | null = null
+let expiryTimerId: ReturnType<typeof setTimeout> | null = null
 let pollGeneration = 0
 
 const busy = computed(() => submitting.value || polling.value)
@@ -99,12 +101,24 @@ const warningMessage = computed(() => {
   return ''
 })
 
+function getExpiryTime(exportState: ExportResponse | null): number | null {
+  if (!exportState) {
+    return null
+  }
+
+  const expiresAt = Date.parse(exportState.expires_at)
+  return Number.isNaN(expiresAt) ? null : expiresAt
+}
+
 const isExpired = computed(() => {
-  if (!currentExport.value) {
+  expirySignal.value
+
+  const expiresAt = getExpiryTime(currentExport.value)
+  if (expiresAt === null) {
     return false
   }
 
-  return Date.parse(currentExport.value.expires_at) <= Date.now()
+  return expiresAt <= Date.now()
 })
 
 const terminalError = computed(() => {
@@ -171,9 +185,16 @@ const retryLabel = computed(() => {
 })
 
 function clearTimer() {
-  if (timerId !== null) {
-    clearTimeout(timerId)
-    timerId = null
+  if (pollTimerId !== null) {
+    clearTimeout(pollTimerId)
+    pollTimerId = null
+  }
+}
+
+function clearExpiryTimer() {
+  if (expiryTimerId !== null) {
+    clearTimeout(expiryTimerId)
+    expiryTimerId = null
   }
 }
 
@@ -206,7 +227,7 @@ function schedulePoll(exportId: string, generation: number) {
   stopPolling()
   pollGeneration = generation
   polling.value = true
-  timerId = setTimeout(() => {
+  pollTimerId = setTimeout(() => {
     void pollExport(exportId, generation)
   }, POLL_INTERVAL_MS)
 }
@@ -303,9 +324,36 @@ function errorMessage(error: unknown, fallback: string): string {
   return fallback
 }
 
+watch(
+  currentExport,
+  (exportState) => {
+    clearExpiryTimer()
+    expirySignal.value += 1
+
+    const expiresAt = getExpiryTime(exportState)
+    if (expiresAt === null) {
+      return
+    }
+
+    const delay = expiresAt - Date.now()
+    if (delay <= 0) {
+      stopPolling()
+      return
+    }
+
+    expiryTimerId = setTimeout(() => {
+      expiryTimerId = null
+      expirySignal.value += 1
+      stopPolling()
+    }, delay)
+  },
+  { immediate: true }
+)
+
 onBeforeUnmount(() => {
   active = false
   stopPolling()
+  clearExpiryTimer()
 })
 </script>
 

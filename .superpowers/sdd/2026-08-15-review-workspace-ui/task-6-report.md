@@ -92,4 +92,104 @@ vite v6.4.3 building for production...
 
 ## Concerns
 
-- Expiry is derived from `expires_at` on the client and refreshed when the component rerenders or receives status updates; the server download endpoint remains the final authority for late expiry.
+- Expiry now updates on a one-shot client deadline timer derived from `expires_at`; the server download endpoint remains the final authority if client and server clocks drift.
+
+## Fix Round 1
+
+### Files
+
+- `apps/web/src/components/review/ExportPanel.vue`
+- `apps/web/tests/ReviewWorkspace.spec.ts`
+
+### Root Cause
+
+- `ExportPanel` derived expiry from `Date.now()` inside a computed value, but no reactive dependency changed when a completed export crossed `expires_at`.
+- Because polling already stops on terminal completion, the component could keep rendering a stale download link until an unrelated rerender happened.
+- The fix schedules a one-shot expiry timer for the current export, clears/reschedules it on export replacement, and clears it on unmount.
+
+### RED
+
+Command:
+
+```powershell
+Set-Location apps\web; npm test -- --run tests/ReviewWorkspace.spec.ts -t "removes the download link once a completed export expires"
+```
+
+Output:
+
+```text
+> text-verification-web@0.1.0 test
+> vitest run --run tests/ReviewWorkspace.spec.ts -t removes the download link once a completed export expires
+
+RUN  v3.2.7 C:/Work/text-verification/apps/web
+
+❯ tests/ReviewWorkspace.spec.ts (39 tests | 1 failed | 38 skipped)
+× ReviewWorkspaceView > removes the download link once a completed export expires
+  → expected true to be false // Object.is equality
+
+FAIL  tests/ReviewWorkspace.spec.ts > ReviewWorkspaceView > removes the download link once a completed export expires
+AssertionError: expected true to be false // Object.is equality
+❯ tests/ReviewWorkspace.spec.ts:434:77
+```
+
+### GREEN
+
+Command:
+
+```powershell
+Set-Location apps\web; npm test -- --run tests/ReviewWorkspace.spec.ts -t "removes the download link once a completed export expires"
+```
+
+Output:
+
+```text
+> text-verification-web@0.1.0 test
+> vitest run --run tests/ReviewWorkspace.spec.ts -t removes the download link once a completed export expires
+
+RUN  v3.2.7 C:/Work/text-verification/apps/web
+
+✓ tests/ReviewWorkspace.spec.ts (39 tests | 38 skipped)
+
+Test Files  1 passed (1)
+     Tests  1 passed | 38 skipped (39)
+Duration  2.33s
+```
+
+### Verification
+
+Command:
+
+```powershell
+Set-Location apps\web; npm test -- --run tests/ReviewWorkspace.spec.ts
+```
+
+Output:
+
+```text
+> text-verification-web@0.1.0 test
+> vitest run --run tests/ReviewWorkspace.spec.ts
+
+RUN  v3.2.7 C:/Work/text-verification/apps/web
+
+✓ tests/ReviewWorkspace.spec.ts (39 tests)
+
+Test Files  1 passed (1)
+     Tests  39 passed (39)
+Duration  3.54s
+```
+
+Command:
+
+```powershell
+Set-Location apps\web; npm run build
+```
+
+Output:
+
+```text
+> text-verification-web@0.1.0 build
+> vue-tsc -b && vite build
+
+vite v6.4.3 building for production...
+✓ built in 938ms
+```

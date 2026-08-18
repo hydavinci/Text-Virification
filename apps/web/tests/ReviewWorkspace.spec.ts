@@ -395,6 +395,52 @@ describe('ReviewWorkspaceView', () => {
     }
   })
 
+  it('removes the download link once a completed export expires', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-18T00:00:00Z'))
+
+    try {
+      const create = vi.fn().mockResolvedValue(
+        buildCreatedExport({
+          export_id: 'export-1',
+          export_type: 'html_report',
+          status: 'completed',
+          file_name: 'report.html',
+          expires_at: '2026-08-18T00:00:02Z'
+        })
+      )
+      const get = vi.fn()
+      const downloadUrl = vi
+        .fn()
+        .mockReturnValue('/api/v1/jobs/job-1/exports/export-1/download')
+      const wrapper = mountReviewWorkspaceWithConfig({
+        exportsApi: createExportsApiMock({ create, get, downloadUrl })
+      })
+      await flushPromises()
+
+      await wrapper.get('select[name="export-type"]').setValue('html_report')
+      await wrapper.get('button[name="create-export"]').trigger('click')
+      await flushPromises()
+
+      expect(wrapper.get('[data-testid="export-download-link"]').attributes('href')).toBe(
+        '/api/v1/jobs/job-1/exports/export-1/download'
+      )
+      expect(wrapper.find('[data-testid="export-error"]').exists()).toBe(false)
+
+      await vi.advanceTimersByTimeAsync(2000)
+      await flushPromises()
+
+      expect(get).not.toHaveBeenCalled()
+      expect(wrapper.find('[data-testid="export-download-link"]').exists()).toBe(false)
+      expect(wrapper.get('[data-testid="export-error"]').text()).toContain(
+        '导出文件已过期，请重新创建。'
+      )
+      expect(wrapper.get('button[name="retry-export"]').text()).toContain('重新导出')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('surfaces terminal export failures and lets the user retry', async () => {
     vi.useFakeTimers()
 
