@@ -353,7 +353,7 @@ describe('WorkspaceView', () => {
       buildJobRead({
         source_name: 'limit.txt',
         size_bytes: 25 * 1024 * 1024
-      }, 15_000)
+      })
     )
     const wrapper = mount(WorkspaceView, {
       global: {
@@ -371,7 +371,7 @@ describe('WorkspaceView', () => {
 
     expect(createJob).toHaveBeenCalledWith(exactLimit, buildUploadOptions())
     expect(wrapper.find('[role="alert"]').exists()).toBe(false)
-  })
+  }, 15_000)
 
   it('rejects unsupported extensions before upload', async () => {
     const createJob = vi.fn()
