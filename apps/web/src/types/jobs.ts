@@ -22,7 +22,7 @@ export type JobTerminalStatus = (typeof TERMINAL_JOB_STATUSES)[number]
 
 export interface JobCreateOptions {
   scenario?: CheckScenario
-  enabledCategories?: CheckCategory[]
+  enabledCategories?: readonly CheckCategory[]
 }
 
 export interface JobRead {

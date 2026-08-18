@@ -90,9 +90,13 @@ function validateAndUpload(file?: File) {
 }
 
 function buildUploadOptions(): UploadOptionsSnapshot {
+  const enabledCategoriesSnapshot = Object.freeze([
+    ...enabledCategories.value
+  ]) as UploadOptionsSnapshot['enabledCategories']
+
   return Object.freeze({
     scenario: selectedScenario.value,
-    enabledCategories: [...enabledCategories.value]
+    enabledCategories: enabledCategoriesSnapshot
   }) as UploadOptionsSnapshot
 }
 

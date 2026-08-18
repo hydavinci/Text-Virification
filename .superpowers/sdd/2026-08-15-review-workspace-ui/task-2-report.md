@@ -46,3 +46,46 @@
 ## Concerns
 
 - None.
+
+## Review fix round 1/5 — preserve immutable upload options
+
+### Status
+
+- Fixed the review finding that upload options were only shallowly immutable before `createJob`.
+- Left unrelated dirty files `apps/web/src/App.vue` and `apps/web/src/components/JobProgress.vue` untouched and unstaged.
+
+### Files
+
+- Updated `apps/web/src/types/jobs.ts`
+- Updated `apps/web/src/components/UploadWorkspace.vue`
+- Updated `apps/web/src/views/WorkspaceView.vue`
+- Updated `apps/web/tests/WorkspaceView.spec.ts`
+
+### RED
+
+- Added `forwards the same frozen upload options snapshot to createJob` in `apps/web/tests/WorkspaceView.spec.ts`.
+- Command: `npm test -- tests\WorkspaceView.spec.ts`
+- Result: 1 failed / 15 passed. The new test failed because `Object.isFrozen(forwardedOptions)` was `false`, confirming `WorkspaceView` recreated mutable options before `createJob`.
+
+### GREEN
+
+- Changed `JobCreateOptions.enabledCategories` to readonly-compatible typing.
+- Froze the emitted `enabledCategories` array in `UploadWorkspace.vue`.
+- Removed the `WorkspaceView` clone so `jobsApi.createJob(file, options)` receives the original immutable snapshot.
+- Command: `npm test -- tests\WorkspaceView.spec.ts tests\jobsApi.spec.ts`
+- Result: 33 passed.
+
+### Build
+
+- Command: `npm run build`
+- Result: passed.
+
+### Self-review
+
+- Confirmed the exact upload options snapshot emitted by `UploadWorkspace` now reaches `createJob` unchanged.
+- Confirmed both the outer options object and nested `enabledCategories` array are frozen at runtime, with regression coverage.
+- Confirmed readonly typing keeps `jobsApi` form serialization compatible and required no backend or dependency changes.
+
+### Concerns
+
+- None.

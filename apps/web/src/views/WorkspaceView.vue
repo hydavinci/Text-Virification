@@ -81,13 +81,6 @@ function handleProgressError(message: string) {
   }
 }
 
-function cloneJobOptions(options: UploadOptionsSnapshot): Required<JobCreateOptions> {
-  return {
-    scenario: options.scenario,
-    enabledCategories: [...options.enabledCategories]
-  }
-}
-
 async function handleUpload(file: File, options: UploadOptionsSnapshot) {
   const generation = ++requestGeneration
   uploadError.value = null
@@ -95,7 +88,7 @@ async function handleUpload(file: File, options: UploadOptionsSnapshot) {
   isCreating.value = true
 
   try {
-    const job = await jobsApi.createJob(file, cloneJobOptions(options))
+    const job = await jobsApi.createJob(file, options)
     if (!isRequestCurrent(generation)) {
       return
     }

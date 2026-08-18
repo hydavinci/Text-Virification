@@ -7,6 +7,8 @@ import { type JobCreateOptions } from '../src/types/jobs'
 import { CHECK_CATEGORY_VALUES } from '../src/types/review'
 import WorkspaceView from '../src/views/WorkspaceView.vue'
 
+type UploadOptionsSnapshot = Readonly<Required<JobCreateOptions>>
+
 function buildJobRead(
   overrides: Partial<Awaited<ReturnType<JobsApi['createJob']>>> = {}
 ): Awaited<ReturnType<JobsApi['createJob']>> {
@@ -34,13 +36,15 @@ function buildJobRead(
   }
 }
 
-function buildUploadOptions(overrides: JobCreateOptions = {}): Required<JobCreateOptions> {
-  return {
+function buildUploadOptions(overrides: JobCreateOptions = {}): UploadOptionsSnapshot {
+  const enabledCategories = Object.freeze(
+    overrides.enabledCategories ? [...overrides.enabledCategories] : [...CHECK_CATEGORY_VALUES]
+  ) as UploadOptionsSnapshot['enabledCategories']
+
+  return Object.freeze({
     scenario: overrides.scenario ?? 'general',
-    enabledCategories: overrides.enabledCategories
-      ? [...overrides.enabledCategories]
-      : [...CHECK_CATEGORY_VALUES]
-  }
+    enabledCategories
+  })
 }
 
 async function selectFile(wrapper: ReturnType<typeof mount>, file: File) {
@@ -55,7 +59,7 @@ async function selectFile(wrapper: ReturnType<typeof mount>, file: File) {
 async function emitUpload(
   wrapper: ReturnType<typeof mount>,
   file: File,
-  options: Required<JobCreateOptions> = buildUploadOptions()
+  options: UploadOptionsSnapshot = buildUploadOptions()
 ) {
   wrapper.getComponent(UploadWorkspace).vm.$emit('upload', file, options)
   await flushPromises()
@@ -114,6 +118,32 @@ describe('WorkspaceView', () => {
         enabledCategories: ['vocabulary', 'sentence', 'discourse', 'security']
       })
     )
+  })
+
+  it('forwards the same frozen upload options snapshot to createJob', async () => {
+    const createJob = vi.fn().mockResolvedValue(buildJobRead())
+    const wrapper = mount(WorkspaceView, {
+      global: {
+        provide: {
+          [jobsApiKey as symbol]: { createJob, subscribe: vi.fn(() => vi.fn()) }
+        }
+      }
+    })
+    const file = new File(['检查'], 'sample.txt', { type: 'text/plain' })
+    const options = buildUploadOptions({
+      scenario: 'legal',
+      enabledCategories: ['character', 'security']
+    })
+
+    await emitUpload(wrapper, file, options)
+
+    expect(createJob).toHaveBeenCalledTimes(1)
+
+    const [, forwardedOptions] = createJob.mock.calls[0] as [File, UploadOptionsSnapshot]
+
+    expect(Object.isFrozen(forwardedOptions)).toBe(true)
+    expect(Object.isFrozen(forwardedOptions.enabledCategories)).toBe(true)
+    expect(forwardedOptions).toBe(options)
   })
 
   it('rejects uploads when no check categories are selected', async () => {
