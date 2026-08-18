@@ -17,6 +17,7 @@ const {
   filters,
   blocks,
   issues,
+  issueStatusById,
   selectedIssueId,
   selectedIssue,
   selectedBlockId,
@@ -27,12 +28,30 @@ const {
   decisionError,
   canRetryDecision,
   decisionAnnouncement,
+  batchLimit,
+  visibleIssueCount,
+  visibleIssueOverflow,
+  highRiskVisibleIssueCount,
+  batchDecisionError,
+  bulkActionPending,
+  findQuery,
+  replaceText,
+  findStatus,
+  canNavigateMatches,
+  canReplaceAllMatches,
+  findReplaceError,
   selectIssue,
   selectHighlight,
   setFilters,
   decide,
+  decideVisible,
   retryDecision,
   loadNextBlocks,
+  setFindQuery,
+  setReplaceText,
+  goToPreviousMatch,
+  goToNextMatch,
+  replaceAllMatches,
   retrySummary,
   retryDocument,
   retryIssues
@@ -48,13 +67,33 @@ const {
       :loading="loading.summary"
       :error="errors.summary"
       :checker-failures="checkerFailures"
+      :batch-limit="batchLimit"
+      :visible-issue-count="visibleIssueCount"
+      :visible-issue-overflow="visibleIssueOverflow"
+      :high-risk-visible-issue-count="highRiskVisibleIssueCount"
+      :batch-decision-error="batchDecisionError"
+      :bulk-action-pending="bulkActionPending"
+      :find-query="findQuery"
+      :replace-text="replaceText"
+      :find-status="findStatus"
+      :can-navigate-matches="canNavigateMatches"
+      :can-replace-all-matches="canReplaceAllMatches"
+      :find-replace-error="findReplaceError"
       @retry="retrySummary"
+      @accept-visible="decideVisible('accepted')"
+      @ignore-visible="decideVisible('ignored')"
+      @update-find-query="setFindQuery"
+      @update-replace-text="setReplaceText"
+      @previous-match="goToPreviousMatch"
+      @next-match="goToNextMatch"
+      @replace-all="replaceAllMatches"
     />
 
     <div class="review-workspace__columns">
       <ReviewNavigation
         :summary="summary"
         :issues="issues"
+        :issue-status-by-id="issueStatusById"
         :selected-issue-id="selectedIssueId"
         :loading="loading.issues"
         :error="errors.issues"

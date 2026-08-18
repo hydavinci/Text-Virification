@@ -205,6 +205,7 @@ const ReviewWorkspaceStateHarness = defineComponent({
     <ReviewNavigation
       :summary="summary"
       :issues="issues"
+      :issue-status-by-id="issueStatusById"
       :selected-issue-id="selectedIssueId"
       :loading="loading.issues"
       :error="errors.issues"
@@ -865,6 +866,129 @@ describe('ReviewWorkspaceView', () => {
     )
   })
 
+  it('applies successful batch items and marks conflicts', async () => {
+    const putDecisions = vi.fn().mockResolvedValue({
+      outcomes: [
+        {
+          issue_id: 'issue-1',
+          status: 'applied',
+          code: null,
+          decision: {
+            issue_id: 'issue-1',
+            issue_version: 1,
+            action: 'accepted',
+            replacement: null,
+            updated_at: '2026-08-18T02:00:00Z'
+          }
+        },
+        {
+          issue_id: 'issue-2',
+          status: 'conflict',
+          code: 'stale_issue_version',
+          decision: null
+        }
+      ]
+    } satisfies DecisionBatchResponse)
+    const wrapper = mountReviewWorkspace(createAnalysisApiMock({ putDecisions }))
+    await flushPromises()
+
+    await wrapper.get('button[name="accept-visible"]').trigger('click')
+    await flushPromises()
+
+    expect(putDecisions).toHaveBeenCalledWith(jobId, [
+      {
+        issue_id: 'issue-1',
+        issue_version: 1,
+        action: 'accepted'
+      },
+      {
+        issue_id: 'issue-2',
+        issue_version: 1,
+        action: 'accepted'
+      }
+    ])
+    expect(wrapper.get('[data-issue-id="issue-1"]').text()).toContain('已接受')
+    expect(wrapper.get('[data-issue-id="issue-2"]').text()).toContain('需重新确认')
+    expect(wrapper.get('[data-testid="decision-announcement"]').text()).toContain(
+      '成功 1 项，需重新确认 1 项'
+    )
+  })
+
+  it('asks confirmation before accepting visible high-risk security issues', async () => {
+    const originalConfirm = globalThis.confirm
+    const confirm = vi.fn().mockReturnValue(false)
+    globalThis.confirm = confirm
+
+    try {
+      const putDecisions = vi.fn()
+      const wrapper = mountReviewWorkspace(
+        createAnalysisApiMock({
+          getIssues: vi.fn().mockResolvedValue(
+            buildIssuePage({
+              total: 2,
+              items: [
+                buildIssue({
+                  issue_id: 'issue-security',
+                  type: 'security',
+                  severity: 'error',
+                  original: '敏感信息'
+                }),
+                buildIssue({
+                  issue_id: 'issue-2',
+                  block_id: 'block-2',
+                  start: 3,
+                  end: 5,
+                  original: '错误',
+                  message: '发现错词'
+                })
+              ]
+            })
+          ),
+          putDecisions
+        })
+      )
+      await flushPromises()
+
+      await wrapper.get('button[name="accept-visible"]').trigger('click')
+
+      expect(confirm).toHaveBeenCalledWith('当前包含 1 个高风险安全问题，确认批量接受建议吗？')
+      expect(putDecisions).not.toHaveBeenCalled()
+    } finally {
+      globalThis.confirm = originalConfirm
+    }
+  })
+
+  it('limits visible batch decisions to the first 500 loaded filtered issues', async () => {
+    const putDecisions = vi.fn().mockResolvedValue({ outcomes: [] } satisfies DecisionBatchResponse)
+    const wrapper = mountReviewWorkspace(
+      createAnalysisApiMock({
+        getIssues: vi.fn().mockResolvedValue(
+          buildIssuePage({
+            total: 501,
+            items: Array.from({ length: 501 }, (_, index) =>
+              buildIssue({
+                issue_id: `issue-${index + 1}`,
+                block_id: 'block-1',
+                start: 0,
+                end: 2,
+                original: `问题${index + 1}`
+              })
+            )
+          })
+        ),
+        putDecisions
+      })
+    )
+    await flushPromises()
+
+    await wrapper.get('button[name="ignore-visible"]').trigger('click')
+    await flushPromises()
+
+    expect(putDecisions).toHaveBeenCalledTimes(1)
+    expect(putDecisions.mock.calls[0]?.[1]).toHaveLength(500)
+    expect(wrapper.text()).toContain('当前仅批量处理前 500 项')
+  })
+
   it('hides retry UI after a failed save when switching to another issue', async () => {
     const putDecisions = vi
       .fn()
@@ -993,6 +1117,147 @@ describe('ReviewWorkspaceView', () => {
     expect(wrapper.get('[data-testid="custom-replacement-error"]').attributes('role')).toBe(
       'alert'
     )
+  })
+
+  it('navigates document matches without mutating decisions', async () => {
+    const putDecisions = vi.fn()
+    const wrapper = mountReviewWorkspace(
+      createAnalysisApiMock({
+        getDocumentPage: vi.fn().mockResolvedValue(
+          buildDocumentPage({
+            blocks: [
+              buildBlock({
+                text: '甲😀项目乙😀项目丙项目'
+              })
+            ],
+            total_blocks: 1
+          })
+        ),
+        putDecisions
+      })
+    )
+    await flushPromises()
+
+    await wrapper.get('[aria-label="查找内容"]').setValue('项目')
+    expect(wrapper.get('[data-testid="find-status"]').text()).toContain('第 1 / 3 处')
+
+    await wrapper.get('button[name="next-match"]').trigger('click')
+
+    expect(wrapper.get('[data-testid="find-status"]').text()).toContain('第 2 / 3 处')
+    expect(putDecisions).not.toHaveBeenCalled()
+  })
+
+  it('replaces every exact auto-fixable match with custom decisions only', async () => {
+    const putDecisions = vi.fn().mockResolvedValue({
+      outcomes: [
+        {
+          issue_id: 'issue-1',
+          status: 'applied',
+          code: null,
+          decision: {
+            issue_id: 'issue-1',
+            issue_version: 1,
+            action: 'custom',
+            replacement: '条目',
+            updated_at: '2026-08-18T03:00:00Z'
+          }
+        },
+        {
+          issue_id: 'issue-2',
+          status: 'applied',
+          code: null,
+          decision: {
+            issue_id: 'issue-2',
+            issue_version: 1,
+            action: 'custom',
+            replacement: '条目',
+            updated_at: '2026-08-18T03:00:00Z'
+          }
+        },
+        {
+          issue_id: 'issue-3',
+          status: 'applied',
+          code: null,
+          decision: {
+            issue_id: 'issue-3',
+            issue_version: 1,
+            action: 'custom',
+            replacement: '条目',
+            updated_at: '2026-08-18T03:00:00Z'
+          }
+        }
+      ]
+    } satisfies DecisionBatchResponse)
+    const rawBlock = buildBlock({
+      text: '甲😀项目乙😀项目丙项目'
+    })
+    const wrapper = mountReviewWorkspace(
+      createAnalysisApiMock({
+        getDocumentPage: vi.fn().mockResolvedValue(
+          buildDocumentPage({
+            blocks: [rawBlock],
+            total_blocks: 1
+          })
+        ),
+        getIssues: vi.fn().mockResolvedValue(
+          buildIssuePage({
+            total: 3,
+            items: [
+              buildIssue({
+                issue_id: 'issue-1',
+                start: 2,
+                end: 4,
+                original: '项目',
+                context: rawBlock.text
+              }),
+              buildIssue({
+                issue_id: 'issue-2',
+                start: 6,
+                end: 8,
+                original: '项目',
+                context: rawBlock.text
+              }),
+              buildIssue({
+                issue_id: 'issue-3',
+                start: 9,
+                end: 11,
+                original: '项目',
+                context: rawBlock.text
+              })
+            ]
+          })
+        ),
+        putDecisions
+      })
+    )
+    await flushPromises()
+
+    await wrapper.get('[aria-label="查找内容"]').setValue('项目')
+    await wrapper.get('[aria-label="替换为"]').setValue('条目')
+    await wrapper.get('button[name="replace-all"]').trigger('click')
+    await flushPromises()
+
+    expect(putDecisions).toHaveBeenCalledWith(jobId, [
+      {
+        issue_id: 'issue-1',
+        issue_version: 1,
+        action: 'custom',
+        replacement: '条目'
+      },
+      {
+        issue_id: 'issue-2',
+        issue_version: 1,
+        action: 'custom',
+        replacement: '条目'
+      },
+      {
+        issue_id: 'issue-3',
+        issue_version: 1,
+        action: 'custom',
+        replacement: '条目'
+      }
+    ])
+    expect(rawBlock.text).toBe('甲😀项目乙😀项目丙项目')
   })
 
   it('retains loaded issue cards when append fails and retries that page', async () => {

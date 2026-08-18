@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
+import BatchActions from './BatchActions.vue'
+import FindReplace from './FindReplace.vue'
 import type {
   AnalysisSummaryResponse,
   CheckerFailureMap
@@ -14,10 +16,29 @@ const props = defineProps<{
   loading: boolean
   error: string | null
   checkerFailures: CheckerFailureMap
+  batchLimit: number
+  visibleIssueCount: number
+  visibleIssueOverflow: boolean
+  highRiskVisibleIssueCount: number
+  batchDecisionError: string | null
+  bulkActionPending: boolean
+  findQuery: string
+  replaceText: string
+  findStatus: string
+  canNavigateMatches: boolean
+  canReplaceAllMatches: boolean
+  findReplaceError: string | null
 }>()
 
 const emit = defineEmits<{
   retry: []
+  acceptVisible: []
+  ignoreVisible: []
+  updateFindQuery: [value: string]
+  updateReplaceText: [value: string]
+  previousMatch: []
+  nextMatch: []
+  replaceAll: []
 }>()
 
 const failures = computed(() =>
@@ -45,6 +66,32 @@ const failures = computed(() =>
       <button type="button" @click="emit('retry')">重试总览</button>
     </div>
   </header>
+
+  <section class="review-toolbar__actions" aria-label="批量与查找工具">
+    <BatchActions
+      :issue-count="visibleIssueCount"
+      :batch-limit="batchLimit"
+      :high-risk-security-count="highRiskVisibleIssueCount"
+      :busy="bulkActionPending"
+      :error="batchDecisionError"
+      @accept-visible="emit('acceptVisible')"
+      @ignore-visible="emit('ignoreVisible')"
+    />
+    <FindReplace
+      :query="findQuery"
+      :replacement="replaceText"
+      :status="findStatus"
+      :can-navigate="canNavigateMatches"
+      :can-replace-all="canReplaceAllMatches"
+      :busy="bulkActionPending"
+      :error="findReplaceError"
+      @update-query="emit('updateFindQuery', $event)"
+      @update-replacement="emit('updateReplaceText', $event)"
+      @previous-match="emit('previousMatch')"
+      @next-match="emit('nextMatch')"
+      @replace-all="emit('replaceAll')"
+    />
+  </section>
 
   <section
     v-if="failures.length"
@@ -120,6 +167,13 @@ button {
   cursor: pointer;
 }
 
+.review-toolbar__actions {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.9fr) minmax(320px, 1.1fr);
+  gap: 12px;
+  margin-top: 12px;
+}
+
 .checker-failures {
   display: flex;
   align-items: flex-start;
@@ -154,5 +208,11 @@ button {
 
 .checker-failures code {
   font-weight: 800;
+}
+
+@media (max-width: 980px) {
+  .review-toolbar__actions {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 </style>

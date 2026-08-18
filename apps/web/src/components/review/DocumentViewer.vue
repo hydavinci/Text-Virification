@@ -165,19 +165,30 @@ function connectObserver(element: Element | null): void {
 watch(sentinel, connectObserver)
 
 watch(
-  () => [props.selectedIssueId, props.blocks] as const,
-  async ([issueId]) => {
-    if (!issueId) {
+  () => [props.selectedIssueId, props.selectedBlockId, props.blocks] as const,
+  async ([issueId, blockId]) => {
+    if (!issueId && !blockId) {
       return
     }
     await nextTick()
     if (!active) {
       return
     }
-    const highlight = Array.from(
-      viewer.value?.querySelectorAll<HTMLElement>('[data-highlight-issue-id]') ?? []
-    ).find((element) => element.dataset.highlightIssueId === issueId)
-    highlight?.scrollIntoView?.({ block: 'center' })
+    if (issueId) {
+      const highlight = Array.from(
+        viewer.value?.querySelectorAll<HTMLElement>('[data-highlight-issue-id]') ?? []
+      ).find((element) => element.dataset.highlightIssueId === issueId)
+
+      if (highlight) {
+        highlight.scrollIntoView?.({ block: 'center' })
+        return
+      }
+    }
+
+    const block = blockId
+      ? viewer.value?.querySelector<HTMLElement>(`[data-block-id="${blockId}"]`)
+      : null
+    block?.scrollIntoView?.({ block: 'center' })
   },
   { flush: 'post' }
 )

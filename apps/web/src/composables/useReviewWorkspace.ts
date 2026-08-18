@@ -24,6 +24,7 @@ import type { DecisionAction } from '../types/review'
 
 const DOCUMENT_PAGE_LIMIT = 100
 const ISSUE_PAGE_LIMIT = 50
+const MAX_VISIBLE_BATCH_DECISIONS = 500
 
 export type ReviewIssueFilters = Omit<IssuesQuery, 'cursor' | 'limit'>
 
@@ -54,11 +55,21 @@ interface DecisionRequestGuard {
   generation: number
 }
 
+interface ReviewFindMatch {
+  key: string
+  blockId: string
+  start: number
+  end: number
+  matchedIssueId: string | null
+  autoFixable: boolean
+}
+
 export interface ReviewWorkspaceState {
   summary: Ref<AnalysisSummaryResponse | null>
   filters: Ref<ReviewIssueFilters>
   blocks: ComputedRef<DocumentBlock[]>
   issues: ComputedRef<Issue[]>
+  issueStatusById: ComputedRef<Record<string, string>>
   selectedIssueId: Ref<string | null>
   selectedIssue: ComputedRef<Issue | null>
   selectedBlockId: ComputedRef<string | null>
@@ -70,13 +81,31 @@ export interface ReviewWorkspaceState {
   decisionError: ComputedRef<string | null>
   canRetryDecision: ComputedRef<boolean>
   decisionAnnouncement: Ref<string>
+  batchLimit: number
+  visibleIssueCount: ComputedRef<number>
+  visibleIssueOverflow: ComputedRef<boolean>
+  highRiskVisibleIssueCount: ComputedRef<number>
+  batchDecisionError: Ref<string | null>
+  bulkActionPending: Ref<boolean>
+  findQuery: Ref<string>
+  replaceText: Ref<string>
+  findStatus: ComputedRef<string>
+  canNavigateMatches: ComputedRef<boolean>
+  canReplaceAllMatches: ComputedRef<boolean>
+  findReplaceError: Ref<string | null>
   selectIssue(issueId: string): void
   selectHighlight(issueId: string): void
   setFilters(filters: ReviewIssueFilters): Promise<void>
   decide(action: DecisionAction, replacement?: string): Promise<void>
+  decideVisible(action: Exclude<DecisionAction, 'custom'>): Promise<void>
   retryDecision(): Promise<void>
   loadNextBlocks(): Promise<void>
   loadNextIssues(): Promise<void>
+  setFindQuery(value: string): void
+  setReplaceText(value: string): void
+  goToPreviousMatch(): void
+  goToNextMatch(): void
+  replaceAllMatches(): Promise<void>
   retrySummary(): Promise<void>
   retryDocument(): Promise<void>
   retryIssues(): Promise<void>
@@ -101,6 +130,11 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
   const blockCursor = ref<string | null>(null)
   const issueCursor = ref<string | null>(null)
   const decisionAnnouncement = ref('')
+  const batchDecisionError = ref<string | null>(null)
+  const bulkActionPending = ref(false)
+  const findQuery = ref('')
+  const replaceText = ref('')
+  const findReplaceError = ref<string | null>(null)
   const documentCheckerFailures = ref<CheckerFailureMap>({})
   const issueCheckerFailures = ref<CheckerFailureMap>({})
   const loading = reactive<LoadingState>({
@@ -128,6 +162,8 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
   const authoritativeDecisions = new Map<string, IssueDecisionSummary | null>()
   const decisionGenerations = new Map<string, number>()
   const failedDecisions = ref<Record<string, FailedDecision | undefined>>({})
+  const issueNotices = ref<Record<string, string | undefined>>({})
+  const currentFindMatchIndex = ref(-1)
 
   const blocks = computed(() =>
     blockIds.value.flatMap((blockId) => {
@@ -145,7 +181,17 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     const issueId = selectedIssueId.value
     return issueId ? issuesById.value[issueId] ?? null : null
   })
-  const selectedBlockId = computed(() => selectedIssue.value?.block_id ?? null)
+  const findMatches = computed(() =>
+    findDocumentMatches(blocks.value, issues.value, findQuery.value)
+  )
+  const currentFindMatch = computed(() => {
+    const matches = findMatches.value
+    const index = normalizeFindMatchIndex(currentFindMatchIndex.value, matches.length)
+    return index === -1 ? null : matches[index] ?? null
+  })
+  const selectedBlockId = computed(
+    () => currentFindMatch.value?.blockId ?? selectedIssue.value?.block_id ?? null
+  )
   const checkerFailures = computed<CheckerFailureMap>(() => ({
     ...summary.value?.checker_failures,
     ...documentCheckerFailures.value,
@@ -159,6 +205,50 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
   const canRetryDecision = computed(
     () => selectedFailedDecision.value?.command !== undefined
   )
+  const issueStatusById = computed(() =>
+    Object.fromEntries(
+      issues.value.map((issue) => [
+        issue.issue_id,
+        issueNotices.value[issue.issue_id] ?? decisionStatusLabel(issue.decision)
+      ])
+    )
+  )
+  const visibleIssueCount = computed(() => issues.value.length)
+  const visibleIssueOverflow = computed(
+    () => visibleIssueCount.value > MAX_VISIBLE_BATCH_DECISIONS
+  )
+  const visibleBatchIssues = computed(() =>
+    issues.value.slice(0, MAX_VISIBLE_BATCH_DECISIONS)
+  )
+  const highRiskVisibleIssueCount = computed(
+    () => visibleBatchIssues.value.filter(isHighRiskSecurityIssue).length
+  )
+  const findStatus = computed(() => {
+    if (!findQuery.value) {
+      return '仅在已加载内容中查找'
+    }
+
+    const matches = findMatches.value
+    if (!matches.length) {
+      return '未找到匹配'
+    }
+
+    const index = normalizeFindMatchIndex(currentFindMatchIndex.value, matches.length)
+    return `第 ${index + 1} / ${matches.length} 处`
+  })
+  const canNavigateMatches = computed(() => findMatches.value.length > 0)
+  const canReplaceAllMatches = computed(() => {
+    if (!isValidCustomReplacement(replaceText.value)) {
+      return false
+    }
+
+    const matches = findMatches.value
+    if (!matches.length || matches.length > MAX_VISIBLE_BATCH_DECISIONS) {
+      return false
+    }
+
+    return matches.every((match) => match.matchedIssueId !== null && match.autoFixable)
+  })
 
   function isCurrent(generation: number, currentGeneration: number): boolean {
     return active && generation === currentGeneration
@@ -440,6 +530,23 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     }
   }
 
+  function setIssueNotice(issueId: string, message: string): void {
+    issueNotices.value = {
+      ...issueNotices.value,
+      [issueId]: message
+    }
+  }
+
+  function clearIssueNotice(issueId: string): void {
+    if (!Object.prototype.hasOwnProperty.call(issueNotices.value, issueId)) {
+      return
+    }
+
+    const nextIssueNotices = { ...issueNotices.value }
+    delete nextIssueNotices[issueId]
+    issueNotices.value = nextIssueNotices
+  }
+
   function setFailedDecision(issueId: string, failure: FailedDecision): void {
     failedDecisions.value = {
       ...failedDecisions.value,
@@ -513,6 +620,7 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     const generation = nextDecisionGeneration(command.issue_id)
     decisionAnnouncement.value = ''
     clearFailedDecision(command.issue_id)
+    clearIssueNotice(command.issue_id)
     setIssueDecision(command.issue_id, optimisticDecision(command))
 
     try {
@@ -585,6 +693,97 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     await submitDecision(command)
   }
 
+  async function submitDecisionBatch(
+    commands: DecisionCommand[],
+    failureTarget: Ref<string | null>,
+    failureMessage: string
+  ): Promise<void> {
+    if (!commands.length) {
+      return
+    }
+
+    const generations = new Map<string, number>()
+    failureTarget.value = null
+    bulkActionPending.value = true
+    decisionAnnouncement.value = ''
+
+    for (const command of commands) {
+      const generation = nextDecisionGeneration(command.issue_id)
+      generations.set(command.issue_id, generation)
+      clearFailedDecision(command.issue_id)
+      clearIssueNotice(command.issue_id)
+      setIssueDecision(command.issue_id, optimisticDecision(command))
+    }
+
+    try {
+      const response = await analysisApi.putDecisions(jobId, commands)
+      let appliedCount = 0
+      let needsReviewCount = 0
+
+      for (const command of commands) {
+        const generation = generations.get(command.issue_id)
+        if (generation === undefined || !isDecisionCurrent(command.issue_id, generation)) {
+          continue
+        }
+
+        const outcome = response.outcomes.find(
+          (item) => item.issue_id === command.issue_id
+        )
+
+        if (!outcome) {
+          throw new Error('保存处理结果失败：服务器未返回对应结果。')
+        }
+
+        if (outcome.status === 'applied') {
+          authoritativeDecisions.set(command.issue_id, outcome.decision)
+          setIssueDecision(command.issue_id, outcome.decision)
+          clearIssueNotice(command.issue_id)
+          appliedCount += 1
+          continue
+        }
+
+        setIssueDecision(
+          command.issue_id,
+          authoritativeDecisions.get(command.issue_id) ?? null
+        )
+        setIssueNotice(command.issue_id, '需重新确认')
+        needsReviewCount += 1
+      }
+
+      decisionAnnouncement.value = batchDecisionAnnouncement(appliedCount, needsReviewCount)
+      await loadSummary()
+    } catch (error) {
+      for (const command of commands) {
+        const generation = generations.get(command.issue_id)
+        if (generation === undefined || !isDecisionCurrent(command.issue_id, generation)) {
+          continue
+        }
+
+        setIssueDecision(
+          command.issue_id,
+          authoritativeDecisions.get(command.issue_id) ?? null
+        )
+      }
+
+      failureTarget.value = errorMessage(error, failureMessage)
+    } finally {
+      bulkActionPending.value = false
+    }
+  }
+
+  async function decideVisible(
+    action: Exclude<DecisionAction, 'custom'>
+  ): Promise<void> {
+    findReplaceError.value = null
+
+    const commands = visibleBatchIssues.value.flatMap((issue) => {
+      const command = decisionCommand(issue, action)
+      return command ? [command] : []
+    })
+
+    await submitDecisionBatch(commands, batchDecisionError, '批量保存处理结果失败。')
+  }
+
   async function retryDecision(): Promise<void> {
     const issueId = selectedIssueId.value
     const retry = issueId ? failedDecisions.value[issueId] : null
@@ -592,6 +791,80 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
       return
     }
     await submitDecision(retry.command)
+  }
+
+  function setFindQuery(value: string): void {
+    findQuery.value = value
+    currentFindMatchIndex.value = value ? 0 : -1
+    findReplaceError.value = null
+    syncCurrentFindMatchSelection()
+  }
+
+  function setReplaceText(value: string): void {
+    replaceText.value = value
+    findReplaceError.value = null
+  }
+
+  function syncCurrentFindMatchSelection(): void {
+    const match = currentFindMatch.value
+
+    if (!findQuery.value || !match) {
+      return
+    }
+
+    if (match.matchedIssueId && issuesById.value[match.matchedIssueId]) {
+      selectHighlight(match.matchedIssueId)
+      return
+    }
+
+    localizationGeneration += 1
+    explicitlySelectedIssueId = null
+    selectedIssueId.value = null
+  }
+
+  function goToPreviousMatch(): void {
+    const matches = findMatches.value
+    if (!matches.length) {
+      return
+    }
+
+    const currentIndex = normalizeFindMatchIndex(currentFindMatchIndex.value, matches.length)
+    currentFindMatchIndex.value = (currentIndex - 1 + matches.length) % matches.length
+    syncCurrentFindMatchSelection()
+  }
+
+  function goToNextMatch(): void {
+    const matches = findMatches.value
+    if (!matches.length) {
+      return
+    }
+
+    const currentIndex = normalizeFindMatchIndex(currentFindMatchIndex.value, matches.length)
+    currentFindMatchIndex.value = (currentIndex + 1) % matches.length
+    syncCurrentFindMatchSelection()
+  }
+
+  async function replaceAllMatches(): Promise<void> {
+    batchDecisionError.value = null
+
+    if (!canReplaceAllMatches.value) {
+      findReplaceError.value = '仅支持替换与单个可自动修复问题完全对应的匹配项。'
+      return
+    }
+
+    const replacement = replaceText.value
+    const commands = findMatches.value.flatMap((match) => {
+      const issue = match.matchedIssueId ? issuesById.value[match.matchedIssueId] : null
+      const command = issue ? decisionCommand(issue, 'custom', replacement) : null
+      return command ? [command] : []
+    })
+
+    if (commands.length !== findMatches.value.length) {
+      findReplaceError.value = '仅支持替换与单个可自动修复问题完全对应的匹配项。'
+      return
+    }
+
+    await submitDecisionBatch(commands, findReplaceError, '批量替换失败。')
   }
 
   async function loadNextBlocks(): Promise<void> {
@@ -655,6 +928,7 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     filters,
     blocks,
     issues,
+    issueStatusById,
     selectedIssueId,
     selectedIssue,
     selectedBlockId,
@@ -666,13 +940,31 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     decisionError,
     canRetryDecision,
     decisionAnnouncement,
+    batchLimit: MAX_VISIBLE_BATCH_DECISIONS,
+    visibleIssueCount,
+    visibleIssueOverflow,
+    highRiskVisibleIssueCount,
+    batchDecisionError,
+    bulkActionPending,
+    findQuery,
+    replaceText,
+    findStatus,
+    canNavigateMatches,
+    canReplaceAllMatches,
+    findReplaceError,
     selectIssue,
     selectHighlight,
     setFilters,
     decide,
+    decideVisible,
     retryDecision,
     loadNextBlocks,
     loadNextIssues,
+    setFindQuery,
+    setReplaceText,
+    goToPreviousMatch,
+    goToNextMatch,
+    replaceAllMatches,
     retrySummary,
     retryDocument,
     retryIssues
@@ -698,4 +990,104 @@ function isValidCustomReplacement(
     !replacement.includes('\u0000') &&
     Array.from(replacement).length <= 10_000
   )
+}
+
+function normalizeFindMatchIndex(index: number, length: number): number {
+  if (length < 1) {
+    return -1
+  }
+
+  if (index < 0) {
+    return 0
+  }
+
+  if (index >= length) {
+    return length - 1
+  }
+
+  return index
+}
+
+function findDocumentMatches(
+  blocks: DocumentBlock[],
+  issues: Issue[],
+  query: string
+): ReviewFindMatch[] {
+  const queryPoints = Array.from(query)
+  if (!queryPoints.length) {
+    return []
+  }
+
+  const exactIssueByRange = new Map<string, Issue[]>()
+  for (const issue of issues) {
+    const key = `${issue.block_id}:${issue.start}:${issue.end}`
+    const matches = exactIssueByRange.get(key)
+    if (matches) {
+      matches.push(issue)
+    } else {
+      exactIssueByRange.set(key, [issue])
+    }
+  }
+
+  const matches: ReviewFindMatch[] = []
+
+  for (const block of blocks) {
+    const points = Array.from(block.text)
+    const maxStart = points.length - queryPoints.length
+
+    for (let start = 0; start <= maxStart; start += 1) {
+      const end = start + queryPoints.length
+      const slice = points.slice(start, end)
+      if (slice.length !== queryPoints.length || slice.join('') !== query) {
+        continue
+      }
+
+      const exactIssues = exactIssueByRange.get(`${block.block_id}:${start}:${end}`) ?? []
+      const exactIssue = exactIssues.length === 1 ? exactIssues[0] : null
+
+      matches.push({
+        key: `${block.block_id}:${start}:${end}`,
+        blockId: block.block_id,
+        start,
+        end,
+        matchedIssueId: exactIssue?.issue_id ?? null,
+        autoFixable: exactIssue?.auto_fixable ?? false
+      })
+    }
+  }
+
+  return matches
+}
+
+function isHighRiskSecurityIssue(issue: Issue): boolean {
+  return issue.type === 'security' && issue.severity === 'error'
+}
+
+function decisionStatusLabel(decision: IssueDecisionSummary | null): string {
+  switch (decision?.action) {
+    case 'accepted':
+      return '已接受'
+    case 'ignored':
+      return '已忽略'
+    case 'custom':
+      return '已自定义'
+    default:
+      return '未处理'
+  }
+}
+
+function batchDecisionAnnouncement(appliedCount: number, needsReviewCount: number): string {
+  if (appliedCount > 0 && needsReviewCount > 0) {
+    return `成功 ${appliedCount} 项，需重新确认 ${needsReviewCount} 项`
+  }
+
+  if (appliedCount > 0) {
+    return `成功 ${appliedCount} 项`
+  }
+
+  if (needsReviewCount > 0) {
+    return `需重新确认 ${needsReviewCount} 项`
+  }
+
+  return ''
 }

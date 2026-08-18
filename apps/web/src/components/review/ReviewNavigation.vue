@@ -12,6 +12,7 @@ import type { ReviewIssueFilters } from '../../composables/useReviewWorkspace'
 const props = defineProps<{
   summary: AnalysisSummaryResponse | null
   issues: Issue[]
+  issueStatusById: Record<string, string>
   selectedIssueId: string | null
   loading: boolean
   error: string | null
@@ -184,6 +185,7 @@ onBeforeUnmount(() => {
             <span>{{ issue.severity }}</span>
           </span>
           <strong>{{ issue.original }}</strong>
+          <span class="issue-card__status">{{ issueStatusById[issue.issue_id] ?? '未处理' }}</span>
           <span>{{ issue.message }}</span>
         </button>
       </li>
@@ -337,6 +339,12 @@ onBeforeUnmount(() => {
   color: #252e42;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.issue-card__status {
+  color: #4356c9;
+  font-size: 0.72rem;
+  font-weight: 800;
 }
 
 .issue-card > span:last-child {
