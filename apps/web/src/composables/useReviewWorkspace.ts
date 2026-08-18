@@ -361,6 +361,12 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     decisionGuards: DecisionRequestGuard | DecisionRequestGuard[]
   ): Promise<void> {
     const generation = ++issueGeneration
+    const loadedDecisionGenerations = new Map(
+      issueIds.value.map((issueId) => [
+        issueId,
+        decisionGenerations.get(issueId) ?? 0
+      ])
+    )
     lastIssueRequest = { cursor: null, append: false }
     loading.issues = true
     errors.issues = null
@@ -375,7 +381,11 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
         if (!isCurrent(generation, issueGeneration)) {
           return
         }
-        reconcileAuthoritativeIssuePage(response, decisionGuards)
+        reconcileAuthoritativeIssuePage(
+          response,
+          decisionGuards,
+          loadedDecisionGenerations
+        )
       } catch (error) {
         if (!isCurrent(generation, issueGeneration)) {
           return
@@ -505,7 +515,8 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
 
   function reconcileAuthoritativeIssuePage(
     response: IssuePageResponse,
-    decisionGuards: DecisionRequestGuard | DecisionRequestGuard[]
+    decisionGuards: DecisionRequestGuard | DecisionRequestGuard[],
+    loadedDecisionGenerations: ReadonlyMap<string, number>
   ): void {
     const requestedGuards = Array.isArray(decisionGuards)
       ? decisionGuards
@@ -516,9 +527,12 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     }
 
     const protectedIssueIds = new Set(
-      requestedGuards
-        .filter((guard) => !isDecisionCurrent(guard.issueId, guard.generation))
-        .map((guard) => guard.issueId)
+      [...loadedDecisionGenerations]
+        .filter(
+          ([issueId, generation]) =>
+            (decisionGenerations.get(issueId) ?? 0) > generation
+        )
+        .map(([issueId]) => issueId)
     )
     const previousById = issuesById.value
     const previousIds = issueIds.value

@@ -153,3 +153,52 @@ PASS — `vue-tsc -b && vite build`; 59 modules transformed.
 ## Concerns
 
 - None.
+
+## Fix Round 1 — concurrent decision generations and loading announcement
+
+### Root cause
+
+- Authoritative reload reconciliation only derived protected issue IDs from
+  `requestedGuards`. A decision generation that advanced for another loaded issue
+  while the request was pending could therefore be overwritten or removed by the
+  older page.
+- An empty page with a next cursor rendered both the initial empty-list loading
+  status and the pagination loading status.
+
+### RED evidence
+
+```powershell
+Set-Location C:\Work\text-verification\apps\web
+npm test -- ReviewWorkspace.spec.ts -t "preserves an unrelated newer decision while applying a stale authoritative page and cursor|keeps authoritative pagination reachable when all applied rows leave the page empty"
+```
+
+Expected RED — `2` tests failed:
+
+- The stale authoritative page returned `issue-3` and `issue-1`, but removed the
+  newer optimistic decision for unrelated `issue-2`.
+- The empty paginated loading state exposed both `正在加载问题…` and
+  `正在加载更多问题…` live announcements.
+
+### GREEN implementation
+
+- Snapshotted decision generations for every currently loaded issue when an
+  authoritative reload starts.
+- While applying the response, preserved each loaded issue whose generation
+  advanced beyond that snapshot, regardless of whether it appeared in the
+  reload's requested guards.
+- Kept authoritative response order, backfilled rows, cursor, checker failures,
+  and still-current guarded-row reconciliation unchanged.
+- Suppressed the initial empty-list loading live region when a next cursor makes
+  the pagination live region authoritative.
+
+### GREEN evidence
+
+- Focused regressions: PASS — `2` tests.
+- `npm test -- ReviewWorkspace.spec.ts`: PASS — `51` tests.
+- `npm test -- reviewAccessibility.spec.ts`: PASS — `3` tests.
+- `npm test`: PASS — `6` files, `98` tests.
+- `npm run build`: PASS — `vue-tsc -b && vite build`; 59 modules transformed.
+
+### Concerns
+
+- None.

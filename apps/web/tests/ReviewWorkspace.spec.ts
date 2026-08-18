@@ -1616,6 +1616,130 @@ describe('ReviewWorkspaceView', () => {
     expect(wrapper.find('[data-issue-id="issue-52"]').exists()).toBe(true)
   })
 
+  it('preserves an unrelated newer decision while applying a stale authoritative page and cursor', async () => {
+    const authoritativeReload = createDeferred<IssuePageResponse>()
+    const newerDecisionResponse = createDeferred<DecisionBatchResponse>()
+    const acceptedDecision = {
+      issue_version: 1,
+      action: 'accepted' as const,
+      replacement: null,
+      updated_at: '2026-08-18T01:00:00Z'
+    }
+    const ignoredDecision = {
+      issue_version: 1,
+      action: 'ignored' as const,
+      replacement: null,
+      updated_at: '2026-08-18T01:01:00Z'
+    }
+    const getIssues = vi
+      .fn()
+      .mockResolvedValueOnce(
+        buildIssuePage({
+          next_cursor: 'issues-before-decision'
+        })
+      )
+      .mockReturnValueOnce(authoritativeReload.promise)
+      .mockResolvedValueOnce(
+        buildIssuePage({
+          total: 4,
+          items: buildIssueSequence(4, 4),
+          next_cursor: null
+        })
+      )
+      .mockResolvedValueOnce(
+        buildIssuePage({
+          total: 3,
+          items: [
+            buildIssue({
+              issue_id: 'issue-3',
+              original: '问题 3',
+              message: '回填问题'
+            }),
+            buildIssue({
+              decision: acceptedDecision
+            }),
+            buildIssue({
+              issue_id: 'issue-2',
+              block_id: 'block-2',
+              start: 3,
+              end: 5,
+              original: '错误',
+              message: '发现错词',
+              context: '甲😀乙错误',
+              decision: ignoredDecision
+            })
+          ],
+          next_cursor: 'issues-after-newer-decision'
+        })
+      )
+    const putDecisions = vi
+      .fn()
+      .mockResolvedValueOnce(
+        buildAppliedResponse({
+          issue_id: 'issue-1',
+          ...acceptedDecision
+        })
+      )
+      .mockReturnValueOnce(newerDecisionResponse.promise)
+    const wrapper = mountReviewWorkspace(
+      createAnalysisApiMock({ getIssues, putDecisions })
+    )
+    await flushPromises()
+
+    await wrapper.get('button[name="accept"]').trigger('click')
+    await flushPromises()
+
+    expect(getIssues).toHaveBeenCalledTimes(2)
+
+    await wrapper.get('[data-issue-id="issue-2"]').trigger('click')
+    await wrapper.get('button[name="ignore"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-issue-id="issue-2"]').text()).toContain('已忽略')
+
+    authoritativeReload.resolve(
+      buildIssuePage({
+        total: 4,
+        items: [
+          buildIssue({
+            issue_id: 'issue-3',
+            original: '问题 3',
+            message: '回填问题'
+          }),
+          buildIssue({
+            decision: acceptedDecision
+          })
+        ],
+        next_cursor: 'issues-after-stale-reload'
+      })
+    )
+    await flushPromises()
+
+    expect(
+      wrapper.findAll('[data-issue-id]').map((issue) => issue.attributes('data-issue-id'))
+    ).toEqual(['issue-3', 'issue-1', 'issue-2'])
+    expect(wrapper.get('[data-issue-id="issue-2"]').text()).toContain('已忽略')
+
+    await wrapper.get('[data-testid="load-more-issues"]').trigger('click')
+    await flushPromises()
+
+    expect(getIssues).toHaveBeenNthCalledWith(3, jobId, {
+      cursor: 'issues-after-stale-reload',
+      limit: 50
+    })
+    expect(wrapper.find('[data-issue-id="issue-4"]').exists()).toBe(true)
+
+    newerDecisionResponse.resolve(
+      buildAppliedResponse({
+        issue_id: 'issue-2',
+        ...ignoredDecision
+      })
+    )
+    await flushPromises()
+
+    expect(wrapper.get('[data-issue-id="issue-2"]').text()).toContain('已忽略')
+  })
+
   it('removes an all-applied batch from the unreviewed filter and refreshes summary', async () => {
     const filteredIssues = [
       buildIssue(),
@@ -1686,6 +1810,7 @@ describe('ReviewWorkspaceView', () => {
 
   it('keeps authoritative pagination reachable when all applied rows leave the page empty', async () => {
     const filteredIssues = buildIssueSequence(1, 2)
+    const nextPage = createDeferred<IssuePageResponse>()
     const getIssues = vi
       .fn()
       .mockResolvedValueOnce(buildIssuePage())
@@ -1703,13 +1828,7 @@ describe('ReviewWorkspaceView', () => {
           next_cursor: 'issues-after-empty-page'
         })
       )
-      .mockResolvedValueOnce(
-        buildIssuePage({
-          total: 1,
-          items: buildIssueSequence(3, 3),
-          next_cursor: null
-        })
-      )
+      .mockReturnValueOnce(nextPage.promise)
     const putDecisions = vi.fn().mockResolvedValue({
       outcomes: filteredIssues.map((issue) => ({
         issue_id: issue.issue_id,
@@ -1738,6 +1857,22 @@ describe('ReviewWorkspaceView', () => {
     expect(wrapper.find('[data-testid="empty-issues"]').exists()).toBe(false)
 
     await wrapper.get('[data-testid="load-more-issues"]').trigger('click')
+
+    expect(
+      wrapper
+        .getComponent(ReviewNavigation)
+        .findAll('[role="status"]')
+        .map((status) => status.text())
+        .filter((status) => status.includes('正在加载'))
+    ).toEqual(['正在加载更多问题…'])
+
+    nextPage.resolve(
+      buildIssuePage({
+        total: 1,
+        items: buildIssueSequence(3, 3),
+        next_cursor: null
+      })
+    )
     await flushPromises()
 
     expect(getIssues).toHaveBeenLastCalledWith(jobId, {

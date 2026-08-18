@@ -206,7 +206,11 @@ function severityLabel(severityLevel: IssueSeverity): string {
       </label>
     </div>
 
-    <p v-if="loading && !issues.length" class="review-navigation__status" role="status">
+    <p
+      v-if="loading && !issues.length && !nextCursor"
+      class="review-navigation__status"
+      role="status"
+    >
       正在加载问题…
     </p>
 
