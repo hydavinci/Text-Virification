@@ -997,6 +997,147 @@ describe('ReviewWorkspaceView', () => {
     )
   })
 
+  it('reconciles still-current batch reload siblings when another conflicted issue is re-decided', async () => {
+    const batchAcceptedDecision = {
+      issue_version: 1,
+      action: 'accepted' as const,
+      replacement: null,
+      updated_at: '2026-08-18T03:00:00Z'
+    }
+    const newerIgnoredDecision = {
+      issue_version: 1,
+      action: 'ignored' as const,
+      replacement: null,
+      updated_at: '2026-08-18T03:01:00Z'
+    }
+    const authoritativeBatchReload = createDeferred<IssuePageResponse>()
+    const newerDecisionRequest = createDeferred<DecisionBatchResponse>()
+    const getIssues = vi
+      .fn()
+      .mockResolvedValueOnce(
+        buildIssuePage({
+          total: 3,
+          items: [
+            buildIssue(),
+            buildIssue({
+              issue_id: 'issue-2',
+              block_id: 'block-2',
+              start: 3,
+              end: 5,
+              original: '冲突项',
+              message: '需要重新确认'
+            }),
+            buildIssue({
+              issue_id: 'issue-3',
+              block_id: 'block-2',
+              start: 0,
+              end: 2,
+              original: '失效项',
+              message: '服务器已移除'
+            })
+          ]
+        })
+      )
+      .mockReturnValueOnce(authoritativeBatchReload.promise)
+    const putDecisions = vi
+      .fn()
+      .mockResolvedValueOnce({
+        outcomes: [
+          {
+            issue_id: 'issue-1',
+            status: 'applied',
+            code: null,
+            decision: {
+              issue_id: 'issue-1',
+              ...batchAcceptedDecision
+            }
+          },
+          {
+            issue_id: 'issue-2',
+            status: 'conflict',
+            code: 'stale_issue_version',
+            decision: null
+          },
+          {
+            issue_id: 'issue-3',
+            status: 'invalid',
+            code: 'issue_not_found',
+            decision: null
+          }
+        ]
+      } satisfies DecisionBatchResponse)
+      .mockReturnValueOnce(newerDecisionRequest.promise)
+    const wrapper = mountReviewWorkspace(
+      createAnalysisApiMock({
+        getIssues,
+        getSummary: vi
+          .fn()
+          .mockResolvedValueOnce(buildSummary({ total_issues: 3 }))
+          .mockResolvedValueOnce(buildSummary({ total_issues: 2 })),
+        putDecisions
+      })
+    )
+    await flushPromises()
+
+    await wrapper.get('button[name="accept-visible"]').trigger('click')
+    await flushPromises()
+
+    expect(getIssues).toHaveBeenCalledTimes(2)
+
+    await wrapper.get('[data-issue-id="issue-2"]').trigger('click')
+    await wrapper.get('button[name="ignore"]').trigger('click')
+    await flushPromises()
+
+    expect(putDecisions).toHaveBeenNthCalledWith(2, jobId, [
+      {
+        issue_id: 'issue-2',
+        issue_version: 1,
+        action: 'ignored'
+      }
+    ])
+
+    authoritativeBatchReload.resolve(
+      buildIssuePage({
+        total: 2,
+        items: [
+          buildIssue({
+            decision: batchAcceptedDecision
+          }),
+          buildIssue({
+            issue_id: 'issue-2',
+            block_id: 'block-2',
+            start: 3,
+            end: 5,
+            original: '冲突项',
+            message: '服务器仍是旧状态',
+            decision: batchAcceptedDecision
+          })
+        ]
+      })
+    )
+    await flushPromises()
+
+    expect(wrapper.get('[data-issue-id="issue-2"]').text()).toContain('已忽略')
+    expect(wrapper.find('[data-issue-id="issue-3"]').exists()).toBe(false)
+
+    newerDecisionRequest.resolve({
+      outcomes: [
+        {
+          issue_id: 'issue-2',
+          status: 'applied',
+          code: null,
+          decision: {
+            issue_id: 'issue-2',
+            ...newerIgnoredDecision
+          }
+        }
+      ]
+    } satisfies DecisionBatchResponse)
+    await flushPromises()
+
+    expect(wrapper.get('[data-issue-id="issue-2"]').text()).toContain('已忽略')
+  })
+
   it('does not submit stale visible issues while a filter request is in flight', async () => {
     const filteredPage = createDeferred<IssuePageResponse>()
     const getIssues = vi

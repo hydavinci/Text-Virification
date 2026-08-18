@@ -319,11 +319,7 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     return request
   }
 
-  function loadIssuePage(
-    cursor: string | null,
-    append: boolean,
-    decisionGuards?: DecisionRequestGuard | DecisionRequestGuard[]
-  ): Promise<void> {
+  function loadIssuePage(cursor: string | null, append: boolean): Promise<void> {
     const generation = ++issueGeneration
     lastIssueRequest = { cursor, append }
     loading.issues = true
@@ -336,13 +332,50 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
           cursor,
           limit: ISSUE_PAGE_LIMIT
         })
-        if (
-          !isCurrent(generation, issueGeneration) ||
-          !areDecisionGuardsCurrent(decisionGuards)
-        ) {
+        if (!isCurrent(generation, issueGeneration)) {
           return
         }
         applyIssuePage(response, append)
+      } catch (error) {
+        if (!isCurrent(generation, issueGeneration)) {
+          return
+        }
+        errors.issues = errorMessage(error, '无法加载问题列表。')
+      } finally {
+        if (isCurrent(generation, issueGeneration)) {
+          loading.issues = false
+        }
+      }
+    })()
+
+    issueRequest = request
+    void request.finally(() => {
+      if (issueRequest === request) {
+        issueRequest = null
+      }
+    })
+    return request
+  }
+
+  function reloadAuthoritativeIssues(
+    decisionGuards: DecisionRequestGuard | DecisionRequestGuard[]
+  ): Promise<void> {
+    const generation = ++issueGeneration
+    lastIssueRequest = { cursor: null, append: false }
+    loading.issues = true
+    errors.issues = null
+
+    const request = (async () => {
+      try {
+        const response = await analysisApi.getIssues(jobId, {
+          ...filters.value,
+          cursor: null,
+          limit: ISSUE_PAGE_LIMIT
+        })
+        if (!isCurrent(generation, issueGeneration)) {
+          return
+        }
+        reconcileAuthoritativeIssuePage(response, decisionGuards)
       } catch (error) {
         if (!isCurrent(generation, issueGeneration)) {
           return
@@ -470,6 +503,49 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     }
   }
 
+  function reconcileAuthoritativeIssuePage(
+    response: IssuePageResponse,
+    decisionGuards: DecisionRequestGuard | DecisionRequestGuard[]
+  ): void {
+    const guards = currentDecisionGuards(decisionGuards)
+    if (!guards.length) {
+      return
+    }
+
+    const nextById = { ...issuesById.value }
+    const nextIds = [...issueIds.value]
+    const authoritativeIssues = new Map(
+      response.items.map((issue) => [issue.issue_id, issue] as const)
+    )
+
+    for (const guard of guards) {
+      const authoritativeIssue = authoritativeIssues.get(guard.issueId)
+
+      if (authoritativeIssue) {
+        nextById[guard.issueId] = authoritativeIssue
+        authoritativeDecisions.set(guard.issueId, authoritativeIssue.decision)
+        continue
+      }
+
+      delete nextById[guard.issueId]
+      authoritativeDecisions.delete(guard.issueId)
+    }
+
+    issuesById.value = nextById
+    issueIds.value = nextIds.filter((issueId) =>
+      Object.prototype.hasOwnProperty.call(nextById, issueId)
+    )
+    issueCursor.value = response.next_cursor
+    issueCheckerFailures.value = response.checker_failures
+
+    if (
+      !selectedIssueId.value ||
+      !Object.prototype.hasOwnProperty.call(nextById, selectedIssueId.value)
+    ) {
+      selectedIssueId.value = issueIds.value[0] ?? null
+    }
+  }
+
   function selectIssue(issueId: string): void {
     if (issuesById.value[issueId]) {
       selectedIssueId.value = issueId
@@ -509,15 +585,11 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     return active && decisionGenerations.get(issueId) === generation
   }
 
-  function areDecisionGuardsCurrent(
-    decisionGuards?: DecisionRequestGuard | DecisionRequestGuard[]
-  ): boolean {
-    if (!decisionGuards) {
-      return true
-    }
-
+  function currentDecisionGuards(
+    decisionGuards: DecisionRequestGuard | DecisionRequestGuard[]
+  ): DecisionRequestGuard[] {
     const guards = Array.isArray(decisionGuards) ? decisionGuards : [decisionGuards]
-    return guards.every((guard) => isDecisionCurrent(guard.issueId, guard.generation))
+    return guards.filter((guard) => isDecisionCurrent(guard.issueId, guard.generation))
   }
 
   function setIssueDecision(
@@ -638,7 +710,7 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
       )
       decisionAnnouncement.value = '结果已更新，请重新确认'
       await Promise.all([
-        loadIssuePage(null, false, {
+        reloadAuthoritativeIssues({
           issueId: command.issue_id,
           generation
         }),
@@ -746,7 +818,7 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
       await Promise.all([
         loadSummary(),
         authoritativeReloadGuards.length > 0
-          ? loadIssuePage(null, false, authoritativeReloadGuards)
+          ? reloadAuthoritativeIssues(authoritativeReloadGuards)
           : Promise.resolve()
       ])
     } catch (error) {

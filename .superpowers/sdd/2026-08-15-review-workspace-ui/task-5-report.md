@@ -121,3 +121,30 @@
 - Batch non-applied outcomes now reuse guarded issue reloads instead of exposing retry metadata for known-stale commands; per-issue retries remain limited to infrastructure failures.
 - Filter-driven issue invalidation prevents stale batch submissions without changing the 500-item cap, loaded-page find behavior, replace-all issue mapping, or raw document text immutability.
 - High-risk batch acceptance now fails closed when `confirm` is unavailable, and the focused spec plus production build both passed after the fixes.
+
+## Fix Round 2
+
+### Finding 1: Shared guarded batch reloads could drop still-current sibling reconciliation
+
+- Root cause: batch non-applied outcomes shared one `loadIssuePage(null, false, authoritativeReloadGuards)` request, and `areDecisionGuardsCurrent()` required every guard to remain current before applying the authoritative page. Re-deciding one conflicted issue invalidated the whole reload, so still-current invalid/conflicted siblings were never reconciled or removed.
+- RED command: `Set-Location C:\Work\text-verification\apps\web; npm test -- --run tests/ReviewWorkspace.spec.ts`
+- RED output:
+  - `FAIL ReviewWorkspaceView > reconciles still-current batch reload siblings when another conflicted issue is re-decided`
+  - `AssertionError: expected true to be false // Object.is equality`
+  - `tests/ReviewWorkspace.spec.ts:1121:64`
+- GREEN commands:
+  - `Set-Location C:\Work\text-verification\apps\web; npm test -- --run tests/ReviewWorkspace.spec.ts`
+  - `Set-Location C:\Work\text-verification\apps\web; npm run build`
+- GREEN output:
+  - `✓ tests/ReviewWorkspace.spec.ts (33 tests)`
+  - `Tests 33 passed (33)`
+  - `✓ built in 1.02s`
+- Files:
+  - `apps/web/src/composables/useReviewWorkspace.ts`
+  - `apps/web/tests/ReviewWorkspace.spec.ts`
+  - `.superpowers/sdd/2026-08-15-review-workspace-ui/task-5-report.md`
+
+### Self-review
+
+- Replaced shared all-or-nothing guarded page application with issue-granular authoritative reconciliation, so only still-current guarded issues update or disappear while newer local decisions stay untouched.
+- Kept existing stale-response protection for general issue-page loads, preserved prior Task 5 batch/find behavior, and verified the focused review spec plus production build after the fix.
