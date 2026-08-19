@@ -104,6 +104,7 @@
 `ReviewWorkspaceView` 新增纯展示状态：
 
 - `activeRailTool`: `issues | search | batch`
+- `activeSidePanelTool`: `issues | batch`
 - `isSidePanelOpen`: boolean
 - `activeInspectorTab`: `details | search`
 - `isExportOpen`: boolean
@@ -112,11 +113,11 @@
 
 ### 状态转换
 
-- 点击“问题”：打开/激活问题侧板，并激活右侧问题详情页。
+- 点击“问题”：激活问题轨道项，打开/激活问题侧板，并激活右侧问题详情页。
 - 再次点击已激活的“问题”：收起左侧板。
-- 点击“批量”：打开/激活批量侧板。
+- 点击“批量”：激活批量轨道项，并打开/激活批量侧板。
 - 再次点击已激活的“批量”：收起左侧板。
-- 点击“查找”：激活右侧查找替换页，不改变左侧板状态。
+- 点击“查找”：激活查找轨道项和右侧查找替换页，不改变 `activeSidePanelTool` 或左侧板开关状态。
 - 点击“导出”：切换导出弹层。
 - 点击问题列表项或正文高亮：选择问题并激活问题详情页。
 - 在查找页点击上一处/下一处：保持查找页激活，不因内部匹配选择切换到问题详情。
