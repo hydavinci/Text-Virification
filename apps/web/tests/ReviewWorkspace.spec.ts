@@ -48,8 +48,8 @@ function mockViewportWidth(width: number) {
 
   window.matchMedia = vi.fn().mockImplementation((query: string): MediaQueryList => {
     const matches =
-      query === '(max-width: 900px)'
-        ? width <= 900
+    query === '(max-width: 1100px)'
+      ? width <= 1100
         : query === '(prefers-reduced-motion: reduce)'
           ? false
           : false

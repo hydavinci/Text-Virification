@@ -62,7 +62,7 @@ const {
   retryIssues
 } = useReviewWorkspace(props.jobId)
 
-const MOBILE_BREAKPOINT_QUERY = '(max-width: 900px)'
+const MOBILE_BREAKPOINT_QUERY = '(max-width: 1100px)'
 const mediaQuery =
   typeof window !== 'undefined' && typeof window.matchMedia === 'function'
     ? window.matchMedia(MOBILE_BREAKPOINT_QUERY)
@@ -426,7 +426,73 @@ onBeforeUnmount(() => {
   border: 0;
 }
 
-@media (max-width: 900px) {
+@media (min-width: 1101px) {
+  .review-workspace {
+    display: grid;
+    grid-template-areas:
+      "file document find"
+      "export document find"
+      "batch document details"
+      "failures document details"
+      "navigation document details";
+    grid-template-columns: minmax(220px, 0.8fr) minmax(480px, 2.3fr) minmax(240px, 0.9fr);
+    grid-template-rows: auto auto auto auto minmax(0, 1fr);
+    gap: 8px 14px;
+    padding: 8px 0;
+  }
+
+  .review-workspace :deep(.review-toolbar) {
+    grid-area: file;
+  }
+
+  .review-workspace :deep(.review-toolbar__actions),
+  .review-workspace__columns {
+    display: contents;
+  }
+
+  .review-workspace :deep(.export-panel) {
+    grid-area: export;
+  }
+
+  .review-workspace :deep(.batch-actions) {
+    grid-area: batch;
+  }
+
+  .review-workspace :deep(.find-replace) {
+    grid-area: find;
+  }
+
+  .review-workspace :deep(.checker-failures) {
+    grid-area: failures;
+    margin-top: 0;
+  }
+
+  .review-workspace__columns :deep(.review-navigation) {
+    min-height: 0;
+    grid-area: navigation;
+  }
+
+  .review-workspace__columns :deep(.document-viewer) {
+    min-height: 0;
+    grid-area: document;
+  }
+
+  .review-workspace__columns :deep(.issue-panel) {
+    min-height: 0;
+    grid-area: details;
+  }
+
+  .review-workspace:not(:has(.checker-failures)) {
+    grid-template-areas:
+      "file document find"
+      "export document find"
+      "batch document details"
+      "navigation document details";
+    grid-template-rows: auto auto auto minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 1100px) {
   .review-workspace {
     width: min(100% - 24px, 100%);
     height: auto;

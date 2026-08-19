@@ -248,7 +248,7 @@ describe('review workspace accessibility', () => {
     expect(columnsRule).toContain('min-height: 0')
     expect(columnsRule).toContain('grid-template-rows: minmax(0, 1fr)')
     expect(documentRule).toContain('height: 100%')
-    expect(ReviewWorkspaceViewSource).toContain('@media (max-width: 900px)')
+    expect(ReviewWorkspaceViewSource).toContain('@media (max-width: 1100px)')
     expect(ReviewWorkspaceViewSource).toContain('height: auto')
   })
 
@@ -272,6 +272,21 @@ describe('review workspace accessibility', () => {
     )
     expect(FindReplaceSource).toContain('grid-template-areas:')
     expect(FindReplaceSource).toContain('"heading fields actions"')
+  })
+
+  it('runs the desktop document from top to bottom between stacked side tools', () => {
+    expect(ReviewWorkspaceViewSource).toContain('@media (min-width: 1101px)')
+    expect(ReviewWorkspaceViewSource).toContain('grid-template-areas:')
+    expect(ReviewWorkspaceViewSource).toContain('"file document find"')
+    expect(ReviewWorkspaceViewSource).toContain('"export document find"')
+    expect(ReviewWorkspaceViewSource).toContain('"batch document details"')
+    expect(ReviewWorkspaceViewSource).toContain('"navigation document details"')
+    expect(ReviewWorkspaceViewSource).toContain('grid-area: document')
+    expect(ReviewWorkspaceViewSource).toContain('grid-area: navigation')
+    expect(ReviewWorkspaceViewSource).toContain('grid-area: details')
+    expect(ReviewWorkspaceViewSource).toContain(
+      '.review-workspace:not(:has(.checker-failures))'
+    )
   })
 
   it('exposes highlighted text as focus-visible controls without circle markers', async () => {
