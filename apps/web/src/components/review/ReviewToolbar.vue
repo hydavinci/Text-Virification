@@ -214,6 +214,43 @@ button {
   font-weight: 800;
 }
 
+@media (min-width: 981px) {
+  .review-toolbar {
+    min-height: 64px;
+    gap: 16px;
+    padding: 8px 16px;
+  }
+
+  .review-toolbar > div:first-child {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .review-toolbar__eyebrow {
+    display: none;
+  }
+
+  h1 {
+    overflow: hidden;
+    font-size: 1rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .review-toolbar__meta {
+    flex: 0 0 auto;
+    margin: 0;
+  }
+
+  .review-toolbar__actions {
+    grid-template-columns: minmax(240px, 0.8fr) minmax(240px, 0.8fr) minmax(420px, 1.4fr);
+    gap: 8px;
+    margin-top: 8px;
+  }
+}
+
 @media (max-width: 980px) {
   .review-toolbar__actions {
     grid-template-columns: minmax(0, 1fr);

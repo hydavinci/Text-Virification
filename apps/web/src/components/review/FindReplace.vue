@@ -180,4 +180,53 @@ const emit = defineEmits<{
   margin: 0;
   color: #a53636;
 }
+
+@media (min-width: 981px) {
+  .find-replace {
+    grid-template-areas:
+      "heading fields actions"
+      "status status status"
+      "error error error";
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: end;
+    gap: 4px 8px;
+    padding: 8px 10px;
+  }
+
+  .find-replace__heading {
+    grid-area: heading;
+    align-self: center;
+  }
+
+  .find-replace__heading p {
+    display: none;
+  }
+
+  .find-replace__fields {
+    grid-area: fields;
+    gap: 8px;
+  }
+
+  .find-replace__fields label {
+    gap: 3px;
+  }
+
+  .find-replace__actions {
+    grid-area: actions;
+    gap: 8px;
+  }
+
+  .find-replace__actions button {
+    padding: 7px 9px;
+  }
+
+  .find-replace__status {
+    grid-area: status;
+    margin: 0;
+  }
+
+  .find-replace__error {
+    grid-area: error;
+  }
+}
 </style>

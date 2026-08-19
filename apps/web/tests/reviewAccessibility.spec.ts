@@ -14,9 +14,13 @@ import type {
 import type { ExportCreateResponse, ExportResponse } from '../src/types/exports'
 import ReviewWorkspaceView from '../src/views/ReviewWorkspaceView.vue'
 import AppSource from '../src/App.vue?raw'
+import BatchActionsSource from '../src/components/review/BatchActions.vue?raw'
 import DocumentViewerSource from '../src/components/review/DocumentViewer.vue?raw'
+import ExportPanelSource from '../src/components/review/ExportPanel.vue?raw'
+import FindReplaceSource from '../src/components/review/FindReplace.vue?raw'
 import ReviewNavigationSource from '../src/components/review/ReviewNavigation.vue?raw'
 import IssuePanelSource from '../src/components/review/IssuePanel.vue?raw'
+import ReviewToolbarSource from '../src/components/review/ReviewToolbar.vue?raw'
 import ReviewWorkspaceViewSource from '../src/views/ReviewWorkspaceView.vue?raw'
 import WorkspaceViewSource from '../src/views/WorkspaceView.vue?raw'
 
@@ -246,6 +250,28 @@ describe('review workspace accessibility', () => {
     expect(documentRule).toContain('height: 100%')
     expect(ReviewWorkspaceViewSource).toContain('@media (max-width: 900px)')
     expect(ReviewWorkspaceViewSource).toContain('height: auto')
+  })
+
+  it('keeps desktop review tools compact while preserving the mobile layouts', () => {
+    for (const source of [
+      ReviewToolbarSource,
+      ExportPanelSource,
+      BatchActionsSource,
+      FindReplaceSource
+    ]) {
+      expect(source).toContain('@media (min-width: 981px)')
+    }
+
+    expect(ReviewToolbarSource).toContain('min-height: 64px')
+    expect(ExportPanelSource).toContain('.export-panel__heading p')
+    expect(ExportPanelSource).toContain('display: none')
+    expect(BatchActionsSource).toContain('.batch-actions__heading p')
+    expect(BatchActionsSource).toContain('仅当前已加载 · 最多')
+    expect(BatchActionsSource).not.toContain(
+      '.batch-actions__heading p {\r\n    display: none'
+    )
+    expect(FindReplaceSource).toContain('grid-template-areas:')
+    expect(FindReplaceSource).toContain('"heading fields actions"')
   })
 
   it('exposes highlighted text as focus-visible controls without circle markers', async () => {

@@ -560,6 +560,34 @@ onBeforeUnmount(() => {
   border-radius: 12px;
 }
 
+@media (min-width: 981px) {
+  .export-panel {
+    gap: 6px;
+    padding: 8px 10px;
+  }
+
+  .export-panel__heading {
+    align-items: center;
+  }
+
+  .export-panel__heading strong {
+    font-size: 0.84rem;
+  }
+
+  .export-panel__heading p {
+    display: none;
+  }
+
+  .export-panel__controls {
+    gap: 8px;
+  }
+
+  .export-panel__controls label {
+    gap: 3px;
+    font-size: 0.72rem;
+  }
+}
+
 .export-panel__error {
   color: #8a2424;
   background: #fff1f1;

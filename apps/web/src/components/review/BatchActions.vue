@@ -39,7 +39,7 @@ function requestAcceptVisible(): void {
     <div class="batch-actions__heading">
       <div>
         <strong>批量处理当前筛选结果</strong>
-        <p>仅处理当前已加载的问题，最多 {{ batchLimit }} 项。</p>
+        <p>仅当前已加载 · 最多 {{ batchLimit }} 项</p>
       </div>
       <span>{{ scopedIssueCount }} 项</span>
     </div>
@@ -152,5 +152,28 @@ function requestAcceptVisible(): void {
 .batch-actions__error {
   margin: 0;
   color: #a53636;
+}
+
+@media (min-width: 981px) {
+  .batch-actions {
+    gap: 6px;
+    padding: 8px 10px;
+  }
+
+  .batch-actions__heading {
+    align-items: center;
+  }
+
+  .batch-actions__heading > div {
+    display: grid;
+    min-width: 0;
+    gap: 2px;
+  }
+
+  .batch-actions__heading p {
+    margin: 0;
+    font-size: 0.68rem;
+    white-space: nowrap;
+  }
 }
 </style>
