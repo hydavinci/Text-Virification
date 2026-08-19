@@ -311,6 +311,34 @@ function connectObserver(element: Element | null): void {
   observer.observe(element)
 }
 
+function scrollWithinViewer(element: HTMLElement): void {
+  const container = viewer.value
+  if (!container) {
+    return
+  }
+
+  if (container.scrollHeight <= container.clientHeight) {
+    element.scrollIntoView?.({ block: 'center' })
+    return
+  }
+
+  const containerRect = container.getBoundingClientRect()
+  const elementRect = element.getBoundingClientRect()
+  const top =
+    container.scrollTop +
+    elementRect.top -
+    containerRect.top -
+    (container.clientHeight - elementRect.height) / 2
+
+  const nextTop = Math.max(0, top)
+  if (typeof container.scrollTo === 'function') {
+    container.scrollTo({ top: nextTop })
+    return
+  }
+
+  container.scrollTop = nextTop
+}
+
 watch(sentinel, connectObserver)
 
 watch(
@@ -329,7 +357,7 @@ watch(
       )
 
       if (highlight) {
-        highlight.scrollIntoView?.({ block: 'center' })
+        scrollWithinViewer(highlight)
         if (pendingHighlightFocusIssueId === issueId) {
           highlight.focus()
           pendingHighlightFocusIssueId = null
@@ -341,7 +369,9 @@ watch(
     const block = blockId
       ? viewer.value?.querySelector<HTMLElement>(`[data-block-id="${blockId}"]`)
       : null
-    block?.scrollIntoView?.({ block: 'center' })
+    if (block) {
+      scrollWithinViewer(block)
+    }
   },
   { flush: 'post' }
 )
@@ -416,10 +446,18 @@ onBeforeUnmount(() => {
 <style scoped>
 .document-viewer {
   min-width: 0;
+  max-height: calc(100vh - 32px);
+  align-self: start;
   overflow: auto;
   background: #edf1f7;
   border: 1px solid #dfe5ef;
   border-radius: 16px;
+}
+
+@media (max-width: 900px) {
+  .document-viewer {
+    max-height: none;
+  }
 }
 
 .document-viewer__heading {

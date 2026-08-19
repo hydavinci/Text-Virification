@@ -965,14 +965,14 @@ describe('ReviewWorkspaceView', () => {
 
   it('retries localization when the selected issue resolves before its block', async () => {
     const documentPage = createDeferred<DocumentPageResponse>()
-    const scrollIntoView = vi.fn()
+    const scrollTo = vi.fn()
     const originalDescriptor = Object.getOwnPropertyDescriptor(
       HTMLElement.prototype,
-      'scrollIntoView'
+      'scrollTo'
     )
-    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+    Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
       configurable: true,
-      value: scrollIntoView
+      value: scrollTo
     })
 
     try {
@@ -989,10 +989,20 @@ describe('ReviewWorkspaceView', () => {
       )
       await flushPromises()
 
+      const viewer = wrapper.get('.document-viewer').element
+      Object.defineProperty(viewer, 'clientHeight', {
+        configurable: true,
+        value: 600
+      })
+      Object.defineProperty(viewer, 'scrollHeight', {
+        configurable: true,
+        value: 1200
+      })
+
       expect(wrapper.get('[data-issue-id="issue-1"]').attributes('aria-current')).toBe(
         'true'
       )
-      expect(scrollIntoView).not.toHaveBeenCalled()
+      expect(scrollTo).not.toHaveBeenCalled()
 
       documentPage.resolve(
         buildDocumentPage({
@@ -1005,16 +1015,16 @@ describe('ReviewWorkspaceView', () => {
       expect(
         wrapper.get('[data-highlight-range-issue-ids~="issue-1"]').attributes('aria-current')
       ).toBe('true')
-      expect(scrollIntoView).toHaveBeenCalledTimes(1)
+      expect(scrollTo).toHaveBeenCalledTimes(1)
     } finally {
       if (originalDescriptor) {
         Object.defineProperty(
           HTMLElement.prototype,
-          'scrollIntoView',
+          'scrollTo',
           originalDescriptor
         )
       } else {
-        Reflect.deleteProperty(HTMLElement.prototype, 'scrollIntoView')
+        Reflect.deleteProperty(HTMLElement.prototype, 'scrollTo')
       }
     }
   })
@@ -1357,16 +1367,26 @@ describe('ReviewWorkspaceView', () => {
 
     const firstScroll = vi.fn()
     const secondScroll = vi.fn()
-    Object.defineProperty(
-      first.get('[data-highlight-range-issue-ids~="issue-1"]').element,
-      'scrollIntoView',
-      { configurable: true, value: firstScroll }
-    )
-    Object.defineProperty(
-      second.get('[data-highlight-range-issue-ids~="issue-1"]').element,
-      'scrollIntoView',
-      { configurable: true, value: secondScroll }
-    )
+    const firstViewer = first.get('.document-viewer').element
+    const secondViewer = second.get('.document-viewer').element
+    for (const viewer of [firstViewer, secondViewer]) {
+      Object.defineProperty(viewer, 'clientHeight', {
+        configurable: true,
+        value: 600
+      })
+      Object.defineProperty(viewer, 'scrollHeight', {
+        configurable: true,
+        value: 1200
+      })
+    }
+    Object.defineProperty(firstViewer, 'scrollTo', {
+      configurable: true,
+      value: firstScroll
+    })
+    Object.defineProperty(secondViewer, 'scrollTo', {
+      configurable: true,
+      value: secondScroll
+    })
 
     await second.get('[data-issue-id="issue-1"]').trigger('click')
     await flushPromises()
@@ -2829,32 +2849,156 @@ describe('ReviewWorkspaceView', () => {
     )
   })
 
-  it('navigates document matches without mutating decisions', async () => {
+  it('navigates document matches inside the viewer without scrolling the page', async () => {
     const putDecisions = vi.fn()
+    const scrollIntoView = vi.fn()
+    const originalScrollIntoView = Object.getOwnPropertyDescriptor(
+      HTMLElement.prototype,
+      'scrollIntoView'
+    )
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+      configurable: true,
+      value: scrollIntoView
+    })
     const wrapper = mountReviewWorkspace(
       createAnalysisApiMock({
         getDocumentPage: vi.fn().mockResolvedValue(
           buildDocumentPage({
             blocks: [
               buildBlock({
-                text: '甲😀项目乙😀项目丙项目'
+                block_id: 'block-1',
+                text: '甲项目'
+              }),
+              buildBlock({
+                block_id: 'block-2',
+                text: '乙项目'
+              }),
+              buildBlock({
+                block_id: 'block-3',
+                text: '丙项目'
               })
             ],
-            total_blocks: 1
+            total_blocks: 3
           })
         ),
         putDecisions
       })
     )
+    try {
+      await flushPromises()
+
+      const viewer = wrapper.get('.document-viewer').element as HTMLElement
+      const scrollTo = vi.fn()
+      Object.defineProperty(viewer, 'clientHeight', {
+        configurable: true,
+        value: 600
+      })
+      Object.defineProperty(viewer, 'scrollHeight', {
+        configurable: true,
+        value: 1200
+      })
+      Object.defineProperty(viewer, 'scrollTo', {
+        configurable: true,
+        value: scrollTo
+      })
+      vi.spyOn(viewer, 'getBoundingClientRect').mockReturnValue({
+        top: 100,
+        bottom: 700,
+        left: 0,
+        right: 800,
+        width: 800,
+        height: 600,
+        x: 0,
+        y: 100,
+        toJSON: () => ({})
+      })
+      vi.spyOn(
+        wrapper.get('[data-block-id="block-2"]').element,
+        'getBoundingClientRect'
+      ).mockReturnValue({
+        top: 550,
+        bottom: 590,
+        left: 0,
+        right: 800,
+        width: 800,
+        height: 40,
+        x: 0,
+        y: 550,
+        toJSON: () => ({})
+      })
+
+      await wrapper.get('[aria-label="查找内容"]').setValue('项目')
+      await flushPromises()
+      scrollIntoView.mockClear()
+      scrollTo.mockClear()
+      expect(wrapper.get('[data-testid="find-status"]').text()).toContain('第 1 / 3 处')
+
+      await wrapper.get('button[name="next-match"]').trigger('click')
+      await flushPromises()
+
+      expect(wrapper.get('[data-testid="find-status"]').text()).toContain('第 2 / 3 处')
+      expect(scrollIntoView).not.toHaveBeenCalled()
+      expect(scrollTo).toHaveBeenCalledTimes(1)
+      expect(putDecisions).not.toHaveBeenCalled()
+    } finally {
+      wrapper.unmount()
+      if (originalScrollIntoView) {
+        Object.defineProperty(
+          HTMLElement.prototype,
+          'scrollIntoView',
+          originalScrollIntoView
+        )
+      } else {
+        Reflect.deleteProperty(HTMLElement.prototype, 'scrollIntoView')
+      }
+    }
+  })
+
+  it('uses page scrolling when the document viewer has no internal overflow', async () => {
+    const wrapper = mountReviewWorkspace(
+      createAnalysisApiMock({
+        getDocumentPage: vi.fn().mockResolvedValue(
+          buildDocumentPage({
+            blocks: [
+              buildBlock({ block_id: 'block-1', text: '甲项目' }),
+              buildBlock({ block_id: 'block-2', text: '乙项目' })
+            ],
+            total_blocks: 2
+          })
+        )
+      })
+    )
     await flushPromises()
 
     await wrapper.get('[aria-label="查找内容"]').setValue('项目')
-    expect(wrapper.get('[data-testid="find-status"]').text()).toContain('第 1 / 3 处')
+    await flushPromises()
+
+    const viewer = wrapper.get('.document-viewer').element as HTMLElement
+    const viewerScroll = vi.fn()
+    const blockScroll = vi.fn()
+    Object.defineProperty(viewer, 'clientHeight', {
+      configurable: true,
+      value: 600
+    })
+    Object.defineProperty(viewer, 'scrollHeight', {
+      configurable: true,
+      value: 600
+    })
+    Object.defineProperty(viewer, 'scrollTo', {
+      configurable: true,
+      value: viewerScroll
+    })
+    Object.defineProperty(
+      wrapper.get('[data-block-id="block-2"]').element,
+      'scrollIntoView',
+      { configurable: true, value: blockScroll }
+    )
 
     await wrapper.get('button[name="next-match"]').trigger('click')
+    await flushPromises()
 
-    expect(wrapper.get('[data-testid="find-status"]').text()).toContain('第 2 / 3 处')
-    expect(putDecisions).not.toHaveBeenCalled()
+    expect(blockScroll).toHaveBeenCalledWith({ block: 'center' })
+    expect(viewerScroll).not.toHaveBeenCalled()
   })
 
   it('replaces every exact auto-fixable match with custom decisions only', async () => {
