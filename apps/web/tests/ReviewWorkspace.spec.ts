@@ -779,7 +779,7 @@ describe('ReviewWorkspaceView', () => {
     )
   })
 
-  it('renders authoritative category, status, and footer statistics', async () => {
+  it('renders authoritative category and status statistics without a footer', async () => {
     const wrapper = mountReviewWorkspace(
       createAnalysisApiMock({
         getSummary: vi.fn().mockResolvedValue(
@@ -829,10 +829,7 @@ describe('ReviewWorkspaceView', () => {
       '12'
     )
 
-    const footer = wrapper.get('footer[aria-label="审阅统计"]')
-    expect(footer.get('[data-review-counter="processed"]').text()).toContain('9')
-    expect(footer.get('[data-review-counter="unprocessed"]').text()).toContain('12')
-    expect(footer.get('[data-review-counter="high-risk"]').text()).toContain('7')
+    expect(wrapper.find('footer[aria-label="审阅统计"]').exists()).toBe(false)
   })
 
   it('presents API issue types and checker categories with Chinese labels', async () => {

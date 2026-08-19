@@ -18,6 +18,7 @@ import DocumentViewerSource from '../src/components/review/DocumentViewer.vue?ra
 import ReviewNavigationSource from '../src/components/review/ReviewNavigation.vue?raw'
 import IssuePanelSource from '../src/components/review/IssuePanel.vue?raw'
 import ReviewWorkspaceViewSource from '../src/views/ReviewWorkspaceView.vue?raw'
+import WorkspaceViewSource from '../src/views/WorkspaceView.vue?raw'
 
 const jobId = 'job-1'
 
@@ -224,6 +225,27 @@ describe('review workspace accessibility', () => {
     expect(ReviewNavigationSource).toContain(':focus-visible')
     expect(IssuePanelSource).toContain('min-height: 44px')
     expect(IssuePanelSource).toContain(':focus-visible')
+  })
+
+  it('uses a single-screen desktop workspace with independently scrollable columns', () => {
+    const reviewShellRule = sourceRuleBody(WorkspaceViewSource, '\\.workspace--review')
+    const workspaceRule = sourceRuleBody(ReviewWorkspaceViewSource, '\\.review-workspace')
+    const columnsRule = sourceRuleBody(
+      ReviewWorkspaceViewSource,
+      '\\.review-workspace__columns'
+    )
+    const documentRule = sourceRuleBody(DocumentViewerSource, '\\.document-viewer')
+
+    expect(reviewShellRule).toContain('height: 100dvh')
+    expect(reviewShellRule).toContain('overflow: hidden')
+    expect(workspaceRule).toContain('height: 100%')
+    expect(workspaceRule).toContain('overflow: hidden')
+    expect(columnsRule).toContain('flex: 1')
+    expect(columnsRule).toContain('min-height: 0')
+    expect(columnsRule).toContain('grid-template-rows: minmax(0, 1fr)')
+    expect(documentRule).toContain('height: 100%')
+    expect(ReviewWorkspaceViewSource).toContain('@media (max-width: 900px)')
+    expect(ReviewWorkspaceViewSource).toContain('height: auto')
   })
 
   it('exposes highlighted text as focus-visible controls without circle markers', async () => {

@@ -446,8 +446,8 @@ onBeforeUnmount(() => {
 <style scoped>
 .document-viewer {
   min-width: 0;
-  max-height: calc(100vh - 32px);
-  align-self: start;
+  height: 100%;
+  min-height: 0;
   overflow: auto;
   background: #edf1f7;
   border: 1px solid #dfe5ef;
@@ -456,7 +456,7 @@ onBeforeUnmount(() => {
 
 @media (max-width: 900px) {
   .document-viewer {
-    max-height: none;
+    height: auto;
   }
 }
 

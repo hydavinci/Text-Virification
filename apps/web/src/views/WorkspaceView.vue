@@ -226,7 +226,9 @@ onBeforeUnmount(() => {
 
 .workspace--review {
   width: 100%;
+  height: 100dvh;
   padding: 0;
+  overflow: hidden;
 }
 
 .workspace__header {
@@ -313,6 +315,13 @@ h1 {
     width: 48px;
     height: 48px;
     border-radius: 14px;
+  }
+}
+
+@media (max-width: 900px) {
+  .workspace--review {
+    height: auto;
+    overflow: visible;
   }
 }
 </style>
