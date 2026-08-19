@@ -228,6 +228,8 @@ function buildExportWarning(overrides: Partial<ExportWarning> = {}): ExportWarni
 }
 
 function buildExport(overrides: Partial<ExportResponse> = {}): ExportResponse {
+  const now = Date.now()
+
   return {
     export_id: 'export-1',
     job_id: jobId,
@@ -237,9 +239,9 @@ function buildExport(overrides: Partial<ExportResponse> = {}): ExportResponse {
     warnings: [],
     error_code: null,
     error_message: null,
-    created_at: '2026-08-18T00:00:00Z',
-    updated_at: '2026-08-18T00:00:00Z',
-    expires_at: '2026-08-19T00:00:00Z',
+    created_at: new Date(now).toISOString(),
+    updated_at: new Date(now).toISOString(),
+    expires_at: new Date(now + 60 * 60 * 1000).toISOString(),
     ...overrides
   }
 }
@@ -314,6 +316,56 @@ function mountReviewWorkspace(
     observerFactory,
     exportsApi
   })
+}
+
+function buildConnectedOverlapAnalysisApi(): AnalysisApi {
+  return createAnalysisApiMock({
+    getDocumentPage: vi.fn().mockResolvedValue(
+      buildDocumentPage({
+        blocks: [buildBlock({ text: '012345678' })],
+        total_blocks: 1
+      })
+    ),
+    getIssues: vi.fn().mockResolvedValue(
+      buildIssuePage({
+        total: 4,
+        items: [
+          buildIssue({
+            issue_id: 'issue-outside',
+            start: 0,
+            end: 1,
+            original: '0',
+            context: '012345678'
+          }),
+          buildIssue({
+            issue_id: 'issue-a',
+            start: 1,
+            end: 4,
+            original: '123',
+            context: '012345678'
+          }),
+          buildIssue({
+            issue_id: 'issue-b',
+            start: 3,
+            end: 6,
+            original: '345',
+            context: '012345678'
+          }),
+          buildIssue({
+            issue_id: 'issue-c',
+            start: 5,
+            end: 8,
+            original: '567',
+            context: '012345678'
+          })
+        ]
+      })
+    )
+  })
+}
+
+function connectedClusterHighlights(wrapper: ReturnType<typeof mount>) {
+  return wrapper.findAll('[data-highlight-range-issue-ids="issue-a issue-b issue-c"]')
 }
 
 const ReviewWorkspaceStateHarness = defineComponent({
@@ -705,6 +757,7 @@ describe('ReviewWorkspaceView', () => {
     expect(wrapper.find('nav[aria-label="问题筛选"]').exists()).toBe(true)
     expect(wrapper.find('article[aria-label="文档内容"]').exists()).toBe(true)
     expect(wrapper.find('aside[aria-label="问题详情"]').exists()).toBe(true)
+    expect(wrapper.findAll('.document-highlight-control')).toHaveLength(0)
 
     await wrapper.get('[data-issue-id="issue-2"]').trigger('click')
 
@@ -715,10 +768,10 @@ describe('ReviewWorkspaceView', () => {
       wrapper.get('[data-highlight-range-issue-ids~="issue-2"]').text()
     ).toBe('错误')
     expect(
-      wrapper.get('[data-highlight-issue-id="issue-2"]').attributes('aria-current')
+      wrapper.get('[data-highlight-range-issue-ids~="issue-2"]').attributes('aria-current')
     ).toBe('true')
 
-    await wrapper.get('[data-highlight-issue-id="issue-1"]').trigger('click')
+    await wrapper.get('[data-highlight-range-issue-ids~="issue-1"]').trigger('click')
 
     expect(wrapper.get('[data-issue-id="issue-1"]').attributes('aria-current')).toBe('true')
     expect(wrapper.get('[data-block-id="block-1"]').classes()).toContain(
@@ -885,16 +938,16 @@ describe('ReviewWorkspaceView', () => {
     expect(wrapper.get('[data-block-id="block-2"]').classes()).toContain(
       'document-block--active'
     )
-    expect(wrapper.get('[data-highlight-issue-id="issue-2"]').attributes('aria-current')).toBe(
-      'true'
-    )
+    expect(
+      wrapper.get('[data-highlight-range-issue-ids~="issue-2"]').attributes('aria-current')
+    ).toBe('true')
 
     await wrapper.get('[aria-label="文档审阅工作台"]').trigger('keydown', { key: 'k' })
 
     expect(wrapper.get('[data-issue-id="issue-1"]').attributes('aria-current')).toBe('true')
-    expect(wrapper.get('[data-highlight-issue-id="issue-1"]').attributes('aria-current')).toBe(
-      'true'
-    )
+    expect(
+      wrapper.get('[data-highlight-range-issue-ids~="issue-1"]').attributes('aria-current')
+    ).toBe('true')
   })
 
   it('does not trigger j/k issue navigation while typing in editable controls', async () => {
@@ -905,9 +958,9 @@ describe('ReviewWorkspaceView', () => {
     await wrapper.get('[aria-label="自定义替换"]').trigger('keydown', { key: 'k' })
 
     expect(wrapper.get('[data-issue-id="issue-1"]').attributes('aria-current')).toBe('true')
-    expect(wrapper.get('[data-highlight-issue-id="issue-1"]').attributes('aria-current')).toBe(
-      'true'
-    )
+    expect(
+      wrapper.get('[data-highlight-range-issue-ids~="issue-1"]').attributes('aria-current')
+    ).toBe('true')
   })
 
   it('retries localization when the selected issue resolves before its block', async () => {
@@ -950,7 +1003,7 @@ describe('ReviewWorkspaceView', () => {
       await flushPromises()
 
       expect(
-        wrapper.get('[data-highlight-issue-id="issue-1"]').attributes('aria-current')
+        wrapper.get('[data-highlight-range-issue-ids~="issue-1"]').attributes('aria-current')
       ).toBe('true')
       expect(scrollIntoView).toHaveBeenCalledTimes(1)
     } finally {
@@ -1042,11 +1095,11 @@ describe('ReviewWorkspaceView', () => {
       'document-block--active'
     )
     expect(
-      wrapper.get('[data-highlight-issue-id="issue-later"]').attributes('aria-current')
+      wrapper.get('[data-highlight-range-issue-ids~="issue-later"]').attributes('aria-current')
     ).toBe('true')
   })
 
-  it('keeps identical and nested issue ranges addressable without duplicating text', async () => {
+  it('cycles identical and nested highlights on click without duplicating text', async () => {
     const wrapper = mountReviewWorkspace(
       createAnalysisApiMock({
         getDocumentPage: vi.fn().mockResolvedValue(
@@ -1057,8 +1110,15 @@ describe('ReviewWorkspaceView', () => {
         ),
         getIssues: vi.fn().mockResolvedValue(
           buildIssuePage({
-            total: 3,
+            total: 4,
             items: [
+              buildIssue({
+                issue_id: 'issue-other',
+                start: 0,
+                end: 1,
+                original: 'a',
+                context: 'abcdef'
+              }),
               buildIssue({
                 issue_id: 'issue-outer',
                 start: 1,
@@ -1088,20 +1148,195 @@ describe('ReviewWorkspaceView', () => {
     await flushPromises()
 
     expect(wrapper.get('[data-block-id="block-1"]').element.textContent).toBe('abcdef')
-    expect(wrapper.findAll('[data-highlight-issue-id]')).toHaveLength(3)
+    expect(wrapper.findAll('.document-highlight-control')).toHaveLength(0)
 
-    await wrapper.get('[data-highlight-issue-id="issue-identical"]').trigger('click')
+    expect(wrapper.get('[data-issue-id="issue-other"]').attributes('aria-current')).toBe('true')
+
+    await wrapper
+      .get('[data-highlight-range-issue-ids="issue-identical issue-outer issue-nested"]')
+      .trigger('click')
     expect(
       wrapper.get('[data-issue-id="issue-identical"]').attributes('aria-current')
     ).toBe('true')
 
-    await wrapper.get('[data-highlight-issue-id="issue-nested"]').trigger('click')
+    await wrapper
+      .get('[data-highlight-range-issue-ids="issue-identical issue-outer issue-nested"]')
+      .trigger('click')
+    expect(wrapper.get('[data-issue-id="issue-outer"]').attributes('aria-current')).toBe('true')
+
+    await wrapper
+      .get('[data-highlight-range-issue-ids="issue-identical issue-outer issue-nested"]')
+      .trigger('click')
     expect(wrapper.get('[data-issue-id="issue-nested"]').attributes('aria-current')).toBe(
       'true'
     )
+    const selectedHighlight = wrapper.get('[data-highlight-selected="true"]')
+    expect(selectedHighlight.classes()).toContain('document-highlight-range--active')
+    expect(selectedHighlight.text()).toBe('cd')
+  })
+
+  it('cycles overlapping highlights with Enter and Space and prevents Space scrolling', async () => {
+    const wrapper = mountReviewWorkspaceWithConfig({
+      analysisApi: createAnalysisApiMock({
+        getDocumentPage: vi.fn().mockResolvedValue(
+          buildDocumentPage({
+            blocks: [buildBlock({ text: 'abcdef' })],
+            total_blocks: 1
+          })
+        ),
+        getIssues: vi.fn().mockResolvedValue(
+          buildIssuePage({
+            total: 4,
+            items: [
+              buildIssue({
+                issue_id: 'issue-other',
+                start: 0,
+                end: 1,
+                original: 'a',
+                context: 'abcdef'
+              }),
+              buildIssue({
+                issue_id: 'issue-outer',
+                start: 1,
+                end: 5,
+                original: 'bcde',
+                context: 'abcdef'
+              }),
+              buildIssue({
+                issue_id: 'issue-identical',
+                start: 1,
+                end: 5,
+                original: 'bcde',
+                context: 'abcdef'
+              }),
+              buildIssue({
+                issue_id: 'issue-nested',
+                start: 2,
+                end: 4,
+                original: 'cd',
+                context: 'abcdef'
+              })
+            ]
+          })
+        )
+      }),
+      attachTo: document.body
+    })
+    await flushPromises()
+
+    let overlap = wrapper.get(
+      '[data-highlight-range-issue-ids="issue-identical issue-outer issue-nested"]'
+    )
+    let overlapElement = overlap.element as HTMLElement
+    overlapElement.focus()
+
+    const enterEvent = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      bubbles: true,
+      cancelable: true
+    })
+    overlapElement.dispatchEvent(enterEvent)
+    await flushPromises()
+
+    expect(wrapper.get('[data-issue-id="issue-identical"]').attributes('aria-current')).toBe(
+      'true'
+    )
+
+    overlap = wrapper.get(
+      '[data-highlight-range-issue-ids="issue-identical issue-outer issue-nested"]'
+    )
+    overlapElement = overlap.element as HTMLElement
+    expect(document.activeElement).toBe(overlapElement)
+
+    const spaceEvent = new KeyboardEvent('keydown', {
+      key: ' ',
+      code: 'Space',
+      bubbles: true,
+      cancelable: true
+    })
+    document.activeElement?.dispatchEvent(spaceEvent)
+    await flushPromises()
+
+    expect(spaceEvent.defaultPrevented).toBe(true)
+    expect(wrapper.get('[data-issue-id="issue-outer"]').attributes('aria-current')).toBe('true')
+    wrapper.unmount()
+  })
+
+  it('cycles a transitively connected overlap cluster deterministically without dropping text', async () => {
+    const wrapper = mountReviewWorkspace(buildConnectedOverlapAnalysisApi())
+    await flushPromises()
+
+    expect(wrapper.get('[data-issue-id="issue-outside"]').attributes('aria-current')).toBe('true')
+    expect(wrapper.get('[data-block-id="block-1"]').element.textContent).toBe('012345678')
+
+    await connectedClusterHighlights(wrapper)[0]?.trigger('click')
+    expect(wrapper.get('[data-issue-id="issue-a"]').attributes('aria-current')).toBe('true')
+    expect(wrapper.get('[data-block-id="block-1"]').element.textContent).toBe('012345678')
     expect(
-      wrapper.get('[data-highlight-range-issue-ids~="issue-nested"]').classes()
-    ).toContain('document-highlight-range--active')
+      connectedClusterHighlights(wrapper).filter(
+        (highlight) => highlight.attributes('aria-current') === 'true'
+      )
+    ).toHaveLength(1)
+    expect(wrapper.get('[data-highlight-selected="true"]').text()).toBe('123')
+
+    await connectedClusterHighlights(wrapper)[0]?.trigger('click')
+    expect(wrapper.get('[data-issue-id="issue-b"]').attributes('aria-current')).toBe('true')
+    expect(wrapper.get('[data-block-id="block-1"]').element.textContent).toBe('012345678')
+    expect(wrapper.get('[data-highlight-selected="true"]').text()).toBe('345')
+
+    await connectedClusterHighlights(wrapper)[0]?.trigger('click')
+    expect(wrapper.get('[data-issue-id="issue-c"]').attributes('aria-current')).toBe('true')
+    expect(wrapper.get('[data-block-id="block-1"]').element.textContent).toBe('012345678')
+    expect(wrapper.get('[data-highlight-selected="true"]').text()).toBe('567')
+
+    await connectedClusterHighlights(wrapper)[0]?.trigger('click')
+    expect(wrapper.get('[data-issue-id="issue-a"]').attributes('aria-current')).toBe('true')
+    expect(wrapper.get('[data-block-id="block-1"]').element.textContent).toBe('012345678')
+  })
+
+  it('restores focus to the regrouped highlighted control after clicking a focused range', async () => {
+    const wrapper = mountReviewWorkspaceWithConfig({
+      analysisApi: buildConnectedOverlapAnalysisApi(),
+      attachTo: document.body
+    })
+    await flushPromises()
+
+    const beforeClick = connectedClusterHighlights(wrapper)[0]
+    expect(beforeClick).toBeDefined()
+    ;(beforeClick!.element as HTMLElement).focus()
+    expect(document.activeElement).toBe(beforeClick!.element)
+
+    await beforeClick!.trigger('pointerdown')
+    await beforeClick!.trigger('click')
+    await flushPromises()
+
+    const afterClick = wrapper.find('[data-highlight-selected="true"]')
+    expect(wrapper.get('[data-issue-id="issue-a"]').attributes('aria-current')).toBe('true')
+    expect(afterClick).toBeDefined()
+    expect(document.activeElement).toBe(afterClick!.element)
+    wrapper.unmount()
+  })
+
+  it('does not restore focus when pointer activation focused an unfocused highlight', async () => {
+    const wrapper = mountReviewWorkspaceWithConfig({
+      analysisApi: buildConnectedOverlapAnalysisApi(),
+      attachTo: document.body
+    })
+    await flushPromises()
+
+    const beforeClick = connectedClusterHighlights(wrapper)[0]
+    expect(beforeClick).toBeDefined()
+    expect(document.activeElement).not.toBe(beforeClick!.element)
+
+    await beforeClick!.trigger('pointerdown')
+    ;(beforeClick!.element as HTMLElement).focus()
+    await beforeClick!.trigger('click')
+    await flushPromises()
+
+    const afterClick = connectedClusterHighlights(wrapper)[0]
+    expect(afterClick).toBeDefined()
+    expect(document.activeElement).not.toBe(afterClick!.element)
+    wrapper.unmount()
   })
 
   it('scopes selected-highlight localization to its own document viewer', async () => {
@@ -1123,12 +1358,12 @@ describe('ReviewWorkspaceView', () => {
     const firstScroll = vi.fn()
     const secondScroll = vi.fn()
     Object.defineProperty(
-      first.get('[data-highlight-issue-id="issue-1"]').element,
+      first.get('[data-highlight-range-issue-ids~="issue-1"]').element,
       'scrollIntoView',
       { configurable: true, value: firstScroll }
     )
     Object.defineProperty(
-      second.get('[data-highlight-issue-id="issue-1"]').element,
+      second.get('[data-highlight-range-issue-ids~="issue-1"]').element,
       'scrollIntoView',
       { configurable: true, value: secondScroll }
     )

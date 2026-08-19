@@ -151,6 +151,14 @@ describe('WorkspaceView', () => {
     expect(wrapper.get('h1').text()).toBe('文档智能核验')
     expect(wrapper.get('[data-testid="upload-dropzone"]').text()).toContain('点击选择或拖拽文件到此处')
     expect(wrapper.text()).toContain('支持 DOCX、PDF、TXT 格式，文件大小不超过 25 MiB')
+    expect(
+      wrapper.findAll('select[name="scenario"] option').map((option) => option.text())
+    ).toEqual(['通用', '学术', '商务', '法律', '新闻', '技术'])
+    expect(
+      wrapper
+        .findAll('select[name="scenario"] option')
+        .map((option) => option.attributes('value'))
+    ).toEqual(['general', 'academic', 'business', 'legal', 'news', 'technical'])
   })
 
   it('uploads the selected scenario and categories with the file', async () => {

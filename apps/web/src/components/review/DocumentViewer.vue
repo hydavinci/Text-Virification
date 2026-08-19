@@ -12,12 +12,23 @@ interface TextSegment {
   key: string
   text: string
   issueIds: string[]
-  endingIssues: Issue[]
+  start: number
+  end: number
+  selectedBounds: boolean
 }
 
 interface BlockRenderModel {
-  leadingIssues: Issue[]
   segments: TextSegment[]
+}
+
+interface NormalizedIssue {
+  issue: Issue
+  start: number
+  end: number
+}
+
+interface OverlapComponent {
+  issueIds: string[]
 }
 
 const props = defineProps<{
@@ -44,10 +55,55 @@ const viewer = ref<HTMLElement | null>(null)
 const sentinel = ref<Element | null>(null)
 let observer: ReviewIntersectionObserver | null = null
 let requestedCursor: string | null = null
+let pendingHighlightFocusIssueId: string | null = null
+let restoreFocusOnNextPointerClick = false
 let active = true
 
 function issuesForBlock(blockId: string): Issue[] {
   return props.issues.filter((issue) => issue.block_id === blockId)
+}
+
+function connectedOverlapComponents(
+  issues: NormalizedIssue[]
+): Map<string, OverlapComponent> {
+  const components = new Map<string, OverlapComponent>()
+  let componentMembers: NormalizedIssue[] = []
+  let componentEnd = -1
+
+  function commitComponent(): void {
+    if (!componentMembers.length) {
+      return
+    }
+
+    const issueIds = componentMembers.map(({ issue }) => issue.issue_id)
+    const component = { issueIds }
+    for (const member of componentMembers) {
+      components.set(member.issue.issue_id, component)
+    }
+    componentMembers = []
+    componentEnd = -1
+  }
+
+  for (const issue of issues) {
+    if (!componentMembers.length) {
+      componentMembers = [issue]
+      componentEnd = issue.end
+      continue
+    }
+
+    if (issue.start < componentEnd) {
+      componentMembers.push(issue)
+      componentEnd = Math.max(componentEnd, issue.end)
+      continue
+    }
+
+    commitComponent()
+    componentMembers = [issue]
+    componentEnd = issue.end
+  }
+
+  commitComponent()
+  return components
 }
 
 function renderModelForBlock(block: DocumentBlock): BlockRenderModel {
@@ -64,16 +120,21 @@ function renderModelForBlock(block: DocumentBlock): BlockRenderModel {
         left.end - right.end ||
         left.issue.issue_id.localeCompare(right.issue.issue_id)
     )
+  const renderableIssues = normalizedIssues.filter(
+    (normalized) => normalized.end > normalized.start
+  )
+  const componentByIssueId = connectedOverlapComponents(renderableIssues)
 
-  if (!normalizedIssues.length) {
+  if (!renderableIssues.length) {
     return {
-      leadingIssues: [],
       segments: [
         {
           key: `${block.block_id}-text`,
           text: block.text,
           issueIds: [],
-          endingIssues: []
+          start: 0,
+          end: points.length,
+          selectedBounds: false
         }
       ]
     }
@@ -83,39 +144,90 @@ function renderModelForBlock(block: DocumentBlock): BlockRenderModel {
     new Set([
       0,
       points.length,
-      ...normalizedIssues.flatMap(({ start, end }) => [start, end])
+      ...renderableIssues.flatMap(({ start, end }) => [start, end])
     ])
   ).sort((left, right) => left - right)
-  const segments: TextSegment[] = []
+  const atomicSegments: TextSegment[] = []
 
   for (let index = 1; index < boundaries.length; index += 1) {
     const start = boundaries[index - 1] ?? 0
     const end = boundaries[index] ?? start
-    const issueIds = normalizedIssues
-      .filter((normalized) => normalized.start < end && normalized.end > start)
-      .map(({ issue }) => issue.issue_id)
-    const endingIssues = normalizedIssues
-      .filter((normalized) => normalized.end === end)
-      .map(({ issue }) => issue)
+    const overlappingIssues = renderableIssues.filter(
+      (normalized) => normalized.start < end && normalized.end > start
+    )
+    const issueIds =
+      overlappingIssues[0] === undefined
+        ? []
+        : componentByIssueId.get(overlappingIssues[0].issue.issue_id)?.issueIds ??
+          overlappingIssues.map(({ issue }) => issue.issue_id)
 
-    segments.push({
+    atomicSegments.push({
       key: `${block.block_id}-${start}-${end}`,
       text: points.slice(start, end).join(''),
       issueIds,
-      endingIssues
+      start,
+      end,
+      selectedBounds: false
     })
   }
 
+  const selectedIssue = props.selectedIssueId
+    ? renderableIssues.find(
+        (normalized) => normalized.issue.issue_id === props.selectedIssueId
+      )
+    : undefined
+
+  if (!selectedIssue) {
+    return { segments: atomicSegments }
+  }
+
+  const overlapComponent = componentByIssueId.get(selectedIssue.issue.issue_id)
+  const overlapKey = overlapComponent?.issueIds.join('-') ?? selectedIssue.issue.issue_id
+  const segments: TextSegment[] = []
+
+  for (let index = 0; index < atomicSegments.length; index += 1) {
+    const segment = atomicSegments[index]
+    if (!segment) {
+      continue
+    }
+
+    const overlapsSelected =
+      segment.start < selectedIssue.end && segment.end > selectedIssue.start
+
+    if (!overlapsSelected) {
+      segments.push(segment)
+      continue
+    }
+
+    let cursor = index
+
+    while (cursor < atomicSegments.length) {
+      const candidate = atomicSegments[cursor]
+      if (
+        !candidate ||
+        candidate.start >= selectedIssue.end ||
+        candidate.end <= selectedIssue.start
+      ) {
+        break
+      }
+
+      cursor += 1
+    }
+
+    segments.push({
+      key: `${block.block_id}-overlap-${overlapKey}`,
+      text: previewText(selectedIssue.issue),
+      issueIds: overlapComponent?.issueIds ?? [selectedIssue.issue.issue_id],
+      start: selectedIssue.start,
+      end: selectedIssue.end,
+      selectedBounds: true
+    })
+    index = cursor - 1
+  }
+
   return {
-    leadingIssues: normalizedIssues
-      .filter((normalized) => normalized.end === 0)
-      .map(({ issue }) => issue),
     segments
   }
-}
-
-function isSelectedRange(issueIds: string[]): boolean {
-  return props.selectedIssueId !== null && issueIds.includes(props.selectedIssueId)
 }
 
 function previewText(issue: Issue): string {
@@ -128,16 +240,53 @@ function previewText(issue: Issue): string {
   return issue.original
 }
 
-function segmentText(segment: TextSegment): string {
-  const selectedIssueId = props.selectedIssueId
-  if (!selectedIssueId || !segment.issueIds.includes(selectedIssueId)) {
-    return segment.text
+function nextIssueId(issueIds: string[]): string | null {
+  if (!issueIds.length) {
+    return null
   }
 
-  const endingIssue = segment.endingIssues.find(
-    (issue) => issue.issue_id === selectedIssueId
-  )
-  return endingIssue ? previewText(endingIssue) : ''
+  const selectedIndex = props.selectedIssueId
+    ? issueIds.indexOf(props.selectedIssueId)
+    : -1
+  const nextIndex = selectedIndex === -1 ? 0 : (selectedIndex + 1) % issueIds.length
+  return issueIds[nextIndex] ?? null
+}
+
+function activateSegment(issueIds: string[], restoreFocus = false): void {
+  const issueId = nextIssueId(issueIds)
+  if (issueId) {
+    pendingHighlightFocusIssueId = restoreFocus ? issueId : null
+    emit('selectHighlight', issueId)
+  }
+}
+
+function onHighlightPointerDown(event: PointerEvent): void {
+  restoreFocusOnNextPointerClick =
+    event.currentTarget instanceof HTMLElement &&
+    typeof document !== 'undefined' &&
+    event.currentTarget === document.activeElement
+}
+
+function onHighlightClick(_event: MouseEvent, issueIds: string[]): void {
+  const restoreFocus = restoreFocusOnNextPointerClick
+  restoreFocusOnNextPointerClick = false
+  activateSegment(issueIds, restoreFocus)
+}
+
+function onHighlightKeydown(event: KeyboardEvent, issueIds: string[]): void {
+  if (event.key !== 'Enter' && event.key !== ' ' && event.key !== 'Spacebar') {
+    return
+  }
+
+  event.preventDefault()
+  activateSegment(issueIds, true)
+}
+
+function highlightLabel(segment: TextSegment): string {
+  const text = segment.text.trim()
+  const label = text || props.issues.find((issue) => segment.issueIds.includes(issue.issue_id))?.message || '高亮文本'
+  const countLabel = segment.issueIds.length > 1 ? `（共 ${segment.issueIds.length} 个问题）` : ''
+  return `选择问题：${label}${countLabel}`
 }
 
 function connectObserver(element: Element | null): void {
@@ -175,12 +324,16 @@ watch(
       return
     }
     if (issueId) {
-      const highlight = Array.from(
-        viewer.value?.querySelectorAll<HTMLElement>('[data-highlight-issue-id]') ?? []
-      ).find((element) => element.dataset.highlightIssueId === issueId)
+      const highlight = viewer.value?.querySelector<HTMLElement>(
+        '[data-highlight-selected="true"]'
+      )
 
       if (highlight) {
         highlight.scrollIntoView?.({ block: 'center' })
+        if (pendingHighlightFocusIssueId === issueId) {
+          highlight.focus()
+          pendingHighlightFocusIssueId = null
+        }
         return
       }
     }
@@ -224,47 +377,24 @@ onBeforeUnmount(() => {
         :class="{ 'document-block--active': block.block_id === selectedBlockId }"
         :data-block-id="block.block_id"
       >
-        <template
-          v-for="issue in renderModelForBlock(block).leadingIssues"
-          :key="`leading-${issue.issue_id}`"
-        >
-          <button
-            type="button"
-            class="document-highlight-control"
-            :class="{
-              'document-highlight-control--active': issue.issue_id === selectedIssueId
-            }"
-            :data-highlight-issue-id="issue.issue_id"
-            :aria-label="`选择问题：${issue.original || issue.message}`"
-            :aria-current="issue.issue_id === selectedIssueId ? 'true' : 'false'"
-            :title="issue.message"
-            @click="emit('selectHighlight', issue.issue_id)"
-          >{{ issue.issue_id === selectedIssueId ? previewText(issue) : '' }}</button>
-        </template>
         <template v-for="segment in renderModelForBlock(block).segments" :key="segment.key">
           <span
             v-if="segment.issueIds.length"
             class="document-highlight-range"
             :class="{
-              'document-highlight-range--active': isSelectedRange(segment.issueIds)
+              'document-highlight-range--active': segment.selectedBounds
             }"
+            role="button"
+            tabindex="0"
             :data-highlight-range-issue-ids="segment.issueIds.join(' ')"
-          >{{ segmentText(segment) }}</span>
+            :data-highlight-selected="segment.selectedBounds ? 'true' : undefined"
+            :aria-label="highlightLabel(segment)"
+            :aria-current="segment.selectedBounds ? 'true' : 'false'"
+            @pointerdown="onHighlightPointerDown"
+            @click="onHighlightClick($event, segment.issueIds)"
+            @keydown="onHighlightKeydown($event, segment.issueIds)"
+          >{{ segment.text }}</span>
           <template v-else>{{ segment.text }}</template>
-          <button
-            v-for="issue in segment.endingIssues"
-            :key="issue.issue_id"
-            type="button"
-            class="document-highlight-control"
-            :class="{
-              'document-highlight-control--active': issue.issue_id === selectedIssueId
-            }"
-            :data-highlight-issue-id="issue.issue_id"
-            :aria-label="`选择问题：${issue.original || issue.message}`"
-            :aria-current="issue.issue_id === selectedIssueId ? 'true' : 'false'"
-            :title="issue.message"
-            @click="emit('selectHighlight', issue.issue_id)"
-          />
         </template>
       </p>
 
@@ -344,59 +474,37 @@ onBeforeUnmount(() => {
 }
 
 .document-highlight-range {
+  position: relative;
   background: #fff0a8;
   border-radius: 2px;
+  cursor: pointer;
+}
+
+.document-highlight-range::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  min-inline-size: 44px;
+  min-block-size: 44px;
+  inline-size: 100%;
+  transform: translate(-50%, -50%);
+}
+
+.document-highlight-range:hover,
+.document-highlight-range:focus-visible {
+  background: #ffe47f;
+}
+
+.document-highlight-range:focus-visible {
+  outline: 2px solid #bd7d18;
+  outline-offset: 2px;
 }
 
 .document-highlight-range--active {
   background: #ffd56a;
   outline: 2px solid #bd7d18;
   outline-offset: 1px;
-}
-
-.document-highlight-control {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 44px;
-  min-height: 44px;
-  margin: -12px -14px;
-  padding: 0;
-  color: inherit;
-  font: inherit;
-  line-height: inherit;
-  text-align: inherit;
-  vertical-align: middle;
-  background: transparent;
-  border: 0;
-  border-radius: 999px;
-  box-sizing: border-box;
-  cursor: pointer;
-}
-
-.document-highlight-control::before {
-  content: "";
-  flex: none;
-  inline-size: 13px;
-  block-size: 13px;
-  margin-block-start: -0.55em;
-  background: #d99425;
-  border: 2px solid #fff;
-  border-radius: 50%;
-  box-shadow: 0 0 0 1px #bd7d18;
-}
-
-.document-highlight-control:hover::before,
-.document-highlight-control:focus-visible::before,
-.document-highlight-control--active::before {
-  background: #8054d6;
-}
-
-.document-highlight-control:focus-visible,
-.document-highlight-control--active {
-  outline: 2px solid #bd7d18;
-  outline-offset: -10px;
 }
 
 .document-viewer__error {

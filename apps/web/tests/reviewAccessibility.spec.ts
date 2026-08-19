@@ -143,6 +143,10 @@ function createAnalysisApiMock(overrides: Partial<AnalysisApi> = {}): AnalysisAp
 }
 
 function createExportsApiMock(overrides: Partial<ExportsApi> = {}): ExportsApi {
+  const now = Date.now()
+  const createdAt = new Date(now).toISOString()
+  const expiresAt = new Date(now + 60 * 60 * 1000).toISOString()
+
   return {
     create: vi.fn().mockResolvedValue({
       export_id: 'export-1',
@@ -153,9 +157,9 @@ function createExportsApiMock(overrides: Partial<ExportsApi> = {}): ExportsApi {
       warnings: [],
       error_code: null,
       error_message: null,
-      created_at: '2026-08-18T00:00:00Z',
-      updated_at: '2026-08-18T00:00:00Z',
-      expires_at: '2026-08-19T00:00:00Z',
+      created_at: createdAt,
+      updated_at: createdAt,
+      expires_at: expiresAt,
       dispatch_status: 'dispatched'
     } as ExportCreateResponse),
     get: vi.fn().mockResolvedValue({
@@ -167,16 +171,16 @@ function createExportsApiMock(overrides: Partial<ExportsApi> = {}): ExportsApi {
       warnings: [],
       error_code: null,
       error_message: null,
-      created_at: '2026-08-18T00:00:00Z',
-      updated_at: '2026-08-18T00:00:00Z',
-      expires_at: '2026-08-19T00:00:00Z'
+      created_at: createdAt,
+      updated_at: createdAt,
+      expires_at: expiresAt
     } as ExportResponse),
     downloadUrl: vi.fn().mockReturnValue('/api/v1/jobs/job-1/exports/export-1/download'),
     ...overrides
   }
 }
 
-function mountReviewWorkspace() {
+function mountReviewWorkspace(analysisApi = createAnalysisApiMock()) {
   return mount(ReviewWorkspaceView, {
     props: {
       jobId,
@@ -185,7 +189,7 @@ function mountReviewWorkspace() {
     },
     global: {
       provide: {
-        [analysisApiKey as symbol]: createAnalysisApiMock(),
+        [analysisApiKey as symbol]: analysisApi,
         [exportsApiKey as symbol]: createExportsApiMock()
       }
     }
@@ -222,16 +226,86 @@ describe('review workspace accessibility', () => {
     expect(IssuePanelSource).toContain(':focus-visible')
   })
 
-  it('gives document highlight controls their own 44px touch-target contract', () => {
-    const highlightControlRule = sourceRuleBody(
+  it('exposes highlighted text as focus-visible controls without circle markers', async () => {
+    const wrapper = mountReviewWorkspace(
+      createAnalysisApiMock({
+        getDocumentPage: vi.fn().mockResolvedValue(
+          buildDocumentPage({
+            blocks: [buildBlock({ text: 'abcdef' })],
+            total_blocks: 1
+          })
+        ),
+        getIssues: vi.fn().mockResolvedValue(
+          buildIssuePage({
+            total: 4,
+            items: [
+              buildIssue({
+                issue_id: 'issue-other',
+                start: 0,
+                end: 1,
+                original: 'a',
+                context: 'abcdef'
+              }),
+              buildIssue({
+                issue_id: 'issue-outer',
+                start: 1,
+                end: 5,
+                original: 'bcde',
+                context: 'abcdef'
+              }),
+              buildIssue({
+                issue_id: 'issue-identical',
+                start: 1,
+                end: 5,
+                original: 'bcde',
+                context: 'abcdef'
+              }),
+              buildIssue({
+                issue_id: 'issue-nested',
+                start: 2,
+                end: 4,
+                original: 'cd',
+                context: 'abcdef'
+              })
+            ]
+          })
+        )
+      })
+    )
+    await flushPromises()
+
+    const overlap = wrapper.findAll(
+      '[data-highlight-range-issue-ids="issue-identical issue-outer issue-nested"]'
+    )[1]
+    const highlightRangeRule = sourceRuleBody(DocumentViewerSource, '\\.document-highlight-range')
+    const highlightHitAreaRule = sourceRuleBody(
       DocumentViewerSource,
-      '\\.document-highlight-control'
+      '\\.document-highlight-range::after'
     )
 
-    expect(ReviewWorkspaceViewSource).toContain('button:not(.document-highlight-control)')
-    expect(highlightControlRule).toContain('min-width: 44px')
-    expect(highlightControlRule).toContain('min-height: 44px')
-    expect(highlightControlRule).not.toMatch(/\bwidth:\s*(?:0?\.\d+em|[0-3]?\dpx)\b/)
-    expect(highlightControlRule).not.toMatch(/\bheight:\s*(?:0?\.\d+em|[0-3]?\dpx)\b/)
+    expect(overlap).toBeDefined()
+    expect(ReviewWorkspaceViewSource).not.toContain('document-highlight-control')
+    expect(DocumentViewerSource).not.toContain('document-highlight-control')
+    expect(DocumentViewerSource).not.toContain('::before')
+    expect(DocumentViewerSource).toContain('.document-highlight-range:focus-visible')
+    expect(highlightRangeRule).toContain('cursor: pointer')
+    expect(highlightHitAreaRule).toContain('position: absolute')
+    expect(highlightHitAreaRule).toContain('min-inline-size: 44px')
+    expect(highlightHitAreaRule).toContain('min-block-size: 44px')
+    expect(highlightHitAreaRule).not.toContain('background')
+    expect(highlightHitAreaRule).not.toContain('border')
+    expect(highlightHitAreaRule).not.toContain('border-radius')
+    expect(overlap!.attributes('role')).toBe('button')
+    expect(overlap!.attributes('tabindex')).toBe('0')
+    expect(overlap!.attributes('aria-label')).toBe('选择问题：cd（共 3 个问题）')
+    expect(overlap!.attributes('aria-current')).toBe('false')
+
+    await overlap!.trigger('click')
+
+    expect(
+      wrapper
+        .get('[data-highlight-range-issue-ids="issue-identical issue-outer issue-nested"]')
+        .attributes('aria-current')
+    ).toBe('true')
   })
 })

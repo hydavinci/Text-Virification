@@ -384,7 +384,7 @@ onBeforeUnmount(() => {
   padding: 24px 0;
 }
 
-.review-workspace :deep(button:not(.document-highlight-control)),
+.review-workspace :deep(button),
 .review-workspace :deep(select),
 .review-workspace :deep(input[type="search"]),
 .review-workspace :deep(textarea),

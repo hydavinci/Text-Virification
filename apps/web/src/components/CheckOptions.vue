@@ -10,6 +10,15 @@ const CATEGORY_LABELS: Record<CheckCategory, string> = {
   security: '安全合规'
 }
 
+const SCENARIO_LABELS: Record<CheckScenario, string> = {
+  general: '通用',
+  academic: '学术',
+  business: '商务',
+  legal: '法律',
+  news: '新闻',
+  technical: '技术'
+}
+
 const props = defineProps<{
   scenario: CheckScenario
   enabledCategories: CheckCategory[]
@@ -67,7 +76,7 @@ function isCategoryEnabled(category: CheckCategory) {
           @change="handleScenarioChange"
         >
           <option v-for="value in CHECK_SCENARIO_VALUES" :key="value" :value="value">
-            {{ value }}
+            {{ SCENARIO_LABELS[value] }}
           </option>
         </select>
       </label>
