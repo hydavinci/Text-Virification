@@ -288,10 +288,8 @@ function severityLabel(severityLevel: IssueSeverity): string {
 <style scoped>
 .review-navigation {
   min-width: 0;
+  min-height: 0;
   overflow: auto;
-  background: #fff;
-  border: 1px solid #e2e7f0;
-  border-radius: 16px;
 }
 
 .review-navigation__heading {

@@ -49,11 +49,13 @@ function mockViewportWidth(width: number) {
 
   window.matchMedia = vi.fn().mockImplementation((query: string): MediaQueryList => {
     const matches =
-    query === '(max-width: 1100px)'
-      ? width <= 1100
-        : query === '(prefers-reduced-motion: reduce)'
-          ? false
-          : false
+      query === '(max-width: 1100px)'
+        ? width <= 1100
+        : query === '(min-width: 1280px)'
+          ? width >= 1280
+          : query === '(prefers-reduced-motion: reduce)'
+            ? false
+            : false
 
     return {
       matches,
@@ -317,6 +319,30 @@ function mountReviewWorkspace(
     observerFactory,
     exportsApi
   })
+}
+
+async function openDesktopBatchPanel(
+  wrapper: ReturnType<typeof mountReviewWorkspace>
+): Promise<void> {
+  const batchButton = wrapper.find('[data-tool="batch"]')
+  if (!batchButton.exists()) {
+    return
+  }
+
+  await batchButton.trigger('click')
+  await flushPromises()
+}
+
+async function openDesktopIssuesPanel(
+  wrapper: ReturnType<typeof mountReviewWorkspace>
+): Promise<void> {
+  const issuesButton = wrapper.find('[data-tool="issues"]')
+  if (!issuesButton.exists()) {
+    return
+  }
+
+  await issuesButton.trigger('click')
+  await flushPromises()
 }
 
 function buildConnectedOverlapAnalysisApi(): AnalysisApi {
@@ -1012,6 +1038,57 @@ describe('ReviewWorkspaceView', () => {
     } finally {
       restoreViewport()
     }
+  })
+
+  it('toggles issues and batch content from the desktop C2 rail', async () => {
+    const restoreViewport = mockViewportWidth(1440)
+
+    try {
+      const wrapper = mountReviewWorkspace()
+      await flushPromises()
+
+      expect(wrapper.get('[data-tool="issues"]').attributes('aria-pressed')).toBe('true')
+      expect(wrapper.get('aside[aria-label="问题"]').isVisible()).toBe(true)
+
+      await wrapper.get('[data-tool="issues"]').trigger('click')
+      await flushPromises()
+      expect(wrapper.get('.review-workspace__desktop-shell').attributes('data-side-panel-open')).toBe(
+        'false'
+      )
+      expect(wrapper.get('aside[aria-label="问题"]').attributes('style')).toContain(
+        'display: none'
+      )
+
+      await wrapper.get('[data-tool="batch"]').trigger('click')
+      await flushPromises()
+      expect(wrapper.get('.review-workspace__desktop-shell').attributes('data-side-panel-open')).toBe(
+        'true'
+      )
+      expect(wrapper.get('aside[aria-label="批量"]').isVisible()).toBe(true)
+      expect(wrapper.get('aside[aria-label="批量"]').text()).toContain(
+        '批量处理当前筛选结果'
+      )
+    } finally {
+      restoreViewport()
+    }
+  })
+
+  it('places partial checker failures at the top of the issues panel', async () => {
+    const wrapper = mountReviewWorkspace(
+      createAnalysisApiMock({
+        getSummary: vi.fn().mockResolvedValue(
+          buildSummary({
+            checker_failures: {
+              security: { code: 'checker_failed', message: '安全检查器启动失败' }
+            }
+          })
+        )
+      })
+    )
+    await flushPromises()
+
+    const issuesPanel = wrapper.get('aside[aria-label="问题"]')
+    expect(issuesPanel.get('.checker-failures__category').text()).toBe('安全')
   })
 
   it('moves between issues with j/k shortcuts and keeps selection synchronized', async () => {
@@ -2136,6 +2213,7 @@ describe('ReviewWorkspaceView', () => {
 
     await wrapper.get('[aria-label="问题处理状态"]').setValue('unreviewed')
     await flushPromises()
+    await openDesktopBatchPanel(wrapper)
     await wrapper.get('button[name="accept-visible"]').trigger('click')
     await flushPromises()
 
@@ -2191,12 +2269,14 @@ describe('ReviewWorkspaceView', () => {
 
     await wrapper.get('[aria-label="问题处理状态"]').setValue('unreviewed')
     await flushPromises()
+    await openDesktopBatchPanel(wrapper)
     await wrapper.get('button[name="accept-visible"]').trigger('click')
     await flushPromises()
 
     expect(wrapper.findAll('[data-issue-id]')).toHaveLength(0)
     expect(wrapper.find('[data-testid="empty-issues"]').exists()).toBe(false)
 
+    await openDesktopIssuesPanel(wrapper)
     await wrapper.get('[data-testid="load-more-issues"]').trigger('click')
 
     expect(
@@ -2421,9 +2501,11 @@ describe('ReviewWorkspaceView', () => {
     )
     await flushPromises()
 
+    await openDesktopBatchPanel(wrapper)
     await wrapper.get('button[name="accept-visible"]').trigger('click')
     await flushPromises()
 
+    await openDesktopIssuesPanel(wrapper)
     expect(putDecisions).toHaveBeenCalledWith(jobId, [
       {
         issue_id: 'issue-1',
@@ -2557,11 +2639,13 @@ describe('ReviewWorkspaceView', () => {
     )
     await flushPromises()
 
+    await openDesktopBatchPanel(wrapper)
     await wrapper.get('button[name="accept-visible"]').trigger('click')
     await flushPromises()
 
     expect(getIssues).toHaveBeenCalledTimes(2)
 
+    await openDesktopIssuesPanel(wrapper)
     await wrapper.get('[data-issue-id="issue-2"]').trigger('click')
     await wrapper.get('button[name="ignore"]').trigger('click')
     await flushPromises()
@@ -2629,6 +2713,7 @@ describe('ReviewWorkspaceView', () => {
     await wrapper.get('[aria-label="问题严重程度"]').setValue('error')
     await flushPromises()
 
+    await openDesktopBatchPanel(wrapper)
     const acceptVisible = wrapper.get('button[name="accept-visible"]')
     expect(acceptVisible.attributes('disabled')).toBeDefined()
 
@@ -2696,6 +2781,7 @@ describe('ReviewWorkspaceView', () => {
       )
       await flushPromises()
 
+      await openDesktopBatchPanel(wrapper)
       await wrapper.get('button[name="accept-visible"]').trigger('click')
 
       expect(confirm).toHaveBeenCalledWith('当前包含 1 个高风险安全问题，确认批量接受建议吗？')
@@ -2735,6 +2821,7 @@ describe('ReviewWorkspaceView', () => {
       )
       await flushPromises()
 
+      await openDesktopBatchPanel(wrapper)
       await wrapper.get('button[name="accept-visible"]').trigger('click')
 
       expect(putDecisions).not.toHaveBeenCalled()
@@ -2769,6 +2856,7 @@ describe('ReviewWorkspaceView', () => {
     )
     await flushPromises()
 
+    await openDesktopBatchPanel(wrapper)
     await wrapper.get('button[name="ignore-visible"]').trigger('click')
     await flushPromises()
 

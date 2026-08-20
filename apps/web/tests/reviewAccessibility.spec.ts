@@ -210,12 +210,12 @@ describe('review workspace accessibility', () => {
     const wrapper = mountReviewWorkspace()
     await flushPromises()
 
-    const labeledLandmarks = wrapper
-      .get('.review-workspace__columns')
-      .findAll(':scope > [aria-label]')
-      .map((node) => node.attributes('aria-label'))
+    const desktopShell = wrapper.get('.review-workspace__desktop-shell')
 
-    expect(labeledLandmarks).toEqual(['问题筛选', '文档内容', '问题详情'])
+    expect(desktopShell.get('[data-tool="issues"]').attributes('aria-pressed')).toBe('true')
+    expect(desktopShell.get('aside[aria-label="问题"]').isVisible()).toBe(true)
+    expect(desktopShell.get('article[aria-label="文档内容"]').isVisible()).toBe(true)
+    expect(desktopShell.get('aside[aria-label="问题详情"]').isVisible()).toBe(true)
     expect(wrapper.get('[data-issue-id="issue-1"]').text()).toContain('⚠ 警告')
     expect(wrapper.get('aside[aria-label="问题详情"]').text()).toContain('⚠ 警告')
   })
@@ -253,12 +253,7 @@ describe('review workspace accessibility', () => {
   })
 
   it('keeps desktop review tools compact while preserving the mobile layouts', () => {
-    for (const source of [
-      ReviewToolbarSource,
-      ExportPanelSource,
-      BatchActionsSource,
-      FindReplaceSource
-    ]) {
+    for (const source of [ReviewToolbarSource, ExportPanelSource, FindReplaceSource]) {
       expect(source).toContain('@media (min-width: 981px)')
     }
 
@@ -267,27 +262,15 @@ describe('review workspace accessibility', () => {
     expect(ExportPanelSource).toContain('display: none')
     expect(BatchActionsSource).toContain('.batch-actions__heading p')
     expect(BatchActionsSource).toContain('仅当前已加载 · 最多')
-    expect(BatchActionsSource).not.toContain(
-      '.batch-actions__heading p {\r\n    display: none'
-    )
     expect(FindReplaceSource).toContain('grid-template-areas:')
     expect(FindReplaceSource).toContain('"heading fields actions"')
   })
 
-  it('runs the desktop document from top to bottom between stacked side tools', () => {
-    expect(ReviewWorkspaceViewSource).toContain('@media (min-width: 1101px)')
-    expect(ReviewWorkspaceViewSource).toContain('grid-template-areas:')
-    expect(ReviewWorkspaceViewSource).not.toContain('"file document find"')
-    expect(ReviewWorkspaceViewSource).toContain('"export document find"')
-    expect(ReviewWorkspaceViewSource).toContain('"batch document details"')
-    expect(ReviewWorkspaceViewSource).toContain('"navigation document details"')
-    expect(ReviewWorkspaceViewSource).not.toContain('.review-toolbar {')
-    expect(ReviewWorkspaceViewSource).toContain('grid-area: document')
-    expect(ReviewWorkspaceViewSource).toContain('grid-area: navigation')
-    expect(ReviewWorkspaceViewSource).toContain('grid-area: details')
-    expect(ReviewWorkspaceViewSource).toContain(
-      '.review-workspace:not(:has(.checker-failures))'
-    )
+  it('runs the desktop document from top to bottom between the rail, left panel, and inspector', () => {
+    expect(ReviewWorkspaceViewSource).toContain('@media (min-width: 1280px)')
+    expect(ReviewWorkspaceViewSource).toContain('64px')
+    expect(ReviewWorkspaceViewSource).toContain('280px')
+    expect(ReviewWorkspaceViewSource).not.toContain('display: contents')
   })
 
   it('exposes highlighted text as focus-visible controls without circle markers', async () => {

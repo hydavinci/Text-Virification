@@ -75,10 +75,6 @@ function requestAcceptVisible(): void {
 .batch-actions {
   display: grid;
   gap: 10px;
-  padding: 14px 16px;
-  background: #f8f9ff;
-  border: 1px solid #dfe4f4;
-  border-radius: 14px;
 }
 
 .batch-actions__heading {
@@ -152,28 +148,5 @@ function requestAcceptVisible(): void {
 .batch-actions__error {
   margin: 0;
   color: #a53636;
-}
-
-@media (min-width: 981px) {
-  .batch-actions {
-    gap: 6px;
-    padding: 8px 10px;
-  }
-
-  .batch-actions__heading {
-    align-items: center;
-  }
-
-  .batch-actions__heading > div {
-    display: grid;
-    min-width: 0;
-    gap: 2px;
-  }
-
-  .batch-actions__heading p {
-    margin: 0;
-    font-size: 0.68rem;
-    white-space: nowrap;
-  }
 }
 </style>
