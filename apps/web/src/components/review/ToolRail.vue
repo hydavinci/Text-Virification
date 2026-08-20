@@ -28,6 +28,10 @@ const toolItems: ToolItem[] = [
   { id: 'batch', label: '批量', icon: 'M7 7h10v3H7zM7 14h10v3H7z' }
 ]
 
+const railStyle = computed(() =>
+  props.mode === 'rail' ? { width: '64px', flex: '0 0 64px' } : undefined
+)
+
 const toolButtons = ref<Partial<Record<WorkspaceTool, HTMLButtonElement | null>>>({})
 const exportButton = ref<HTMLButtonElement | null>(null)
 
@@ -104,6 +108,7 @@ defineExpose({ focusExportButton })
   <nav
     class="tool-rail"
     :class="`tool-rail--${mode}`"
+    :style="railStyle"
     :aria-label="mode === 'rail' ? '审阅工具' : '工作台视图'"
     :data-side-panel-open="sidePanelOpen"
   >
@@ -124,6 +129,13 @@ defineExpose({ focusExportButton })
         @click="onActivate(tool.id)"
         @keydown="onToolKeydown($event, tool.id)"
       >
+        <span
+          v-if="activeTool === tool.id"
+          class="tool-rail__active-indicator"
+          aria-hidden="true"
+        >
+          ✓
+        </span>
         <svg
           class="tool-rail__icon"
           viewBox="0 0 24 24"
@@ -148,6 +160,7 @@ defineExpose({ focusExportButton })
         @click="onExportClick"
         @keydown="onExportKeydown"
       >
+        <span v-if="exportOpen" class="tool-rail__active-indicator" aria-hidden="true">✓</span>
         <svg
           class="tool-rail__icon"
           viewBox="0 0 24 24"
@@ -168,12 +181,14 @@ defineExpose({ focusExportButton })
   min-width: 0;
   gap: 10px;
   color: #344054;
+  box-sizing: border-box;
 }
 
 .tool-rail--rail {
   flex-direction: column;
   height: 100%;
-  padding: 10px;
+  padding: 10px 8px;
+  gap: 8px;
 }
 
 .tool-rail--bottom {
@@ -190,6 +205,7 @@ defineExpose({ focusExportButton })
 .tool-rail--rail .tool-rail__main {
   flex: 1;
   flex-direction: column;
+  width: 100%;
 }
 
 .tool-rail--bottom .tool-rail__main {
@@ -203,6 +219,7 @@ defineExpose({ focusExportButton })
 
 .tool-rail--rail .tool-rail__footer {
   margin-top: auto;
+  width: 100%;
 }
 
 .tool-rail--bottom .tool-rail__footer {
@@ -210,6 +227,7 @@ defineExpose({ focusExportButton })
 }
 
 .tool-rail__button {
+  position: relative;
   display: inline-flex;
   flex-direction: column;
   align-items: center;
@@ -217,16 +235,20 @@ defineExpose({ focusExportButton })
   gap: 6px;
   min-width: 44px;
   min-height: 44px;
-  padding: 10px 12px;
+  width: 100%;
+  padding: 8px 0;
   color: inherit;
   background: #f8f9fc;
   border: 1px solid #d8deea;
   border-radius: 12px;
+  box-sizing: border-box;
   cursor: pointer;
 }
 
 .tool-rail--bottom .tool-rail__button {
   min-width: 72px;
+  width: auto;
+  padding: 10px 12px;
 }
 
 .tool-rail__button:hover,
@@ -240,6 +262,23 @@ defineExpose({ focusExportButton })
   color: #243b98;
   background: #eef0ff;
   border-color: #7a8bea;
+}
+
+.tool-rail__active-indicator {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  background: #fff;
+  font-size: 10px;
+  font-weight: 900;
+  line-height: 1;
 }
 
 .tool-rail__icon {
