@@ -91,6 +91,9 @@ describe('review shell containers', () => {
     })
     const detailsTab = wrapper.get('[role="tab"][data-tab="details"]')
 
+    expect(detailsTab.get('.context-inspector__tab-indicator').text()).toBe('✓')
+    expect(wrapper.find('[data-tab="search"] .context-inspector__tab-indicator').exists()).toBe(false)
+
     await detailsTab.trigger('keydown', { key: 'ArrowRight' })
     expect(wrapper.emitted('update:activeTab')).toEqual([['search']])
 

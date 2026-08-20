@@ -85,6 +85,13 @@ watch(
           @click="activateTab(tab)"
           @keydown="onTabKeydown($event, tab)"
         >
+          <span
+            v-if="activeTab === tab"
+            class="context-inspector__tab-indicator"
+            aria-hidden="true"
+          >
+            ✓
+          </span>
           {{ tab === 'details' ? '详情' : '查找' }}
         </button>
       </div>
@@ -149,6 +156,7 @@ watch(
 }
 
 .context-inspector__tab {
+  position: relative;
   min-height: 44px;
   padding: 9px 12px;
   color: #4256c9;
@@ -163,6 +171,24 @@ watch(
   color: #fff;
   background: linear-gradient(135deg, #5c75f7, #7958d9);
   border-color: transparent;
+}
+
+.context-inspector__tab-indicator {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  background: #fff;
+  color: #243154;
+  font-size: 10px;
+  font-weight: 900;
+  line-height: 1;
 }
 
 .context-inspector__tab:focus-visible {
