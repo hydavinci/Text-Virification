@@ -627,7 +627,12 @@ onBeforeUnmount(() => {
 .export-panel__controls {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(152px, 1fr));
+  align-items: end;
   gap: calc(var(--review-space-2) + 2px);
+}
+
+.export-panel__controls > button {
+  height: 44px;
 }
 
 .export-panel__controls label {

@@ -274,6 +274,17 @@ describe('review workspace accessibility', () => {
     })
   })
 
+  it('aligns the export action with the format selector', () => {
+    const controlsRule = sourceRuleBody(ExportPanelSource, '\\.export-panel__controls')
+    const actionRule = sourceRuleBody(
+      ExportPanelSource,
+      '\\.export-panel__controls > button'
+    )
+
+    expect(controlsRule).toContain('align-items: end')
+    expect(actionRule).toContain('height: 44px')
+  })
+
   it('ships a five-track bottom rail with shrinkable 44px controls', () => {
     const bottomRailRule = sourceRuleBody(ToolRailSource, '\\.tool-rail--bottom')
     const bottomMainRule = sourceRuleBody(ToolRailSource, '\\.tool-rail--bottom \\.tool-rail__main')
