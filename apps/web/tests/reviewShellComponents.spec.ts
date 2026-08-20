@@ -50,7 +50,7 @@ describe('ToolRail', () => {
     wrapper.unmount()
   })
 
-  it('reports export state and exposes trigger focus', () => {
+  it('reports export state and exposes typed tool focus methods', () => {
     const wrapper = mount(ToolRail, {
       attachTo: document.body,
       props: {
@@ -63,8 +63,14 @@ describe('ToolRail', () => {
 
     expect(wrapper.get('[data-tool="export"]').attributes('aria-expanded')).toBe('true')
     expect(wrapper.get('[data-tool="export"] .tool-rail__active-indicator').text()).toBe('✓')
-    ;(wrapper.vm as { focusExportButton(): void }).focusExportButton()
+    const rail = wrapper.vm as {
+      focusExportButton(): void
+      focusTool(tool: 'issues' | 'batch'): void
+    }
+    rail.focusExportButton()
     expect(document.activeElement).toBe(wrapper.get('[data-tool="export"]').element)
+    rail.focusTool('batch')
+    expect(document.activeElement).toBe(wrapper.get('[data-tool="batch"]').element)
     wrapper.unmount()
   })
 })

@@ -351,6 +351,14 @@ function scrollWithinViewer(element: HTMLElement): void {
   container.scrollTop = nextTop
 }
 
+function focusSelectedHighlight(): void {
+  viewer.value
+    ?.querySelector<HTMLElement>('[data-highlight-selected="true"]')
+    ?.focus()
+}
+
+defineExpose({ focusSelectedHighlight })
+
 watch(sentinel, connectObserver)
 
 watch(

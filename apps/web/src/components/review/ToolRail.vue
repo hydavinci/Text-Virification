@@ -12,7 +12,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   activate: [tool: WorkspaceTool]
-  toggleExport: []
+  toggleExport: [trigger: HTMLElement | null]
 }>()
 
 type ToolItem = {
@@ -97,11 +97,14 @@ function onActivate(tool: WorkspaceTool): void {
   emit('activate', tool)
 }
 
-function onExportClick(): void {
-  emit('toggleExport')
+function onExportClick(event: MouseEvent): void {
+  emit(
+    'toggleExport',
+    event.currentTarget instanceof HTMLElement ? event.currentTarget : null
+  )
 }
 
-defineExpose({ focusExportButton })
+defineExpose({ focusExportButton, focusTool })
 </script>
 
 <template>

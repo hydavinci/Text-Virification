@@ -40,39 +40,105 @@ function createDeferred<T>() {
 }
 
 function mockViewportWidth(width: number) {
+  const viewport = mockResponsiveViewport(width)
+  return viewport.restore
+}
+
+function mockResponsiveViewport(initialWidth: number) {
   const originalMatchMedia = window.matchMedia
+  const originalInnerWidth = window.innerWidth
+  let width = initialWidth
+  const records = new Map<
+    string,
+    {
+      mediaQuery: MediaQueryList
+      listeners: Set<(event: MediaQueryListEvent) => void>
+      legacyListeners: Set<(event: MediaQueryListEvent) => void>
+    }
+  >()
 
-  Object.defineProperty(window, 'innerWidth', {
-    configurable: true,
-    value: width
-  })
-
-  window.matchMedia = vi.fn().mockImplementation((query: string): MediaQueryList => {
-    const matches =
-      query === '(max-width: 1279px)'
-        ? width <= 1279
-        : query === '(max-width: 767px)'
-          ? width <= 767
+  function queryMatches(query: string): boolean {
+    return query === '(max-width: 1279px)'
+      ? width <= 1279
+      : query === '(max-width: 767px)'
+        ? width <= 767
         : query === '(min-width: 1280px)'
           ? width >= 1280
-          : query === '(prefers-reduced-motion: reduce)'
-            ? false
-            : false
+          : false
+  }
 
-    return {
-      matches,
+  window.matchMedia = vi.fn().mockImplementation((query: string): MediaQueryList => {
+    const existing = records.get(query)
+    if (existing) {
+      return existing.mediaQuery
+    }
+
+    const listeners = new Set<(event: MediaQueryListEvent) => void>()
+    const legacyListeners = new Set<(event: MediaQueryListEvent) => void>()
+    const mediaQuery = {
+      get matches() {
+        return queryMatches(query)
+      },
       media: query,
       onchange: null,
-      addEventListener: vi.fn(),
-      removeEventListener: vi.fn(),
-      addListener: vi.fn(),
-      removeListener: vi.fn(),
+      addEventListener: vi.fn(
+        (_type: string, listener: (event: MediaQueryListEvent) => void) => {
+          listeners.add(listener)
+        }
+      ),
+      removeEventListener: vi.fn(
+        (_type: string, listener: (event: MediaQueryListEvent) => void) => {
+          listeners.delete(listener)
+        }
+      ),
+      addListener: vi.fn((listener: (event: MediaQueryListEvent) => void) => {
+        legacyListeners.add(listener)
+      }),
+      removeListener: vi.fn((listener: (event: MediaQueryListEvent) => void) => {
+        legacyListeners.delete(listener)
+      }),
       dispatchEvent: vi.fn()
     } as unknown as MediaQueryList
+
+    records.set(query, { mediaQuery, listeners, legacyListeners })
+    return mediaQuery
   })
 
-  return () => {
-    window.matchMedia = originalMatchMedia
+  function setWidth(nextWidth: number): void {
+    const previousMatches = new Map<string, boolean>()
+    for (const [query] of records) {
+      previousMatches.set(query, queryMatches(query))
+    }
+
+    width = nextWidth
+    Object.defineProperty(window, 'innerWidth', {
+      configurable: true,
+      value: width
+    })
+
+    for (const [query, record] of records) {
+      const matches = queryMatches(query)
+      if (previousMatches.get(query) === matches) {
+        continue
+      }
+
+      const event = { matches, media: query } as MediaQueryListEvent
+      record.listeners.forEach((listener) => listener(event))
+      record.legacyListeners.forEach((listener) => listener(event))
+    }
+  }
+
+  setWidth(initialWidth)
+
+  return {
+    setWidth,
+    restore() {
+      window.matchMedia = originalMatchMedia
+      Object.defineProperty(window, 'innerWidth', {
+        configurable: true,
+        value: originalInnerWidth
+      })
+    }
   }
 }
 
@@ -535,6 +601,22 @@ describe('ReviewWorkspaceView', () => {
     wrapper.unmount()
   })
 
+  it('does not let export dialog key events trigger workspace issue shortcuts', async () => {
+    const wrapper = mountReviewWorkspaceWithConfig({ attachTo: document.body })
+    await flushPromises()
+    await openExportDialog(wrapper)
+
+    const closeButton = wrapper.get('[aria-label="关闭导出"]')
+    const dialog = wrapper.get('[role="dialog"][aria-label="导出文件"]')
+
+    await closeButton.trigger('keydown', { key: 'j' })
+    expect(wrapper.get('[data-issue-id="issue-1"]').attributes('aria-current')).toBe('true')
+
+    await dialog.trigger('keydown', { key: 'j' })
+    expect(wrapper.get('[data-issue-id="issue-1"]').attributes('aria-current')).toBe('true')
+    wrapper.unmount()
+  })
+
   it('opens the export dialog from the compact bottom rail and restores focus after closing', async () => {
     const restoreViewport = mockViewportWidth(1024)
 
@@ -631,6 +713,66 @@ describe('ReviewWorkspaceView', () => {
     await flushPromises()
 
     expect(wrapper.find('[data-testid="export-download-link"]').exists()).toBe(true)
+  })
+
+  it('preserves export polling and focus return across live 1279 and 1280 transitions', async () => {
+    vi.useFakeTimers()
+    const viewport = mockResponsiveViewport(1279)
+    const create = vi.fn().mockResolvedValue(
+      buildCreatedExport({
+        export_id: 'export-responsive',
+        status: 'queued',
+        file_name: 'responsive.html'
+      })
+    )
+    const get = vi.fn().mockResolvedValue(
+      buildExport({
+        export_id: 'export-responsive',
+        status: 'completed',
+        file_name: 'responsive.html'
+      })
+    )
+    let wrapper: ReturnType<typeof mountReviewWorkspaceWithConfig> | null = null
+
+    try {
+      wrapper = mountReviewWorkspaceWithConfig({
+        attachTo: document.body,
+        exportsApi: createExportsApiMock({ create, get })
+      })
+      await flushPromises()
+
+      await openExportDialog(wrapper)
+      await wrapper.get('button[name="create-export"]').trigger('click')
+      await flushPromises()
+      expect(wrapper.get('[data-testid="export-status"]').text()).toContain('已排队')
+
+      viewport.setWidth(1280)
+      await flushPromises()
+      expect(wrapper.get('nav[aria-label="审阅工具"]').isVisible()).toBe(true)
+
+      await vi.advanceTimersByTimeAsync(2000)
+      await flushPromises()
+
+      expect(get).toHaveBeenCalledWith(jobId, 'export-responsive')
+      expect(wrapper.get('[data-testid="export-download-link"]').attributes('download')).toBe(
+        'responsive.html'
+      )
+
+      viewport.setWidth(1279)
+      await flushPromises()
+      const compactTrigger = wrapper.get(
+        'nav[aria-label="工作台视图"] [data-tool="export"]'
+      )
+
+      expect(wrapper.get('[data-testid="export-download-link"]').isVisible()).toBe(true)
+      await wrapper.get('[aria-label="关闭导出"]').trigger('click')
+      await flushPromises()
+      expect(document.activeElement).toBe(compactTrigger.element)
+    } finally {
+      wrapper?.unmount()
+      viewport.restore()
+      vi.useRealTimers()
+    }
 
     await wrapper.get('[aria-label="关闭导出"]').trigger('click')
     await flushPromises()
@@ -1298,6 +1440,7 @@ describe('ReviewWorkspaceView', () => {
 
       expect(wrapper.get('[data-testid="phone-issue-details"]').isVisible()).toBe(true)
       expect(wrapper.get('nav[aria-label="问题筛选"]').isVisible()).toBe(false)
+      expect(wrapper.get('[aria-label="返回问题列表"]').text()).toBe('返回问题列表')
 
       await wrapper.get('[aria-label="返回问题列表"]').trigger('click')
       await flushPromises()
@@ -1311,7 +1454,7 @@ describe('ReviewWorkspaceView', () => {
     }
   })
 
-  it('keeps the compact document view active when a highlight selects an issue', async () => {
+  it('opens the compact issues view with selected details when a highlight is activated', async () => {
     const restoreViewport = mockViewportWidth(1024)
 
     try {
@@ -1321,13 +1464,104 @@ describe('ReviewWorkspaceView', () => {
       await wrapper.get('[data-highlight-range-issue-ids~="issue-1"]').trigger('click')
       await flushPromises()
 
-      expect(wrapper.get('[data-tool="document"]').attributes('aria-current')).toBe('page')
-      expect(wrapper.get('[data-highlight-range-issue-ids~="issue-1"]').attributes('aria-current')).toBe(
-        'true'
-      )
+      expect(wrapper.get('[data-tool="issues"]').attributes('aria-pressed')).toBe('true')
+      expect(wrapper.get('section[aria-label="问题详情"]').isVisible()).toBe(true)
+      expect(wrapper.get('aside[aria-label="问题详情"]').text()).toContain('建议调整措辞')
       wrapper.unmount()
     } finally {
       restoreViewport()
+    }
+  })
+
+  it('returns a phone highlight detail to the document focus and preserves overlap cycling', async () => {
+    const restoreViewport = mockViewportWidth(390)
+
+    try {
+      const wrapper = mountReviewWorkspaceWithConfig({
+        analysisApi: buildConnectedOverlapAnalysisApi(),
+        attachTo: document.body
+      })
+      await flushPromises()
+
+      await connectedClusterHighlights(wrapper)[0]?.trigger('click')
+      await flushPromises()
+
+      expect(wrapper.get('[data-testid="phone-issue-details"]').isVisible()).toBe(true)
+      expect(wrapper.get('[aria-label="返回文档"]').text()).toBe('返回文档')
+
+      await wrapper.get('[aria-label="返回文档"]').trigger('click')
+      await flushPromises()
+
+      let selectedHighlight = wrapper.get('[data-highlight-selected="true"]')
+      expect(selectedHighlight.text()).toBe('123')
+      expect(document.activeElement).toBe(selectedHighlight.element)
+
+      await selectedHighlight.trigger('keydown', { key: 'Enter' })
+      await flushPromises()
+      expect(wrapper.get('[data-testid="phone-issue-details"]').isVisible()).toBe(true)
+
+      await wrapper.get('[aria-label="返回文档"]').trigger('click')
+      await flushPromises()
+
+      selectedHighlight = wrapper.get('[data-highlight-selected="true"]')
+      expect(selectedHighlight.text()).toBe('345')
+      expect(document.activeElement).toBe(selectedHighlight.element)
+      wrapper.unmount()
+    } finally {
+      restoreViewport()
+    }
+  })
+
+  it('preserves pending issue search and custom replacement drafts across live 767 and 768 transitions', async () => {
+    vi.useFakeTimers()
+    const viewport = mockResponsiveViewport(767)
+    const getIssues = vi.fn().mockResolvedValue(buildIssuePage())
+    let wrapper: ReturnType<typeof mountReviewWorkspaceWithConfig> | null = null
+
+    try {
+      wrapper = mountReviewWorkspaceWithConfig({
+        attachTo: document.body,
+        analysisApi: createAnalysisApiMock({ getIssues })
+      })
+      await flushPromises()
+
+      await wrapper.get('[data-tool="issues"]').trigger('click')
+      await wrapper.get('[aria-label="搜索问题"]').setValue('待处理草稿')
+      await wrapper.get('[data-issue-id="issue-2"]').trigger('click')
+      await wrapper.get('[aria-label="自定义替换"]').setValue('自定义草稿')
+
+      viewport.setWidth(768)
+      await flushPromises()
+
+      expect((wrapper.get('[aria-label="搜索问题"]').element as HTMLInputElement).value).toBe(
+        '待处理草稿'
+      )
+      expect((wrapper.get('[aria-label="自定义替换"]').element as HTMLTextAreaElement).value).toBe(
+        '自定义草稿'
+      )
+
+      viewport.setWidth(767)
+      await flushPromises()
+
+      expect(wrapper.get('[data-testid="phone-issue-details"]').isVisible()).toBe(true)
+      expect((wrapper.get('[aria-label="搜索问题"]').element as HTMLInputElement).value).toBe(
+        '待处理草稿'
+      )
+      expect((wrapper.get('[aria-label="自定义替换"]').element as HTMLTextAreaElement).value).toBe(
+        '自定义草稿'
+      )
+
+      await vi.advanceTimersByTimeAsync(250)
+      await flushPromises()
+      expect(getIssues).toHaveBeenLastCalledWith(jobId, {
+        search: '待处理草稿',
+        cursor: null,
+        limit: 50
+      })
+    } finally {
+      wrapper?.unmount()
+      viewport.restore()
+      vi.useRealTimers()
     }
   })
 
@@ -1359,6 +1593,25 @@ describe('ReviewWorkspaceView', () => {
       expect(wrapper.get('aside[aria-label="批量"]').text()).toContain(
         '批量处理当前筛选结果'
       )
+    } finally {
+      restoreViewport()
+    }
+  })
+
+  it('restores focus to the corresponding desktop rail tool after closing the side panel', async () => {
+    const restoreViewport = mockViewportWidth(1440)
+
+    try {
+      const wrapper = mountReviewWorkspaceWithConfig({ attachTo: document.body })
+      await flushPromises()
+
+      const closeButton = wrapper.get('[aria-label="关闭问题面板"]')
+      ;(closeButton.element as HTMLElement).focus()
+      await closeButton.trigger('click')
+      await flushPromises()
+
+      expect(document.activeElement).toBe(wrapper.get('[data-tool="issues"]').element)
+      wrapper.unmount()
     } finally {
       restoreViewport()
     }

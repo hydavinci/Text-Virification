@@ -236,7 +236,9 @@ describe('review workspace accessibility', () => {
     expect(AppSource).toContain('@media (prefers-reduced-motion: reduce)')
     expect(AppSource).toContain(':focus-visible')
     expect(ReviewWorkspaceViewSource).toContain('min-height: 44px')
-    expect(ReviewWorkspaceViewSource).toContain('aria-label="返回问题列表"')
+    expect(ReviewWorkspaceViewSource).toContain(':aria-label="phoneBackLabel"')
+    expect(ReviewWorkspaceViewSource).toContain("'返回文档'")
+    expect(ReviewWorkspaceViewSource).toContain("'返回问题列表'")
     expect(ContextInspectorSource).toContain('min-width: 44px')
     expect(ReviewNavigationSource).toContain('min-height: 44px')
     expect(ReviewNavigationSource).toContain(':focus-visible')
@@ -312,14 +314,16 @@ describe('review workspace accessibility', () => {
   })
 
   it('ships the anchored export dialog without the transitional toolbar', () => {
-    expect(ReviewWorkspaceViewSource).toContain('<ExportPanel')
+    expect(ReviewWorkspaceViewSource.match(/<ExportPanel/g)).toHaveLength(1)
     expect(ReviewWorkspaceViewSource).not.toContain('review-workspace__fallback-export')
     expect(ReviewWorkspaceViewSource).not.toContain('ReviewToolbar')
     expect(ReviewWorkspaceViewSource).toContain('mode="bottom"')
     expect(ReviewWorkspaceViewSource).toContain(
-      '.review-workspace__compact-export-panel :deep(.export-panel)'
+      '.review-workspace__export-panel :deep(.export-panel)'
     )
-    expect(ReviewWorkspaceViewSource).toContain('bottom: calc(100% + 12px)')
+    expect(ReviewWorkspaceViewSource).toContain(
+      'bottom: calc(96px + env(safe-area-inset-bottom, 0px))'
+    )
     expect(ReviewWorkspaceViewSource).toContain('max-height: min(420px, calc(100dvh - 140px))')
     expect(ExportPanelSource).toContain('role="dialog"')
     expect(ExportPanelSource).toContain('aria-modal="true"')

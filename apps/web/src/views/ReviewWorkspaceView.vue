@@ -94,8 +94,17 @@ const activeSidePanelTool = ref<SidePanelTool>('issues')
 const isSidePanelOpen = ref(true)
 const isExportOpen = ref(false)
 const activeInspectorTab = ref<InspectorTab>('details')
-const toolRail = ref<{ focusExportButton(): void } | null>(null)
+const toolRail = ref<{
+  focusExportButton(): void
+  focusTool(tool: WorkspaceTool): void
+} | null>(null)
+const documentViewer = ref<{ focusSelectedHighlight(): void } | null>(null)
 const lastPhoneIssueTrigger = ref<HTMLElement | null>(null)
+const phoneIssueDetailOrigin = ref<'document' | 'list'>('list')
+const lastExportTrigger = ref<HTMLElement | null>(null)
+const phoneBackLabel = computed(() =>
+  phoneIssueDetailOrigin.value === 'document' ? '返回文档' : '返回问题列表'
+)
 
 function bindMediaQuery(
   mediaQuery: MediaQueryList | null,
@@ -143,6 +152,7 @@ function activateCompactView(tool: WorkspaceTool): void {
   if (tool === 'issues') {
     activeInspectorTab.value = 'details'
     if (isPhone.value) {
+      phoneIssueDetailOrigin.value = 'list'
       phoneIssueSubview.value = 'list'
     }
     return
@@ -193,6 +203,7 @@ function selectIssueAndShowDetails(
     activeInspectorTab.value = 'details'
 
     if (isPhone.value) {
+      phoneIssueDetailOrigin.value = 'list'
       lastPhoneIssueTrigger.value = trigger
       phoneIssueSubview.value = 'details'
     }
@@ -207,11 +218,11 @@ function selectHighlightAndShowDetails(issueId: string): void {
   selectHighlight(issueId)
 
   if (isCompact.value) {
-    if (activeCompactView.value === 'issues') {
-      activeInspectorTab.value = 'details'
-      if (isPhone.value) {
-        phoneIssueSubview.value = 'details'
-      }
+    activeCompactView.value = 'issues'
+    activeInspectorTab.value = 'details'
+    if (isPhone.value) {
+      phoneIssueDetailOrigin.value = 'document'
+      phoneIssueSubview.value = 'details'
     }
     return
   }
@@ -221,11 +232,18 @@ function selectHighlightAndShowDetails(issueId: string): void {
 }
 
 function closeSidePanel(): void {
+  const tool = activeSidePanelTool.value
   isSidePanelOpen.value = false
+  void nextTick(() => toolRail.value?.focusTool(tool))
 }
 
 function focusExportTrigger(): void {
   void nextTick(() => {
+    if (lastExportTrigger.value?.isConnected) {
+      lastExportTrigger.value.focus()
+      return
+    }
+
     toolRail.value?.focusExportButton()
   })
 }
@@ -239,7 +257,9 @@ function closeExport(): void {
   focusExportTrigger()
 }
 
-function toggleExport(): void {
+function toggleExport(trigger: HTMLElement | null): void {
+  lastExportTrigger.value = trigger
+
   if (isExportOpen.value) {
     closeExport()
     return
@@ -248,8 +268,14 @@ function toggleExport(): void {
   isExportOpen.value = true
 }
 
-function returnToPhoneIssueList(): void {
+function returnFromPhoneIssueDetails(): void {
   phoneIssueSubview.value = 'list'
+  if (phoneIssueDetailOrigin.value === 'document') {
+    activeCompactView.value = 'document'
+    void nextTick(() => documentViewer.value?.focusSelectedHighlight())
+    return
+  }
+
   void nextTick(() => lastPhoneIssueTrigger.value?.focus())
 }
 
@@ -270,6 +296,7 @@ function onWorkspaceKeydown(event: KeyboardEvent): void {
     event.altKey ||
     event.ctrlKey ||
     event.metaKey ||
+    isExportOpen.value ||
     isEditableTarget(event.target) ||
     issues.value.length < 2
   ) {
@@ -322,6 +349,7 @@ onBeforeUnmount(() => {
           aria-label="文档"
         >
           <DocumentViewer
+            ref="documentViewer"
             :source-name="sourceName"
             :file-type="fileType"
             :total-issues="summary?.total_issues ?? null"
@@ -348,9 +376,9 @@ onBeforeUnmount(() => {
         >
           <CheckerFailureNotice :failures="checkerFailures" />
 
-          <div v-if="isPhone" class="review-workspace__phone-issues">
+          <div class="review-workspace__compact-issues">
             <div
-              v-show="phoneIssueSubview === 'list'"
+              v-show="!isPhone || phoneIssueSubview === 'list'"
               class="review-workspace__compact-surface"
             >
               <ReviewNavigation
@@ -370,51 +398,20 @@ onBeforeUnmount(() => {
             </div>
 
             <section
-              v-show="phoneIssueSubview === 'details'"
+              v-show="!isPhone || phoneIssueSubview === 'details'"
               data-testid="phone-issue-details"
-              class="review-workspace__compact-surface review-workspace__compact-surface--padded review-workspace__phone-issue-details"
+              class="review-workspace__compact-surface review-workspace__compact-surface--padded review-workspace__compact-issue-details"
               aria-label="问题详情"
             >
               <button
+                v-if="isPhone"
                 type="button"
                 class="review-workspace__phone-back"
-                aria-label="返回问题列表"
-                @click="returnToPhoneIssueList"
+                :aria-label="phoneBackLabel"
+                @click="returnFromPhoneIssueDetails"
               >
-                返回问题列表
+                {{ phoneBackLabel }}
               </button>
-              <IssuePanel
-                :issue="selectedIssue"
-                :decision-error="decisionError"
-                :can-retry-decision="canRetryDecision"
-                @decide="decide"
-                @retry-decision="retryDecision"
-              />
-            </section>
-          </div>
-
-          <div v-else class="review-workspace__compact-issue-grid">
-            <div class="review-workspace__compact-surface">
-              <ReviewNavigation
-                :summary="summary"
-                :issues="issues"
-                :issue-status-by-id="issueStatusById"
-                :selected-issue-id="selectedIssueId"
-                :loading="loading.issues"
-                :error="errors.issues"
-                :filters="filters"
-                :next-cursor="issueCursor"
-                @select="selectIssueAndShowDetails"
-                @retry="retryIssues"
-                @load-next="loadNextIssues"
-                @filter-change="setFilters"
-              />
-            </div>
-
-            <section
-              class="review-workspace__compact-surface review-workspace__compact-surface--padded"
-              aria-label="问题详情"
-            >
               <IssuePanel
                 :issue="selectedIssue"
                 :decision-error="decisionError"
@@ -479,13 +476,6 @@ onBeforeUnmount(() => {
             @activate="activateCompactView"
             @toggle-export="toggleExport"
           />
-          <ExportPanel
-            class="review-workspace__compact-export-panel"
-            :job-id="jobId"
-            :file-type="fileType"
-            :open="isExportOpen"
-            @close="closeExport"
-          />
         </div>
       </div>
     </div>
@@ -504,12 +494,6 @@ onBeforeUnmount(() => {
           :export-open="isExportOpen"
           @activate="activateDesktopTool"
           @toggle-export="toggleExport"
-        />
-        <ExportPanel
-          :job-id="jobId"
-          :file-type="fileType"
-          :open="isExportOpen"
-          @close="closeExport"
         />
       </div>
 
@@ -554,6 +538,7 @@ onBeforeUnmount(() => {
       </WorkspaceSidePanel>
 
       <DocumentViewer
+        ref="documentViewer"
         :source-name="sourceName"
         :file-type="fileType"
         :total-issues="summary?.total_issues ?? null"
@@ -600,6 +585,14 @@ onBeforeUnmount(() => {
         </template>
       </ContextInspector>
     </div>
+
+    <ExportPanel
+      class="review-workspace__export-panel"
+      :job-id="jobId"
+      :file-type="fileType"
+      :open="isExportOpen"
+      @close="closeExport"
+    />
 
     <p
       class="review-workspace__announcement"
@@ -684,9 +677,8 @@ onBeforeUnmount(() => {
   padding: var(--review-space-4);
 }
 
-.review-workspace__compact-issue-grid,
-.review-workspace__phone-issues,
-.review-workspace__phone-issue-details {
+.review-workspace__compact-issues,
+.review-workspace__compact-issue-details {
   display: grid;
   gap: var(--review-space-3);
   min-height: 0;
@@ -712,13 +704,10 @@ onBeforeUnmount(() => {
   backdrop-filter: blur(8px);
 }
 
-.review-workspace__compact-export-panel :deep(.export-panel) {
-  left: 12px;
-  right: 12px;
-  top: auto;
-  bottom: calc(100% + 12px);
-  width: auto;
-  max-height: min(420px, calc(100dvh - 140px));
+.review-workspace__export-panel :deep(.export-panel) {
+  left: 76px;
+  right: auto;
+  bottom: 16px;
 }
 
 .review-workspace__phone-back {
@@ -808,6 +797,15 @@ onBeforeUnmount(() => {
     height: auto;
     padding-top: 18px;
     overflow: visible;
+  }
+
+  .review-workspace__export-panel :deep(.export-panel) {
+    left: 12px;
+    right: 12px;
+    top: auto;
+    bottom: calc(96px + env(safe-area-inset-bottom, 0px));
+    width: auto;
+    max-height: min(420px, calc(100dvh - 140px));
   }
 }
 </style>
