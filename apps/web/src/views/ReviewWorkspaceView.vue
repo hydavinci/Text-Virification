@@ -170,20 +170,12 @@ function selectIssueAndShowDetails(issueId: string): void {
   selectIssue(issueId)
   activeRailTool.value = 'issues'
   activeInspectorTab.value = 'details'
-
-  if (isMobile.value) {
-    activateMobileTab('issues')
-  }
 }
 
 function selectHighlightAndShowDetails(issueId: string): void {
   selectHighlight(issueId)
   activeRailTool.value = 'issues'
   activeInspectorTab.value = 'details'
-
-  if (isMobile.value) {
-    activateMobileTab('issues')
-  }
 }
 
 function closeSidePanel(): void {

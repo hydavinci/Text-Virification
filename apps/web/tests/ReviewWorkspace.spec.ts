@@ -1080,6 +1080,35 @@ describe('ReviewWorkspaceView', () => {
     }
   })
 
+  it('keeps the document tab active when a mobile highlight selects an issue', async () => {
+    const restoreViewport = mockViewportWidth(480)
+
+    try {
+      const wrapper = mountReviewWorkspaceWithConfig({ attachTo: document.body })
+      await flushPromises()
+
+      const documentTab = wrapper.get('[role="tab"][aria-controls="review-document-panel"]')
+      const issueTab = wrapper.get('[role="tab"][aria-controls="review-issues-panel"]')
+
+      await wrapper.get('[data-highlight-range-issue-ids~="issue-1"]').trigger('click')
+      await flushPromises()
+
+      expect(wrapper.get('[data-issue-id="issue-1"]').attributes('aria-current')).toBe('true')
+      expect(documentTab.attributes('aria-selected')).toBe('true')
+      expect(issueTab.attributes('aria-selected')).toBe('false')
+      expect(wrapper.get('[role="tabpanel"][aria-label="文档"]').attributes('aria-hidden')).toBe(
+        'false'
+      )
+      expect(wrapper.get('[role="tabpanel"][aria-label="问题"]').attributes('aria-hidden')).toBe(
+        'true'
+      )
+
+      wrapper.unmount()
+    } finally {
+      restoreViewport()
+    }
+  })
+
   it('toggles issues and batch content from the desktop C2 rail', async () => {
     const restoreViewport = mockViewportWidth(1440)
 
