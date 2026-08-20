@@ -201,6 +201,7 @@ defineExpose({ focusExportButton })
 
 .tool-rail__main {
   display: flex;
+  min-width: 0;
   gap: var(--review-space-2);
 }
 
@@ -211,11 +212,15 @@ defineExpose({ focusExportButton })
 }
 
 .tool-rail--bottom .tool-rail__main {
-  display: contents;
+  display: grid;
+  grid-column: 1 / span 4;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  align-items: stretch;
 }
 
 .tool-rail__footer {
   display: flex;
+  min-width: 0;
 }
 
 .tool-rail--rail .tool-rail__footer {
@@ -224,7 +229,8 @@ defineExpose({ focusExportButton })
 }
 
 .tool-rail--bottom .tool-rail__footer {
-  display: contents;
+  grid-column: 5;
+  align-items: stretch;
 }
 
 .tool-rail__button {

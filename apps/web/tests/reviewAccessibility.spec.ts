@@ -245,6 +245,19 @@ describe('review workspace accessibility', () => {
   })
 
   it('uses one inherited review visual system without obsolete export breakpoints', () => {
+    const reviewShellSources = [
+      ReviewWorkspaceViewSource,
+      WorkspaceViewSource,
+      ToolRailSource,
+      ContextInspectorSource,
+      DocumentViewerSource,
+      ExportPanelSource,
+      FindReplaceSource,
+      ReviewNavigationSource,
+      IssuePanelSource,
+      BatchActionsSource
+    ]
+
     expect(ReviewWorkspaceViewSource).toContain('--review-accent:')
     expect(ReviewWorkspaceViewSource).toContain('--review-space-4: 16px')
     expect(ReviewWorkspaceViewSource).toContain('--review-panel-radius:')
@@ -254,6 +267,9 @@ describe('review workspace accessibility', () => {
     expect(ExportPanelSource).not.toContain('@media (max-width: 980px)')
     expect(FindReplaceSource).not.toContain('@media (min-width: 981px)')
     expect(BatchActionsSource).not.toContain('@media (min-width: 981px)')
+    reviewShellSources.forEach((source) => {
+      expect(source).not.toContain('display: contents')
+    })
   })
 
   it('ships a five-track bottom rail with shrinkable 44px controls', () => {
@@ -266,8 +282,10 @@ describe('review workspace accessibility', () => {
     expect(bottomRailRule).toContain('display: grid')
     expect(bottomRailRule).toContain('grid-template-columns: repeat(5, minmax(0, 1fr))')
     expect(bottomRailRule).toContain('align-items: stretch')
-    expect(bottomMainRule).toContain('display: contents')
-    expect(bottomFooterRule).toContain('display: contents')
+    expect(bottomMainRule).toContain('display: grid')
+    expect(bottomMainRule).toContain('grid-column: 1 / span 4')
+    expect(bottomMainRule).toContain('grid-template-columns: repeat(4, minmax(0, 1fr))')
+    expect(bottomFooterRule).toContain('grid-column: 5')
     expect(buttonRule).toContain('min-height: 44px')
     expect(bottomButtonRule).toContain('min-width: 0')
   })
