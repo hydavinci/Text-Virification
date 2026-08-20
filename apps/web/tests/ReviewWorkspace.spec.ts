@@ -811,6 +811,46 @@ describe('ReviewWorkspaceView', () => {
     )
   })
 
+  it('routes search to the inspector without changing the left panel', async () => {
+    const wrapper = mountReviewWorkspace()
+    await flushPromises()
+
+    await openDesktopBatchPanel(wrapper)
+    await wrapper.get('[data-tool="search"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[role="tab"][data-tab="search"]').attributes('aria-selected')).toBe(
+      'true'
+    )
+    expect(wrapper.get('aside[aria-label="批量"]').isVisible()).toBe(true)
+    expect(wrapper.get('[aria-label="查找内容"]').isVisible()).toBe(true)
+  })
+
+  it('opens details for exact issue and highlight selection', async () => {
+    const wrapper = mountReviewWorkspace()
+    await flushPromises()
+
+    await wrapper.get('[data-tool="search"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-issue-id="issue-2"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[role="tab"][data-tab="details"]').attributes('aria-selected')).toBe(
+      'true'
+    )
+    expect(wrapper.get('aside[aria-label="问题详情"]').text()).toContain('发现错词')
+
+    await wrapper.get('[data-tool="search"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-highlight-range-issue-ids~="issue-1"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[role="tab"][data-tab="details"]').attributes('aria-selected')).toBe(
+      'true'
+    )
+    expect(wrapper.get('aside[aria-label="问题详情"]').text()).toContain('建议调整措辞')
+  })
+
   it('does not reserve the obsolete desktop file grid area', () => {
     expect(ReviewWorkspaceViewSource).not.toContain('"file document find"')
     expect(ReviewWorkspaceViewSource).not.toContain(
@@ -3101,6 +3141,8 @@ describe('ReviewWorkspaceView', () => {
         toJSON: () => ({})
       })
 
+      await wrapper.get('[data-tool="search"]').trigger('click')
+      await flushPromises()
       await wrapper.get('[aria-label="查找内容"]').setValue('项目')
       await flushPromises()
       scrollIntoView.mockClear()
@@ -3110,6 +3152,10 @@ describe('ReviewWorkspaceView', () => {
       await wrapper.get('button[name="next-match"]').trigger('click')
       await flushPromises()
 
+      expect(wrapper.get('[role="tab"][data-tab="search"]').attributes('aria-selected')).toBe(
+        'true'
+      )
+      expect(wrapper.get('[aria-label="查找内容"]').isVisible()).toBe(true)
       expect(wrapper.get('[data-testid="find-status"]').text()).toContain('第 2 / 3 处')
       expect(scrollIntoView).not.toHaveBeenCalled()
       expect(scrollTo).toHaveBeenCalledTimes(1)
@@ -3144,6 +3190,8 @@ describe('ReviewWorkspaceView', () => {
     )
     await flushPromises()
 
+    await wrapper.get('[data-tool="search"]').trigger('click')
+    await flushPromises()
     await wrapper.get('[aria-label="查找内容"]').setValue('项目')
     await flushPromises()
 
@@ -3260,6 +3308,8 @@ describe('ReviewWorkspaceView', () => {
     )
     await flushPromises()
 
+    await wrapper.get('[data-tool="search"]').trigger('click')
+    await flushPromises()
     await wrapper.get('[aria-label="查找内容"]').setValue('项目')
     await wrapper.get('[aria-label="替换为"]').setValue('条目')
     await wrapper.get('button[name="replace-all"]').trigger('click')

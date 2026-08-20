@@ -180,11 +180,6 @@ function validateCustomReplacement(replacement: string): string | null {
 <style scoped>
 .issue-panel {
   min-width: 0;
-  overflow: auto;
-  padding: 18px;
-  background: #fff;
-  border: 1px solid #e2e7f0;
-  border-radius: 16px;
 }
 
 .issue-panel__heading {

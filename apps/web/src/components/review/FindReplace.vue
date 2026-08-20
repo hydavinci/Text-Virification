@@ -84,11 +84,8 @@ const emit = defineEmits<{
 <style scoped>
 .find-replace {
   display: grid;
-  gap: 10px;
-  padding: 14px 16px;
-  background: #fff;
-  border: 1px solid #dfe4f4;
-  border-radius: 14px;
+  min-width: 0;
+  gap: 12px;
 }
 
 .find-replace__heading strong {
@@ -112,7 +109,7 @@ const emit = defineEmits<{
 
 .find-replace__fields {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
 }
 
@@ -147,6 +144,7 @@ const emit = defineEmits<{
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  flex-wrap: nowrap;
 }
 
 .find-replace__nav {
@@ -179,54 +177,5 @@ const emit = defineEmits<{
 .find-replace__error {
   margin: 0;
   color: #a53636;
-}
-
-@media (min-width: 981px) {
-  .find-replace {
-    grid-template-areas:
-      "heading fields actions"
-      "status status status"
-      "error error error";
-    grid-template-columns: auto minmax(0, 1fr) auto;
-    align-items: end;
-    gap: 4px 8px;
-    padding: 8px 10px;
-  }
-
-  .find-replace__heading {
-    grid-area: heading;
-    align-self: center;
-  }
-
-  .find-replace__heading p {
-    display: none;
-  }
-
-  .find-replace__fields {
-    grid-area: fields;
-    gap: 8px;
-  }
-
-  .find-replace__fields label {
-    gap: 3px;
-  }
-
-  .find-replace__actions {
-    grid-area: actions;
-    gap: 8px;
-  }
-
-  .find-replace__actions button {
-    padding: 7px 9px;
-  }
-
-  .find-replace__status {
-    grid-area: status;
-    margin: 0;
-  }
-
-  .find-replace__error {
-    grid-area: error;
-  }
 }
 </style>

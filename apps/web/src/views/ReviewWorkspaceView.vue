@@ -3,7 +3,9 @@ import { nextTick, onBeforeUnmount, ref, type Ref } from 'vue'
 
 import BatchActions from '../components/review/BatchActions.vue'
 import CheckerFailureNotice from '../components/review/CheckerFailureNotice.vue'
+import ContextInspector from '../components/review/ContextInspector.vue'
 import DocumentViewer from '../components/review/DocumentViewer.vue'
+import FindReplace from '../components/review/FindReplace.vue'
 import IssuePanel from '../components/review/IssuePanel.vue'
 import ReviewNavigation from '../components/review/ReviewNavigation.vue'
 import ReviewToolbar from '../components/review/ReviewToolbar.vue'
@@ -164,6 +166,26 @@ function activateDesktopTool(tool: WorkspaceTool): void {
   }
 }
 
+function selectIssueAndShowDetails(issueId: string): void {
+  selectIssue(issueId)
+  activeRailTool.value = 'issues'
+  activeInspectorTab.value = 'details'
+
+  if (isMobile.value) {
+    activateMobileTab('issues')
+  }
+}
+
+function selectHighlightAndShowDetails(issueId: string): void {
+  selectHighlight(issueId)
+  activeRailTool.value = 'issues'
+  activeInspectorTab.value = 'details'
+
+  if (isMobile.value) {
+    activateMobileTab('issues')
+  }
+}
+
 function closeSidePanel(): void {
   isSidePanelOpen.value = false
 }
@@ -264,18 +286,6 @@ onBeforeUnmount(() => {
     <ReviewToolbar
       :job-id="jobId"
       :file-type="fileType"
-      :bulk-action-pending="bulkActionPending"
-      :find-query="findQuery"
-      :replace-text="replaceText"
-      :find-status="findStatus"
-      :can-navigate-matches="canNavigateMatches"
-      :can-replace-all-matches="canReplaceAllMatches"
-      :find-replace-error="findReplaceError"
-      @update-find-query="setFindQuery"
-      @update-replace-text="setReplaceText"
-      @previous-match="goToPreviousMatch"
-      @next-match="goToNextMatch"
-      @replace-all="replaceAllMatches"
     />
 
     <div v-if="!isDesktop" class="review-workspace__supplements">
@@ -345,7 +355,7 @@ onBeforeUnmount(() => {
           :next-cursor="blockCursor"
           :loading="loading.document"
           :error="errors.document"
-          @select-highlight="selectHighlight"
+          @select-highlight="selectHighlightAndShowDetails"
           @load-next="loadNextBlocks"
           @retry-summary="retrySummary"
           @retry="retryDocument"
@@ -369,23 +379,38 @@ onBeforeUnmount(() => {
           :error="errors.issues"
           :filters="filters"
           :next-cursor="issueCursor"
-          @select="selectIssue"
+          @select="selectIssueAndShowDetails"
           @retry="retryIssues"
           @load-next="loadNextIssues"
           @filter-change="setFilters"
         />
-        <div
-          class="review-workspace__inspector-placeholder"
-          :data-inspector-tab="activeInspectorTab"
-        >
-          <IssuePanel
-            :issue="selectedIssue"
-            :decision-error="decisionError"
-            :can-retry-decision="canRetryDecision"
-            @decide="decide"
-            @retry-decision="retryDecision"
-          />
-        </div>
+        <ContextInspector v-model:active-tab="activeInspectorTab">
+          <template #details>
+            <IssuePanel
+              :issue="selectedIssue"
+              :decision-error="decisionError"
+              :can-retry-decision="canRetryDecision"
+              @decide="decide"
+              @retry-decision="retryDecision"
+            />
+          </template>
+          <template #search>
+            <FindReplace
+              :query="findQuery"
+              :replacement="replaceText"
+              :status="findStatus"
+              :can-navigate="canNavigateMatches"
+              :can-replace-all="canReplaceAllMatches"
+              :busy="bulkActionPending"
+              :error="findReplaceError"
+              @update-query="setFindQuery"
+              @update-replacement="setReplaceText"
+              @previous-match="goToPreviousMatch"
+              @next-match="goToNextMatch"
+              @replace-all="replaceAllMatches"
+            />
+          </template>
+        </ContextInspector>
       </section>
     </template>
 
@@ -423,7 +448,7 @@ onBeforeUnmount(() => {
               :error="errors.issues"
               :filters="filters"
               :next-cursor="issueCursor"
-              @select="selectIssue"
+              @select="selectIssueAndShowDetails"
               @retry="retryIssues"
               @load-next="loadNextIssues"
               @filter-change="setFilters"
@@ -456,19 +481,39 @@ onBeforeUnmount(() => {
         :next-cursor="blockCursor"
         :loading="loading.document"
         :error="errors.document"
-        @select-highlight="selectHighlight"
+        @select-highlight="selectHighlightAndShowDetails"
         @load-next="loadNextBlocks"
         @retry-summary="retrySummary"
         @retry="retryDocument"
       />
 
-      <IssuePanel
-        :issue="selectedIssue"
-        :decision-error="decisionError"
-        :can-retry-decision="canRetryDecision"
-        @decide="decide"
-        @retry-decision="retryDecision"
-      />
+      <ContextInspector v-model:active-tab="activeInspectorTab">
+        <template #details>
+          <IssuePanel
+            :issue="selectedIssue"
+            :decision-error="decisionError"
+            :can-retry-decision="canRetryDecision"
+            @decide="decide"
+            @retry-decision="retryDecision"
+          />
+        </template>
+        <template #search>
+          <FindReplace
+            :query="findQuery"
+            :replacement="replaceText"
+            :status="findStatus"
+            :can-navigate="canNavigateMatches"
+            :can-replace-all="canReplaceAllMatches"
+            :busy="bulkActionPending"
+            :error="findReplaceError"
+            @update-query="setFindQuery"
+            @update-replacement="setReplaceText"
+            @previous-match="goToPreviousMatch"
+            @next-match="goToNextMatch"
+            @replace-all="replaceAllMatches"
+          />
+        </template>
+      </ContextInspector>
     </div>
 
     <div v-else class="review-workspace__columns">
@@ -481,7 +526,7 @@ onBeforeUnmount(() => {
         :error="errors.issues"
         :filters="filters"
         :next-cursor="issueCursor"
-        @select="selectIssue"
+        @select="selectIssueAndShowDetails"
         @retry="retryIssues"
         @load-next="loadNextIssues"
         @filter-change="setFilters"
@@ -499,18 +544,38 @@ onBeforeUnmount(() => {
         :next-cursor="blockCursor"
         :loading="loading.document"
         :error="errors.document"
-        @select-highlight="selectHighlight"
+        @select-highlight="selectHighlightAndShowDetails"
         @load-next="loadNextBlocks"
         @retry-summary="retrySummary"
         @retry="retryDocument"
       />
-      <IssuePanel
-        :issue="selectedIssue"
-        :decision-error="decisionError"
-        :can-retry-decision="canRetryDecision"
-        @decide="decide"
-        @retry-decision="retryDecision"
-      />
+      <ContextInspector v-model:active-tab="activeInspectorTab">
+        <template #details>
+          <IssuePanel
+            :issue="selectedIssue"
+            :decision-error="decisionError"
+            :can-retry-decision="canRetryDecision"
+            @decide="decide"
+            @retry-decision="retryDecision"
+          />
+        </template>
+        <template #search>
+          <FindReplace
+            :query="findQuery"
+            :replacement="replaceText"
+            :status="findStatus"
+            :can-navigate="canNavigateMatches"
+            :can-replace-all="canReplaceAllMatches"
+            :busy="bulkActionPending"
+            :error="findReplaceError"
+            @update-query="setFindQuery"
+            @update-replacement="setReplaceText"
+            @previous-match="goToPreviousMatch"
+            @next-match="goToNextMatch"
+            @replace-all="replaceAllMatches"
+          />
+        </template>
+      </ContextInspector>
     </div>
 
     <p
@@ -615,11 +680,6 @@ onBeforeUnmount(() => {
 
 .review-workspace__desktop-shell {
   align-items: stretch;
-}
-
-.review-workspace__inspector-placeholder {
-  min-width: 0;
-  min-height: 0;
 }
 
 .review-workspace__side-panel-content {

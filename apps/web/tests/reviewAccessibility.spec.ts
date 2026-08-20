@@ -253,17 +253,31 @@ describe('review workspace accessibility', () => {
   })
 
   it('keeps desktop review tools compact while preserving the mobile layouts', () => {
-    for (const source of [ReviewToolbarSource, ExportPanelSource, FindReplaceSource]) {
+    for (const source of [ReviewToolbarSource, ExportPanelSource]) {
       expect(source).toContain('@media (min-width: 981px)')
     }
 
     expect(ReviewToolbarSource).toContain('min-height: 64px')
+    expect(ReviewToolbarSource).toContain('aria-label="导出工具"')
+    expect(ReviewToolbarSource).not.toContain('FindReplace')
     expect(ExportPanelSource).toContain('.export-panel__heading p')
     expect(ExportPanelSource).toContain('display: none')
     expect(BatchActionsSource).toContain('.batch-actions__heading p')
     expect(BatchActionsSource).toContain('仅当前已加载 · 最多')
-    expect(FindReplaceSource).toContain('grid-template-areas:')
-    expect(FindReplaceSource).toContain('"heading fields actions"')
+    expect(FindReplaceSource).not.toContain('@media (min-width: 981px)')
+    expect(FindReplaceSource).not.toContain('grid-template-areas:')
+
+    const findReplaceRule = sourceRuleBody(FindReplaceSource, '\\.find-replace')
+    const findReplaceFieldsRule = sourceRuleBody(FindReplaceSource, '\\.find-replace__fields')
+    const findReplaceActionsRule = sourceRuleBody(FindReplaceSource, '\\.find-replace__actions')
+    const issuePanelRule = sourceRuleBody(IssuePanelSource, '\\.issue-panel')
+
+    expect(findReplaceRule).not.toContain('background:')
+    expect(findReplaceRule).not.toContain('border:')
+    expect(findReplaceFieldsRule).toContain('grid-template-columns: minmax(0, 1fr)')
+    expect(findReplaceActionsRule).toContain('flex-wrap: nowrap')
+    expect(issuePanelRule).not.toContain('background:')
+    expect(issuePanelRule).not.toContain('border:')
   })
 
   it('runs the desktop document from top to bottom between the rail, left panel, and inspector', () => {
