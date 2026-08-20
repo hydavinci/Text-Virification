@@ -192,11 +192,7 @@ onBeforeUnmount(() => {
   <section class="review-workspace" aria-label="文档审阅工作台" @keydown="onWorkspaceKeydown">
     <ReviewToolbar
       :job-id="jobId"
-      :source-name="sourceName"
       :file-type="fileType"
-      :summary="summary"
-      :loading="loading.summary"
-      :error="errors.summary"
       :checker-failures="checkerFailures"
       :batch-limit="batchLimit"
       :visible-issue-count="visibleIssueCount"
@@ -209,7 +205,6 @@ onBeforeUnmount(() => {
       :can-navigate-matches="canNavigateMatches"
       :can-replace-all-matches="canReplaceAllMatches"
       :find-replace-error="findReplaceError"
-      @retry="retrySummary"
       @accept-visible="decideVisible('accepted')"
       @ignore-visible="decideVisible('ignored')"
       @update-find-query="setFindQuery"
@@ -258,6 +253,11 @@ onBeforeUnmount(() => {
         v-show="activeMobileTab === 'document'"
       >
         <DocumentViewer
+          :source-name="sourceName"
+          :file-type="fileType"
+          :total-issues="summary?.total_issues ?? null"
+          :summary-loading="loading.summary"
+          :summary-error="errors.summary"
           :blocks="blocks"
           :issues="issues"
           :selected-issue-id="selectedIssueId"
@@ -267,6 +267,7 @@ onBeforeUnmount(() => {
           :error="errors.document"
           @select-highlight="selectHighlight"
           @load-next="loadNextBlocks"
+          @retry-summary="retrySummary"
           @retry="retryDocument"
         />
       </section>
@@ -319,6 +320,11 @@ onBeforeUnmount(() => {
         @filter-change="setFilters"
       />
       <DocumentViewer
+        :source-name="sourceName"
+        :file-type="fileType"
+        :total-issues="summary?.total_issues ?? null"
+        :summary-loading="loading.summary"
+        :summary-error="errors.summary"
         :blocks="blocks"
         :issues="issues"
         :selected-issue-id="selectedIssueId"
@@ -328,6 +334,7 @@ onBeforeUnmount(() => {
         :error="errors.document"
         @select-highlight="selectHighlight"
         @load-next="loadNextBlocks"
+        @retry-summary="retrySummary"
         @retry="retryDocument"
       />
       <IssuePanel

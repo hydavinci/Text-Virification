@@ -4,20 +4,13 @@ import { computed } from 'vue'
 import BatchActions from './BatchActions.vue'
 import ExportPanel from './ExportPanel.vue'
 import FindReplace from './FindReplace.vue'
-import type {
-  AnalysisSummaryResponse,
-  CheckerFailureMap
-} from '../../types/analysis'
+import type { CheckerFailureMap } from '../../types/analysis'
 import type { FileType } from '../../types/review'
 import { categoryLabel } from './presentation'
 
 const props = defineProps<{
   jobId: string
-  sourceName: string
   fileType: FileType
-  summary: AnalysisSummaryResponse | null
-  loading: boolean
-  error: string | null
   checkerFailures: CheckerFailureMap
   batchLimit: number
   visibleIssueCount: number
@@ -33,7 +26,6 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  retry: []
   acceptVisible: []
   ignoreVisible: []
   updateFindQuery: [value: string]
@@ -51,24 +43,6 @@ const failures = computed(() =>
 </script>
 
 <template>
-  <header class="review-toolbar">
-    <div>
-      <p class="review-toolbar__eyebrow">文档审阅</p>
-      <h1>{{ sourceName }}</h1>
-      <p class="review-toolbar__meta">
-        {{ fileType.toUpperCase() }}
-        <span aria-hidden="true">·</span>
-        {{ summary ? `${summary.total_issues} 个问题` : '正在读取问题总览' }}
-      </p>
-    </div>
-
-    <p v-if="loading" class="review-toolbar__status" role="status">正在加载总览…</p>
-    <div v-else-if="error" class="review-toolbar__error" role="alert">
-      <span>{{ error }}</span>
-      <button type="button" @click="emit('retry')">重试总览</button>
-    </div>
-  </header>
-
   <section class="review-toolbar__actions" aria-label="导出、批量与查找工具">
     <ExportPanel :job-id="jobId" :file-type="fileType" />
     <BatchActions
@@ -112,65 +86,6 @@ const failures = computed(() =>
 </template>
 
 <style scoped>
-.review-toolbar {
-  display: flex;
-  min-height: 92px;
-  align-items: center;
-  justify-content: space-between;
-  gap: 24px;
-  padding: 18px 24px;
-  background: #fff;
-  border: 1px solid #e2e7f0;
-  border-radius: 18px;
-  box-shadow: 0 12px 36px rgba(36, 49, 80, 0.08);
-}
-
-.review-toolbar__eyebrow {
-  margin: 0 0 4px;
-  color: #5a6fe7;
-  font-size: 0.75rem;
-  font-weight: 800;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-h1 {
-  margin: 0;
-  color: #1c2538;
-  font-size: 1.35rem;
-}
-
-.review-toolbar__meta {
-  display: flex;
-  gap: 7px;
-  margin: 6px 0 0;
-  color: #697287;
-  font-size: 0.8rem;
-}
-
-.review-toolbar__status {
-  margin: 0;
-  color: #667085;
-}
-
-.review-toolbar__error {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  color: #a53636;
-}
-
-button {
-  min-height: 44px;
-  padding: 7px 11px;
-  color: #4256c9;
-  font-weight: 700;
-  background: #eef0ff;
-  border: 0;
-  border-radius: 8px;
-  cursor: pointer;
-}
-
 .review-toolbar__actions {
   display: grid;
   grid-template-columns: minmax(260px, 0.9fr) minmax(280px, 0.9fr) minmax(320px, 1.1fr);
@@ -217,31 +132,6 @@ button {
 @media (min-width: 981px) {
   .review-toolbar {
     min-height: 64px;
-    gap: 16px;
-    padding: 8px 16px;
-  }
-
-  .review-toolbar > div:first-child {
-    display: flex;
-    min-width: 0;
-    align-items: center;
-    gap: 12px;
-  }
-
-  .review-toolbar__eyebrow {
-    display: none;
-  }
-
-  h1 {
-    overflow: hidden;
-    font-size: 1rem;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .review-toolbar__meta {
-    flex: 0 0 auto;
-    margin: 0;
   }
 
   .review-toolbar__actions {

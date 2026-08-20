@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { inject, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 
 import type { DocumentBlock, Issue } from '../../types/analysis'
+import type { FileType } from '../../types/review'
+import DocumentHeader from './DocumentHeader.vue'
 import {
   browserReviewIntersectionObserverFactory,
   reviewIntersectionObserverFactoryKey,
@@ -32,6 +34,11 @@ interface OverlapComponent {
 }
 
 const props = defineProps<{
+  sourceName: string
+  fileType: FileType
+  totalIssues: number | null
+  summaryLoading: boolean
+  summaryError: string | null
   blocks: DocumentBlock[]
   issues: Issue[]
   selectedIssueId: string | null
@@ -44,6 +51,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   selectHighlight: [issueId: string]
   loadNext: []
+  retrySummary: []
   retry: []
 }>()
 
@@ -58,6 +66,10 @@ let requestedCursor: string | null = null
 let pendingHighlightFocusIssueId: string | null = null
 let restoreFocusOnNextPointerClick = false
 let active = true
+
+const loadedParagraphCount = computed(
+  () => props.blocks.filter(({ kind }) => kind === 'paragraph').length
+)
 
 function issuesForBlock(blockId: string): Issue[] {
   return props.issues.filter((issue) => issue.block_id === blockId)
@@ -384,13 +396,15 @@ onBeforeUnmount(() => {
 
 <template>
   <article ref="viewer" class="document-viewer" aria-label="文档内容">
-    <div class="document-viewer__heading">
-      <div>
-        <p>文档内容</p>
-        <strong>{{ blocks.length }} 个已加载段落</strong>
-      </div>
-      <span v-if="loading" role="status">正在加载…</span>
-    </div>
+    <DocumentHeader
+      :source-name="sourceName"
+      :file-type="fileType"
+      :loaded-paragraph-count="loadedParagraphCount"
+      :total-issues="totalIssues"
+      :loading="summaryLoading"
+      :error="summaryError"
+      @retry="emit('retrySummary')"
+    />
 
     <div v-if="error" class="document-viewer__error" data-testid="document-error" role="alert">
       <p>{{ error }}</p>
@@ -458,31 +472,6 @@ onBeforeUnmount(() => {
   .document-viewer {
     height: auto;
   }
-}
-
-.document-viewer__heading {
-  position: sticky;
-  z-index: 2;
-  top: 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 13px 18px;
-  background: rgba(255, 255, 255, 0.95);
-  border-bottom: 1px solid #dfe5ef;
-  backdrop-filter: blur(8px);
-}
-
-.document-viewer__heading p {
-  margin: 0 0 2px;
-  color: #667085;
-  font-size: 0.72rem;
-}
-
-.document-viewer__heading strong,
-.document-viewer__heading span {
-  color: #30394d;
-  font-size: 0.8rem;
 }
 
 .document-viewer__page {

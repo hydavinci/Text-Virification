@@ -758,6 +758,11 @@ describe('ReviewWorkspaceView', () => {
     expect(wrapper.find('article[aria-label="文档内容"]').exists()).toBe(true)
     expect(wrapper.find('aside[aria-label="问题详情"]').exists()).toBe(true)
     expect(wrapper.findAll('.document-highlight-control')).toHaveLength(0)
+    expect(wrapper.get('[data-testid="document-header"]').text()).toContain('sample.txt')
+    expect(wrapper.get('[data-testid="document-header"]').text()).toContain(
+      '2 个已加载段落'
+    )
+    expect(wrapper.get('[data-testid="document-header"]').text()).toContain('2 个问题')
 
     await wrapper.get('[data-issue-id="issue-2"]').trigger('click')
 
@@ -3160,7 +3165,7 @@ describe('ReviewWorkspaceView', () => {
     const wrapper = mountReviewWorkspace(createAnalysisApiMock({ getSummary }))
     await flushPromises()
 
-    const retry = wrapper.get('.review-toolbar__error button')
+    const retry = wrapper.get('[data-testid="document-header"] button')
     await retry.trigger('click')
     await retry.trigger('click')
 
@@ -3169,7 +3174,9 @@ describe('ReviewWorkspaceView', () => {
     successfulRetry.resolve(buildSummary())
     await flushPromises()
 
-    expect(wrapper.find('.review-toolbar__error').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="document-header"] [role="alert"]').exists()).toBe(
+      false
+    )
     expect(wrapper.text()).toContain('2 个问题')
   })
 

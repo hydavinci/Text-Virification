@@ -2,6 +2,7 @@ import { mount } from '@vue/test-utils'
 import { describe, expect, it } from 'vitest'
 
 import ContextInspector from '../src/components/review/ContextInspector.vue'
+import DocumentHeader from '../src/components/review/DocumentHeader.vue'
 import WorkspaceSidePanel from '../src/components/review/WorkspaceSidePanel.vue'
 import ToolRail from '../src/components/review/ToolRail.vue'
 
@@ -69,6 +70,29 @@ describe('ToolRail', () => {
 })
 
 describe('review shell containers', () => {
+  it('renders file metadata and retries a failed summary', async () => {
+    const wrapper = mount(DocumentHeader, {
+      props: {
+        sourceName: 'contract.docx',
+        fileType: 'docx',
+        loadedParagraphCount: 42,
+        totalIssues: 7,
+        loading: false,
+        error: '总览加载失败'
+      }
+    })
+
+    expect(wrapper.text()).toContain('contract.docx')
+    expect(wrapper.text()).toContain('DOCX')
+    expect(wrapper.text()).toContain('42 个已加载段落')
+    expect(wrapper.text()).toContain('7 个问题')
+    expect(wrapper.get('[role="alert"]').text()).toContain('总览加载失败')
+
+    await wrapper.get('button').trigger('click')
+
+    expect(wrapper.emitted('retry')).toHaveLength(1)
+  })
+
   it('labels and closes the optional side panel', async () => {
     const wrapper = mount(WorkspaceSidePanel, {
       props: { open: true, title: '问题' },
