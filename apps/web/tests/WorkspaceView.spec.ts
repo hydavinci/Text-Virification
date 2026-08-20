@@ -300,6 +300,40 @@ describe('WorkspaceView', () => {
     )
   })
 
+  it('returns to the upload workspace to process another file', async () => {
+    const closeSubscription = vi.fn()
+    const createJob = vi.fn().mockResolvedValue(buildJobRead())
+    const subscribe = vi.fn((_jobId, onEvent) => {
+      onEvent({
+        sequence: 2,
+        status: 'completed',
+        progress: 100,
+        message: '处理完成',
+        created_at: '2026-08-14T00:02:00Z'
+      })
+      return closeSubscription
+    })
+    const wrapper = mount(WorkspaceView, {
+      global: {
+        provide: {
+          [jobsApiKey as symbol]: { createJob, subscribe },
+          [analysisApiKey as symbol]: createAnalysisApiMock(),
+          [exportsApiKey as symbol]: createExportsApiMock()
+        }
+      }
+    })
+
+    await selectFile(wrapper, new File(['检查'], 'sample.txt', { type: 'text/plain' }))
+    await flushPromises()
+    await wrapper.get('button[name="process-another-file"]').trigger('click')
+    await flushPromises()
+
+    expect(closeSubscription).toHaveBeenCalledTimes(1)
+    expect(wrapper.find('[aria-label="文档审阅工作台"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="upload-dropzone"]').isVisible()).toBe(true)
+    expect(wrapper.get('main').classes()).not.toContain('workspace--review')
+  })
+
   it('opens the review workspace when analysis partially completes', async () => {
     const createJob = vi.fn().mockResolvedValue(buildJobRead())
     const subscribe = vi.fn((_jobId, onEvent) => {

@@ -144,6 +144,15 @@ function isRequestCurrent(generation: number): boolean {
   return isMounted && generation === requestGeneration
 }
 
+function processAnotherFile(): void {
+  requestGeneration += 1
+  closeSubscription()
+  activeJob.value = null
+  jobState.value = null
+  uploadError.value = null
+  isCreating.value = false
+}
+
 function defaultStatusMessage(status: JobStatus): string {
   switch (status) {
     case 'queued':
@@ -185,6 +194,7 @@ onBeforeUnmount(() => {
       :job-id="activeJob.jobId"
       :source-name="activeJob.sourceName"
       :file-type="activeJob.fileType"
+      @process-another-file="processAnotherFile"
     />
 
     <template v-else>

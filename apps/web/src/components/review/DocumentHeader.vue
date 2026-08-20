@@ -12,6 +12,7 @@ defineProps<{
 
 const emit = defineEmits<{
   retry: []
+  processAnotherFile: []
 }>()
 </script>
 
@@ -25,13 +26,24 @@ const emit = defineEmits<{
       <p>{{ loadedParagraphCount }} 个已加载段落 · {{ totalIssues ?? '—' }} 个问题</p>
     </div>
 
-    <span v-if="loading" class="document-header__status" role="status">
-      正在读取问题总览…
-    </span>
+    <div class="document-header__actions">
+      <span v-if="loading" class="document-header__status" role="status">
+        正在读取问题总览…
+      </span>
 
-    <div v-else-if="error" class="document-header__error" role="alert">
-      <span>{{ error }}</span>
-      <button type="button" @click="emit('retry')">重试总览</button>
+      <div v-else-if="error" class="document-header__error" role="alert">
+        <span>{{ error }}</span>
+        <button type="button" @click="emit('retry')">重试总览</button>
+      </div>
+
+      <button
+        type="button"
+        name="process-another-file"
+        class="document-header__new-file"
+        @click="emit('processAnotherFile')"
+      >
+        处理其他文件
+      </button>
     </div>
   </header>
 </template>
@@ -53,6 +65,13 @@ const emit = defineEmits<{
 
 .document-header__body {
   min-width: 0;
+}
+
+.document-header__actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--review-space-2);
 }
 
 .document-header__identity {
@@ -108,6 +127,18 @@ const emit = defineEmits<{
   cursor: pointer;
 }
 
+.document-header__new-file {
+  min-height: 44px;
+  padding: 0 var(--review-space-3);
+  color: var(--review-accent);
+  font-weight: 700;
+  white-space: nowrap;
+  background: var(--review-accent-soft);
+  border: 1px solid var(--review-border);
+  border-radius: calc(var(--review-panel-radius) - 2px);
+  cursor: pointer;
+}
+
 @media (max-width: 680px) {
   .document-header {
     align-items: flex-start;
@@ -116,6 +147,11 @@ const emit = defineEmits<{
 
   .document-header__error {
     flex-wrap: wrap;
+  }
+
+  .document-header__actions {
+    width: 100%;
+    justify-content: space-between;
   }
 }
 </style>

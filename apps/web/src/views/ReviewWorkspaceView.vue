@@ -27,6 +27,10 @@ const props = defineProps<{
   fileType: FileType
 }>()
 
+const emit = defineEmits<{
+  processAnotherFile: []
+}>()
+
 const {
   summary,
   filters,
@@ -366,6 +370,7 @@ onBeforeUnmount(() => {
             @load-next="loadNextBlocks"
             @retry-summary="retrySummary"
             @retry="retryDocument"
+            @process-another-file="emit('processAnotherFile')"
           />
         </section>
 
@@ -555,6 +560,7 @@ onBeforeUnmount(() => {
         @load-next="loadNextBlocks"
         @retry-summary="retrySummary"
         @retry="retryDocument"
+        @process-another-file="emit('processAnotherFile')"
       />
 
       <ContextInspector v-model:active-tab="activeInspectorTab">

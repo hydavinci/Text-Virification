@@ -53,6 +53,7 @@ const emit = defineEmits<{
   loadNext: []
   retrySummary: []
   retry: []
+  processAnotherFile: []
 }>()
 
 const observerFactory = inject(
@@ -412,6 +413,7 @@ onBeforeUnmount(() => {
       :loading="summaryLoading"
       :error="summaryError"
       @retry="emit('retrySummary')"
+      @process-another-file="emit('processAnotherFile')"
     />
 
     <div v-if="error" class="document-viewer__error" data-testid="document-error" role="alert">
