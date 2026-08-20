@@ -18,6 +18,31 @@ async function loadFixture(page: Page) {
   await expect(page.locator('.document-block')).toHaveCount(30)
 }
 
+async function readControlMetrics(locator: ReturnType<Page['locator']>) {
+  return locator.evaluate((node) => {
+    if (!(node instanceof HTMLElement)) {
+      throw new Error('Expected HTMLElement for geometry assertions')
+    }
+
+    const style = window.getComputedStyle(node)
+    const textRange = document.createRange()
+    textRange.selectNodeContents(node)
+    const textLineCount = Array.from(textRange.getClientRects()).filter(
+      (rect) => rect.width > 0 && rect.height > 0
+    ).length
+
+    return {
+      writingMode: style.writingMode,
+      whiteSpace: style.whiteSpace,
+      scrollWidth: node.scrollWidth,
+      clientWidth: node.clientWidth,
+      scrollHeight: node.scrollHeight,
+      clientHeight: node.clientHeight,
+      textLineCount
+    }
+  })
+}
+
 function expectDefinedBox(
   box: Awaited<ReturnType<ReturnType<Page['locator']>['boundingBox']>>
 ): asserts box is NonNullable<typeof box> {
@@ -86,12 +111,25 @@ for (const viewport of compactViewports) {
     await page.getByRole('button', { name: /^查找$/ }).click()
 
     const searchInput = page.getByLabel('查找内容')
-    const nextMatchButton = page.getByRole('button', { name: '下一处' })
+    const replaceInput = page.getByLabel('替换为')
+    const actionButtons = [
+      page.getByRole('button', { name: '上一处' }),
+      page.getByRole('button', { name: '下一处' }),
+      page.getByRole('button', { name: '全部替换' })
+    ]
+
     await expect(searchInput).toBeInViewport()
-    await expect(nextMatchButton).toBeVisible()
-    expect(
-      await nextMatchButton.evaluate((node) => window.getComputedStyle(node).writingMode)
-    ).toBe('horizontal-tb')
+    await expect(replaceInput).toBeInViewport()
+
+    for (const button of actionButtons) {
+      await expect(button).toBeInViewport()
+
+      const metrics = await readControlMetrics(button)
+      expect(metrics.writingMode).toBe('horizontal-tb')
+      expect(metrics.textLineCount).toBeLessThanOrEqual(1)
+      expect(metrics.scrollWidth).toBeLessThanOrEqual(metrics.clientWidth)
+      expect(metrics.scrollHeight).toBeLessThanOrEqual(metrics.clientHeight)
+    }
 
     await page.getByRole('button', { name: /^导出$/ }).click()
 
