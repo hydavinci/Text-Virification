@@ -20,7 +20,6 @@ import ExportPanelSource from '../src/components/review/ExportPanel.vue?raw'
 import FindReplaceSource from '../src/components/review/FindReplace.vue?raw'
 import ReviewNavigationSource from '../src/components/review/ReviewNavigation.vue?raw'
 import IssuePanelSource from '../src/components/review/IssuePanel.vue?raw'
-import ReviewToolbarSource from '../src/components/review/ReviewToolbar.vue?raw'
 import ReviewWorkspaceViewSource from '../src/views/ReviewWorkspaceView.vue?raw'
 import WorkspaceViewSource from '../src/views/WorkspaceView.vue?raw'
 
@@ -252,16 +251,18 @@ describe('review workspace accessibility', () => {
     expect(ReviewWorkspaceViewSource).toContain('height: auto')
   })
 
-  it('keeps desktop review tools compact while preserving the mobile layouts', () => {
-    for (const source of [ReviewToolbarSource, ExportPanelSource]) {
-      expect(source).toContain('@media (min-width: 981px)')
-    }
-
-    expect(ReviewToolbarSource).toContain('min-height: 64px')
-    expect(ReviewToolbarSource).toContain('aria-label="导出工具"')
-    expect(ReviewToolbarSource).not.toContain('FindReplace')
+  it('ships the anchored export dialog without the transitional toolbar', () => {
+    expect(ReviewWorkspaceViewSource).toContain('<ExportPanel')
+    expect(ReviewWorkspaceViewSource).not.toContain('ReviewToolbar')
+    expect(ExportPanelSource).toContain('role="dialog"')
+    expect(ExportPanelSource).toContain('aria-modal="true"')
+    expect(ExportPanelSource).toContain('data-testid="export-backdrop"')
+    expect(ExportPanelSource).toContain('aria-label="关闭导出"')
+    expect(ExportPanelSource).toContain('v-show="open"')
+    expect(ExportPanelSource).toContain("@pointerdown.self=\"emit('close')\"")
+    expect(ExportPanelSource).toContain('@keydown="onDialogKeydown"')
+    expect(ExportPanelSource).toContain('@media (min-width: 981px)')
     expect(ExportPanelSource).toContain('.export-panel__heading p')
-    expect(ExportPanelSource).toContain('display: none')
     expect(BatchActionsSource).toContain('.batch-actions__heading p')
     expect(BatchActionsSource).toContain('仅当前已加载 · 最多')
     expect(FindReplaceSource).not.toContain('@media (min-width: 981px)')

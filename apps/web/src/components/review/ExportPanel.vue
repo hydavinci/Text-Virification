@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, inject, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 
 import { exportsApiKey } from '../../api/exports'
 import { ApiError } from '../../types/api'
@@ -16,6 +16,11 @@ const POLL_INTERVAL_MS = 2000
 const props = defineProps<{
   jobId: string
   fileType: FileType
+  open: boolean
+}>()
+
+const emit = defineEmits<{
+  close: []
 }>()
 
 const injectedExportsApi = inject(exportsApiKey)
@@ -56,6 +61,7 @@ const requestError = ref<string | null>(null)
 const confirmationMessage = ref<string | null>(null)
 const confirmationWarnings = ref<ExportWarning[]>([])
 const expirySignal = ref(0)
+const dialog = ref<HTMLElement | null>(null)
 
 let active = true
 let pollTimerId: ReturnType<typeof setTimeout> | null = null
@@ -189,6 +195,18 @@ const retryLabel = computed(() => {
   return '重新导出'
 })
 
+function focusableElements(): HTMLElement[] {
+  if (!dialog.value) {
+    return []
+  }
+
+  return Array.from(
+    dialog.value.querySelectorAll<HTMLElement>(
+      'button:not(:disabled), select:not(:disabled), input:not(:disabled), textarea:not(:disabled), a[href], [tabindex]:not([tabindex="-1"])'
+    )
+  ).filter((element) => !element.hasAttribute('disabled') && element.tabIndex !== -1)
+}
+
 function clearTimer() {
   if (pollTimerId !== null) {
     clearTimeout(pollTimerId)
@@ -317,6 +335,37 @@ function retry() {
   void createExport(false)
 }
 
+function onDialogKeydown(event: KeyboardEvent): void {
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    emit('close')
+    return
+  }
+
+  if (event.key !== 'Tab') {
+    return
+  }
+
+  const focusable = focusableElements()
+  const first = focusable[0]
+  const last = focusable.at(-1)
+
+  if (!first || !last) {
+    return
+  }
+
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault()
+    last.focus()
+    return
+  }
+
+  if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault()
+    first.focus()
+  }
+}
+
 function errorMessage(error: unknown, fallback: string): string {
   if (error instanceof ApiError) {
     return error.detail.message
@@ -355,6 +404,18 @@ watch(
   { immediate: true }
 )
 
+watch(
+  () => props.open,
+  async (open) => {
+    if (!open) {
+      return
+    }
+
+    await nextTick()
+    focusableElements()[0]?.focus()
+  }
+)
+
 onBeforeUnmount(() => {
   active = false
   stopPolling()
@@ -363,106 +424,155 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="export-panel" aria-label="导出文件">
-    <div class="export-panel__heading">
-      <div>
-        <strong>导出文件</strong>
-        <p>生成修改版文件或核验报告。</p>
-      </div>
-      <span>{{ fileType.toUpperCase() }}</span>
-    </div>
+  <div v-show="open" class="export-panel-overlay">
+    <div
+      class="export-panel-overlay__backdrop"
+      data-testid="export-backdrop"
+      @pointerdown.self="emit('close')"
+    />
 
-    <div class="export-panel__controls">
-      <label>
-        <span>导出格式</span>
-        <select v-model="selectedType" name="export-type" :disabled="busy">
-          <option
-            v-for="option in exportOptions"
-            :key="option.value"
-            :value="option.value"
+    <section
+      ref="dialog"
+      class="export-panel"
+      role="dialog"
+      aria-modal="true"
+      aria-label="导出文件"
+      tabindex="-1"
+      @keydown="onDialogKeydown"
+    >
+      <div class="export-panel__heading">
+        <div>
+          <strong>导出文件</strong>
+          <p>生成修改版文件或核验报告。</p>
+        </div>
+        <div class="export-panel__heading-actions">
+          <span>{{ fileType.toUpperCase() }}</span>
+          <button
+            type="button"
+            class="export-panel__close"
+            aria-label="关闭导出"
+            @click="emit('close')"
           >
-            {{ option.label }}
-          </option>
-        </select>
-      </label>
-      <button type="button" name="create-export" :disabled="busy" @click="createExport(false)">
-        {{ busy ? '处理中…' : '创建导出' }}
-      </button>
-    </div>
+            ×
+          </button>
+        </div>
+      </div>
 
-    <div
-      v-if="statusMessage"
-      class="export-panel__status"
-      data-testid="export-status"
-      role="status"
-    >
-      {{ statusMessage }}
-    </div>
+      <div class="export-panel__controls">
+        <label>
+          <span>导出格式</span>
+          <select v-model="selectedType" name="export-type" :disabled="busy">
+            <option
+              v-for="option in exportOptions"
+              :key="option.value"
+              :value="option.value"
+            >
+              {{ option.label }}
+            </option>
+          </select>
+        </label>
+        <button type="button" name="create-export" :disabled="busy" @click="createExport(false)">
+          {{ busy ? '处理中…' : '创建导出' }}
+        </button>
+      </div>
 
-    <div
-      v-if="terminalError || requestError"
-      class="export-panel__error"
-      data-testid="export-error"
-      role="alert"
-    >
-      <span>{{ terminalError ?? requestError }}</span>
-      <button
-        v-if="canRetry"
-        type="button"
-        name="retry-export"
-        :disabled="busy"
-        @click="retry"
+      <div
+        v-if="statusMessage"
+        class="export-panel__status"
+        data-testid="export-status"
+        role="status"
       >
-        {{ retryLabel }}
-      </button>
-    </div>
+        {{ statusMessage }}
+      </div>
 
-    <div
-      v-if="panelWarnings.length"
-      class="export-panel__warnings"
-      data-testid="export-warnings"
-      role="alert"
-    >
-      <strong>{{ warningHeading }}</strong>
-      <p>{{ warningMessage }}</p>
-      <ul>
-        <li v-for="warning in panelWarnings" :key="`${warning.code}-${warning.issue_id}`">
-          <span class="export-panel__warning-code">{{ warning.code }}</span>
-          <span>{{ warning.message }}</span>
-        </li>
-      </ul>
-      <button
-        v-if="confirmationWarnings.length"
-        type="button"
-        name="confirm-export-warnings"
-        :disabled="busy"
-        @click="createExport(true)"
+      <div
+        v-if="terminalError || requestError"
+        class="export-panel__error"
+        data-testid="export-error"
+        role="alert"
       >
-        确认警告并继续导出
-      </button>
-    </div>
+        <span>{{ terminalError ?? requestError }}</span>
+        <button
+          v-if="canRetry"
+          type="button"
+          name="retry-export"
+          :disabled="busy"
+          @click="retry"
+        >
+          {{ retryLabel }}
+        </button>
+      </div>
 
-    <a
-      v-if="downloadUrl"
-      class="export-panel__download"
-      data-testid="export-download-link"
-      :href="downloadUrl"
-      :download="currentExport?.file_name"
-    >
-      下载 {{ currentExport?.file_name }}
-    </a>
-  </section>
+      <div
+        v-if="panelWarnings.length"
+        class="export-panel__warnings"
+        data-testid="export-warnings"
+        role="alert"
+      >
+        <strong>{{ warningHeading }}</strong>
+        <p>{{ warningMessage }}</p>
+        <ul>
+          <li v-for="warning in panelWarnings" :key="`${warning.code}-${warning.issue_id}`">
+            <span class="export-panel__warning-code">{{ warning.code }}</span>
+            <span>{{ warning.message }}</span>
+          </li>
+        </ul>
+        <button
+          v-if="confirmationWarnings.length"
+          type="button"
+          name="confirm-export-warnings"
+          :disabled="busy"
+          @click="createExport(true)"
+        >
+          确认警告并继续导出
+        </button>
+      </div>
+
+      <a
+        v-if="downloadUrl"
+        class="export-panel__download"
+        data-testid="export-download-link"
+        :href="downloadUrl"
+        :download="currentExport?.file_name"
+      >
+        下载 {{ currentExport?.file_name }}
+      </a>
+    </section>
+  </div>
 </template>
 
 <style scoped>
+.export-panel-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.export-panel-overlay__backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(28, 37, 56, 0.2);
+  pointer-events: auto;
+}
+
 .export-panel {
+  position: absolute;
+  left: calc(100% + 12px);
+  bottom: 0;
   display: grid;
   gap: 12px;
   min-width: 0;
+  width: min(360px, calc(100vw - 32px));
+  max-height: calc(100dvh - 48px);
   padding: 14px 16px;
+  overflow: auto;
   background: #fff;
   border: 1px solid #e2e7f0;
   border-radius: 16px;
+  box-shadow: 0 20px 48px rgba(15, 23, 42, 0.18);
+  pointer-events: auto;
 }
 
 .export-panel__heading {
@@ -484,10 +594,32 @@ onBeforeUnmount(() => {
   font-size: 0.8rem;
 }
 
+.export-panel__heading-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .export-panel__heading span {
   color: #5a6fe7;
   font-size: 0.78rem;
   font-weight: 700;
+}
+
+.export-panel__close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0;
+  color: #475467;
+  font-size: 1.4rem;
+  line-height: 1;
+  background: #f8f9fc;
+  border: 1px solid #d8deea;
+  border-radius: 10px;
+  cursor: pointer;
 }
 
 .export-panel__controls {
@@ -578,6 +710,10 @@ onBeforeUnmount(() => {
     display: none;
   }
 
+  .export-panel__heading-actions {
+    gap: 8px;
+  }
+
   .export-panel__controls {
     gap: 8px;
   }
@@ -639,6 +775,15 @@ a:focus-visible {
 }
 
 @media (max-width: 980px) {
+  .export-panel {
+    left: min(12px, 100% + 12px);
+    right: 12px;
+    bottom: auto;
+    top: 12px;
+    width: auto;
+    max-height: calc(100dvh - 24px);
+  }
+
   .export-panel__controls {
     grid-template-columns: minmax(0, 1fr);
   }

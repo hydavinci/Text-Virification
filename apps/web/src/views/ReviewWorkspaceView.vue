@@ -5,10 +5,10 @@ import BatchActions from '../components/review/BatchActions.vue'
 import CheckerFailureNotice from '../components/review/CheckerFailureNotice.vue'
 import ContextInspector from '../components/review/ContextInspector.vue'
 import DocumentViewer from '../components/review/DocumentViewer.vue'
+import ExportPanel from '../components/review/ExportPanel.vue'
 import FindReplace from '../components/review/FindReplace.vue'
 import IssuePanel from '../components/review/IssuePanel.vue'
 import ReviewNavigation from '../components/review/ReviewNavigation.vue'
-import ReviewToolbar from '../components/review/ReviewToolbar.vue'
 import ToolRail from '../components/review/ToolRail.vue'
 import WorkspaceSidePanel from '../components/review/WorkspaceSidePanel.vue'
 import { useReviewWorkspace } from '../composables/useReviewWorkspace'
@@ -91,8 +91,10 @@ const activeMobileTab = ref<MobileReviewTab>('document')
 const activeRailTool = ref<RailTool>('issues')
 const activeSidePanelTool = ref<SidePanelTool>('issues')
 const isSidePanelOpen = ref(true)
+const isExportOpen = ref(false)
 const activeInspectorTab = ref<InspectorTab>('details')
 const tabButtons = new Map<MobileReviewTab, HTMLButtonElement>()
+const toolRail = ref<{ focusExportButton(): void } | null>(null)
 
 function bindMediaQuery(
   mediaQuery: MediaQueryList | null,
@@ -182,12 +184,28 @@ function closeSidePanel(): void {
   isSidePanelOpen.value = false
 }
 
-function focusToolbarExport(): void {
+function focusExportTrigger(): void {
   void nextTick(() => {
-    workspaceRoot.value
-      ?.querySelector<HTMLSelectElement>('select[name="export-type"]')
-      ?.focus()
+    toolRail.value?.focusExportButton()
   })
+}
+
+function closeExport(): void {
+  if (!isExportOpen.value) {
+    return
+  }
+
+  isExportOpen.value = false
+  focusExportTrigger()
+}
+
+function toggleExport(): void {
+  if (isExportOpen.value) {
+    closeExport()
+    return
+  }
+
+  isExportOpen.value = true
 }
 
 function onTabKeydown(event: KeyboardEvent): void {
@@ -275,11 +293,6 @@ onBeforeUnmount(() => {
     aria-label="文档审阅工作台"
     @keydown="onWorkspaceKeydown"
   >
-    <ReviewToolbar
-      :job-id="jobId"
-      :file-type="fileType"
-    />
-
     <div v-if="!isDesktop" class="review-workspace__supplements">
       <CheckerFailureNotice v-if="!isDesktop" :failures="checkerFailures" />
 
@@ -411,14 +424,23 @@ onBeforeUnmount(() => {
       class="review-workspace__desktop-shell"
       :data-side-panel-open="isSidePanelOpen"
     >
-      <ToolRail
-        mode="rail"
-        :active-tool="activeRailTool"
-        :side-panel-open="isSidePanelOpen"
-        :export-open="true"
-        @activate="activateDesktopTool"
-        @toggle-export="focusToolbarExport"
-      />
+      <div class="review-workspace__rail-stack">
+        <ToolRail
+          ref="toolRail"
+          mode="rail"
+          :active-tool="activeRailTool"
+          :side-panel-open="isSidePanelOpen"
+          :export-open="isExportOpen"
+          @activate="activateDesktopTool"
+          @toggle-export="toggleExport"
+        />
+        <ExportPanel
+          :job-id="jobId"
+          :file-type="fileType"
+          :open="isExportOpen"
+          @close="closeExport"
+        />
+      </div>
 
       <WorkspaceSidePanel
         :open="isSidePanelOpen"
@@ -672,6 +694,13 @@ onBeforeUnmount(() => {
 
 .review-workspace__desktop-shell {
   align-items: stretch;
+}
+
+.review-workspace__rail-stack {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: visible;
 }
 
 .review-workspace__side-panel-content {

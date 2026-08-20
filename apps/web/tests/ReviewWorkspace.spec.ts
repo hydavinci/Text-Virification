@@ -345,6 +345,13 @@ async function openDesktopIssuesPanel(
   await flushPromises()
 }
 
+async function openExportDialog(
+  wrapper: ReturnType<typeof mountReviewWorkspace>
+): Promise<void> {
+  await wrapper.get('[data-tool="export"]').trigger('click')
+  await flushPromises()
+}
+
 function buildConnectedOverlapAnalysisApi(): AnalysisApi {
   return createAnalysisApiMock({
     getDocumentPage: vi.fn().mockResolvedValue(
@@ -452,10 +459,90 @@ describe('ReviewWorkspaceView', () => {
       }
     })
     await flushPromises()
+    await openExportDialog(wrapper)
 
     expect(wrapper.find('option[value="modified_document"]').exists()).toBe(false)
     expect(wrapper.find('option[value="html_report"]').exists()).toBe(true)
     expect(wrapper.find('option[value="pdf_report"]').exists()).toBe(true)
+  })
+
+  it('opens export as a modal dialog and restores trigger focus after Escape closes it', async () => {
+    const wrapper = mountReviewWorkspaceWithConfig({ attachTo: document.body })
+    await flushPromises()
+    const trigger = wrapper.get('[data-tool="export"]')
+
+    await trigger.trigger('click')
+    await flushPromises()
+
+    const dialog = wrapper.get('[role="dialog"][aria-label="导出文件"]')
+    const closeButton = wrapper.get('[aria-label="关闭导出"]')
+
+    expect(dialog.isVisible()).toBe(true)
+    expect(document.activeElement).toBe(closeButton.element)
+
+    await closeButton.trigger('keydown', { key: 'Escape' })
+    await flushPromises()
+
+    expect(dialog.isVisible()).toBe(false)
+    expect(document.activeElement).toBe(trigger.element)
+    wrapper.unmount()
+  })
+
+  it('traps focus in the export dialog and restores trigger focus after backdrop close', async () => {
+    const wrapper = mountReviewWorkspaceWithConfig({ attachTo: document.body })
+    await flushPromises()
+    const trigger = wrapper.get('[data-tool="export"]')
+
+    await openExportDialog(wrapper)
+
+    const dialog = wrapper.get('[role="dialog"][aria-label="导出文件"]')
+    const closeButton = wrapper.get('[aria-label="关闭导出"]')
+    const createButton = wrapper.get('button[name="create-export"]')
+
+    ;(closeButton.element as HTMLElement).focus()
+    await closeButton.trigger('keydown', { key: 'Tab', shiftKey: true })
+
+    expect(document.activeElement).toBe(createButton.element)
+    expect(dialog.element.contains(document.activeElement)).toBe(true)
+
+    await wrapper.get('[data-testid="export-backdrop"]').trigger('pointerdown')
+    await flushPromises()
+
+    expect(dialog.isVisible()).toBe(false)
+    expect(document.activeElement).toBe(trigger.element)
+    wrapper.unmount()
+  })
+
+  it('retains completed export state after closing and reopening the dialog', async () => {
+    const create = vi.fn().mockResolvedValue(
+      buildCreatedExport({
+        export_id: 'export-1',
+        export_type: 'html_report',
+        status: 'completed',
+        file_name: 'report.html'
+      })
+    )
+    const wrapper = mountReviewWorkspaceWithConfig({
+      attachTo: document.body,
+      exportsApi: createExportsApiMock({ create })
+    })
+    await flushPromises()
+
+    await openExportDialog(wrapper)
+    await wrapper.get('select[name="export-type"]').setValue('html_report')
+    await wrapper.get('button[name="create-export"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="export-download-link"]').exists()).toBe(true)
+
+    await wrapper.get('[aria-label="关闭导出"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[role="dialog"][aria-label="导出文件"]').isVisible()).toBe(false)
+
+    await openExportDialog(wrapper)
+
+    expect(wrapper.find('[data-testid="export-download-link"]').exists()).toBe(true)
+    wrapper.unmount()
   })
 
   it('creates, polls, and exposes a completed export download', async () => {
@@ -496,6 +583,7 @@ describe('ReviewWorkspaceView', () => {
       })
       await flushPromises()
 
+      await openExportDialog(wrapper)
       await wrapper.get('select[name="export-type"]').setValue('html_report')
       await wrapper.get('button[name="create-export"]').trigger('click')
       await flushPromises()
@@ -550,6 +638,7 @@ describe('ReviewWorkspaceView', () => {
       })
       await flushPromises()
 
+      await openExportDialog(wrapper)
       await wrapper.get('select[name="export-type"]').setValue('html_report')
       await wrapper.get('button[name="create-export"]').trigger('click')
       await flushPromises()
@@ -592,6 +681,7 @@ describe('ReviewWorkspaceView', () => {
       })
       await flushPromises()
 
+      await openExportDialog(wrapper)
       await wrapper.get('select[name="export-type"]').setValue('html_report')
       await wrapper.get('button[name="create-export"]').trigger('click')
       await flushPromises()
@@ -655,6 +745,7 @@ describe('ReviewWorkspaceView', () => {
       })
       await flushPromises()
 
+      await openExportDialog(wrapper)
       await wrapper.get('select[name="export-type"]').setValue('html_report')
       await wrapper.get('button[name="create-export"]').trigger('click')
       await flushPromises()
@@ -706,6 +797,7 @@ describe('ReviewWorkspaceView', () => {
       })
       await flushPromises()
 
+      await openExportDialog(wrapper)
       await wrapper.get('select[name="export-type"]').setValue('html_report')
       await wrapper.get('button[name="create-export"]').trigger('click')
       await flushPromises()
@@ -753,6 +845,7 @@ describe('ReviewWorkspaceView', () => {
     })
     await flushPromises()
 
+    await openExportDialog(wrapper)
     await wrapper.get('button[name="create-export"]').trigger('click')
     await flushPromises()
 
