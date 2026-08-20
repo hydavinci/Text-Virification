@@ -437,19 +437,14 @@ onBeforeUnmount(() => {
   .review-workspace {
     display: grid;
     grid-template-areas:
-      "file document find"
       "export document find"
       "batch document details"
       "failures document details"
       "navigation document details";
     grid-template-columns: minmax(220px, 0.8fr) minmax(480px, 2.3fr) minmax(240px, 0.9fr);
-    grid-template-rows: auto auto auto auto minmax(0, 1fr);
+    grid-template-rows: auto auto auto minmax(0, 1fr);
     gap: 8px 14px;
     padding: 8px 0;
-  }
-
-  .review-workspace :deep(.review-toolbar) {
-    grid-area: file;
   }
 
   .review-workspace :deep(.review-toolbar__actions),
@@ -488,14 +483,12 @@ onBeforeUnmount(() => {
     min-height: 0;
     grid-area: details;
   }
-
   .review-workspace:not(:has(.checker-failures)) {
     grid-template-areas:
-      "file document find"
       "export document find"
       "batch document details"
       "navigation document details";
-    grid-template-rows: auto auto auto minmax(0, 1fr);
+    grid-template-rows: auto auto minmax(0, 1fr);
   }
 }
 

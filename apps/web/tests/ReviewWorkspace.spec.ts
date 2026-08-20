@@ -24,6 +24,7 @@ import type {
 import type { ExportCreateResponse, ExportResponse, ExportWarning } from '../src/types/exports'
 import type { FileType } from '../src/types/review'
 import ReviewWorkspaceView from '../src/views/ReviewWorkspaceView.vue'
+import ReviewWorkspaceViewSource from '../src/views/ReviewWorkspaceView.vue?raw'
 
 const jobId = 'job-1'
 
@@ -782,6 +783,89 @@ describe('ReviewWorkspaceView', () => {
     expect(wrapper.get('[data-block-id="block-1"]').classes()).toContain(
       'document-block--active'
     )
+  })
+
+  it('does not reserve the obsolete desktop file grid area', () => {
+    expect(ReviewWorkspaceViewSource).not.toContain('"file document find"')
+    expect(ReviewWorkspaceViewSource).not.toContain(
+      '.review-workspace :deep(.review-toolbar)'
+    )
+  })
+
+  it('counts only paragraph blocks in the header while rendering all loaded block kinds', async () => {
+    const wrapper = mountReviewWorkspace(
+      createAnalysisApiMock({
+        getSummary: vi.fn().mockResolvedValue(buildSummary({ total_issues: 2 })),
+        getDocumentPage: vi.fn().mockResolvedValue(
+          buildDocumentPage({
+            blocks: [
+              buildBlock({
+                block_id: 'paragraph-1',
+                text: '第一段文字',
+                paragraph_index: 0
+              }),
+              buildBlock({
+                block_id: 'heading-1',
+                kind: 'heading',
+                text: '第一章',
+                paragraph_index: null
+              }),
+              buildBlock({
+                block_id: 'table-cell-1',
+                kind: 'table_cell',
+                text: '表格单元',
+                paragraph_index: null
+              }),
+              buildBlock({
+                block_id: 'paragraph-2',
+                text: '第二段文字',
+                paragraph_index: 1
+              }),
+              buildBlock({
+                block_id: 'footer-1',
+                kind: 'footer',
+                text: '页脚附注',
+                paragraph_index: null
+              })
+            ],
+            total_blocks: 5
+          })
+        ),
+        getIssues: vi.fn().mockResolvedValue(
+          buildIssuePage({
+            total: 2,
+            items: [
+              buildIssue({
+                issue_id: 'issue-1',
+                block_id: 'paragraph-1',
+                context: '第一段文字'
+              }),
+              buildIssue({
+                issue_id: 'issue-2',
+                block_id: 'paragraph-2',
+                original: '第二',
+                suggestion: '次段',
+                context: '第二段文字'
+              })
+            ]
+          })
+        )
+      })
+    )
+    await flushPromises()
+
+    const headerText = wrapper.get('[data-testid="document-header"]').text()
+    const renderedBlockTexts = wrapper.findAll('[data-block-id]').map((block) => block.text())
+
+    expect(headerText).toContain('2 个已加载段落')
+    expect(headerText).toContain('2 个问题')
+    expect(renderedBlockTexts).toEqual([
+      '第一段文字',
+      '第一章',
+      '表格单元',
+      '第二段文字',
+      '页脚附注'
+    ])
   })
 
   it('renders authoritative category and status statistics without a footer', async () => {
