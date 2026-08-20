@@ -468,7 +468,7 @@ onBeforeUnmount(() => {
   border-radius: 16px;
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 1279px) {
   .document-viewer {
     height: auto;
   }

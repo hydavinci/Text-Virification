@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, ref, type Ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, type Ref } from 'vue'
 
 import BatchActions from '../components/review/BatchActions.vue'
 import CheckerFailureNotice from '../components/review/CheckerFailureNotice.vue'
@@ -14,14 +14,12 @@ import WorkspaceSidePanel from '../components/review/WorkspaceSidePanel.vue'
 import { useReviewWorkspace } from '../composables/useReviewWorkspace'
 import type { FileType } from '../types/review'
 import type {
+  CompactWorkspaceView,
   InspectorTab,
   RailTool,
   SidePanelTool,
   WorkspaceTool
 } from '../components/review/workspaceLayout'
-
-type MobileReviewTab = 'document' | 'issues'
-type ExportTriggerSource = 'desktop' | 'fallback'
 
 const props = defineProps<{
   jobId: string
@@ -75,29 +73,29 @@ const {
   retryIssues
 } = useReviewWorkspace(props.jobId)
 
-const MOBILE_BREAKPOINT_QUERY = '(max-width: 1100px)'
-const DESKTOP_BREAKPOINT_QUERY = '(min-width: 1280px)'
+const COMPACT_BREAKPOINT_QUERY = '(max-width: 1279px)'
+const PHONE_BREAKPOINT_QUERY = '(max-width: 767px)'
 const supportsMatchMedia =
   typeof window !== 'undefined' && typeof window.matchMedia === 'function'
 
-const mobileMediaQuery =
-  supportsMatchMedia ? window.matchMedia(MOBILE_BREAKPOINT_QUERY) : null
-const desktopMediaQuery =
-  supportsMatchMedia ? window.matchMedia(DESKTOP_BREAKPOINT_QUERY) : null
+const compactMediaQuery =
+  supportsMatchMedia ? window.matchMedia(COMPACT_BREAKPOINT_QUERY) : null
+const phoneMediaQuery =
+  supportsMatchMedia ? window.matchMedia(PHONE_BREAKPOINT_QUERY) : null
 
 const workspaceRoot = ref<HTMLElement | null>(null)
-const isMobile = ref(mobileMediaQuery?.matches ?? false)
-const isDesktop = ref(desktopMediaQuery?.matches ?? !isMobile.value)
-const activeMobileTab = ref<MobileReviewTab>('document')
+const isCompact = ref(compactMediaQuery?.matches ?? false)
+const isPhone = ref(phoneMediaQuery?.matches ?? false)
+const isDesktop = computed(() => !isCompact.value)
+const activeCompactView = ref<CompactWorkspaceView>('document')
+const phoneIssueSubview = ref<'list' | 'details'>('list')
 const activeRailTool = ref<RailTool>('issues')
 const activeSidePanelTool = ref<SidePanelTool>('issues')
 const isSidePanelOpen = ref(true)
 const isExportOpen = ref(false)
 const activeInspectorTab = ref<InspectorTab>('details')
-const tabButtons = new Map<MobileReviewTab, HTMLButtonElement>()
 const toolRail = ref<{ focusExportButton(): void } | null>(null)
-const fallbackExportButton = ref<HTMLButtonElement | null>(null)
-const lastExportTrigger = ref<ExportTriggerSource>('desktop')
+const lastPhoneIssueTrigger = ref<HTMLElement | null>(null)
 
 function bindMediaQuery(
   mediaQuery: MediaQueryList | null,
@@ -107,38 +105,51 @@ function bindMediaQuery(
     return null
   }
 
-  const handleChange = (event: MediaQueryListEvent): void => {
-    target.value = event.matches
+  const syncMatches = (matches: boolean): void => {
+    target.value = matches
   }
+
+  const handleChange = (event: MediaQueryListEvent): void => {
+    syncMatches(event.matches)
+  }
+
+  const handleLegacyChange = (
+    event: MediaQueryListEvent | MediaQueryList
+  ): void => {
+    syncMatches(event.matches)
+  }
+
+  const cleanup: Array<() => void> = []
 
   if (typeof mediaQuery.addEventListener === 'function') {
     mediaQuery.addEventListener('change', handleChange)
-    return () => mediaQuery.removeEventListener('change', handleChange)
+    cleanup.push(() => mediaQuery.removeEventListener('change', handleChange))
   }
 
-  mediaQuery.addListener(handleChange)
-  return () => mediaQuery.removeListener(handleChange)
+  if (typeof mediaQuery.addListener === 'function') {
+    mediaQuery.addListener(handleLegacyChange)
+    cleanup.push(() => mediaQuery.removeListener(handleLegacyChange))
+  }
+
+  return cleanup.length ? () => cleanup.forEach((callback) => callback()) : null
 }
 
-const cleanupMobileMediaQuery = bindMediaQuery(mobileMediaQuery, isMobile)
-const cleanupDesktopMediaQuery = bindMediaQuery(desktopMediaQuery, isDesktop)
+const cleanupCompactMediaQuery = bindMediaQuery(compactMediaQuery, isCompact)
+const cleanupPhoneMediaQuery = bindMediaQuery(phoneMediaQuery, isPhone)
 
-function registerTabButton(tab: MobileReviewTab, candidate: unknown): void {
-  if (candidate instanceof HTMLButtonElement) {
-    tabButtons.set(tab, candidate)
+function activateCompactView(tool: WorkspaceTool): void {
+  activeCompactView.value = tool
+
+  if (tool === 'issues') {
+    activeInspectorTab.value = 'details'
+    if (isPhone.value) {
+      phoneIssueSubview.value = 'list'
+    }
     return
   }
 
-  tabButtons.delete(tab)
-}
-
-function activateMobileTab(tab: MobileReviewTab, preserveFocus = false): void {
-  activeMobileTab.value = tab
-
-  if (preserveFocus) {
-    void nextTick(() => {
-      tabButtons.get(tab)?.focus()
-    })
+  if (tool === 'search') {
+    activeInspectorTab.value = 'search'
   }
 }
 
@@ -171,14 +182,40 @@ function activateDesktopTool(tool: WorkspaceTool): void {
   }
 }
 
-function selectIssueAndShowDetails(issueId: string): void {
+function selectIssueAndShowDetails(
+  issueId: string,
+  trigger: HTMLElement | null = null
+): void {
   selectIssue(issueId)
+
+  if (isCompact.value) {
+    activeCompactView.value = 'issues'
+    activeInspectorTab.value = 'details'
+
+    if (isPhone.value) {
+      lastPhoneIssueTrigger.value = trigger
+      phoneIssueSubview.value = 'details'
+    }
+    return
+  }
+
   activeRailTool.value = 'issues'
   activeInspectorTab.value = 'details'
 }
 
 function selectHighlightAndShowDetails(issueId: string): void {
   selectHighlight(issueId)
+
+  if (isCompact.value) {
+    if (activeCompactView.value === 'issues') {
+      activeInspectorTab.value = 'details'
+      if (isPhone.value) {
+        phoneIssueSubview.value = 'details'
+      }
+    }
+    return
+  }
+
   activeRailTool.value = 'issues'
   activeInspectorTab.value = 'details'
 }
@@ -189,11 +226,6 @@ function closeSidePanel(): void {
 
 function focusExportTrigger(): void {
   void nextTick(() => {
-    if (lastExportTrigger.value === 'fallback') {
-      fallbackExportButton.value?.focus()
-      return
-    }
-
     toolRail.value?.focusExportButton()
   })
 }
@@ -207,9 +239,7 @@ function closeExport(): void {
   focusExportTrigger()
 }
 
-function toggleExport(trigger: ExportTriggerSource): void {
-  lastExportTrigger.value = trigger
-
+function toggleExport(): void {
   if (isExportOpen.value) {
     closeExport()
     return
@@ -218,28 +248,9 @@ function toggleExport(trigger: ExportTriggerSource): void {
   isExportOpen.value = true
 }
 
-function onTabKeydown(event: KeyboardEvent): void {
-  const orderedTabs: MobileReviewTab[] = ['document', 'issues']
-  const currentIndex = orderedTabs.indexOf(activeMobileTab.value)
-
-  if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
-    event.preventDefault()
-    const delta = event.key === 'ArrowRight' ? 1 : -1
-    const nextIndex = (currentIndex + delta + orderedTabs.length) % orderedTabs.length
-    activateMobileTab(orderedTabs[nextIndex] ?? 'document', true)
-    return
-  }
-
-  if (event.key === 'Home') {
-    event.preventDefault()
-    activateMobileTab('document', true)
-    return
-  }
-
-  if (event.key === 'End') {
-    event.preventDefault()
-    activateMobileTab('issues', true)
-  }
+function returnToPhoneIssueList(): void {
+  phoneIssueSubview.value = 'list'
+  void nextTick(() => lastPhoneIssueTrigger.value?.focus())
 }
 
 function isEditableTarget(target: EventTarget | null): boolean {
@@ -291,8 +302,8 @@ function onWorkspaceKeydown(event: KeyboardEvent): void {
 }
 
 onBeforeUnmount(() => {
-  cleanupMobileMediaQuery?.()
-  cleanupDesktopMediaQuery?.()
+  cleanupCompactMediaQuery?.()
+  cleanupPhoneMediaQuery?.()
 })
 </script>
 
@@ -303,134 +314,124 @@ onBeforeUnmount(() => {
     aria-label="文档审阅工作台"
     @keydown="onWorkspaceKeydown"
   >
-    <div v-if="!isDesktop" class="review-workspace__supplements">
-      <CheckerFailureNotice v-if="!isDesktop" :failures="checkerFailures" />
-
-      <div class="review-workspace__fallback-export">
-        <button
-          ref="fallbackExportButton"
-          type="button"
-          class="review-workspace__fallback-export-trigger"
-          data-tool="export"
-          aria-haspopup="dialog"
-          :aria-expanded="isExportOpen"
-          @click="toggleExport('fallback')"
+    <div v-if="isCompact" class="review-workspace__compact-shell">
+      <div class="review-workspace__compact-main">
+        <section
+          v-show="activeCompactView === 'document'"
+          class="review-workspace__compact-panel review-workspace__compact-panel--document"
+          aria-label="文档"
         >
-          导出
-        </button>
-        <ExportPanel
-          class="review-workspace__fallback-export-panel"
-          :job-id="jobId"
-          :file-type="fileType"
-          :open="isExportOpen"
-          @close="closeExport"
-        />
-      </div>
+          <DocumentViewer
+            :source-name="sourceName"
+            :file-type="fileType"
+            :total-issues="summary?.total_issues ?? null"
+            :summary-loading="loading.summary"
+            :summary-error="errors.summary"
+            :blocks="blocks"
+            :issues="issues"
+            :selected-issue-id="selectedIssueId"
+            :selected-block-id="selectedBlockId"
+            :next-cursor="blockCursor"
+            :loading="loading.document"
+            :error="errors.document"
+            @select-highlight="selectHighlightAndShowDetails"
+            @load-next="loadNextBlocks"
+            @retry-summary="retrySummary"
+            @retry="retryDocument"
+          />
+        </section>
 
-      <section class="review-workspace__auxiliary-panel" aria-label="批量">
-        <BatchActions
-          :issue-count="visibleIssueCount"
-          :batch-limit="batchLimit"
-          :high-risk-security-count="highRiskVisibleIssueCount"
-          :busy="bulkActionPending"
-          :error="batchDecisionError"
-          @accept-visible="decideVisible('accepted')"
-          @ignore-visible="decideVisible('ignored')"
-        />
-      </section>
-    </div>
-
-    <template v-if="isMobile">
-      <div class="review-workspace__tabs" role="tablist" aria-label="工作台视图" @keydown="onTabKeydown">
-        <button
-          :ref="(element) => registerTabButton('document', element)"
-          type="button"
-          role="tab"
-          class="review-workspace__tab"
-          :class="{ 'review-workspace__tab--active': activeMobileTab === 'document' }"
-          :aria-selected="activeMobileTab === 'document'"
-          aria-controls="review-document-panel"
-          :tabindex="activeMobileTab === 'document' ? 0 : -1"
-          @click="activateMobileTab('document', true)"
+        <section
+          v-show="activeCompactView === 'issues'"
+          class="review-workspace__compact-panel review-workspace__compact-panel--issues"
+          aria-label="问题工作台"
         >
-          文档
-        </button>
-        <button
-          :ref="(element) => registerTabButton('issues', element)"
-          type="button"
-          role="tab"
-          class="review-workspace__tab"
-          :class="{ 'review-workspace__tab--active': activeMobileTab === 'issues' }"
-          :aria-selected="activeMobileTab === 'issues'"
-          aria-controls="review-issues-panel"
-          :tabindex="activeMobileTab === 'issues' ? 0 : -1"
-          @click="activateMobileTab('issues', true)"
+          <CheckerFailureNotice :failures="checkerFailures" />
+
+          <div v-if="isPhone" class="review-workspace__phone-issues">
+            <div
+              v-show="phoneIssueSubview === 'list'"
+              class="review-workspace__compact-surface"
+            >
+              <ReviewNavigation
+                :summary="summary"
+                :issues="issues"
+                :issue-status-by-id="issueStatusById"
+                :selected-issue-id="selectedIssueId"
+                :loading="loading.issues"
+                :error="errors.issues"
+                :filters="filters"
+                :next-cursor="issueCursor"
+                @select="selectIssueAndShowDetails"
+                @retry="retryIssues"
+                @load-next="loadNextIssues"
+                @filter-change="setFilters"
+              />
+            </div>
+
+            <section
+              v-show="phoneIssueSubview === 'details'"
+              data-testid="phone-issue-details"
+              class="review-workspace__compact-surface review-workspace__compact-surface--padded review-workspace__phone-issue-details"
+              aria-label="问题详情"
+            >
+              <button
+                type="button"
+                class="review-workspace__phone-back"
+                aria-label="返回问题列表"
+                @click="returnToPhoneIssueList"
+              >
+                返回问题列表
+              </button>
+              <IssuePanel
+                :issue="selectedIssue"
+                :decision-error="decisionError"
+                :can-retry-decision="canRetryDecision"
+                @decide="decide"
+                @retry-decision="retryDecision"
+              />
+            </section>
+          </div>
+
+          <div v-else class="review-workspace__compact-issue-grid">
+            <div class="review-workspace__compact-surface">
+              <ReviewNavigation
+                :summary="summary"
+                :issues="issues"
+                :issue-status-by-id="issueStatusById"
+                :selected-issue-id="selectedIssueId"
+                :loading="loading.issues"
+                :error="errors.issues"
+                :filters="filters"
+                :next-cursor="issueCursor"
+                @select="selectIssueAndShowDetails"
+                @retry="retryIssues"
+                @load-next="loadNextIssues"
+                @filter-change="setFilters"
+              />
+            </div>
+
+            <section
+              class="review-workspace__compact-surface review-workspace__compact-surface--padded"
+              aria-label="问题详情"
+            >
+              <IssuePanel
+                :issue="selectedIssue"
+                :decision-error="decisionError"
+                :can-retry-decision="canRetryDecision"
+                @decide="decide"
+                @retry-decision="retryDecision"
+              />
+            </section>
+          </div>
+        </section>
+
+        <section
+          v-show="activeCompactView === 'search'"
+          class="review-workspace__compact-panel"
+          aria-label="查找"
         >
-          问题
-        </button>
-      </div>
-
-      <section
-        id="review-document-panel"
-        class="review-workspace__mobile-panel"
-        role="tabpanel"
-        aria-label="文档"
-        :aria-hidden="activeMobileTab !== 'document'"
-        v-show="activeMobileTab === 'document'"
-      >
-        <DocumentViewer
-          :source-name="sourceName"
-          :file-type="fileType"
-          :total-issues="summary?.total_issues ?? null"
-          :summary-loading="loading.summary"
-          :summary-error="errors.summary"
-          :blocks="blocks"
-          :issues="issues"
-          :selected-issue-id="selectedIssueId"
-          :selected-block-id="selectedBlockId"
-          :next-cursor="blockCursor"
-          :loading="loading.document"
-          :error="errors.document"
-          @select-highlight="selectHighlightAndShowDetails"
-          @load-next="loadNextBlocks"
-          @retry-summary="retrySummary"
-          @retry="retryDocument"
-        />
-      </section>
-
-      <section
-        id="review-issues-panel"
-        class="review-workspace__mobile-panel review-workspace__mobile-panel--issues"
-        role="tabpanel"
-        aria-label="问题"
-        :aria-hidden="activeMobileTab !== 'issues'"
-        v-show="activeMobileTab === 'issues'"
-      >
-        <ReviewNavigation
-          :summary="summary"
-          :issues="issues"
-          :issue-status-by-id="issueStatusById"
-          :selected-issue-id="selectedIssueId"
-          :loading="loading.issues"
-          :error="errors.issues"
-          :filters="filters"
-          :next-cursor="issueCursor"
-          @select="selectIssueAndShowDetails"
-          @retry="retryIssues"
-          @load-next="loadNextIssues"
-          @filter-change="setFilters"
-        />
-        <ContextInspector v-model:active-tab="activeInspectorTab">
-          <template #details>
-            <IssuePanel
-              :issue="selectedIssue"
-              :decision-error="decisionError"
-              :can-retry-decision="canRetryDecision"
-              @decide="decide"
-              @retry-decision="retryDecision"
-            />
-          </template>
-          <template #search>
+          <div class="review-workspace__compact-surface review-workspace__compact-surface--padded">
             <FindReplace
               :query="findQuery"
               :replacement="replaceText"
@@ -445,13 +446,52 @@ onBeforeUnmount(() => {
               @next-match="goToNextMatch"
               @replace-all="replaceAllMatches"
             />
-          </template>
-        </ContextInspector>
-      </section>
-    </template>
+          </div>
+        </section>
+
+        <section
+          v-show="activeCompactView === 'batch'"
+          class="review-workspace__compact-panel"
+          aria-label="批量"
+        >
+          <div class="review-workspace__compact-surface review-workspace__compact-surface--padded">
+            <BatchActions
+              :issue-count="visibleIssueCount"
+              :batch-limit="batchLimit"
+              :high-risk-security-count="highRiskVisibleIssueCount"
+              :busy="bulkActionPending"
+              :error="batchDecisionError"
+              @accept-visible="decideVisible('accepted')"
+              @ignore-visible="decideVisible('ignored')"
+            />
+          </div>
+        </section>
+      </div>
+
+      <div class="review-workspace__compact-footer">
+        <div class="review-workspace__compact-rail-stack">
+          <ToolRail
+            ref="toolRail"
+            mode="bottom"
+            :active-tool="activeCompactView"
+            :side-panel-open="false"
+            :export-open="isExportOpen"
+            @activate="activateCompactView"
+            @toggle-export="toggleExport"
+          />
+          <ExportPanel
+            class="review-workspace__compact-export-panel"
+            :job-id="jobId"
+            :file-type="fileType"
+            :open="isExportOpen"
+            @close="closeExport"
+          />
+        </div>
+      </div>
+    </div>
 
     <div
-      v-else-if="isDesktop"
+      v-else
       class="review-workspace__desktop-shell"
       :data-side-panel-open="isSidePanelOpen"
     >
@@ -463,7 +503,7 @@ onBeforeUnmount(() => {
           :side-panel-open="isSidePanelOpen"
           :export-open="isExportOpen"
           @activate="activateDesktopTool"
-          @toggle-export="toggleExport('desktop')"
+          @toggle-export="toggleExport"
         />
         <ExportPanel
           :job-id="jobId"
@@ -561,68 +601,6 @@ onBeforeUnmount(() => {
       </ContextInspector>
     </div>
 
-    <div v-else class="review-workspace__columns">
-      <ReviewNavigation
-        :summary="summary"
-        :issues="issues"
-        :issue-status-by-id="issueStatusById"
-        :selected-issue-id="selectedIssueId"
-        :loading="loading.issues"
-        :error="errors.issues"
-        :filters="filters"
-        :next-cursor="issueCursor"
-        @select="selectIssueAndShowDetails"
-        @retry="retryIssues"
-        @load-next="loadNextIssues"
-        @filter-change="setFilters"
-      />
-      <DocumentViewer
-        :source-name="sourceName"
-        :file-type="fileType"
-        :total-issues="summary?.total_issues ?? null"
-        :summary-loading="loading.summary"
-        :summary-error="errors.summary"
-        :blocks="blocks"
-        :issues="issues"
-        :selected-issue-id="selectedIssueId"
-        :selected-block-id="selectedBlockId"
-        :next-cursor="blockCursor"
-        :loading="loading.document"
-        :error="errors.document"
-        @select-highlight="selectHighlightAndShowDetails"
-        @load-next="loadNextBlocks"
-        @retry-summary="retrySummary"
-        @retry="retryDocument"
-      />
-      <ContextInspector v-model:active-tab="activeInspectorTab">
-        <template #details>
-          <IssuePanel
-            :issue="selectedIssue"
-            :decision-error="decisionError"
-            :can-retry-decision="canRetryDecision"
-            @decide="decide"
-            @retry-decision="retryDecision"
-          />
-        </template>
-        <template #search>
-          <FindReplace
-            :query="findQuery"
-            :replacement="replaceText"
-            :status="findStatus"
-            :can-navigate="canNavigateMatches"
-            :can-replace-all="canReplaceAllMatches"
-            :busy="bulkActionPending"
-            :error="findReplaceError"
-            @update-query="setFindQuery"
-            @update-replacement="setReplaceText"
-            @previous-match="goToPreviousMatch"
-            @next-match="goToNextMatch"
-            @replace-all="replaceAllMatches"
-          />
-        </template>
-      </ContextInspector>
-    </div>
-
     <p
       class="review-workspace__announcement"
       data-testid="decision-announcement"
@@ -635,6 +613,7 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .review-workspace {
+  position: relative;
   display: flex;
   width: min(100% - 32px, 1560px);
   height: 100%;
@@ -652,34 +631,87 @@ onBeforeUnmount(() => {
   min-height: 44px;
 }
 
-.review-workspace__supplements {
+.review-workspace__compact-shell {
   display: grid;
-  gap: 12px;
-  margin-top: 14px;
+  min-height: 0;
+  flex: 1;
+  gap: 14px;
+  grid-template-rows: minmax(0, 1fr) auto;
 }
 
-.review-workspace__auxiliary-panel,
-.review-workspace__columns :deep(.review-navigation),
-.review-workspace__mobile-panel--issues :deep(.review-navigation) {
+.review-workspace__compact-main {
+  min-height: 0;
+  overflow: auto;
+}
+
+.review-workspace__compact-panel {
+  display: grid;
+  min-height: 0;
+  gap: 14px;
+}
+
+.review-workspace__compact-panel--document {
+  height: 100%;
+}
+
+.review-workspace__compact-panel--issues {
+  align-content: start;
+}
+
+.review-workspace__compact-surface {
+  min-height: 0;
   background: #fff;
   border: 1px solid #e2e7f0;
   border-radius: 16px;
+  overflow: hidden;
 }
 
-.review-workspace__auxiliary-panel {
+.review-workspace__compact-surface--padded {
   padding: 16px;
 }
 
-.review-workspace__fallback-export {
-  position: relative;
-  display: flex;
-  justify-content: flex-end;
+.review-workspace__compact-issue-grid,
+.review-workspace__phone-issues,
+.review-workspace__phone-issue-details {
+  display: grid;
+  gap: 14px;
+  min-height: 0;
 }
 
-.review-workspace__fallback-export-trigger {
+.review-workspace__compact-footer {
+  position: sticky;
+  bottom: 0;
+  z-index: 4;
+  padding-bottom: env(safe-area-inset-bottom, 0);
+}
+
+.review-workspace__compact-rail-stack {
+  position: relative;
+  padding-top: 8px;
+}
+
+.review-workspace__compact-rail-stack :deep(.tool-rail) {
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid #dfe5ef;
+  border-radius: 18px;
+  box-shadow: 0 14px 32px rgba(22, 31, 52, 0.12);
+  backdrop-filter: blur(8px);
+}
+
+.review-workspace__compact-export-panel :deep(.export-panel) {
+  left: 12px;
+  right: 12px;
+  top: auto;
+  bottom: calc(100% + 12px);
+  width: auto;
+  max-height: min(420px, calc(100dvh - 140px));
+}
+
+.review-workspace__phone-back {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  justify-self: start;
   min-width: 44px;
   padding: 0 16px;
   color: #4256c9;
@@ -690,59 +722,9 @@ onBeforeUnmount(() => {
   cursor: pointer;
 }
 
-.review-workspace__fallback-export-trigger[aria-expanded='true'] {
-  color: #fff;
-  background: linear-gradient(135deg, #5c75f7, #7958d9);
-  border-color: transparent;
-}
-
-.review-workspace__fallback-export-trigger:focus-visible {
+.review-workspace__phone-back:focus-visible {
   outline: 3px solid #8ea2ff;
   outline-offset: 2px;
-}
-
-.review-workspace__fallback-export-panel :deep(.export-panel) {
-  left: auto;
-  right: 0;
-  top: calc(100% + 12px);
-  bottom: auto;
-}
-
-.review-workspace__tabs {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-  margin-top: 14px;
-}
-
-.review-workspace__tab {
-  padding: 0 16px;
-  color: #4256c9;
-  font-weight: 700;
-  background: #eef0ff;
-  border: 1px solid #d4dcff;
-  border-radius: 12px;
-  cursor: pointer;
-}
-
-.review-workspace__tab--active {
-  color: #fff;
-  background: linear-gradient(135deg, #5c75f7, #7958d9);
-  border-color: transparent;
-}
-
-.review-workspace__tab[role="tab"]:focus-visible {
-  outline: 3px solid #8ea2ff;
-  outline-offset: 2px;
-}
-
-.review-workspace__mobile-panel {
-  margin-top: 14px;
-}
-
-.review-workspace__mobile-panel--issues {
-  display: grid;
-  gap: 14px;
 }
 
 .review-workspace__desktop-shell,
@@ -804,9 +786,10 @@ onBeforeUnmount(() => {
   }
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 1279px) {
   .review-workspace {
     width: min(100% - 24px, 100%);
+    min-height: calc(100dvh - 24px);
     height: auto;
     padding-top: 18px;
     overflow: visible;

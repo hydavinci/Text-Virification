@@ -289,7 +289,7 @@ describe('WorkspaceView', () => {
     expect(createJob).toHaveBeenCalledWith(file, buildUploadOptions())
     expect(wrapper.find('[aria-label="文档审阅工作台"]').exists()).toBe(true)
     expect(wrapper.get('main').classes()).toContain('workspace--review')
-    expect(wrapper.text()).toContain('sample.txt')
+    expect(wrapper.get('[data-testid="document-header"]').text()).toContain('sample.txt')
     expect(analysisApi.getDocumentPage).toHaveBeenCalledWith(
       '6d96fe0f-f4fc-4b43-90fd-68e5bd09f21f',
       { cursor: null, limit: 100 }
@@ -349,7 +349,7 @@ describe('WorkspaceView', () => {
     await flushPromises()
 
     expect(wrapper.find('[aria-label="文档审阅工作台"]').exists()).toBe(true)
-    expect(wrapper.text()).toContain('sample.txt')
+    expect(wrapper.get('[data-testid="document-header"]').text()).toContain('sample.txt')
     expect(analysisApi.getSummary).toHaveBeenCalledWith(
       '6d96fe0f-f4fc-4b43-90fd-68e5bd09f21f'
     )

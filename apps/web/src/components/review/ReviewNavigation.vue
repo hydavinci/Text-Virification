@@ -28,7 +28,7 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  select: [issueId: string]
+  select: [issueId: string, trigger: HTMLElement | null]
   retry: []
   loadNext: []
   filterChange: [filters: ReviewIssueFilters]
@@ -103,6 +103,14 @@ onBeforeUnmount(() => {
 function severityLabel(severityLevel: IssueSeverity): string {
   const presentation = describeSeverity(severityLevel)
   return `${presentation.icon} ${presentation.text}`
+}
+
+function selectIssue(issueId: string, event: MouseEvent): void {
+  emit(
+    'select',
+    issueId,
+    event.currentTarget instanceof HTMLElement ? event.currentTarget : null
+  )
 }
 </script>
 
@@ -237,7 +245,7 @@ function severityLabel(severityLevel: IssueSeverity): string {
           :class="{ 'issue-card--active': issue.issue_id === selectedIssueId }"
           :data-issue-id="issue.issue_id"
           :aria-current="issue.issue_id === selectedIssueId ? 'true' : 'false'"
-          @click="emit('select', issue.issue_id)"
+          @click="selectIssue(issue.issue_id, $event)"
         >
           <span class="issue-card__meta">
             <span class="issue-card__type">{{ issueTypeLabel(issue.type) }}</span>

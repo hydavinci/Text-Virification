@@ -49,8 +49,10 @@ function mockViewportWidth(width: number) {
 
   window.matchMedia = vi.fn().mockImplementation((query: string): MediaQueryList => {
     const matches =
-      query === '(max-width: 1100px)'
-        ? width <= 1100
+      query === '(max-width: 1279px)'
+        ? width <= 1279
+        : query === '(max-width: 767px)'
+          ? width <= 767
         : query === '(min-width: 1280px)'
           ? width >= 1280
           : query === '(prefers-reduced-motion: reduce)'
@@ -451,6 +453,26 @@ afterEach(() => {
 })
 
 describe('ReviewWorkspaceView', () => {
+  it('emits the clicked issue trigger with ReviewNavigation select events', async () => {
+    const wrapper = mount(ReviewNavigation, {
+      props: {
+        summary: buildSummary(),
+        issues: buildIssuePage().items,
+        issueStatusById: {},
+        selectedIssueId: 'issue-1',
+        loading: false,
+        error: null,
+        filters: {},
+        nextCursor: null
+      }
+    })
+
+    const issueTrigger = wrapper.get('[data-issue-id="issue-2"]')
+    await issueTrigger.trigger('click')
+
+    expect(wrapper.emitted('select')).toEqual([['issue-2', issueTrigger.element]])
+  })
+
   it('does not offer modified document export for PDF', async () => {
     const wrapper = mountReviewWorkspaceWithConfig({
       props: {
@@ -513,13 +535,18 @@ describe('ReviewWorkspaceView', () => {
     wrapper.unmount()
   })
 
-  it('opens the export dialog from the 1200px fallback layout and restores focus after closing', async () => {
-    const restoreViewport = mockViewportWidth(1200)
+  it('opens the export dialog from the compact bottom rail and restores focus after closing', async () => {
+    const restoreViewport = mockViewportWidth(1024)
 
     try {
       const wrapper = mountReviewWorkspaceWithConfig({ attachTo: document.body })
       await flushPromises()
-      const trigger = wrapper.get('[data-tool="export"]')
+      const bottomRail = wrapper.get('nav[aria-label="工作台视图"]')
+      const trigger = bottomRail.get('[data-tool="export"]')
+
+      expect(
+        bottomRail.findAll('button').map((button) => button.attributes('data-tool'))
+      ).toEqual(['document', 'issues', 'search', 'batch', 'export'])
 
       await trigger.trigger('click')
       await flushPromises()
@@ -538,8 +565,8 @@ describe('ReviewWorkspaceView', () => {
     }
   })
 
-  it('reuses the persistent export dialog state from the mobile layout trigger', async () => {
-    const restoreViewport = mockViewportWidth(480)
+  it('reuses the persistent export dialog state from the phone bottom rail trigger', async () => {
+    const restoreViewport = mockViewportWidth(390)
     const create = vi.fn().mockResolvedValue(
       buildCreatedExport({
         export_id: 'export-1',
@@ -1206,66 +1233,98 @@ describe('ReviewWorkspaceView', () => {
     expect(wrapper.get('.checker-failures__category').text()).not.toContain('security')
   })
 
-  it('uses 文档/问题 tabs on narrow screens and preserves focus after switching', async () => {
-    const restoreViewport = mockViewportWidth(480)
+  it('uses five-entry bottom navigation at compact widths and preserves panel state', async () => {
+    const restoreViewport = mockViewportWidth(1024)
 
     try {
-      const wrapper = mountReviewWorkspaceWithConfig({ attachTo: document.body })
+      const wrapper = mountReviewWorkspaceWithConfig({
+        attachTo: document.body,
+        analysisApi: createAnalysisApiMock({
+          getSummary: vi.fn().mockResolvedValue(
+            buildSummary({
+              checker_failures: {
+                security: { code: 'checker_failed', message: '安全检查器启动失败' }
+              }
+            })
+          )
+        })
+      })
       await flushPromises()
 
-      const issueTab = wrapper.get('[role="tab"][aria-controls="review-issues-panel"]')
+      const bottomRail = wrapper.get('nav[aria-label="工作台视图"]')
+      expect(wrapper.get('[data-testid="document-header"]').text()).toContain('sample.txt')
+      expect(
+        bottomRail.findAll('button').map((button) => button.attributes('data-tool'))
+      ).toEqual(['document', 'issues', 'search', 'batch', 'export'])
 
-      expect(wrapper.get('[role="tablist"]').attributes('aria-label')).toBe('工作台视图')
-      expect(issueTab.attributes('aria-selected')).toBe('false')
-      expect(wrapper.get('[role="tabpanel"][aria-label="文档"]').attributes('aria-hidden')).toBe(
-        'false'
-      )
-      expect(wrapper.get('[role="tabpanel"][aria-label="问题"]').attributes('aria-hidden')).toBe(
-        'true'
-      )
-
-      await issueTab.trigger('click')
+      await wrapper.get('[data-tool="search"]').trigger('click')
       await flushPromises()
+      await wrapper.get('[aria-label="查找内容"]').setValue('第一')
 
-      expect(issueTab.attributes('aria-selected')).toBe('true')
-      expect(wrapper.get('[role="tabpanel"][aria-label="问题"]').attributes('aria-hidden')).toBe(
-        'false'
-      )
-      expect(wrapper.get('[role="tabpanel"][aria-label="文档"]').attributes('aria-hidden')).toBe(
-        'true'
-      )
-      expect(document.activeElement).toBe(issueTab.element)
+      await wrapper.get('[data-tool="batch"]').trigger('click')
+      await flushPromises()
+      expect(wrapper.get('[aria-label="批量处理"]').isVisible()).toBe(true)
+
+      await wrapper.get('[data-tool="issues"]').trigger('click')
+      await flushPromises()
+      expect(wrapper.get('.checker-failures__category').text()).toBe('安全')
       expect(wrapper.get('nav[aria-label="问题筛选"]').isVisible()).toBe(true)
-      expect(wrapper.get('aside[aria-label="问题详情"]').isVisible()).toBe(true)
+
+      await wrapper.get('[data-tool="search"]').trigger('click')
+      await flushPromises()
+
+      expect((wrapper.get('[aria-label="查找内容"]').element as HTMLInputElement).value).toBe(
+        '第一'
+      )
       wrapper.unmount()
     } finally {
       restoreViewport()
     }
   })
 
-  it('keeps the document tab active when a mobile highlight selects an issue', async () => {
-    const restoreViewport = mockViewportWidth(480)
+  it('uses a phone issue-detail subview and restores list focus on return', async () => {
+    const restoreViewport = mockViewportWidth(390)
 
     try {
       const wrapper = mountReviewWorkspaceWithConfig({ attachTo: document.body })
       await flushPromises()
 
-      const documentTab = wrapper.get('[role="tab"][aria-controls="review-document-panel"]')
-      const issueTab = wrapper.get('[role="tab"][aria-controls="review-issues-panel"]')
+      await wrapper.get('[data-tool="issues"]').trigger('click')
+      await flushPromises()
+
+      const issueTrigger = wrapper.get('[data-issue-id="issue-2"]')
+      await issueTrigger.trigger('click')
+      await flushPromises()
+
+      expect(wrapper.get('[data-testid="phone-issue-details"]').isVisible()).toBe(true)
+      expect(wrapper.get('nav[aria-label="问题筛选"]').isVisible()).toBe(false)
+
+      await wrapper.get('[aria-label="返回问题列表"]').trigger('click')
+      await flushPromises()
+
+      expect(wrapper.get('[data-testid="phone-issue-details"]').isVisible()).toBe(false)
+      expect(wrapper.get('nav[aria-label="问题筛选"]').isVisible()).toBe(true)
+      expect(document.activeElement).toBe(issueTrigger.element)
+      wrapper.unmount()
+    } finally {
+      restoreViewport()
+    }
+  })
+
+  it('keeps the compact document view active when a highlight selects an issue', async () => {
+    const restoreViewport = mockViewportWidth(1024)
+
+    try {
+      const wrapper = mountReviewWorkspaceWithConfig({ attachTo: document.body })
+      await flushPromises()
 
       await wrapper.get('[data-highlight-range-issue-ids~="issue-1"]').trigger('click')
       await flushPromises()
 
-      expect(wrapper.get('[data-issue-id="issue-1"]').attributes('aria-current')).toBe('true')
-      expect(documentTab.attributes('aria-selected')).toBe('true')
-      expect(issueTab.attributes('aria-selected')).toBe('false')
-      expect(wrapper.get('[role="tabpanel"][aria-label="文档"]').attributes('aria-hidden')).toBe(
-        'false'
-      )
-      expect(wrapper.get('[role="tabpanel"][aria-label="问题"]').attributes('aria-hidden')).toBe(
+      expect(wrapper.get('[data-tool="document"]').attributes('aria-current')).toBe('page')
+      expect(wrapper.get('[data-highlight-range-issue-ids~="issue-1"]').attributes('aria-current')).toBe(
         'true'
       )
-
       wrapper.unmount()
     } finally {
       restoreViewport()
