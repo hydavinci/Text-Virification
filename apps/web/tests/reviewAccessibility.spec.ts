@@ -20,6 +20,7 @@ import ExportPanelSource from '../src/components/review/ExportPanel.vue?raw'
 import FindReplaceSource from '../src/components/review/FindReplace.vue?raw'
 import ReviewNavigationSource from '../src/components/review/ReviewNavigation.vue?raw'
 import IssuePanelSource from '../src/components/review/IssuePanel.vue?raw'
+import ToolRailSource from '../src/components/review/ToolRail.vue?raw'
 import ReviewWorkspaceViewSource from '../src/views/ReviewWorkspaceView.vue?raw'
 import WorkspaceViewSource from '../src/views/WorkspaceView.vue?raw'
 
@@ -228,6 +229,22 @@ describe('review workspace accessibility', () => {
     expect(ReviewNavigationSource).toContain(':focus-visible')
     expect(IssuePanelSource).toContain('min-height: 44px')
     expect(IssuePanelSource).toContain(':focus-visible')
+  })
+
+  it('ships a five-track bottom rail with shrinkable 44px controls', () => {
+    const bottomRailRule = sourceRuleBody(ToolRailSource, '\\.tool-rail--bottom')
+    const bottomMainRule = sourceRuleBody(ToolRailSource, '\\.tool-rail--bottom \\.tool-rail__main')
+    const bottomFooterRule = sourceRuleBody(ToolRailSource, '\\.tool-rail--bottom \\.tool-rail__footer')
+    const buttonRule = sourceRuleBody(ToolRailSource, '\\.tool-rail__button')
+    const bottomButtonRule = sourceRuleBody(ToolRailSource, '\\.tool-rail--bottom \\.tool-rail__button')
+
+    expect(bottomRailRule).toContain('display: grid')
+    expect(bottomRailRule).toContain('grid-template-columns: repeat(5, minmax(0, 1fr))')
+    expect(bottomRailRule).toContain('align-items: stretch')
+    expect(bottomMainRule).toContain('display: contents')
+    expect(bottomFooterRule).toContain('display: contents')
+    expect(buttonRule).toContain('min-height: 44px')
+    expect(bottomButtonRule).toContain('min-width: 0')
   })
 
   it('uses a single-screen desktop workspace with independently scrollable columns', () => {

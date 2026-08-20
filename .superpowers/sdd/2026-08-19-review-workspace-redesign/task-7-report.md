@@ -25,3 +25,20 @@
 
 ## Concerns
 - None.
+
+## Round 1/5 Fix
+- Addressed the compact bottom-rail overflow by changing bottom mode in `apps/web/src/components/review/ToolRail.vue` from flex sizing to a five-column grid: `grid-template-columns: repeat(5, minmax(0, 1fr))`, with `.tool-rail__main` / `.tool-rail__footer` set to `display: contents` so all five controls occupy equal tracks.
+- Bottom-mode buttons now use `min-width: 0` and `padding: 10px 4px` while the shared `.tool-rail__button` rule still keeps `min-height: 44px`; desktop rail sizing stays on the existing inline `width: 64px; flex: 0 0 64px` contract.
+- Added `review workspace accessibility > ships a five-track bottom rail with shrinkable 44px controls` in `apps/web/tests/reviewAccessibility.spec.ts` to assert the five `minmax(0, 1fr)` tracks, shrinkable bottom buttons, and 44px minimum touch height.
+
+### Exact evidence
+- Red test before the fix:
+  - `npm test -- reviewAccessibility.spec.ts`
+  - `1 failed | 6 passed (7)`
+  - `expected '\r\n  flex-direction: row;\r\n  align…' to contain 'display: grid'`
+- Verification after the fix:
+  - `npm test -- reviewShellComponents.spec.ts reviewAccessibility.spec.ts && npm run build`
+  - `Test Files  2 passed (2)`
+  - `Tests  13 passed (13)`
+  - `vite v6.4.3 building for production...`
+  - `✓ built in 1.01s`
