@@ -277,10 +277,11 @@ describe('review workspace accessibility', () => {
   it('runs the desktop document from top to bottom between stacked side tools', () => {
     expect(ReviewWorkspaceViewSource).toContain('@media (min-width: 1101px)')
     expect(ReviewWorkspaceViewSource).toContain('grid-template-areas:')
-    expect(ReviewWorkspaceViewSource).toContain('"file document find"')
+    expect(ReviewWorkspaceViewSource).not.toContain('"file document find"')
     expect(ReviewWorkspaceViewSource).toContain('"export document find"')
     expect(ReviewWorkspaceViewSource).toContain('"batch document details"')
     expect(ReviewWorkspaceViewSource).toContain('"navigation document details"')
+    expect(ReviewWorkspaceViewSource).not.toContain('.review-toolbar {')
     expect(ReviewWorkspaceViewSource).toContain('grid-area: document')
     expect(ReviewWorkspaceViewSource).toContain('grid-area: navigation')
     expect(ReviewWorkspaceViewSource).toContain('grid-area: details')
