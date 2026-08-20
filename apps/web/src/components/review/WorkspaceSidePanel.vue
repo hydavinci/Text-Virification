@@ -35,23 +35,23 @@ const emit = defineEmits<{
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  background: #fff;
-  border: 1px solid #dfe4f4;
-  border-radius: 14px;
+  background: var(--review-surface);
+  border: 1px solid var(--review-border);
+  border-radius: var(--review-panel-radius);
 }
 
 .workspace-side-panel__header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 14px 16px;
-  border-bottom: 1px solid #edf0f5;
+  gap: var(--review-space-3);
+  padding: calc(var(--review-space-3) + 2px) var(--review-space-4);
+  border-bottom: 1px solid var(--review-border);
 }
 
 .workspace-side-panel__title {
   margin: 0;
-  color: #243154;
+  color: var(--review-text);
   font-size: 0.92rem;
   line-height: 1.4;
 }
@@ -63,11 +63,12 @@ const emit = defineEmits<{
   min-width: 44px;
   min-height: 44px;
   padding: 0;
-  color: #667085;
+  color: var(--review-text-muted);
   font: inherit;
-  background: #f8f9fc;
-  border: 1px solid #dfe4ee;
-  border-radius: 10px;
+  white-space: nowrap;
+  background: var(--review-surface);
+  border: 1px solid var(--review-border);
+  border-radius: calc(var(--review-panel-radius) - 2px);
   cursor: pointer;
 }
 
@@ -79,6 +80,6 @@ const emit = defineEmits<{
 .workspace-side-panel__content {
   min-height: 0;
   overflow: auto;
-  padding: 16px;
+  padding: var(--review-space-4);
 }
 </style>

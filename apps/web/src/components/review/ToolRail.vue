@@ -179,16 +179,16 @@ defineExpose({ focusExportButton })
 .tool-rail {
   display: flex;
   min-width: 0;
-  gap: 10px;
-  color: #344054;
+  gap: calc(var(--review-space-2) + 2px);
+  color: var(--review-text-muted);
   box-sizing: border-box;
 }
 
 .tool-rail--rail {
   flex-direction: column;
   height: 100%;
-  padding: 10px 8px;
-  gap: 8px;
+  padding: 10px var(--review-space-2);
+  gap: var(--review-space-2);
 }
 
 .tool-rail--bottom {
@@ -196,12 +196,12 @@ defineExpose({ focusExportButton })
   grid-template-columns: repeat(5, minmax(0, 1fr));
   align-items: stretch;
   padding: 10px;
-  gap: 8px;
+  gap: var(--review-space-2);
 }
 
 .tool-rail__main {
   display: flex;
-  gap: 8px;
+  gap: var(--review-space-2);
 }
 
 .tool-rail--rail .tool-rail__main {
@@ -239,9 +239,9 @@ defineExpose({ focusExportButton })
   width: 100%;
   padding: 8px 0;
   color: inherit;
-  background: #f8f9fc;
-  border: 1px solid #d8deea;
-  border-radius: 12px;
+  background: var(--review-surface);
+  border: 1px solid var(--review-border);
+  border-radius: var(--review-panel-radius);
   box-sizing: border-box;
   cursor: pointer;
 }
@@ -259,9 +259,9 @@ defineExpose({ focusExportButton })
 }
 
 .tool-rail__button--active {
-  color: #243b98;
-  background: #eef0ff;
-  border-color: #7a8bea;
+  color: var(--review-accent);
+  background: var(--review-accent-soft);
+  border-color: var(--review-accent);
 }
 
 .tool-rail__active-indicator {
@@ -275,7 +275,7 @@ defineExpose({ focusExportButton })
   height: 14px;
   border: 1px solid currentColor;
   border-radius: 999px;
-  background: #fff;
+  background: var(--review-surface);
   font-size: 10px;
   font-weight: 900;
   line-height: 1;
@@ -295,5 +295,6 @@ defineExpose({ focusExportButton })
   font-size: 0.72rem;
   font-weight: 700;
   line-height: 1;
+  white-space: nowrap;
 }
 </style>

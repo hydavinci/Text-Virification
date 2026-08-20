@@ -186,22 +186,23 @@ function validateCustomReplacement(replacement: string): string | null {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
-  padding-bottom: 16px;
-  border-bottom: 1px solid #edf0f5;
+  gap: var(--review-space-3);
+  padding-bottom: var(--review-space-4);
+  border-bottom: 1px solid var(--review-border);
 }
 
 .issue-panel__heading p {
   margin: 0 0 5px;
-  color: #6575d7;
+  color: var(--review-accent);
   font-size: 0.72rem;
   font-weight: 800;
   text-transform: uppercase;
+  white-space: nowrap;
 }
 
 h2 {
   margin: 0;
-  color: #20283a;
+  color: var(--review-text);
   font-size: 1rem;
   line-height: 1.45;
 }
@@ -212,6 +213,7 @@ h2 {
   font-weight: 800;
   border-radius: 999px;
   text-transform: uppercase;
+  white-space: nowrap;
 }
 
 .issue-panel__severity--error {
@@ -231,8 +233,8 @@ h2 {
 
 dl {
   display: grid;
-  gap: 16px;
-  margin: 18px 0 0;
+  gap: var(--review-space-4);
+  margin: calc(var(--review-space-4) + 2px) 0 0;
 }
 
 dl div {
@@ -241,14 +243,14 @@ dl div {
 }
 
 dt {
-  color: #667085;
+  color: var(--review-text-muted);
   font-size: 0.72rem;
   font-weight: 700;
 }
 
 dd {
   margin: 0;
-  color: #30394d;
+  color: var(--review-text);
   font-size: 0.86rem;
   line-height: 1.6;
   overflow-wrap: anywhere;
@@ -258,12 +260,12 @@ dd {
   display: grid;
   min-height: 220px;
   place-content: center;
-  color: #667085;
+  color: var(--review-text-muted);
   text-align: center;
 }
 
 .issue-panel__empty strong {
-  color: #30394d;
+  color: var(--review-text);
 }
 
 .issue-panel__empty p {
@@ -275,57 +277,60 @@ dd {
 
 .issue-panel__decisions {
   display: grid;
-  gap: 12px;
+  gap: var(--review-space-3);
   margin-top: 22px;
   padding-top: 18px;
-  border-top: 1px solid #edf0f5;
+  border-top: 1px solid var(--review-border);
 }
 
 .issue-panel__decision-heading {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: calc(var(--review-space-2) + 2px);
 }
 
 .issue-panel__decision-heading h3 {
   margin: 0;
-  color: #30394d;
+  color: var(--review-text);
   font-size: 0.86rem;
 }
 
 .issue-panel__decision-heading span {
-  color: #596bd9;
+  color: var(--review-accent);
   font-size: 0.72rem;
   font-weight: 800;
+  white-space: nowrap;
 }
 
 .issue-panel__decision-buttons {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
+  gap: var(--review-space-2);
 }
 
 .issue-panel__decisions button {
   min-height: 44px;
   padding: 9px 10px;
-  color: #4256c9;
+  color: var(--review-accent);
   font-weight: 700;
-  background: #eef0ff;
+  white-space: nowrap;
+  background: var(--review-accent-soft);
   border: 0;
-  border-radius: 8px;
+  border-radius: calc(var(--review-panel-radius) - 4px);
   cursor: pointer;
 }
 
 .issue-panel__decision-buttons button:last-child {
-  color: #596276;
-  background: #f0f2f6;
+  color: var(--review-text-muted);
+  background: var(--review-surface);
+  border: 1px solid var(--review-border);
 }
 
 .issue-panel__decisions label {
   display: grid;
   gap: 6px;
-  color: #667085;
+  color: var(--review-text-muted);
   font-size: 0.72rem;
   font-weight: 700;
 }
@@ -334,12 +339,13 @@ dd {
   width: 100%;
   min-height: 44px;
   padding: 9px;
-  color: #30394d;
+  color: var(--review-text);
   font: inherit;
   line-height: 1.5;
   resize: vertical;
-  border: 1px solid #dfe4ee;
-  border-radius: 8px;
+  background: var(--review-surface);
+  border: 1px solid var(--review-border);
+  border-radius: calc(var(--review-panel-radius) - 4px);
 }
 
 .issue-panel__custom-button {
@@ -355,7 +361,7 @@ dd {
 .issue-panel__validation-error,
 .issue-panel__decision-error {
   margin: 0;
-  color: #a53636;
+  color: var(--review-danger);
   font-size: 0.78rem;
   line-height: 1.45;
 }
@@ -363,7 +369,7 @@ dd {
 .issue-panel__decision-error {
   padding: 11px;
   background: #fff2f2;
-  border-radius: 8px;
+  border-radius: calc(var(--review-panel-radius) - 4px);
 }
 
 .issue-panel__decision-error p {

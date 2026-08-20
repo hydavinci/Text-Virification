@@ -44,10 +44,10 @@ const emit = defineEmits<{
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  padding: 13px 18px;
+  gap: var(--review-space-4);
+  padding: calc(var(--review-space-3) + 1px) calc(var(--review-space-4) + 2px);
   background: rgba(255, 255, 255, 0.95);
-  border-bottom: 1px solid #dfe5ef;
+  border-bottom: 1px solid var(--review-border);
   backdrop-filter: blur(8px);
 }
 
@@ -58,12 +58,12 @@ const emit = defineEmits<{
 .document-header__identity {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: calc(var(--review-space-2) + 2px);
 }
 
 .document-header__identity strong {
   overflow: hidden;
-  color: #1c2538;
+  color: var(--review-text);
   font-size: 0.95rem;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -71,18 +71,19 @@ const emit = defineEmits<{
 
 .document-header__identity span {
   flex: 0 0 auto;
-  padding: 2px 8px;
-  color: #4256c9;
+  padding: 2px var(--review-space-2);
+  color: var(--review-accent);
   font-size: 0.72rem;
   font-weight: 800;
-  background: #eef0ff;
+  white-space: nowrap;
+  background: var(--review-accent-soft);
   border-radius: 999px;
 }
 
 .document-header__body p,
 .document-header__status {
   margin: 4px 0 0;
-  color: #667085;
+  color: var(--review-text-muted);
   font-size: 0.78rem;
 }
 
@@ -90,19 +91,20 @@ const emit = defineEmits<{
   display: flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: 10px;
-  color: #a53636;
+  gap: calc(var(--review-space-2) + 2px);
+  color: var(--review-danger);
   font-size: 0.78rem;
 }
 
 .document-header__error button {
   min-height: 44px;
-  padding: 7px 10px;
-  color: #4256c9;
+  padding: 7px calc(var(--review-space-2) + 2px);
+  color: var(--review-accent);
   font-weight: 700;
-  background: #eef0ff;
+  white-space: nowrap;
+  background: var(--review-accent-soft);
   border: 0;
-  border-radius: 8px;
+  border-radius: calc(var(--review-panel-radius) - 4px);
   cursor: pointer;
 }
 

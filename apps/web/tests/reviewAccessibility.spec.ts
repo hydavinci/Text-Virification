@@ -15,6 +15,7 @@ import type { ExportCreateResponse, ExportResponse } from '../src/types/exports'
 import ReviewWorkspaceView from '../src/views/ReviewWorkspaceView.vue'
 import AppSource from '../src/App.vue?raw'
 import BatchActionsSource from '../src/components/review/BatchActions.vue?raw'
+import ContextInspectorSource from '../src/components/review/ContextInspector.vue?raw'
 import DocumentViewerSource from '../src/components/review/DocumentViewer.vue?raw'
 import ExportPanelSource from '../src/components/review/ExportPanel.vue?raw'
 import FindReplaceSource from '../src/components/review/FindReplace.vue?raw'
@@ -211,7 +212,18 @@ describe('review workspace accessibility', () => {
     await flushPromises()
 
     const desktopShell = wrapper.get('.review-workspace__desktop-shell')
+    const desktopLabels = Array.from(desktopShell.element.children)
+      .map((child) => {
+        const element = child as HTMLElement
+        return (
+          element.getAttribute('aria-label') ??
+          element.querySelector<HTMLElement>('[aria-label]')?.getAttribute('aria-label') ??
+          ''
+        )
+      })
+      .filter(Boolean)
 
+    expect(desktopLabels).toEqual(['审阅工具', '问题', '文档内容', '上下文检查器'])
     expect(desktopShell.get('[data-tool="issues"]').attributes('aria-pressed')).toBe('true')
     expect(desktopShell.get('aside[aria-label="问题"]').isVisible()).toBe(true)
     expect(desktopShell.get('article[aria-label="文档内容"]').isVisible()).toBe(true)
@@ -225,10 +237,23 @@ describe('review workspace accessibility', () => {
     expect(AppSource).toContain(':focus-visible')
     expect(ReviewWorkspaceViewSource).toContain('min-height: 44px')
     expect(ReviewWorkspaceViewSource).toContain('aria-label="返回问题列表"')
+    expect(ContextInspectorSource).toContain('min-width: 44px')
     expect(ReviewNavigationSource).toContain('min-height: 44px')
     expect(ReviewNavigationSource).toContain(':focus-visible')
     expect(IssuePanelSource).toContain('min-height: 44px')
     expect(IssuePanelSource).toContain(':focus-visible')
+  })
+
+  it('uses one inherited review visual system without obsolete export breakpoints', () => {
+    expect(ReviewWorkspaceViewSource).toContain('--review-accent:')
+    expect(ReviewWorkspaceViewSource).toContain('--review-space-4: 16px')
+    expect(ReviewWorkspaceViewSource).toContain('--review-panel-radius:')
+    expect(ReviewWorkspaceViewSource).not.toContain('ReviewToolbar')
+    expect(ReviewWorkspaceViewSource).not.toContain('review-workspace__fallback-export')
+    expect(ExportPanelSource).not.toContain('@media (min-width: 981px)')
+    expect(ExportPanelSource).not.toContain('@media (max-width: 980px)')
+    expect(FindReplaceSource).not.toContain('@media (min-width: 981px)')
+    expect(BatchActionsSource).not.toContain('@media (min-width: 981px)')
   })
 
   it('ships a five-track bottom rail with shrinkable 44px controls', () => {
@@ -270,9 +295,14 @@ describe('review workspace accessibility', () => {
 
   it('ships the anchored export dialog without the transitional toolbar', () => {
     expect(ReviewWorkspaceViewSource).toContain('<ExportPanel')
-    expect(ReviewWorkspaceViewSource).toContain('mode="bottom"')
     expect(ReviewWorkspaceViewSource).not.toContain('review-workspace__fallback-export')
     expect(ReviewWorkspaceViewSource).not.toContain('ReviewToolbar')
+    expect(ReviewWorkspaceViewSource).toContain('mode="bottom"')
+    expect(ReviewWorkspaceViewSource).toContain(
+      '.review-workspace__compact-export-panel :deep(.export-panel)'
+    )
+    expect(ReviewWorkspaceViewSource).toContain('bottom: calc(100% + 12px)')
+    expect(ReviewWorkspaceViewSource).toContain('max-height: min(420px, calc(100dvh - 140px))')
     expect(ExportPanelSource).toContain('role="dialog"')
     expect(ExportPanelSource).toContain('aria-modal="true"')
     expect(ExportPanelSource).toContain('data-testid="export-backdrop"')
@@ -280,7 +310,8 @@ describe('review workspace accessibility', () => {
     expect(ExportPanelSource).toContain('v-show="open"')
     expect(ExportPanelSource).toContain("@pointerdown.self=\"emit('close')\"")
     expect(ExportPanelSource).toContain('@keydown="onDialogKeydown"')
-    expect(ExportPanelSource).toContain('@media (min-width: 981px)')
+    expect(ExportPanelSource).toContain('left: calc(100% + 12px)')
+    expect(ExportPanelSource).toContain('bottom: 0')
     expect(ExportPanelSource).toContain('.export-panel__heading p')
     expect(BatchActionsSource).toContain('.batch-actions__heading p')
     expect(BatchActionsSource).toContain('仅当前已加载 · 最多')

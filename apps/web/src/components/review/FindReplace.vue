@@ -85,12 +85,12 @@ const emit = defineEmits<{
 .find-replace {
   display: grid;
   min-width: 0;
-  gap: 12px;
+  gap: var(--review-space-3);
 }
 
 .find-replace__heading strong {
   display: block;
-  color: #243154;
+  color: var(--review-text);
   font-size: 0.86rem;
 }
 
@@ -104,19 +104,19 @@ const emit = defineEmits<{
 
 .find-replace__heading p,
 .find-replace__status {
-  color: #667085;
+  color: var(--review-text-muted);
 }
 
 .find-replace__fields {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: 10px;
+  gap: calc(var(--review-space-2) + 2px);
 }
 
 .find-replace__fields label {
   display: grid;
   gap: 5px;
-  color: #667085;
+  color: var(--review-text-muted);
   font-size: 0.72rem;
   font-weight: 700;
 }
@@ -126,11 +126,11 @@ const emit = defineEmits<{
   min-width: 0;
   min-height: 44px;
   padding: 8px 9px;
-  color: #30394d;
+  color: var(--review-text);
   font-size: 0.78rem;
-  background: #f8f9fc;
-  border: 1px solid #dfe4ee;
-  border-radius: 8px;
+  background: var(--review-surface);
+  border: 1px solid var(--review-border);
+  border-radius: calc(var(--review-panel-radius) - 4px);
 }
 
 .find-replace__fields input:focus-visible,
@@ -143,39 +143,41 @@ const emit = defineEmits<{
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--review-space-3);
   flex-wrap: nowrap;
 }
 
 .find-replace__nav {
   display: flex;
-  gap: 8px;
+  gap: var(--review-space-2);
 }
 
 .find-replace__actions button {
   min-height: 44px;
   padding: 9px 11px;
-  color: #4256c9;
+  color: var(--review-accent);
   font-weight: 700;
-  background: #eef0ff;
+  white-space: nowrap;
+  background: var(--review-accent-soft);
   border: 1px solid transparent;
-  border-radius: 9px;
+  border-radius: calc(var(--review-panel-radius) - 3px);
   cursor: pointer;
 }
 
 .find-replace__actions > button {
-  color: #596276;
-  background: #f0f2f6;
+  color: var(--review-text-muted);
+  background: var(--review-surface);
+  border-color: var(--review-border);
 }
 
 .find-replace__actions button:disabled {
   color: #8c93a8;
   cursor: not-allowed;
-  background: #f2f4f8;
+  background: var(--review-canvas);
 }
 
 .find-replace__error {
   margin: 0;
-  color: #a53636;
+  color: var(--review-danger);
 }
 </style>

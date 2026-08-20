@@ -613,13 +613,27 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .review-workspace {
+  --review-accent: #4f5fd5;
+  --review-accent-soft: #eef0ff;
+  --review-surface: #ffffff;
+  --review-canvas: #f3f5f8;
+  --review-border: #dfe3ea;
+  --review-text: #202939;
+  --review-text-muted: #667085;
+  --review-danger: #a53636;
+  --review-space-1: 4px;
+  --review-space-2: 8px;
+  --review-space-3: 12px;
+  --review-space-4: 16px;
+  --review-panel-radius: 12px;
   position: relative;
   display: flex;
   width: min(100% - 32px, 1560px);
   height: 100%;
   flex-direction: column;
   margin: 0 auto;
-  padding: 16px 0;
+  padding: var(--review-space-4) 0;
+  color: var(--review-text);
   overflow: hidden;
 }
 
@@ -635,7 +649,7 @@ onBeforeUnmount(() => {
   display: grid;
   min-height: 0;
   flex: 1;
-  gap: 14px;
+  gap: var(--review-space-3);
   grid-template-rows: minmax(0, 1fr) auto;
 }
 
@@ -647,7 +661,7 @@ onBeforeUnmount(() => {
 .review-workspace__compact-panel {
   display: grid;
   min-height: 0;
-  gap: 14px;
+  gap: var(--review-space-3);
 }
 
 .review-workspace__compact-panel--document {
@@ -660,21 +674,21 @@ onBeforeUnmount(() => {
 
 .review-workspace__compact-surface {
   min-height: 0;
-  background: #fff;
-  border: 1px solid #e2e7f0;
-  border-radius: 16px;
+  background: var(--review-surface);
+  border: 1px solid var(--review-border);
+  border-radius: calc(var(--review-panel-radius) + var(--review-space-1));
   overflow: hidden;
 }
 
 .review-workspace__compact-surface--padded {
-  padding: 16px;
+  padding: var(--review-space-4);
 }
 
 .review-workspace__compact-issue-grid,
 .review-workspace__phone-issues,
 .review-workspace__phone-issue-details {
   display: grid;
-  gap: 14px;
+  gap: var(--review-space-3);
   min-height: 0;
 }
 
@@ -687,13 +701,13 @@ onBeforeUnmount(() => {
 
 .review-workspace__compact-rail-stack {
   position: relative;
-  padding-top: 8px;
+  padding-top: var(--review-space-2);
 }
 
 .review-workspace__compact-rail-stack :deep(.tool-rail) {
   background: rgba(255, 255, 255, 0.96);
-  border: 1px solid #dfe5ef;
-  border-radius: 18px;
+  border: 1px solid var(--review-border);
+  border-radius: calc(var(--review-panel-radius) + 6px);
   box-shadow: 0 14px 32px rgba(22, 31, 52, 0.12);
   backdrop-filter: blur(8px);
 }
@@ -713,12 +727,13 @@ onBeforeUnmount(() => {
   justify-content: center;
   justify-self: start;
   min-width: 44px;
-  padding: 0 16px;
-  color: #4256c9;
+  padding: 0 var(--review-space-4);
+  color: var(--review-accent);
   font-weight: 700;
-  background: #eef0ff;
-  border: 1px solid #d4dcff;
-  border-radius: 12px;
+  white-space: nowrap;
+  background: var(--review-accent-soft);
+  border: 1px solid var(--review-border);
+  border-radius: var(--review-panel-radius);
   cursor: pointer;
 }
 
@@ -732,8 +747,8 @@ onBeforeUnmount(() => {
   display: grid;
   min-height: 0;
   flex: 1;
-  gap: 14px;
-  margin-top: 14px;
+  gap: var(--review-space-3);
+  margin-top: var(--review-space-3);
   grid-template-rows: minmax(0, 1fr);
 }
 
@@ -756,7 +771,7 @@ onBeforeUnmount(() => {
 
 .review-workspace__side-panel-content {
   display: grid;
-  gap: 14px;
+  gap: var(--review-space-3);
   min-height: 0;
 }
 

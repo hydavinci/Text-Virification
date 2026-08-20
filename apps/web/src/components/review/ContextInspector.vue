@@ -130,21 +130,21 @@ watch(
   min-height: 0;
   grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
-  background: #fff;
-  border: 1px solid #dfe4f4;
-  border-radius: 14px;
+  background: var(--review-surface);
+  border: 1px solid var(--review-border);
+  border-radius: var(--review-panel-radius);
 }
 
 .context-inspector__header {
   display: grid;
-  gap: 12px;
-  padding: 14px 16px 12px;
-  border-bottom: 1px solid #edf0f5;
+  gap: var(--review-space-3);
+  padding: calc(var(--review-space-3) + 2px) var(--review-space-4) var(--review-space-3);
+  border-bottom: 1px solid var(--review-border);
 }
 
 .context-inspector__title {
   margin: 0;
-  color: #243154;
+  color: var(--review-text);
   font-size: 0.92rem;
   line-height: 1.4;
 }
@@ -152,25 +152,27 @@ watch(
 .context-inspector__tabs {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
+  gap: var(--review-space-2);
 }
 
 .context-inspector__tab {
   position: relative;
+  min-width: 44px;
   min-height: 44px;
-  padding: 9px 12px;
-  color: #4256c9;
+  padding: 9px var(--review-space-3);
+  color: var(--review-accent);
   font-weight: 700;
-  background: #eef0ff;
-  border: 1px solid #d4dcff;
-  border-radius: 10px;
+  white-space: nowrap;
+  background: var(--review-accent-soft);
+  border: 1px solid var(--review-border);
+  border-radius: calc(var(--review-panel-radius) - 2px);
   cursor: pointer;
 }
 
 .context-inspector__tab--active {
-  color: #fff;
-  background: linear-gradient(135deg, #5c75f7, #7958d9);
-  border-color: transparent;
+  color: var(--review-surface);
+  background: var(--review-accent);
+  border-color: var(--review-accent);
 }
 
 .context-inspector__tab-indicator {
@@ -184,8 +186,8 @@ watch(
   height: 14px;
   border: 1px solid currentColor;
   border-radius: 999px;
-  background: #fff;
-  color: #243154;
+  background: var(--review-surface);
+  color: var(--review-text);
   font-size: 10px;
   font-weight: 900;
   line-height: 1;
@@ -203,6 +205,6 @@ watch(
 
 .context-inspector__panel-body {
   min-height: 0;
-  padding: 16px;
+  padding: var(--review-space-4);
 }
 </style>

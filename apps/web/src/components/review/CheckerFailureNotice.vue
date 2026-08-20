@@ -34,12 +34,12 @@ const visibleFailures = computed(() =>
 <style scoped>
 .checker-failures {
   display: grid;
-  gap: 10px;
-  padding: 12px 14px;
+  gap: calc(var(--review-space-2) + 2px);
+  padding: var(--review-space-3) calc(var(--review-space-3) + 2px);
   color: #7c3f16;
   background: #fff6e8;
   border: 1px solid #f3d6ad;
-  border-radius: 12px;
+  border-radius: var(--review-panel-radius);
 }
 
 .checker-failures strong {
@@ -48,7 +48,7 @@ const visibleFailures = computed(() =>
 
 .checker-failures ul {
   display: grid;
-  gap: 8px;
+  gap: var(--review-space-2);
   margin: 0;
   padding: 0;
   list-style: none;
@@ -57,7 +57,7 @@ const visibleFailures = computed(() =>
 .checker-failures li {
   display: flex;
   flex-wrap: wrap;
-  gap: 7px;
+  gap: calc(var(--review-space-2) - 1px);
   font-size: 0.8rem;
 }
 

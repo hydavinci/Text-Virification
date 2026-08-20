@@ -304,47 +304,48 @@ function selectIssue(issueId: string, event: MouseEvent): void {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 18px;
-  border-bottom: 1px solid #edf0f5;
+  padding: calc(var(--review-space-4) + 2px);
+  border-bottom: 1px solid var(--review-border);
 }
 
 .review-navigation__heading p {
   margin: 0;
-  color: #667085;
+  color: var(--review-text-muted);
   font-size: 0.75rem;
 }
 
 .review-navigation__heading strong {
   display: block;
   margin-top: 3px;
-  color: #20283a;
+  color: var(--review-text);
   font-size: 1.5rem;
 }
 
 .review-navigation__heading > span {
-  color: #758096;
+  color: var(--review-text-muted);
   font-size: 0.72rem;
+  white-space: nowrap;
 }
 
 .review-navigation__filters {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-  padding: 14px 12px;
-  border-bottom: 1px solid #edf0f5;
+  gap: calc(var(--review-space-2) + 2px);
+  padding: calc(var(--review-space-3) + 2px) var(--review-space-3);
+  border-bottom: 1px solid var(--review-border);
 }
 
 .review-navigation__overview {
   display: grid;
-  gap: 12px;
-  padding: 14px 12px;
-  border-bottom: 1px solid #edf0f5;
+  gap: var(--review-space-3);
+  padding: calc(var(--review-space-3) + 2px) var(--review-space-3);
+  border-bottom: 1px solid var(--review-border);
 }
 
 .review-navigation__overview h2,
 .review-navigation__overview h3 {
   margin: 0;
-  color: #30394d;
+  color: var(--review-text);
 }
 
 .review-navigation__overview h2 {
@@ -357,7 +358,7 @@ function selectIssue(issueId: string, event: MouseEvent): void {
 
 .review-navigation__overview-group {
   display: grid;
-  gap: 7px;
+  gap: calc(var(--review-space-2) - 1px);
 }
 
 .review-navigation__overview dl {
@@ -371,12 +372,12 @@ function selectIssue(issueId: string, event: MouseEvent): void {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  padding: 7px 8px;
-  color: #596276;
+  gap: var(--review-space-2);
+  padding: 7px var(--review-space-2);
+  color: var(--review-text-muted);
   font-size: 0.72rem;
-  background: #f8f9fc;
-  border-radius: 8px;
+  background: var(--review-surface);
+  border-radius: calc(var(--review-panel-radius) - 4px);
 }
 
 .review-navigation__overview dt,
@@ -385,14 +386,14 @@ function selectIssue(issueId: string, event: MouseEvent): void {
 }
 
 .review-navigation__overview dd {
-  color: #30394d;
+  color: var(--review-text);
   font-weight: 800;
 }
 
 .review-navigation__filters label {
   display: grid;
   gap: 5px;
-  color: #667085;
+  color: var(--review-text-muted);
   font-size: 0.7rem;
   font-weight: 700;
 }
@@ -403,11 +404,11 @@ function selectIssue(issueId: string, event: MouseEvent): void {
   min-width: 0;
   padding: 8px 9px;
   min-height: 44px;
-  color: #30394d;
+  color: var(--review-text);
   font-size: 0.78rem;
-  background: #f8f9fc;
-  border: 1px solid #dfe4ee;
-  border-radius: 8px;
+  background: var(--review-surface);
+  border: 1px solid var(--review-border);
+  border-radius: calc(var(--review-panel-radius) - 4px);
 }
 
 .review-navigation__filters select:focus-visible,
@@ -423,13 +424,13 @@ function selectIssue(issueId: string, event: MouseEvent): void {
 .review-navigation__status,
 .review-navigation__empty,
 .review-navigation__error {
-  margin: 16px;
-  color: #667085;
+  margin: var(--review-space-4);
+  color: var(--review-text-muted);
   font-size: 0.84rem;
 }
 
 .review-navigation__error {
-  color: #a53636;
+  color: var(--review-danger);
 }
 
 .review-navigation__error p {
@@ -439,17 +440,19 @@ function selectIssue(issueId: string, event: MouseEvent): void {
 .review-navigation__error button {
   min-height: 44px;
   padding: 7px 10px;
-  color: #4256c9;
+  color: var(--review-accent);
   font-weight: 700;
-  background: #eef0ff;
+  white-space: nowrap;
+  background: var(--review-accent-soft);
   border: 0;
-  border-radius: 8px;
+  border-radius: calc(var(--review-panel-radius) - 4px);
   cursor: pointer;
 }
 
 .review-navigation__pagination {
   display: grid;
-  padding: 4px 10px 14px;
+  padding: var(--review-space-1) calc(var(--review-space-2) + 2px)
+    calc(var(--review-space-3) + 2px);
 }
 
 .review-navigation__pagination .review-navigation__status {
@@ -459,12 +462,13 @@ function selectIssue(issueId: string, event: MouseEvent): void {
 
 .review-navigation__pagination button {
   min-height: 44px;
-  padding: 8px 12px;
-  color: #4256c9;
+  padding: 8px var(--review-space-3);
+  color: var(--review-accent);
   font-weight: 800;
-  background: #eef0ff;
-  border: 1px solid #d4dcff;
-  border-radius: 10px;
+  white-space: nowrap;
+  background: var(--review-accent-soft);
+  border: 1px solid var(--review-border);
+  border-radius: calc(var(--review-panel-radius) - 2px);
   cursor: pointer;
 }
 
@@ -475,9 +479,9 @@ function selectIssue(issueId: string, event: MouseEvent): void {
 
 .issue-list {
   display: grid;
-  gap: 8px;
+  gap: var(--review-space-2);
   margin: 0;
-  padding: 10px;
+  padding: calc(var(--review-space-2) + 2px);
   list-style: none;
 }
 
@@ -485,13 +489,13 @@ function selectIssue(issueId: string, event: MouseEvent): void {
   display: grid;
   width: 100%;
   min-height: 44px;
-  gap: 7px;
-  padding: 13px;
-  color: #596276;
+  gap: calc(var(--review-space-2) - 1px);
+  padding: calc(var(--review-space-3) + 1px);
+  color: var(--review-text-muted);
   text-align: left;
-  background: #f8f9fc;
+  background: var(--review-surface);
   border: 1px solid transparent;
-  border-radius: 11px;
+  border-radius: calc(var(--review-panel-radius) - 1px);
   cursor: pointer;
 }
 
@@ -503,15 +507,15 @@ function selectIssue(issueId: string, event: MouseEvent): void {
 }
 
 .issue-card--active {
-  background: #eef0ff;
-  border-color: #7a8bea;
+  background: var(--review-accent-soft);
+  border-color: var(--review-accent);
 }
 
 .issue-card__meta {
   display: flex;
   justify-content: space-between;
-  gap: 8px;
-  color: #6977c9;
+  gap: var(--review-space-2);
+  color: var(--review-accent);
   font-size: 0.68rem;
   font-weight: 800;
   text-transform: uppercase;
@@ -537,15 +541,16 @@ function selectIssue(issueId: string, event: MouseEvent): void {
 
 .issue-card strong {
   overflow: hidden;
-  color: #252e42;
+  color: var(--review-text);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .issue-card__status {
-  color: #4356c9;
+  color: var(--review-accent);
   font-size: 0.72rem;
   font-weight: 800;
+  white-space: nowrap;
 }
 
 .issue-card > span:last-child {

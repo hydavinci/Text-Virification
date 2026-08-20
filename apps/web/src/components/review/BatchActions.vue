@@ -74,19 +74,19 @@ function requestAcceptVisible(): void {
 <style scoped>
 .batch-actions {
   display: grid;
-  gap: 10px;
+  gap: calc(var(--review-space-2) + 2px);
 }
 
 .batch-actions__heading {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--review-space-3);
 }
 
 .batch-actions__heading strong {
   display: block;
-  color: #243154;
+  color: var(--review-text);
   font-size: 0.86rem;
 }
 
@@ -100,38 +100,41 @@ function requestAcceptVisible(): void {
 
 .batch-actions__heading p,
 .batch-actions__notice {
-  color: #667085;
+  color: var(--review-text-muted);
 }
 
 .batch-actions__heading > span {
-  padding: 4px 8px;
-  color: #4356c9;
+  padding: var(--review-space-1) var(--review-space-2);
+  color: var(--review-accent);
   font-size: 0.74rem;
   font-weight: 800;
-  background: #eef0ff;
+  white-space: nowrap;
+  background: var(--review-accent-soft);
   border-radius: 999px;
 }
 
 .batch-actions__buttons {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
+  gap: var(--review-space-2);
 }
 
 .batch-actions__buttons button {
   min-height: 44px;
   padding: 9px 11px;
-  color: #4256c9;
+  color: var(--review-accent);
   font-weight: 700;
-  background: #eef0ff;
+  white-space: nowrap;
+  background: var(--review-accent-soft);
   border: 1px solid transparent;
-  border-radius: 9px;
+  border-radius: calc(var(--review-panel-radius) - 3px);
   cursor: pointer;
 }
 
 .batch-actions__buttons button:last-child {
-  color: #596276;
-  background: #f0f2f6;
+  color: var(--review-text-muted);
+  background: var(--review-surface);
+  border-color: var(--review-border);
 }
 
 .batch-actions__buttons button:focus-visible {
@@ -142,11 +145,11 @@ function requestAcceptVisible(): void {
 .batch-actions__buttons button:disabled {
   color: #8c93a8;
   cursor: not-allowed;
-  background: #f2f4f8;
+  background: var(--review-canvas);
 }
 
 .batch-actions__error {
   margin: 0;
-  color: #a53636;
+  color: var(--review-danger);
 }
 </style>
