@@ -513,6 +513,76 @@ describe('ReviewWorkspaceView', () => {
     wrapper.unmount()
   })
 
+  it('opens the export dialog from the 1200px fallback layout and restores focus after closing', async () => {
+    const restoreViewport = mockViewportWidth(1200)
+
+    try {
+      const wrapper = mountReviewWorkspaceWithConfig({ attachTo: document.body })
+      await flushPromises()
+      const trigger = wrapper.get('[data-tool="export"]')
+
+      await trigger.trigger('click')
+      await flushPromises()
+
+      const dialog = wrapper.get('[role="dialog"][aria-label="导出文件"]')
+      expect(dialog.isVisible()).toBe(true)
+
+      await dialog.trigger('keydown', { key: 'Escape' })
+      await flushPromises()
+
+      expect(dialog.isVisible()).toBe(false)
+      expect(document.activeElement).toBe(trigger.element)
+      wrapper.unmount()
+    } finally {
+      restoreViewport()
+    }
+  })
+
+  it('reuses the persistent export dialog state from the mobile layout trigger', async () => {
+    const restoreViewport = mockViewportWidth(480)
+    const create = vi.fn().mockResolvedValue(
+      buildCreatedExport({
+        export_id: 'export-1',
+        export_type: 'html_report',
+        status: 'completed',
+        file_name: 'report.html'
+      })
+    )
+
+    try {
+      const wrapper = mountReviewWorkspaceWithConfig({
+        attachTo: document.body,
+        exportsApi: createExportsApiMock({ create })
+      })
+      await flushPromises()
+
+      const trigger = wrapper.get('[data-tool="export"]')
+      await trigger.trigger('click')
+      await flushPromises()
+
+      expect(wrapper.get('[role="dialog"][aria-label="导出文件"]').isVisible()).toBe(true)
+
+      await wrapper.get('select[name="export-type"]').setValue('html_report')
+      await wrapper.get('button[name="create-export"]').trigger('click')
+      await flushPromises()
+
+      expect(wrapper.find('[data-testid="export-download-link"]').exists()).toBe(true)
+
+      await wrapper.get('[aria-label="关闭导出"]').trigger('click')
+      await flushPromises()
+      expect(document.activeElement).toBe(trigger.element)
+
+      await trigger.trigger('click')
+      await flushPromises()
+
+      expect(wrapper.get('[role="dialog"][aria-label="导出文件"]').isVisible()).toBe(true)
+      expect(wrapper.find('[data-testid="export-download-link"]').exists()).toBe(true)
+      wrapper.unmount()
+    } finally {
+      restoreViewport()
+    }
+  })
+
   it('retains completed export state after closing and reopening the dialog', async () => {
     const create = vi.fn().mockResolvedValue(
       buildCreatedExport({

@@ -21,6 +21,7 @@ import type {
 } from '../components/review/workspaceLayout'
 
 type MobileReviewTab = 'document' | 'issues'
+type ExportTriggerSource = 'desktop' | 'fallback'
 
 const props = defineProps<{
   jobId: string
@@ -95,6 +96,8 @@ const isExportOpen = ref(false)
 const activeInspectorTab = ref<InspectorTab>('details')
 const tabButtons = new Map<MobileReviewTab, HTMLButtonElement>()
 const toolRail = ref<{ focusExportButton(): void } | null>(null)
+const fallbackExportButton = ref<HTMLButtonElement | null>(null)
+const lastExportTrigger = ref<ExportTriggerSource>('desktop')
 
 function bindMediaQuery(
   mediaQuery: MediaQueryList | null,
@@ -186,6 +189,11 @@ function closeSidePanel(): void {
 
 function focusExportTrigger(): void {
   void nextTick(() => {
+    if (lastExportTrigger.value === 'fallback') {
+      fallbackExportButton.value?.focus()
+      return
+    }
+
     toolRail.value?.focusExportButton()
   })
 }
@@ -199,7 +207,9 @@ function closeExport(): void {
   focusExportTrigger()
 }
 
-function toggleExport(): void {
+function toggleExport(trigger: ExportTriggerSource): void {
+  lastExportTrigger.value = trigger
+
   if (isExportOpen.value) {
     closeExport()
     return
@@ -295,6 +305,27 @@ onBeforeUnmount(() => {
   >
     <div v-if="!isDesktop" class="review-workspace__supplements">
       <CheckerFailureNotice v-if="!isDesktop" :failures="checkerFailures" />
+
+      <div class="review-workspace__fallback-export">
+        <button
+          ref="fallbackExportButton"
+          type="button"
+          class="review-workspace__fallback-export-trigger"
+          data-tool="export"
+          aria-haspopup="dialog"
+          :aria-expanded="isExportOpen"
+          @click="toggleExport('fallback')"
+        >
+          导出
+        </button>
+        <ExportPanel
+          class="review-workspace__fallback-export-panel"
+          :job-id="jobId"
+          :file-type="fileType"
+          :open="isExportOpen"
+          @close="closeExport"
+        />
+      </div>
 
       <section class="review-workspace__auxiliary-panel" aria-label="批量">
         <BatchActions
@@ -432,7 +463,7 @@ onBeforeUnmount(() => {
           :side-panel-open="isSidePanelOpen"
           :export-open="isExportOpen"
           @activate="activateDesktopTool"
-          @toggle-export="toggleExport"
+          @toggle-export="toggleExport('desktop')"
         />
         <ExportPanel
           :job-id="jobId"
@@ -637,6 +668,44 @@ onBeforeUnmount(() => {
 
 .review-workspace__auxiliary-panel {
   padding: 16px;
+}
+
+.review-workspace__fallback-export {
+  position: relative;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.review-workspace__fallback-export-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  padding: 0 16px;
+  color: #4256c9;
+  font-weight: 700;
+  background: #eef0ff;
+  border: 1px solid #d4dcff;
+  border-radius: 12px;
+  cursor: pointer;
+}
+
+.review-workspace__fallback-export-trigger[aria-expanded='true'] {
+  color: #fff;
+  background: linear-gradient(135deg, #5c75f7, #7958d9);
+  border-color: transparent;
+}
+
+.review-workspace__fallback-export-trigger:focus-visible {
+  outline: 3px solid #8ea2ff;
+  outline-offset: 2px;
+}
+
+.review-workspace__fallback-export-panel :deep(.export-panel) {
+  left: auto;
+  right: 0;
+  top: calc(100% + 12px);
+  bottom: auto;
 }
 
 .review-workspace__tabs {
