@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Review workspace layout fixture</title>
+    <style>
+      :root {
+        color: #172033;
+        background: #f4f7fb;
+        font-family:
+          Inter, "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", sans-serif;
+        font-synthesis: none;
+        text-rendering: optimizeLegibility;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body,
+      #fixture,
+      #app {
+        height: 100%;
+        margin: 0;
+      }
+
+      body {
+        min-width: 320px;
+        background:
+          radial-gradient(circle at 50% 0%, rgba(77, 110, 255, 0.1), transparent 32rem),
+          #f4f7fb;
+      }
+
+      button,
+      input,
+      select,
+      textarea {
+        font: inherit;
+      }
+
+      #fixture {
+        height: 100dvh;
+        overflow: hidden;
+      }
+    </style>
+  </head>
+  <body>
+    <main id="fixture" aria-label="审阅工作台布局夹具">
+      <div id="app"></div>
+    </main>
+    <script type="module" src="./reviewWorkspaceHarness.ts"></script>
+  </body>
+</html>

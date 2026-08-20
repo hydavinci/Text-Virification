@@ -9,6 +9,8 @@ export default defineConfig({
     }
   },
   test: {
-    environment: 'jsdom'
+    environment: 'jsdom',
+    include: ['tests/**/*.spec.ts'],
+    exclude: ['tests/layout/**/*.spec.ts']
   }
 })
