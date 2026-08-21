@@ -8,6 +8,7 @@ from text_verification.config import Settings, get_settings
 from text_verification.infrastructure.analysis_repositories import AnalysisRepository
 from text_verification.infrastructure.database import get_session_factory
 from text_verification.infrastructure.repositories import JobRepository
+from text_verification.infrastructure.revision_repository import RevisionRepository
 from text_verification.infrastructure.storage import JobStorage
 
 
@@ -33,6 +34,12 @@ def get_analysis_repository(
     session: Annotated[Session, Depends(get_db_session)],
 ) -> AnalysisRepository:
     return AnalysisRepository(session)
+
+
+def get_revision_repository(
+    session: Annotated[Session, Depends(get_db_session)],
+) -> RevisionRepository:
+    return RevisionRepository(session)
 
 
 def get_job_storage(

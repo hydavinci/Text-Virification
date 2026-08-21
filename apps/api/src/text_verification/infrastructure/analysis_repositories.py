@@ -4,9 +4,8 @@ import base64
 import binascii
 import json
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Literal, cast
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from sqlalchemy import Select, and_, delete, func, literal, or_, select
 from sqlalchemy.orm import Session
@@ -28,7 +27,6 @@ from text_verification.infrastructure.orm import (
     IssueRow,
     JobRow,
 )
-from text_verification.infrastructure.repositories import JobRepository
 
 UNREVIEWED_DECISION = "unreviewed"
 SUMMARY_DECISION_STATES = ("accepted", "ignored", UNREVIEWED_DECISION)
@@ -126,58 +124,53 @@ class AnalysisRepository:
         issues: list[Issue],
         failures: dict[CheckCategory, CheckerFailure],
     ) -> None:
-        job = JobRepository(self._session).lock_job(job_id)
-        current_document = self._find_current_document_row(job_id, lock=True)
-        self._require_strictly_newer_document_version(job_id, document.version)
         self._validate_issues(document, issues)
+        from text_verification.infrastructure.revision_repository import RevisionRepository
+
+        revisions = RevisionRepository(self._session)
+        current_version_id = self._current_version_id(job_id)
+        version = revisions.create_queued_version(
+            job_id,
+            parent_version_id=current_version_id,
+            reason="upload" if current_version_id is None else "edited",
+            idempotency_key=None,
+        )
+        revisions.mark_analyzing(version.version_id)
+        revisions.complete_analysis(version.version_id, document, issues, failures)
+
+    def persist_version_analysis(
+        self,
+        version_id: UUID,
+        document: DocumentModel,
+        issues: list[Issue],
+        failures: dict[CheckCategory, CheckerFailure],
+    ) -> None:
+        version = self._session.get(DocumentVersionRow, version_id)
+        if version is None:
+            raise LookupError(f"Document version {version_id} does not exist.")
+        job_id = version.job_id
+        self._validate_issues(document, issues)
+
         self._session.execute(
             delete(CheckerFailureRow)
-            .where(CheckerFailureRow.job_id == job_id)
+            .where(CheckerFailureRow.version_id == version_id)
             .execution_options(synchronize_session="fetch")
         )
         self._session.execute(
             delete(IssueRow)
-            .where(IssueRow.job_id == job_id)
+            .where(IssueRow.version_id == version_id)
             .execution_options(synchronize_session="fetch")
         )
         self._session.execute(
             delete(DocumentBlockRow)
-            .where(DocumentBlockRow.job_id == job_id)
+            .where(DocumentBlockRow.version_id == version_id)
             .execution_options(synchronize_session="fetch")
         )
         self._session.execute(
             delete(DocumentRow)
-            .where(DocumentRow.job_id == job_id)
+            .where(DocumentRow.version_id == version_id)
             .execution_options(synchronize_session="fetch")
         )
-        self._session.execute(
-            delete(DocumentVersionRow)
-            .where(DocumentVersionRow.job_id == job_id)
-            .execution_options(synchronize_session="fetch")
-        )
-
-        version_id = uuid4()
-        changed_at = datetime.now(UTC)
-        self._session.add(
-            DocumentVersionRow(
-                version_id=version_id,
-                job_id=job_id,
-                parent_version_id=None,
-                revision_number=document.version,
-                status="succeeded",
-                source_kind="upload",
-                created_reason="upload" if current_document is None else "edited",
-                content_sha256=None,
-                idempotency_key=None,
-                created_at=changed_at,
-                started_at=changed_at,
-                completed_at=changed_at,
-                failure_code=None,
-                failure_message=None,
-            )
-        )
-        self._session.flush()
-        job.active_version_id = version_id
 
         document_row = DocumentRow(
             version_id=version_id,
@@ -245,9 +238,10 @@ class AnalysisRepository:
                     message=failure.message,
                 )
             )
+        self._session.flush()
 
-    def get_document(self, job_id: UUID) -> DocumentModel | None:
-        row = self._find_current_document_row(job_id)
+    def get_document(self, job_id: UUID, version_id: UUID | None = None) -> DocumentModel | None:
+        row = self._find_document_row(job_id, version_id=version_id)
         if row is None:
             return None
 
@@ -272,11 +266,16 @@ class AnalysisRepository:
             metadata=row.metadata_json,
         )
 
-    def has_analysis(self, job_id: UUID) -> bool:
-        return self._find_current_document_row(job_id) is not None
+    def has_analysis(self, job_id: UUID, version_id: UUID | None = None) -> bool:
+        return self._find_document_row(job_id, version_id=version_id) is not None
 
-    def list_document_blocks(self, job_id: UUID, query: DocumentQuery) -> DocumentPage | None:
-        row = self._find_current_document_row(job_id)
+    def list_document_blocks(
+        self,
+        job_id: UUID,
+        query: DocumentQuery,
+        version_id: UUID | None = None,
+    ) -> DocumentPage | None:
+        row = self._find_document_row(job_id, version_id=version_id)
         if row is None:
             return None
 
@@ -317,12 +316,17 @@ class AnalysisRepository:
             next_cursor=next_cursor,
         )
 
-    def list_issues(self, job_id: UUID, query: IssueQuery) -> IssuePage:
-        version_id = self._current_version_id(job_id)
-        if version_id is None:
+    def list_issues(
+        self,
+        job_id: UUID,
+        query: IssueQuery,
+        version_id: UUID | None = None,
+    ) -> IssuePage:
+        resolved_version_id = self._resolve_version_id(job_id, version_id)
+        if resolved_version_id is None:
             return IssuePage(items=[], total=0, next_cursor=None)
 
-        filtered_issue_ids = self._filtered_issue_ids_query(version_id, query)
+        filtered_issue_ids = self._filtered_issue_ids_query(resolved_version_id, query)
         total = int(
             self._session.scalar(
                 select(func.count())
@@ -346,7 +350,7 @@ class AnalysisRepository:
                 ),
             )
             .outerjoin(IssueDecisionRow, IssueDecisionRow.issue_id == IssueRow.issue_id)
-            .where(IssueRow.version_id == version_id)
+            .where(IssueRow.version_id == resolved_version_id)
         )
 
         if query.category is not None:
@@ -400,9 +404,9 @@ class AnalysisRepository:
 
         return IssuePage(items=items, total=total, next_cursor=next_cursor)
 
-    def list_all_issues(self, job_id: UUID) -> list[Issue]:
-        version_id = self._current_version_id(job_id)
-        if version_id is None:
+    def list_all_issues(self, job_id: UUID, version_id: UUID | None = None) -> list[Issue]:
+        resolved_version_id = self._resolve_version_id(job_id, version_id)
+        if resolved_version_id is None:
             return []
         rows = self._session.execute(
             select(
@@ -418,7 +422,7 @@ class AnalysisRepository:
                 ),
             )
             .outerjoin(IssueDecisionRow, IssueDecisionRow.issue_id == IssueRow.issue_id)
-            .where(IssueRow.version_id == version_id)
+            .where(IssueRow.version_id == resolved_version_id)
             .order_by(
                 DocumentBlockRow.block_order,
                 IssueRow.start_offset,
@@ -430,13 +434,17 @@ class AnalysisRepository:
             for issue_row, _block_order, decision_row in rows
         ]
 
-    def get_checker_failures(self, job_id: UUID) -> dict[CheckCategory, CheckerFailure]:
-        version_id = self._current_version_id(job_id)
-        if version_id is None:
+    def get_checker_failures(
+        self,
+        job_id: UUID,
+        version_id: UUID | None = None,
+    ) -> dict[CheckCategory, CheckerFailure]:
+        resolved_version_id = self._resolve_version_id(job_id, version_id)
+        if resolved_version_id is None:
             return {}
         rows = self._session.scalars(
             select(CheckerFailureRow)
-            .where(CheckerFailureRow.version_id == version_id)
+            .where(CheckerFailureRow.version_id == resolved_version_id)
             .order_by(CheckerFailureRow.category)
         ).all()
         return {
@@ -444,18 +452,22 @@ class AnalysisRepository:
             for row in rows
         }
 
-    def summarize_issues(self, job_id: UUID) -> IssueSummary:
-        version_id = self._current_version_id(job_id)
-        if version_id is None:
+    def summarize_issues(
+        self,
+        job_id: UUID,
+        version_id: UUID | None = None,
+    ) -> IssueSummary:
+        resolved_version_id = self._resolve_version_id(job_id, version_id)
+        if resolved_version_id is None:
             return IssueSummary(total=0, by_category={}, by_severity={}, by_decision={})
         category_rows = self._session.execute(
             select(IssueRow.category, func.count())
-            .where(IssueRow.version_id == version_id)
+            .where(IssueRow.version_id == resolved_version_id)
             .group_by(IssueRow.category)
         ).all()
         severity_rows = self._session.execute(
             select(IssueRow.severity, func.count())
-            .where(IssueRow.version_id == version_id)
+            .where(IssueRow.version_id == resolved_version_id)
             .group_by(IssueRow.severity)
         ).all()
         decision_group = func.coalesce(IssueDecisionRow.action, literal(UNREVIEWED_DECISION))
@@ -463,7 +475,7 @@ class AnalysisRepository:
             select(decision_group, func.count())
             .select_from(IssueRow)
             .outerjoin(IssueDecisionRow, IssueDecisionRow.issue_id == IssueRow.issue_id)
-            .where(IssueRow.version_id == version_id)
+            .where(IssueRow.version_id == resolved_version_id)
             .group_by(decision_group)
         ).all()
         by_category = {
@@ -512,14 +524,6 @@ class AnalysisRepository:
             if issue.block_id in block_pages and issue.page != block_page:
                 raise ValueError("issue page must match the referenced document block page")
 
-    def _require_strictly_newer_document_version(self, job_id: UUID, version: int) -> None:
-        current_document = self._find_current_document_row(job_id, lock=True)
-        if current_document is not None and version <= current_document.version:
-            raise ValueError(
-                "replacement document version must be strictly greater than "
-                "current persisted version"
-            )
-
     def _current_version_id(self, job_id: UUID) -> UUID | None:
         version_id = self._session.scalar(
             select(JobRow.active_version_id).where(JobRow.job_id == job_id)
@@ -533,22 +537,30 @@ class AnalysisRepository:
             .limit(1)
         )
 
-    def _find_current_document_row(
+    def _resolve_version_id(self, job_id: UUID, version_id: UUID | None = None) -> UUID | None:
+        if version_id is not None:
+            return self._session.scalar(
+                select(DocumentVersionRow.version_id).where(
+                    DocumentVersionRow.job_id == job_id,
+                    DocumentVersionRow.version_id == version_id,
+                )
+            )
+        return self._current_version_id(job_id)
+
+    def _find_document_row(
         self,
         job_id: UUID,
         *,
+        version_id: UUID | None = None,
         lock: bool = False,
     ) -> DocumentRow | None:
-        version_id = self._current_version_id(job_id)
-        if version_id is not None:
-            statement = select(DocumentRow).where(DocumentRow.version_id == version_id)
-        else:
-            statement = (
-                select(DocumentRow)
-                .where(DocumentRow.job_id == job_id)
-                .order_by(DocumentRow.version.desc())
-                .limit(1)
-            )
+        resolved_version_id = self._resolve_version_id(job_id, version_id)
+        if resolved_version_id is None:
+            return None
+        statement = select(DocumentRow).where(
+            DocumentRow.job_id == job_id,
+            DocumentRow.version_id == resolved_version_id,
+        )
         if lock:
             statement = statement.with_for_update().execution_options(populate_existing=True)
         return self._session.execute(statement).scalar_one_or_none()

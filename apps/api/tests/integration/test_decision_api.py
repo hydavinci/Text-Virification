@@ -448,7 +448,7 @@ def test_batch_and_reanalysis_serialize_without_deadlock(
             version=2,
             text="重新分析",
         )
-        assert _count_decisions(verification_session, current_issue.issue_id) == 0
+        assert _count_decisions(verification_session, current_issue.issue_id) == 1
     finally:
         verification_session.close()
 

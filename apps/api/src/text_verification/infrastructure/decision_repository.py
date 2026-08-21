@@ -56,20 +56,29 @@ class DecisionRepository:
                 status=DecisionOutcomeStatus.INVALID,
                 code=UNSUPPORTED_DECISION_ACTION_CODE,
             )
+        active_version_id = self._session.scalar(
+            select(JobRow.active_version_id).where(JobRow.job_id == job_id)
+        )
+        if active_version_id is None:
+            active_version_id = self._session.scalar(
+                select(DocumentRow.version_id)
+                .where(DocumentRow.job_id == job_id)
+                .order_by(DocumentRow.version.desc())
+                .limit(1)
+            )
         issue_row = self._session.execute(
             select(IssueRow)
             .where(
                 IssueRow.job_id == job_id,
                 IssueRow.issue_id == command.issue_id,
+                IssueRow.version_id == active_version_id,
             )
             .with_for_update()
             .execution_options(populate_existing=True)
         ).scalar_one_or_none()
         if issue_row is None:
             current_document_version = self._session.scalar(
-                select(DocumentRow.version)
-                .join(JobRow, JobRow.active_version_id == DocumentRow.version_id)
-                .where(JobRow.job_id == job_id)
+                select(DocumentRow.version).where(DocumentRow.version_id == active_version_id)
             )
             if (
                 current_document_version is not None

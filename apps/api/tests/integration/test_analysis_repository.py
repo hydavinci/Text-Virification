@@ -11,13 +11,16 @@ from sqlalchemy.orm import Session
 from text_verification.checkers.models import CheckCategory, CheckerFailure
 from text_verification.domain.documents import DocumentModel, FileType, TextBlock
 from text_verification.domain.issues import DecisionAction, DecisionCommand, Issue, IssueSeverity
+from text_verification.domain.revisions import DocumentVersionStatus
 from text_verification.infrastructure.analysis_repositories import (
     AnalysisRepository,
+    DocumentQuery,
     IssueQuery,
 )
 from text_verification.infrastructure.decision_repository import DecisionRepository
 from text_verification.infrastructure.orm import IssueDecisionRow, IssueRow
 from text_verification.infrastructure.repositories import JobRepository
+from text_verification.infrastructure.revision_repository import RevisionRepository
 
 
 def test_repository_round_trips_document_issue_and_failures_exactly(db_session: Session) -> None:
@@ -83,10 +86,11 @@ def test_replace_analysis_is_atomic(db_session: Session) -> None:
     assert stored.blocks[0].text == "旧"
 
 
-def test_replace_analysis_removes_stale_decisions_when_new_version_persists(
+def test_replace_analysis_preserves_parent_versions_and_scopes_current_reads(
     db_session: Session,
 ) -> None:
     repository = AnalysisRepository(db_session)
+    revisions = RevisionRepository(db_session)
     job_id = seed_job(db_session)
     original_document = build_document([("旧问题", 1)])
     original_issue = build_issue(
@@ -127,11 +131,37 @@ def test_replace_analysis_removes_stale_decisions_when_new_version_persists(
     repository.replace_analysis(job_id, replacement_document, [replacement_issue], {})
     db_session.commit()
 
-    page = repository.list_issues(job_id, IssueQuery(limit=20))
+    versions = revisions.list_versions(job_id)
+    first_version = versions[0]
+    second_version = versions[1]
+    current_page = repository.list_issues(job_id, IssueQuery(limit=20))
+    original_page = repository.list_issues(job_id, IssueQuery(limit=20), first_version.version_id)
+    original_document_page = repository.list_document_blocks(
+        job_id,
+        DocumentQuery(limit=20),
+        first_version.version_id,
+    )
+    current_summary = repository.summarize_issues(job_id)
+    original_summary = repository.summarize_issues(job_id, first_version.version_id)
 
-    assert count_decisions(db_session, original_issue.issue_id) == 0
-    assert page.items == [replacement_issue]
-    assert page.items[0].decision is None
+    assert [version.status for version in versions] == [
+        DocumentVersionStatus.SUCCEEDED,
+        DocumentVersionStatus.SUCCEEDED,
+    ]
+    assert revisions.get_active_version(job_id) == second_version
+    assert count_decisions(db_session, original_issue.issue_id) == 1
+    assert repository.get_document(job_id) == replacement_document
+    assert repository.get_document(job_id, first_version.version_id) == original_document
+    assert current_page.items == [replacement_issue]
+    assert current_page.items[0].decision is None
+    assert [item.issue_id for item in original_page.items] == [original_issue.issue_id]
+    assert original_page.items[0].decision is not None
+    assert original_page.items[0].decision.action == DecisionAction.ACCEPTED
+    assert original_document_page is not None
+    assert [block.text for block in original_document_page.blocks] == ["旧问题"]
+    assert repository.get_checker_failures(job_id, first_version.version_id) == {}
+    assert current_summary.by_decision["unreviewed"] == 1
+    assert original_summary.by_decision["accepted"] == 1
 
 
 @pytest.mark.parametrize("replacement_version", [2, 1])
@@ -182,12 +212,15 @@ def test_replace_analysis_rejects_non_increasing_document_version_before_deletin
 
     stored = repository.get_document(job_id)
     page = repository.list_issues(job_id, IssueQuery(limit=20))
+    active_version = RevisionRepository(db_session).get_active_version(job_id)
 
     assert stored == current_document
     assert db_session.get(IssueRow, replacement_issue.issue_id) is None
     assert [item.issue_id for item in page.items] == [current_issue.issue_id]
     assert page.items[0].document_version == current_document.version
     assert count_decisions(db_session, current_issue.issue_id) == 1
+    assert active_version is not None
+    assert active_version.status == DocumentVersionStatus.SUCCEEDED
 
 
 def test_replace_analysis_rejects_issue_with_mismatched_document_id(db_session: Session) -> None:

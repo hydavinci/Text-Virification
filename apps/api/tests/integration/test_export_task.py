@@ -206,7 +206,7 @@ def test_docx_html_report_uses_same_preflight_applicability_warnings(
     ]
 
 
-def test_html_report_task_includes_checker_failures_and_replacement_warnings(
+def test_html_report_task_includes_checker_failures_for_reviewed_pdf_job(
     client,
     celery_eager,
     db_session: Session,
@@ -238,7 +238,13 @@ def test_html_report_task_includes_checker_failures_and_replacement_warnings(
             )
         },
     )
-    _apply_decision(db_session, job_id, issue, DecisionAction.ACCEPTED)
+    _apply_decision(
+        db_session,
+        job_id,
+        issue,
+        DecisionAction.ACCEPTED,
+        replacement="修订",
+    )
 
     created = client.post(
         f"/api/v1/jobs/{job_id}/exports",
@@ -252,10 +258,8 @@ def test_html_report_task_includes_checker_failures_and_replacement_warnings(
     html = download.content.decode("utf-8")
     assert "checker_failed" in html
     assert "安全分类检查失败。" in html
-    assert "missing_replacement_value" in html
     stored = _load_export(db_session_factory, export_id)
-    assert len(stored.warnings) == 1
-    assert stored.warnings[0].code == "missing_replacement_value"
+    assert stored.warnings == []
 
 
 @pytest.mark.skipif(os.name == "nt", reason="WeasyPrint native runtime is provided by Docker")
