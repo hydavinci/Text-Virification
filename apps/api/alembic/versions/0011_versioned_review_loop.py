@@ -150,6 +150,7 @@ ISSUES_LEGACY_TABLE = sa.table(
     "issues_legacy",
     sa.column("issue_id", UUIDType),
     sa.column("job_id", UUIDType),
+    sa.column("document_id", UUIDType),
     sa.column("document_version", sa.Integer()),
     sa.column("category", sa.String(length=32)),
     sa.column("severity", sa.String(length=16)),
@@ -700,6 +701,7 @@ def downgrade() -> None:
                 {
                     "issue_id": row["issue_id"],
                     "job_id": row["job_id"],
+                    "document_id": row["document_id"],
                     "document_version": row["document_version"],
                     "category": row["category"],
                     "severity": row["severity"],
@@ -1237,6 +1239,7 @@ def _create_issues_legacy_table() -> None:
         "issues_legacy",
         sa.Column("issue_id", UUIDType, primary_key=True, nullable=False),
         sa.Column("job_id", UUIDType, nullable=False),
+        sa.Column("document_id", UUIDType, nullable=False),
         sa.Column("document_version", sa.Integer(), nullable=False),
         sa.Column("category", sa.String(length=32), nullable=False),
         sa.Column("severity", sa.String(length=16), nullable=False),

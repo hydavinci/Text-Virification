@@ -294,6 +294,10 @@ class EditDraftRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    @property
+    def blocks(self) -> list[dict[str, object]]:
+        return self.blocks_json
+
 
 class IssueSuggestionRow(Base):
     __tablename__ = "issue_suggestions"
@@ -365,6 +369,10 @@ class ReviewOperationBatchRow(Base):
         cascade="all, delete-orphan",
         order_by="ReviewOperationItemRow.sequence",
     )
+
+    @property
+    def batch_id(self) -> UUID:
+        return self.operation_batch_id
 
 
 class ReviewOperationItemRow(Base):

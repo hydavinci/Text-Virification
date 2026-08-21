@@ -7,12 +7,17 @@ from pydantic import ValidationError
 from text_verification.domain.documents import DocumentModel, FileType, TextBlock
 from text_verification.domain.issues import DecisionAction, DecisionCommand, Issue, IssueSeverity
 from text_verification.domain.jobs import JobRead, JobStatus
+from text_verification.domain.review_operations import (
+    ReviewOperationBatchRead,
+    ReviewOperationType,
+)
 from text_verification.domain.revisions import (
     DocumentVersionRead,
     DocumentVersionStatus,
     DraftBlock,
     EditDraftRead,
 )
+from text_verification.infrastructure.orm import EditDraftRow, ReviewOperationBatchRow
 
 NOW = datetime(2026, 8, 21, 0, 0, tzinfo=UTC)
 
@@ -102,6 +107,61 @@ def test_draft_rejects_duplicate_block_ids() -> None:
             created_at=NOW,
             updated_at=NOW,
         )
+
+
+def test_edit_draft_read_hydrates_from_edit_draft_row_shape() -> None:
+    draft_id = uuid4()
+    job_id = uuid4()
+    version_id = uuid4()
+    row = EditDraftRow(
+        draft_id=draft_id,
+        job_id=job_id,
+        base_version_id=version_id,
+        revision=2,
+        blocks_json=[
+            {"block_id": "p-1", "text": "第一段"},
+            {"block_id": "p-2", "text": "第二段"},
+        ],
+        content_sha256=None,
+        created_at=NOW,
+        updated_at=NOW,
+        consumed_at=None,
+    )
+
+    draft = EditDraftRead.model_validate(row)
+
+    assert draft.draft_id == draft_id
+    assert draft.job_id == job_id
+    assert draft.base_version_id == version_id
+    assert draft.revision == 2
+    assert [block.model_dump() for block in draft.blocks] == [
+        {"block_id": "p-1", "text": "第一段"},
+        {"block_id": "p-2", "text": "第二段"},
+    ]
+
+
+def test_review_operation_batch_read_hydrates_from_batch_row_shape() -> None:
+    batch_id = uuid4()
+    job_id = uuid4()
+    version_id = uuid4()
+    row = ReviewOperationBatchRow(
+        operation_batch_id=batch_id,
+        job_id=job_id,
+        version_id=version_id,
+        operation_type=ReviewOperationType.DECISION.value,
+        affected_count=3,
+        undoes_batch_id=None,
+        created_at=NOW,
+    )
+
+    batch = ReviewOperationBatchRead.model_validate(row)
+
+    assert batch.batch_id == batch_id
+    assert batch.job_id == job_id
+    assert batch.version_id == version_id
+    assert batch.operation_type is ReviewOperationType.DECISION
+    assert batch.affected_count == 3
+    assert batch.undoes_batch_id is None
 
 
 def test_failed_version_requires_failure_fields() -> None:

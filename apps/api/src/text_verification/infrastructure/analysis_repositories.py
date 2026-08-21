@@ -176,6 +176,7 @@ class AnalysisRepository:
                 failure_message=None,
             )
         )
+        self._session.flush()
         job.active_version_id = version_id
 
         document_row = DocumentRow(
