@@ -14,6 +14,7 @@ celery_app = Celery(
     include=[
         "text_verification.workers.tasks",
         "text_verification.workers.export_tasks",
+        "text_verification.workers.reanalysis_tasks",
     ],
 )
 celery_app.conf.update(

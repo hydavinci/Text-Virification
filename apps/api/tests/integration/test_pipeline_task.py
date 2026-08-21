@@ -716,6 +716,79 @@ def _build_document(text: str) -> DocumentModel:
     )
 
 
+def test_analyze_document_reuses_checker_execution_for_versioned_documents(
+    worker_storage,
+) -> None:
+    from text_verification.workers.pipeline import PipelineRunner
+
+    @dataclass
+    class RecordingRevisionRepository:
+        marked_version_ids: list[UUID] = field(default_factory=list)
+        progress_updates: list[tuple[UUID, CheckCategory, tuple[CheckCategory, ...], int]] = (
+            field(default_factory=list)
+        )
+        completed_versions: list[tuple[UUID, DocumentModel]] = field(default_factory=list)
+
+        def mark_analyzing(self, version_id: UUID) -> None:
+            self.marked_version_ids.append(version_id)
+
+        def record_progress(self, version_id: UUID, progress) -> None:
+            self.progress_updates.append(
+                (
+                    version_id,
+                    progress.current_category,
+                    progress.completed_categories,
+                    progress.issue_count,
+                )
+            )
+
+        def complete_analysis(self, version_id: UUID, document, issues, failures) -> None:
+            del issues, failures
+            self.completed_versions.append((version_id, document.model_copy(deep=True)))
+
+    job_repository = InMemoryJobRepository()
+    analysis_repository = InMemoryAnalysisRepository(job_repository)
+    revision_repository = RecordingRevisionRepository()
+    checker_registry = RecordingCheckerRegistry()
+    version_id = UUID("00000000-0000-0000-0000-000000000222")
+    document = _build_document("祕密且绝对领先").model_copy(update={"version": 2})
+    runner = PipelineRunner(
+        job_repository,
+        analysis_repository,
+        worker_storage,
+        _build_parser_registry(),
+        checker_registry,
+        revision_repository=revision_repository,
+    )
+
+    result = runner.analyze_document(
+        version_id,
+        document,
+        CheckOptions(enabled_categories=[CheckCategory.CHARACTER, CheckCategory.SECURITY]),
+    )
+
+    assert revision_repository.marked_version_ids == [version_id]
+    assert revision_repository.progress_updates == [
+        (
+            version_id,
+            CheckCategory.CHARACTER,
+            (CheckCategory.CHARACTER,),
+            0,
+        ),
+        (
+            version_id,
+            CheckCategory.SECURITY,
+            (CheckCategory.CHARACTER, CheckCategory.SECURITY),
+            0,
+        ),
+    ]
+    assert revision_repository.completed_versions == [(version_id, document)]
+    assert result.completed_categories == {
+        CheckCategory.CHARACTER,
+        CheckCategory.SECURITY,
+    }
+
+
 def test_process_job_marks_partial_and_keeps_available_issues(
     monkeypatch,
     worker_storage,

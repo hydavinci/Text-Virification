@@ -1,12 +1,15 @@
+from collections.abc import Callable
 from uuid import UUID
 
 from text_verification.checkers.models import (
     CHECK_CATEGORY_ORDER,
-    CheckerProgress,
     CheckOptions,
+    CheckRunResult,
     CheckScenario,
+    CheckerProgress,
 )
 from text_verification.checkers.registry import CheckerRegistry
+from text_verification.domain.documents import DocumentModel
 from text_verification.domain.jobs import (
     JobEventMetadata,
     JobRead,
@@ -16,6 +19,7 @@ from text_verification.domain.jobs import (
 from text_verification.domain.ports import CheckContext
 from text_verification.infrastructure.analysis_repositories import AnalysisRepository
 from text_verification.infrastructure.repositories import JobRepository
+from text_verification.infrastructure.revision_repository import RevisionRepository
 from text_verification.infrastructure.storage import InvalidUpload, JobStorage
 from text_verification.parsers.registry import ParserRegistry
 
@@ -37,6 +41,8 @@ class PipelineRunner:
         parsers: ParserRegistry,
         checkers: CheckerRegistry,
         check_context: CheckContext = DEFAULT_CHECK_CONTEXT,
+        *,
+        revision_repository: RevisionRepository | None = None,
     ) -> None:
         self._repository = repository
         self._analysis_repository = analysis_repository
@@ -44,6 +50,7 @@ class PipelineRunner:
         self._parsers = parsers
         self._checkers = checkers
         self._check_context = check_context
+        self._revision_repository = revision_repository
 
     def run(self, job_id: UUID) -> None:
         job = self._repository.get_job(job_id)
@@ -120,12 +127,7 @@ class PipelineRunner:
             )
             self._repository.commit()
 
-        result = self._checkers.run(
-            document,
-            self._check_context,
-            options,
-            on_progress=persist_progress,
-        )
+        result = self._run_checks(document, options, on_progress=persist_progress)
         self._analysis_repository.replace_analysis(
             job.job_id,
             document,
@@ -136,6 +138,46 @@ class PipelineRunner:
         terminal_message = PARTIAL_EVENT_MESSAGE if result.failures else COMPLETED_EVENT_MESSAGE
         self._repository.transition(job.job_id, terminal_status, 100, terminal_message)
         self._repository.commit()
+
+    def analyze_document(
+        self,
+        version_id: UUID,
+        document: DocumentModel,
+        options: CheckOptions,
+    ) -> CheckRunResult:
+        if self._revision_repository is None:
+            raise RuntimeError("Revision repository is required for versioned analysis.")
+
+        self._revision_repository.mark_analyzing(version_id)
+        result = self._run_checks(
+            document,
+            options,
+            on_progress=lambda progress: self._revision_repository.record_progress(
+                version_id,
+                progress,
+            ),
+        )
+        self._revision_repository.complete_analysis(
+            version_id,
+            document,
+            result.issues,
+            result.failures,
+        )
+        return result
+
+    def _run_checks(
+        self,
+        document: DocumentModel,
+        options: CheckOptions,
+        *,
+        on_progress: Callable[[CheckerProgress], None] | None = None,
+    ) -> CheckRunResult:
+        return self._checkers.run(
+            document,
+            self._check_context,
+            options,
+            on_progress=on_progress,
+        )
 
     def _check_options_for(self, job: JobRead) -> CheckOptions:
         scenario = getattr(job, "scenario", None) or CheckScenario.GENERAL

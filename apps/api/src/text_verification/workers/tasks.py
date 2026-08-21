@@ -4,6 +4,7 @@ import logging
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
+from pathlib import Path
 from typing import Any, NoReturn, cast
 from uuid import UUID
 
@@ -29,6 +30,7 @@ from text_verification.domain.ports import CheckContext
 from text_verification.infrastructure.analysis_repositories import AnalysisRepository
 from text_verification.infrastructure.database import get_session_factory
 from text_verification.infrastructure.repositories import JobRepository
+from text_verification.infrastructure.revision_repository import RevisionRepository
 from text_verification.infrastructure.storage import InvalidUpload, JobStorage
 from text_verification.parsers import DocxParser, ParserRegistry, PdfParser, TxtParser
 from text_verification.workers.celery_app import celery_app
@@ -53,6 +55,16 @@ def _get_job_storage() -> JobStorage:
     return JobStorage(settings.storage_root, settings.max_upload_bytes)
 
 
+def _repository_root() -> Path:
+    return Path(__file__).resolve().parents[5]
+
+
+def _resolve_resource_root(path: Path) -> Path:
+    if path.is_absolute():
+        return path
+    return (_repository_root() / path).resolve()
+
+
 SESSION_FACTORY_PROVIDER: SessionFactoryProvider = get_session_factory
 STORAGE_FACTORY: StorageFactory = _get_job_storage
 REPOSITORY_FACTORY: RepositoryFactory = JobRepository
@@ -67,9 +79,10 @@ def _build_parser_registry() -> ParserRegistry:
 @lru_cache(maxsize=1)
 def _build_checker_registry() -> CheckerRegistry:
     settings = get_settings()
+    rules_root = _resolve_resource_root(settings.rules_root)
     rule_set = RuleLoader(
-        settings.rules_root / "common-rules.zh-cn.json",
-        settings.rules_root / "scenarios.zh-cn.json",
+        rules_root / "common-rules.zh-cn.json",
+        rules_root / "scenarios.zh-cn.json",
     ).load()
     return CheckerRegistry.from_rule_set(
         rule_set,
@@ -85,7 +98,9 @@ def _build_check_context() -> CheckContext:
     return CheckContext(
         (),
         (),
-        shared_dictionaries=DictionaryLoader(settings.dictionaries_root).load(),
+        shared_dictionaries=DictionaryLoader(
+            _resolve_resource_root(settings.dictionaries_root)
+        ).load(),
     )
 
 
@@ -101,6 +116,7 @@ def _build_pipeline_runner(
         _build_parser_registry(),
         _build_checker_registry(),
         _build_check_context(),
+        revision_repository=RevisionRepository(session),
     )
 
 

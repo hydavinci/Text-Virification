@@ -4,16 +4,24 @@ import hashlib
 import json
 from collections import Counter
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from text_verification.checkers.models import CheckCategory, CheckerFailure
+from text_verification.checkers.models import (
+    CHECK_CATEGORY_ORDER,
+    CheckCategory,
+    CheckerFailure,
+    CheckerProgress,
+)
 from text_verification.domain.documents import DocumentModel
 from text_verification.domain.issues import Issue
 from text_verification.domain.revisions import (
+    DocumentVersionEvent,
+    DocumentVersionEventMetadata,
     DocumentVersionRead,
     DocumentVersionStatus,
     DraftBlock,
@@ -23,11 +31,21 @@ from text_verification.domain.revisions import (
 from text_verification.infrastructure.analysis_repositories import AnalysisRepository
 from text_verification.infrastructure.orm import (
     DocumentRow,
+    DocumentVersionEventRow,
     DocumentVersionRow,
     EditDraftRow,
     JobRow,
 )
 from text_verification.infrastructure.repositories import JobRepository
+
+REANALYSIS_IDEMPOTENCY_PREFIX = "reanalysis"
+VERSION_CREATED_EVENT_MESSAGE = "版本已创建"
+VERSION_ANALYZING_EVENT_MESSAGE = "开始分析"
+VERSION_PROGRESS_EVENT_MESSAGE = "检查进度已更新"
+VERSION_COMPLETED_EVENT_MESSAGE = "处理完成"
+DRAFT_CONSUMED_MESSAGE = "草稿已被消费，请刷新后重试。"
+STALE_DOCUMENT_VERSION_MESSAGE = "已有更新版本完成，当前重新分析结果已过期。"
+INVALID_REANALYSIS_VERSION_MESSAGE = "重新分析请求无效，请刷新后重试。"
 
 
 class VersionNotFoundError(LookupError):
@@ -70,6 +88,35 @@ class InvalidDraftBlocksError(ValueError):
         self.missing_block_ids = missing_block_ids
         self.unexpected_block_ids = unexpected_block_ids
         super().__init__("Draft block identifiers do not match the persisted draft.")
+
+
+class DraftConsumedError(ValueError):
+    def __init__(self, draft_id: UUID) -> None:
+        self.draft_id = draft_id
+        super().__init__(f"Edit draft {draft_id} has already been consumed.")
+
+
+class StaleDocumentVersionError(ValueError):
+    def __init__(self, version_id: UUID, active_revision_number: int) -> None:
+        self.version_id = version_id
+        self.active_revision_number = active_revision_number
+        super().__init__(
+            "Document version "
+            f"{version_id} is older than active revision {active_revision_number}."
+        )
+
+
+class InvalidReanalysisVersionError(ValueError):
+    def __init__(self, version_id: UUID) -> None:
+        self.version_id = version_id
+        super().__init__(f"Document version {version_id} is not a valid reanalysis request.")
+
+
+@dataclass(frozen=True)
+class _ReanalysisRequest:
+    draft_id: UUID
+    expected_draft_revision: int
+    client_key: str
 
 
 class RevisionRepository:
@@ -122,7 +169,53 @@ class RevisionRepository:
         )
         self._session.add(version)
         self._session.flush()
+        self._append_version_event(
+            version.version_id,
+            status=DocumentVersionStatus.QUEUED,
+            progress=0,
+            message=VERSION_CREATED_EVENT_MESSAGE,
+        )
         return _to_version_read(version)
+
+    def create_reanalysis_version(
+        self,
+        draft_id: UUID,
+        *,
+        expected_draft_revision: int,
+        idempotency_key: str,
+    ) -> DocumentVersionRead:
+        draft_job_id = self._draft_job_id(draft_id)
+        JobRepository(self._session).lock_job(draft_job_id)
+        draft = self._lock_draft(draft_job_id, draft_id)
+        stored_idempotency_key = _encode_reanalysis_idempotency_key(
+            draft_id,
+            expected_draft_revision,
+            idempotency_key,
+        )
+        existing = self._session.execute(
+            select(DocumentVersionRow)
+            .where(
+                DocumentVersionRow.job_id == draft_job_id,
+                DocumentVersionRow.idempotency_key == stored_idempotency_key,
+            )
+            .execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+        if existing is not None:
+            return _to_version_read(existing)
+
+        self._require_editable_draft(draft)
+        if draft.revision != expected_draft_revision:
+            raise StaleDraftRevisionError(current_revision=draft.revision)
+        base_version = self._lock_job_version(draft_job_id, draft.base_version_id)
+        base_status = DocumentVersionStatus(base_version.status)
+        if base_status != DocumentVersionStatus.SUCCEEDED:
+            raise InvalidBaseVersionError(draft.base_version_id, base_status)
+        return self.create_queued_version(
+            draft_job_id,
+            parent_version_id=draft.base_version_id,
+            reason="edited",
+            idempotency_key=stored_idempotency_key,
+        )
 
     def mark_analyzing(self, version_id: UUID) -> DocumentVersionRead:
         version = self._lock_version(version_id)
@@ -135,8 +228,40 @@ class RevisionRepository:
         JobRepository(self._session).lock_job(version.job_id)
         version.status = DocumentVersionStatus.ANALYZING.value
         version.started_at = version.started_at or datetime.now(UTC)
+        self._append_version_event(
+            version.version_id,
+            status=DocumentVersionStatus.ANALYZING,
+            progress=0,
+            message=VERSION_ANALYZING_EVENT_MESSAGE,
+        )
         self._session.flush()
         return _to_version_read(version)
+
+    def record_progress(self, version_id: UUID, progress: CheckerProgress) -> None:
+        version = self._lock_version(version_id)
+        status = DocumentVersionStatus(version.status)
+        if status in {DocumentVersionStatus.SUCCEEDED, DocumentVersionStatus.FAILED}:
+            raise ImmutableDocumentVersionError(version_id, status)
+        if status == DocumentVersionStatus.QUEUED:
+            self.mark_analyzing(version_id)
+        progress_value = int(
+            min(
+                99,
+                (95 * len(progress.completed_categories)) // len(CHECK_CATEGORY_ORDER),
+            )
+        )
+        self._append_version_event(
+            version_id,
+            status=DocumentVersionStatus.ANALYZING,
+            progress=progress_value,
+            message=VERSION_PROGRESS_EVENT_MESSAGE,
+            metadata=DocumentVersionEventMetadata(
+                current_category=progress.current_category,
+                completed_categories=list(progress.completed_categories),
+                issue_count=progress.issue_count,
+            ),
+        )
+        self._session.flush()
 
     def complete_analysis(
         self,
@@ -151,6 +276,7 @@ class RevisionRepository:
             raise ImmutableDocumentVersionError(version_id, status)
 
         job = JobRepository(self._session).lock_job(version.job_id)
+        draft = self._lock_reanalysis_draft_for_completion(version)
         self._require_strictly_newer_document_version(
             version.job_id,
             version.version_id,
@@ -166,6 +292,14 @@ class RevisionRepository:
         version.failure_code = None
         version.failure_message = None
         job.active_version_id = version.version_id
+        if draft is not None:
+            draft.consumed_at = changed_at
+        self._append_version_event(
+            version.version_id,
+            status=DocumentVersionStatus.SUCCEEDED,
+            progress=100,
+            message=VERSION_COMPLETED_EVENT_MESSAGE,
+        )
         self._session.flush()
         return _to_version_read(version)
 
@@ -183,6 +317,12 @@ class RevisionRepository:
         version.failure_code = code
         version.failure_message = message
         version.content_sha256 = None
+        self._append_version_event(
+            version.version_id,
+            status=DocumentVersionStatus.FAILED,
+            progress=self._last_event_progress(version.version_id),
+            message=message,
+        )
         self._session.flush()
         return _to_version_read(version)
 
@@ -208,6 +348,46 @@ class RevisionRepository:
             .order_by(DocumentVersionRow.revision_number, DocumentVersionRow.created_at)
         ).all()
         return [_to_version_read(row) for row in rows]
+
+    def list_version_events_after(
+        self,
+        version_id: UUID,
+        after_sequence: int,
+    ) -> list[DocumentVersionEvent]:
+        rows = self._session.scalars(
+            select(DocumentVersionEventRow)
+            .where(
+                DocumentVersionEventRow.version_id == version_id,
+                DocumentVersionEventRow.sequence > after_sequence,
+            )
+            .order_by(DocumentVersionEventRow.sequence)
+        ).all()
+        return [_to_version_event(row) for row in rows]
+
+    def get_reanalysis_request(self, version_id: UUID) -> tuple[DocumentVersionRead, UUID, int]:
+        version = self._lock_version(version_id)
+        request = _decode_reanalysis_idempotency_key(version.idempotency_key)
+        if request is None:
+            raise InvalidReanalysisVersionError(version_id)
+        return _to_version_read(version), request.draft_id, request.expected_draft_revision
+
+    def get_reanalysis_draft(
+        self,
+        job_id: UUID,
+        draft_id: UUID,
+        *,
+        expected_revision: int,
+    ) -> EditDraftRead:
+        draft = self._session.execute(
+            select(EditDraftRow).where(
+                EditDraftRow.job_id == job_id,
+                EditDraftRow.draft_id == draft_id,
+            )
+        ).scalar_one_or_none()
+        if draft is None:
+            raise DraftNotFoundError(draft_id)
+        self._validate_reanalysis_draft(draft, expected_revision)
+        return _to_draft_read(draft)
 
     def create_draft(self, job_id: UUID, base_version_id: UUID) -> EditDraftRead:
         JobRepository(self._session).lock_job(job_id)
@@ -278,6 +458,7 @@ class RevisionRepository:
     ) -> EditDraftRead:
         JobRepository(self._session).lock_job(job_id)
         row = self._lock_draft(job_id, draft_id)
+        self._require_editable_draft(row)
         current_blocks = [
             _to_draft_block(block["block_id"], str(block["text"])) for block in row.blocks
         ]
@@ -303,6 +484,7 @@ class RevisionRepository:
     def delete_draft(self, job_id: UUID, draft_id: UUID) -> None:
         JobRepository(self._session).lock_job(job_id)
         row = self._lock_draft(job_id, draft_id)
+        self._require_editable_draft(row)
         self._session.delete(row)
         self._session.flush()
 
@@ -331,6 +513,14 @@ class RevisionRepository:
             raise VersionNotFoundError(version_id)
         return version
 
+    def _draft_job_id(self, draft_id: UUID) -> UUID:
+        job_id = self._session.scalar(
+            select(EditDraftRow.job_id).where(EditDraftRow.draft_id == draft_id)
+        )
+        if job_id is None:
+            raise DraftNotFoundError(draft_id)
+        return job_id
+
     def _lock_draft(self, job_id: UUID, draft_id: UUID) -> EditDraftRow:
         draft = self._session.execute(
             select(EditDraftRow)
@@ -343,6 +533,30 @@ class RevisionRepository:
         ).scalar_one_or_none()
         if draft is None:
             raise DraftNotFoundError(draft_id)
+        return draft
+
+    def _require_editable_draft(self, draft: EditDraftRow) -> None:
+        if draft.consumed_at is not None:
+            raise DraftConsumedError(draft.draft_id)
+
+    def _validate_reanalysis_draft(
+        self,
+        draft: EditDraftRow,
+        expected_revision: int,
+    ) -> None:
+        self._require_editable_draft(draft)
+        if draft.revision != expected_revision:
+            raise StaleDraftRevisionError(current_revision=draft.revision)
+
+    def _lock_reanalysis_draft_for_completion(
+        self,
+        version: DocumentVersionRow,
+    ) -> EditDraftRow | None:
+        request = _decode_reanalysis_idempotency_key(version.idempotency_key)
+        if request is None:
+            return None
+        draft = self._lock_draft(version.job_id, request.draft_id)
+        self._validate_reanalysis_draft(draft, request.expected_draft_revision)
         return draft
 
     def _validate_draft_block_ids(
@@ -405,10 +619,48 @@ class RevisionRepository:
             select(DocumentRow.version).where(DocumentRow.version_id == current_version_id)
         )
         if current_document_version is not None and document_version <= current_document_version:
-            raise ValueError(
-                "replacement document version must be strictly greater than "
-                "current persisted version"
+            raise StaleDocumentVersionError(
+                version_id,
+                active_revision_number=current_document_version,
             )
+
+    def _append_version_event(
+        self,
+        version_id: UUID,
+        *,
+        status: DocumentVersionStatus,
+        progress: int,
+        message: str,
+        metadata: DocumentVersionEventMetadata | None = None,
+    ) -> None:
+        self._session.add(
+            DocumentVersionEventRow(
+                version_id=version_id,
+                sequence=self._next_version_event_sequence(version_id),
+                status=status.value,
+                progress=progress,
+                message=message,
+                metadata_json=None if metadata is None else metadata.model_dump(mode="json"),
+                created_at=datetime.now(UTC),
+            )
+        )
+
+    def _next_version_event_sequence(self, version_id: UUID) -> int:
+        current_max = self._session.scalar(
+            select(func.max(DocumentVersionEventRow.sequence)).where(
+                DocumentVersionEventRow.version_id == version_id
+            )
+        )
+        return int(current_max or 0) + 1
+
+    def _last_event_progress(self, version_id: UUID) -> int:
+        latest = self._session.execute(
+            select(DocumentVersionEventRow.progress)
+            .where(DocumentVersionEventRow.version_id == version_id)
+            .order_by(DocumentVersionEventRow.sequence.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        return int(latest or 0)
 
 
 def normalized_document_sha256(document: DocumentModel) -> str:
@@ -443,5 +695,53 @@ def _to_version_read(row: DocumentVersionRow) -> DocumentVersionRead:
     return DocumentVersionRead.model_validate(row)
 
 
+def _to_version_event(row: DocumentVersionEventRow) -> DocumentVersionEvent:
+    return DocumentVersionEvent(
+        sequence=row.sequence,
+        status=DocumentVersionStatus(row.status),
+        progress=row.progress,
+        message=row.message,
+        created_at=row.created_at,
+        metadata=(
+            DocumentVersionEventMetadata.model_validate(row.metadata_json)
+            if row.metadata_json is not None
+            else None
+        ),
+    )
+
+
 def _to_draft_read(row: EditDraftRow) -> EditDraftRead:
     return EditDraftRead.model_validate(row)
+
+
+def _encode_reanalysis_idempotency_key(
+    draft_id: UUID,
+    expected_draft_revision: int,
+    idempotency_key: str,
+) -> str:
+    return (
+        f"{REANALYSIS_IDEMPOTENCY_PREFIX}:{draft_id}:{expected_draft_revision}:"
+        f"{idempotency_key}"
+    )
+
+
+def _decode_reanalysis_idempotency_key(
+    idempotency_key: str | None,
+) -> _ReanalysisRequest | None:
+    if idempotency_key is None:
+        return None
+    parts = idempotency_key.split(":", 3)
+    if len(parts) != 4 or parts[0] != REANALYSIS_IDEMPOTENCY_PREFIX:
+        return None
+    try:
+        draft_id = UUID(parts[1])
+        expected_draft_revision = int(parts[2])
+    except (TypeError, ValueError):
+        return None
+    if expected_draft_revision < 1:
+        return None
+    return _ReanalysisRequest(
+        draft_id=draft_id,
+        expected_draft_revision=expected_draft_revision,
+        client_key=parts[3],
+    )

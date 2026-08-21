@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import re
 from datetime import datetime
 from enum import StrEnum
 from uuid import UUID
 
+from text_verification.checkers.models import CheckCategory
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 HEX_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -88,3 +90,21 @@ class EditDraftRead(BaseModel):
         if len(block_ids) != len(set(block_ids)):
             raise ValueError("draft blocks must not contain duplicate block_id values")
         return self
+
+
+class DocumentVersionEventMetadata(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    current_category: CheckCategory
+    completed_categories: list[CheckCategory]
+    issue_count: int = Field(ge=0)
+
+
+@dataclass(frozen=True)
+class DocumentVersionEvent:
+    sequence: int
+    status: DocumentVersionStatus
+    progress: int
+    message: str
+    created_at: datetime
+    metadata: DocumentVersionEventMetadata | None = None

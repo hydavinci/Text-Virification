@@ -1,21 +1,42 @@
 from __future__ import annotations
 
+import asyncio
+import json
+from collections.abc import AsyncIterator, Callable
+from importlib import import_module
+from time import monotonic
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from text_verification.api.dependencies import (
     get_db_session,
     get_job_repository,
     get_revision_repository,
 )
-from text_verification.api.routes.jobs import JOB_NOT_FOUND_CODE, _http_error
-from text_verification.domain.revisions import DocumentVersionRead, DraftBlock, EditDraftRead
+from text_verification.api.routes.jobs import (
+    JOB_NOT_FOUND_CODE,
+    SSE_KEEPALIVE_SECONDS,
+    SSE_POLL_SECONDS,
+    _format_control_event,
+    _http_error,
+    _parse_last_event_id,
+)
+from text_verification.domain.revisions import (
+    DocumentVersionEvent,
+    DocumentVersionRead,
+    DocumentVersionStatus,
+    DraftBlock,
+    EditDraftRead,
+)
+from text_verification.infrastructure.database import get_session_factory
 from text_verification.infrastructure.repositories import JobRepository
 from text_verification.infrastructure.revision_repository import (
+    DraftConsumedError,
     DraftNotFoundError,
     InvalidBaseVersionError,
     InvalidDraftBlocksError,
@@ -32,6 +53,12 @@ VERSION_NOT_FOUND_CODE = "version_not_found"
 VERSION_NOT_FOUND_MESSAGE = "文档版本不存在。"
 
 router = APIRouter(tags=["versions"])
+
+SessionFactoryProvider = Callable[[], sessionmaker[Session]]
+RevisionRepositoryFactory = Callable[[Session], RevisionRepository]
+
+SESSION_FACTORY_PROVIDER: SessionFactoryProvider = get_session_factory
+REVISION_REPOSITORY_FACTORY: RevisionRepositoryFactory = RevisionRepository
 
 
 class VersionListResponse(BaseModel):
@@ -55,6 +82,20 @@ class DraftUpdateRequest(BaseModel):
     blocks: list[DraftBlock]
 
 
+class DraftReanalysisRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_draft_revision: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=255)
+
+
+class DraftReanalysisResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    version: DocumentVersionRead
+    events_url: str
+
+
 @router.get("/jobs/{job_id}/versions", response_model=VersionListResponse)
 def list_versions(
     job_id: UUID,
@@ -67,6 +108,28 @@ def list_versions(
         job_id=job_id,
         active_version_id=None if active_version is None else active_version.version_id,
         versions=revision_repository.list_versions(job_id),
+    )
+
+
+@router.get("/jobs/{job_id}/versions/{version_id}/events")
+async def stream_version_events(
+    job_id: UUID,
+    version_id: UUID,
+    request: Request,
+    job_repository: Annotated[JobRepository, Depends(get_job_repository)],
+    revision_repository: Annotated[RevisionRepository, Depends(get_revision_repository)],
+    last_event_id: Annotated[str | None, Header(alias="Last-Event-ID")] = None,
+) -> StreamingResponse:
+    _require_job(job_id, job_repository)
+    _require_version(job_id, version_id, revision_repository)
+    after_sequence = _parse_last_event_id(last_event_id)
+    return StreamingResponse(
+        _version_event_stream(version_id, after_sequence, request),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
@@ -145,6 +208,9 @@ def update_draft(
             DRAFT_NOT_FOUND_CODE,
             "草稿不存在。",
         ) from error
+    except DraftConsumedError as error:
+        session.rollback()
+        raise _draft_consumed_conflict() from error
     except StaleDraftRevisionError as error:
         session.rollback()
         raise _draft_conflict(error.current_revision) from error
@@ -176,10 +242,80 @@ def delete_draft(
             DRAFT_NOT_FOUND_CODE,
             "草稿不存在。",
         ) from error
+    except DraftConsumedError as error:
+        session.rollback()
+        raise _draft_consumed_conflict() from error
     except Exception:
         session.rollback()
         raise
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/jobs/{job_id}/drafts/{draft_id}/reanalyze",
+    response_model=DraftReanalysisResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def reanalyze_draft(
+    job_id: UUID,
+    draft_id: UUID,
+    payload: DraftReanalysisRequest,
+    session: Annotated[Session, Depends(get_db_session)],
+    job_repository: Annotated[JobRepository, Depends(get_job_repository)],
+    revision_repository: Annotated[RevisionRepository, Depends(get_revision_repository)],
+) -> DraftReanalysisResponse:
+    _lock_job(job_id, job_repository)
+    if revision_repository.get_draft(job_id, draft_id) is None:
+        raise _http_error(
+            status.HTTP_404_NOT_FOUND,
+            DRAFT_NOT_FOUND_CODE,
+            "草稿不存在。",
+        )
+    try:
+        version = revision_repository.create_reanalysis_version(
+            draft_id,
+            expected_draft_revision=payload.expected_draft_revision,
+            idempotency_key=payload.idempotency_key,
+        )
+        session.commit()
+    except DraftNotFoundError as error:
+        session.rollback()
+        raise _http_error(
+            status.HTTP_404_NOT_FOUND,
+            DRAFT_NOT_FOUND_CODE,
+            "草稿不存在。",
+        ) from error
+    except DraftConsumedError as error:
+        session.rollback()
+        raise _draft_consumed_conflict() from error
+    except StaleDraftRevisionError as error:
+        session.rollback()
+        raise _draft_conflict(error.current_revision) from error
+    except InvalidBaseVersionError as error:
+        session.rollback()
+        raise _http_error(
+            status.HTTP_409_CONFLICT,
+            INVALID_BASE_VERSION_CODE,
+            "只能基于成功版本创建草稿。",
+        ) from error
+    except Exception:
+        session.rollback()
+        raise
+
+    try:
+        dispatch_process_document_version(str(version.version_id))
+    except Exception as error:
+        _recover_from_reanalysis_dispatch_failure(session, revision_repository, version.version_id)
+        raise _http_error(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "reanalysis_dispatch_failed",
+            "重新分析调度失败，请稍后重试。",
+        ) from error
+
+    return DraftReanalysisResponse(
+        version=version,
+        events_url=f"/api/v1/jobs/{job_id}/versions/{version.version_id}/events",
+    )
 
 
 def _lock_job(job_id: UUID, repository: JobRepository) -> None:
@@ -202,6 +338,20 @@ def _require_job(job_id: UUID, repository: JobRepository) -> None:
         )
 
 
+def _require_version(
+    job_id: UUID,
+    version_id: UUID,
+    repository: RevisionRepository,
+) -> None:
+    version = repository.get_version(version_id)
+    if version is None or version.job_id != job_id:
+        raise _http_error(
+            status.HTTP_404_NOT_FOUND,
+            VERSION_NOT_FOUND_CODE,
+            VERSION_NOT_FOUND_MESSAGE,
+        )
+
+
 def _draft_conflict(current_revision: int) -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_409_CONFLICT,
@@ -209,6 +359,16 @@ def _draft_conflict(current_revision: int) -> HTTPException:
             "code": STALE_DRAFT_REVISION_CODE,
             "message": "草稿已更新，请刷新后重试。",
             "current_revision": current_revision,
+        },
+    )
+
+
+def _draft_consumed_conflict() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "code": "draft_consumed",
+            "message": "草稿已被消费，请刷新后重试。",
         },
     )
 
@@ -224,3 +384,95 @@ def _invalid_draft_blocks(error: InvalidDraftBlocksError) -> HTTPException:
             "unexpected_block_ids": list(error.unexpected_block_ids),
         },
     )
+
+
+def dispatch_process_document_version(version_id: str) -> None:
+    worker_tasks = import_module("text_verification.workers.reanalysis_tasks")
+    process_document_version = worker_tasks.process_document_version
+    process_document_version.delay(version_id)
+
+
+def _recover_from_reanalysis_dispatch_failure(
+    session: Session,
+    revision_repository: RevisionRepository,
+    version_id: UUID,
+) -> None:
+    try:
+        revision_repository.fail_version(
+            version_id,
+            code="reanalysis_dispatch_failed",
+            message="重新分析调度失败，请稍后重试。",
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+
+
+async def _version_event_stream(
+    version_id: UUID,
+    after_sequence: int,
+    request: Request,
+) -> AsyncIterator[str]:
+    session_factory = SESSION_FACTORY_PROVIDER()
+    last_keepalive = monotonic()
+
+    while True:
+        if await request.is_disconnected():
+            return
+
+        events, version = _poll_version_state(session_factory, version_id, after_sequence)
+        emitted = False
+        for event in events:
+            yield _format_version_event(event)
+            after_sequence = event.sequence
+            last_keepalive = monotonic()
+            emitted = True
+
+        if version is None:
+            yield _format_control_event("expired")
+            return
+
+        if version.status in {
+            DocumentVersionStatus.SUCCEEDED,
+            DocumentVersionStatus.FAILED,
+        }:
+            yield _format_control_event("done")
+            return
+
+        if not emitted and monotonic() - last_keepalive >= SSE_KEEPALIVE_SECONDS:
+            yield ": keepalive\n\n"
+            last_keepalive = monotonic()
+
+        await asyncio.sleep(SSE_POLL_SECONDS)
+
+
+def _poll_version_state(
+    session_factory: sessionmaker[Session],
+    version_id: UUID,
+    after_sequence: int,
+) -> tuple[list[DocumentVersionEvent], DocumentVersionRead | None]:
+    session = session_factory()
+    try:
+        repository = REVISION_REPOSITORY_FACTORY(session)
+        version = repository.get_version(version_id)
+        events = repository.list_version_events_after(version_id, after_sequence)
+        return events, version
+    finally:
+        session.close()
+
+
+def _format_version_event(event: DocumentVersionEvent) -> str:
+    payload_data: dict[str, object] = {
+        "status": event.status.value,
+        "progress": event.progress,
+        "message": event.message,
+        "created_at": event.created_at.isoformat(),
+    }
+    if event.metadata is not None:
+        payload_data.update(event.metadata.model_dump(mode="json"))
+    payload = json.dumps(
+        payload_data,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return f"id: {event.sequence}\nevent: progress\ndata: {payload}\n\n"
