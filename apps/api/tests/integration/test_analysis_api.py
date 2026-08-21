@@ -15,6 +15,7 @@ from text_verification.domain.jobs import JobStatus
 from text_verification.infrastructure.analysis_repositories import AnalysisRepository
 from text_verification.infrastructure.decision_repository import DecisionRepository
 from text_verification.infrastructure.repositories import JobRepository
+from text_verification.infrastructure.revision_repository import RevisionRepository
 
 
 @pytest.fixture(autouse=True)
@@ -172,6 +173,98 @@ def test_analysis_endpoints_return_ready_and_not_found_errors(client, db_session
     assert ready_response.json()["detail"]["code"] == "analysis_not_ready"
     assert missing_response.status_code == 404
     assert missing_response.json()["detail"]["code"] == "job_not_found"
+
+
+def test_analysis_endpoints_accept_historical_version_id(client, db_session: Session) -> None:
+    job_id = _seed_job(db_session, status=JobStatus.COMPLETED)
+    repository = AnalysisRepository(db_session)
+    original_document = _build_document([("旧问题", 1)])
+    original_issue = _build_issue(
+        block_id="p-000001",
+        issue_id=UUID("00000000-0000-0000-0000-000000000021"),
+        original="旧",
+        suggestion="老",
+        start=0,
+        end=1,
+        page=1,
+        category=CheckCategory.SECURITY,
+    )
+    replacement_document = _build_document([("新问题", 2)], version=2)
+    replacement_issue = _build_issue(
+        block_id="p-000001",
+        issue_id=UUID("00000000-0000-0000-0000-000000000022"),
+        original="新",
+        suggestion="现",
+        start=0,
+        end=1,
+        page=2,
+        category=CheckCategory.VOCABULARY,
+    )
+    repository.replace_analysis(job_id, original_document, [original_issue], {})
+    repository.replace_analysis(job_id, replacement_document, [replacement_issue], {})
+    db_session.commit()
+    versions = RevisionRepository(db_session).list_versions(job_id)
+    first_version = versions[0]
+
+    document_response = client.get(
+        f"/api/v1/jobs/{job_id}/document",
+        params={"version_id": str(first_version.version_id)},
+    )
+    issues_response = client.get(
+        f"/api/v1/jobs/{job_id}/issues",
+        params={"version_id": str(first_version.version_id)},
+    )
+    summary_response = client.get(
+        f"/api/v1/jobs/{job_id}/summary",
+        params={"version_id": str(first_version.version_id)},
+    )
+    current_document_response = client.get(f"/api/v1/jobs/{job_id}/document")
+
+    assert document_response.status_code == 200
+    assert issues_response.status_code == 200
+    assert summary_response.status_code == 200
+    assert [block["text"] for block in document_response.json()["blocks"]] == ["旧问题"]
+    assert issues_response.json()["items"][0]["rule_id"] == "security-001"
+    assert summary_response.json()["by_category"]["security"] == 1
+    assert [block["text"] for block in current_document_response.json()["blocks"]] == ["新问题"]
+    assert current_document_response.json()["version"] == replacement_document.version
+
+
+@pytest.mark.parametrize("path_suffix", ["document", "issues", "summary"])
+def test_analysis_endpoints_return_structured_not_found_for_unknown_version(
+    client,
+    db_session: Session,
+    path_suffix: str,
+) -> None:
+    job_id = _seed_analysis(
+        db_session,
+        status=JobStatus.COMPLETED,
+        document=_build_document([("正文", 1)]),
+        issues=[
+            _build_issue(
+                block_id="p-000001",
+                issue_id=UUID("00000000-0000-0000-0000-000000000099"),
+                original="正文",
+                suggestion="正文",
+                start=0,
+                end=2,
+                page=1,
+                category=CheckCategory.SECURITY,
+            )
+        ],
+        failures={},
+    )
+
+    response = client.get(
+        f"/api/v1/jobs/{job_id}/{path_suffix}",
+        params={"version_id": "00000000-0000-0000-0000-000000000123"},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == {
+        "code": "version_not_found",
+        "message": "文档版本不存在。",
+    }
 
 
 @pytest.mark.parametrize("path_suffix", ["document", "issues", "summary"])
@@ -491,7 +584,11 @@ def _seed_job(
     return job_id
 
 
-def _build_document(block_specs: list[tuple[str, int | None]]) -> DocumentModel:
+def _build_document(
+    block_specs: list[tuple[str, int | None]],
+    *,
+    version: int = 1,
+) -> DocumentModel:
     blocks = [
         TextBlock(
             block_id=f"p-{index + 1:06d}",
@@ -509,7 +606,7 @@ def _build_document(block_specs: list[tuple[str, int | None]]) -> DocumentModel:
         document_id=UUID("00000000-0000-0000-0000-000000000001"),
         file_type=FileType.TXT,
         source_name="analysis.txt",
-        version=1,
+        version=version,
         blocks=blocks,
         metadata={"language": "zh-CN"},
     )

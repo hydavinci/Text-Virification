@@ -6,7 +6,11 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query, status
 from pydantic import BaseModel, ConfigDict
 
-from text_verification.api.dependencies import get_analysis_repository, get_job_repository
+from text_verification.api.dependencies import (
+    get_analysis_repository,
+    get_job_repository,
+    get_revision_repository,
+)
 from text_verification.api.routes.jobs import JOB_NOT_FOUND_CODE, _http_error
 from text_verification.checkers.models import CHECK_CATEGORY_ORDER, CheckCategory, CheckerFailure
 from text_verification.domain.documents import FileType, TextBlock
@@ -19,12 +23,15 @@ from text_verification.infrastructure.analysis_repositories import (
     IssueQuery,
 )
 from text_verification.infrastructure.repositories import JobRepository
+from text_verification.infrastructure.revision_repository import RevisionRepository
 
 ANALYSIS_NOT_FOUND_CODE = "analysis_not_found"
 ANALYSIS_FAILED_CODE = "analysis_failed"
 ANALYSIS_NOT_READY_CODE = "analysis_not_ready"
 INVALID_ISSUE_FILTERS_CODE = "invalid_issue_filters"
 JOB_EXPIRED_CODE = "job_expired"
+VERSION_NOT_FOUND_CODE = "version_not_found"
+VERSION_NOT_FOUND_MESSAGE = "文档版本不存在。"
 
 ANALYSIS_FAILED_FALLBACK_MESSAGE = "分析失败，请重新上传文件后重试。"
 ANALYSIS_NOT_FOUND_MESSAGE = "分析结果不存在，请重新上传后重试。"
@@ -91,15 +98,19 @@ def get_document_page(
     job_id: UUID,
     repository: Annotated[JobRepository, Depends(get_job_repository)],
     analysis_repository: Annotated[AnalysisRepository, Depends(get_analysis_repository)],
+    revision_repository: Annotated[RevisionRepository, Depends(get_revision_repository)],
+    version_id: UUID | None = None,
     cursor: str | None = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
 ) -> DocumentPageResponse:
     job = _require_ready_job(job_id, repository)
-    _require_analysis(job_id, analysis_repository)
+    resolved_version_id = _require_version(job_id, version_id, revision_repository)
+    _require_analysis(job_id, analysis_repository, version_id=resolved_version_id)
     try:
         page = analysis_repository.list_document_blocks(
             job_id,
             DocumentQuery(cursor=_normalize_cursor(cursor), limit=limit),
+            resolved_version_id,
         )
     except InvalidCursorError as error:
         raise _http_error(status.HTTP_400_BAD_REQUEST, error.code, error.message) from error
@@ -121,7 +132,7 @@ def get_document_page(
         total_blocks=page.total_blocks,
         next_cursor=page.next_cursor,
         checker_failures=_serialize_checker_failures(
-            analysis_repository.get_checker_failures(job_id)
+            analysis_repository.get_checker_failures(job_id, resolved_version_id)
         ),
     )
 
@@ -131,15 +142,18 @@ def get_issue_page(
     job_id: UUID,
     repository: Annotated[JobRepository, Depends(get_job_repository)],
     analysis_repository: Annotated[AnalysisRepository, Depends(get_analysis_repository)],
+    revision_repository: Annotated[RevisionRepository, Depends(get_revision_repository)],
     category: CheckCategory | None = None,
     severity: IssueSeverity | None = None,
     decision: ISSUE_DECISIONS | None = None,
     search: str | None = None,
+    version_id: UUID | None = None,
     cursor: str | None = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> IssuePageResponse:
     job = _require_ready_job(job_id, repository)
-    _require_analysis(job_id, analysis_repository)
+    resolved_version_id = _require_version(job_id, version_id, revision_repository)
+    _require_analysis(job_id, analysis_repository, version_id=resolved_version_id)
     try:
         page = analysis_repository.list_issues(
             job_id,
@@ -151,6 +165,7 @@ def get_issue_page(
                 cursor=_normalize_cursor(cursor),
                 limit=limit,
             ),
+            resolved_version_id,
         )
     except InvalidCursorError as error:
         raise _http_error(status.HTTP_400_BAD_REQUEST, error.code, error.message) from error
@@ -167,7 +182,7 @@ def get_issue_page(
         items=page.items,
         next_cursor=page.next_cursor,
         checker_failures=_serialize_checker_failures(
-            analysis_repository.get_checker_failures(job_id)
+            analysis_repository.get_checker_failures(job_id, resolved_version_id)
         ),
     )
 
@@ -177,10 +192,13 @@ def get_analysis_summary(
     job_id: UUID,
     repository: Annotated[JobRepository, Depends(get_job_repository)],
     analysis_repository: Annotated[AnalysisRepository, Depends(get_analysis_repository)],
+    revision_repository: Annotated[RevisionRepository, Depends(get_revision_repository)],
+    version_id: UUID | None = None,
 ) -> AnalysisSummaryResponse:
     job = _require_ready_job(job_id, repository)
-    _require_analysis(job_id, analysis_repository)
-    summary = analysis_repository.summarize_issues(job_id)
+    resolved_version_id = _require_version(job_id, version_id, revision_repository)
+    _require_analysis(job_id, analysis_repository, version_id=resolved_version_id)
+    summary = analysis_repository.summarize_issues(job_id, resolved_version_id)
     return AnalysisSummaryResponse(
         job_id=job_id,
         status=job.status,
@@ -198,7 +216,7 @@ def get_analysis_summary(
             for decision in SUMMARY_DECISION_STATES
         },
         checker_failures=_serialize_checker_failures(
-            analysis_repository.get_checker_failures(job_id)
+            analysis_repository.get_checker_failures(job_id, resolved_version_id)
         ),
     )
 
@@ -232,12 +250,30 @@ def _require_analysis(
     job_id: UUID,
     analysis_repository: AnalysisRepository,
     *,
+    version_id: UUID | None = None,
     missing_status_code: int = status.HTTP_404_NOT_FOUND,
     missing_code: str = ANALYSIS_NOT_FOUND_CODE,
     missing_message: str = ANALYSIS_NOT_FOUND_MESSAGE,
 ) -> None:
-    if not analysis_repository.has_analysis(job_id):
+    if not analysis_repository.has_analysis(job_id, version_id):
         raise _http_error(missing_status_code, missing_code, missing_message)
+
+
+def _require_version(
+    job_id: UUID,
+    version_id: UUID | None,
+    revision_repository: RevisionRepository,
+) -> UUID | None:
+    if version_id is None:
+        return None
+    version = revision_repository.get_version(version_id)
+    if version is None or version.job_id != job_id:
+        raise _http_error(
+            status.HTTP_404_NOT_FOUND,
+            VERSION_NOT_FOUND_CODE,
+            VERSION_NOT_FOUND_MESSAGE,
+        )
+    return version.version_id
 
 
 def _normalize_cursor(cursor: str | None) -> str | None:

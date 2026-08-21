@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import Counter
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -14,11 +16,60 @@ from text_verification.domain.issues import Issue
 from text_verification.domain.revisions import (
     DocumentVersionRead,
     DocumentVersionStatus,
+    DraftBlock,
+    EditDraftRead,
     ImmutableDocumentVersionError,
 )
 from text_verification.infrastructure.analysis_repositories import AnalysisRepository
-from text_verification.infrastructure.orm import DocumentRow, DocumentVersionRow, JobRow
+from text_verification.infrastructure.orm import (
+    DocumentRow,
+    DocumentVersionRow,
+    EditDraftRow,
+    JobRow,
+)
 from text_verification.infrastructure.repositories import JobRepository
+
+
+class VersionNotFoundError(LookupError):
+    def __init__(self, version_id: UUID) -> None:
+        self.version_id = version_id
+        super().__init__(f"Document version {version_id} does not exist.")
+
+
+class DraftNotFoundError(LookupError):
+    def __init__(self, draft_id: UUID) -> None:
+        self.draft_id = draft_id
+        super().__init__(f"Edit draft {draft_id} does not exist.")
+
+
+class InvalidBaseVersionError(ValueError):
+    def __init__(self, version_id: UUID, status: DocumentVersionStatus) -> None:
+        self.version_id = version_id
+        self.status = status
+        super().__init__(
+            "Document version "
+            f"{version_id} with status {status.value} cannot be used as a draft base."
+        )
+
+
+class StaleDraftRevisionError(ValueError):
+    def __init__(self, current_revision: int) -> None:
+        self.current_revision = current_revision
+        super().__init__(f"Draft revision is stale; current revision is {current_revision}.")
+
+
+class InvalidDraftBlocksError(ValueError):
+    def __init__(
+        self,
+        *,
+        duplicate_block_ids: tuple[str, ...],
+        missing_block_ids: tuple[str, ...],
+        unexpected_block_ids: tuple[str, ...],
+    ) -> None:
+        self.duplicate_block_ids = duplicate_block_ids
+        self.missing_block_ids = missing_block_ids
+        self.unexpected_block_ids = unexpected_block_ids
+        super().__init__("Draft block identifiers do not match the persisted draft.")
 
 
 class RevisionRepository:
@@ -144,6 +195,12 @@ class RevisionRepository:
             return None
         return _to_version_read(version)
 
+    def get_version(self, version_id: UUID) -> DocumentVersionRead | None:
+        version = self._session.get(DocumentVersionRow, version_id)
+        if version is None:
+            return None
+        return _to_version_read(version)
+
     def list_versions(self, job_id: UUID) -> list[DocumentVersionRead]:
         rows = self._session.scalars(
             select(DocumentVersionRow)
@@ -151,6 +208,103 @@ class RevisionRepository:
             .order_by(DocumentVersionRow.revision_number, DocumentVersionRow.created_at)
         ).all()
         return [_to_version_read(row) for row in rows]
+
+    def create_draft(self, job_id: UUID, base_version_id: UUID) -> EditDraftRead:
+        JobRepository(self._session).lock_job(job_id)
+        version = self._lock_job_version(job_id, base_version_id)
+        version_status = DocumentVersionStatus(version.status)
+        if version_status != DocumentVersionStatus.SUCCEEDED:
+            raise InvalidBaseVersionError(base_version_id, version_status)
+
+        existing = self._session.execute(
+            select(EditDraftRow)
+            .where(
+                EditDraftRow.job_id == job_id,
+                EditDraftRow.base_version_id == base_version_id,
+                EditDraftRow.consumed_at.is_(None),
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+        if existing is not None:
+            return _to_draft_read(existing)
+
+        document = self._session.execute(
+            select(DocumentRow)
+            .where(
+                DocumentRow.job_id == job_id,
+                DocumentRow.version_id == base_version_id,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+        if document is None:
+            raise InvalidBaseVersionError(base_version_id, version_status)
+
+        blocks = [_to_draft_block(block.block_id, block.text) for block in document.blocks]
+        created_at = datetime.now(UTC)
+        draft = EditDraftRow(
+            job_id=job_id,
+            base_version_id=base_version_id,
+            revision=1,
+            blocks_json=[block.model_dump(mode="json") for block in blocks],
+            content_sha256=draft_blocks_sha256(blocks),
+            created_at=created_at,
+            updated_at=created_at,
+            consumed_at=None,
+        )
+        self._session.add(draft)
+        self._session.flush()
+        return _to_draft_read(draft)
+
+    def get_draft(self, job_id: UUID, draft_id: UUID) -> EditDraftRead | None:
+        draft = self._session.execute(
+            select(EditDraftRow).where(
+                EditDraftRow.job_id == job_id,
+                EditDraftRow.draft_id == draft_id,
+            )
+        ).scalar_one_or_none()
+        if draft is None:
+            return None
+        return _to_draft_read(draft)
+
+    def update_draft(
+        self,
+        job_id: UUID,
+        draft_id: UUID,
+        *,
+        expected_revision: int,
+        blocks: list[DraftBlock],
+    ) -> EditDraftRead:
+        JobRepository(self._session).lock_job(job_id)
+        row = self._lock_draft(job_id, draft_id)
+        current_blocks = [
+            _to_draft_block(block["block_id"], str(block["text"])) for block in row.blocks
+        ]
+        if row.revision != expected_revision:
+            raise StaleDraftRevisionError(current_revision=row.revision)
+
+        self._validate_draft_block_ids(current_blocks, blocks)
+        if current_blocks == blocks:
+            return _to_draft_read(row)
+
+        updates_by_block_id = {block.block_id: block.text for block in blocks}
+        updated_blocks = [
+            DraftBlock(block_id=block.block_id, text=updates_by_block_id[block.block_id])
+            for block in current_blocks
+        ]
+        row.blocks_json = [block.model_dump(mode="json") for block in updated_blocks]
+        row.revision += 1
+        row.content_sha256 = draft_blocks_sha256(updated_blocks)
+        row.updated_at = datetime.now(UTC)
+        self._session.flush()
+        return _to_draft_read(row)
+
+    def delete_draft(self, job_id: UUID, draft_id: UUID) -> None:
+        JobRepository(self._session).lock_job(job_id)
+        row = self._lock_draft(job_id, draft_id)
+        self._session.delete(row)
+        self._session.flush()
 
     def _lock_version(self, version_id: UUID) -> DocumentVersionRow:
         version = self._session.execute(
@@ -162,6 +316,60 @@ class RevisionRepository:
         if version is None:
             raise LookupError(f"Document version {version_id} does not exist.")
         return version
+
+    def _lock_job_version(self, job_id: UUID, version_id: UUID) -> DocumentVersionRow:
+        version = self._session.execute(
+            select(DocumentVersionRow)
+            .where(
+                DocumentVersionRow.job_id == job_id,
+                DocumentVersionRow.version_id == version_id,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+        if version is None:
+            raise VersionNotFoundError(version_id)
+        return version
+
+    def _lock_draft(self, job_id: UUID, draft_id: UUID) -> EditDraftRow:
+        draft = self._session.execute(
+            select(EditDraftRow)
+            .where(
+                EditDraftRow.job_id == job_id,
+                EditDraftRow.draft_id == draft_id,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+        if draft is None:
+            raise DraftNotFoundError(draft_id)
+        return draft
+
+    def _validate_draft_block_ids(
+        self,
+        current_blocks: list[DraftBlock],
+        submitted_blocks: list[DraftBlock],
+    ) -> None:
+        expected_ids = [block.block_id for block in current_blocks]
+        submitted_ids = [block.block_id for block in submitted_blocks]
+        counts = Counter(submitted_ids)
+        duplicate_block_ids = _stable_unique(
+            block_id for block_id in submitted_ids if counts[block_id] > 1
+        )
+        expected_id_set = set(expected_ids)
+        submitted_id_set = set(submitted_ids)
+        missing_block_ids = tuple(
+            block_id for block_id in expected_ids if block_id not in submitted_id_set
+        )
+        unexpected_block_ids = _stable_unique(
+            block_id for block_id in submitted_ids if block_id not in expected_id_set
+        )
+        if duplicate_block_ids or missing_block_ids or unexpected_block_ids:
+            raise InvalidDraftBlocksError(
+                duplicate_block_ids=duplicate_block_ids,
+                missing_block_ids=missing_block_ids,
+                unexpected_block_ids=unexpected_block_ids,
+            )
 
     def _next_revision_number(self, job_id: UUID) -> int:
         current_max = self._session.scalar(
@@ -213,5 +421,27 @@ def normalized_document_sha256(document: DocumentModel) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def draft_blocks_sha256(blocks: list[DraftBlock]) -> str:
+    payload = json.dumps(
+        [block.model_dump(mode="json") for block in blocks],
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _stable_unique(values: Iterable[str]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(values))
+
+
+def _to_draft_block(block_id: str, text: str) -> DraftBlock:
+    return DraftBlock(block_id=block_id, text=text)
+
+
 def _to_version_read(row: DocumentVersionRow) -> DocumentVersionRead:
     return DocumentVersionRead.model_validate(row)
+
+
+def _to_draft_read(row: EditDraftRow) -> EditDraftRead:
+    return EditDraftRead.model_validate(row)
