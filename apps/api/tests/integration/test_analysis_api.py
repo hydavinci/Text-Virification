@@ -268,6 +268,43 @@ def test_analysis_endpoints_return_structured_not_found_for_unknown_version(
 
 
 @pytest.mark.parametrize("path_suffix", ["document", "issues", "summary"])
+@pytest.mark.parametrize(
+    ("status", "error_message"),
+    [
+        (JobStatus.QUEUED, None),
+        (
+            JobStatus.FAILED,
+            "PDF 中没有可提取的文本，请使用包含文本层的 PDF。",
+        ),
+        (JobStatus.EXPIRED, None),
+    ],
+)
+def test_analysis_unknown_version_returns_not_found_before_readiness_gates(
+    client,
+    db_session: Session,
+    path_suffix: str,
+    status: JobStatus,
+    error_message: str | None,
+) -> None:
+    job_id = _seed_job(
+        db_session,
+        status=status,
+        error_message=error_message,
+    )
+
+    response = client.get(
+        f"/api/v1/jobs/{job_id}/{path_suffix}",
+        params={"version_id": "00000000-0000-0000-0000-000000000123"},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == {
+        "code": "version_not_found",
+        "message": "文档版本不存在。",
+    }
+
+
+@pytest.mark.parametrize("path_suffix", ["document", "issues", "summary"])
 def test_legacy_completed_job_without_analysis_returns_structured_not_found(
     client,
     db_session: Session,

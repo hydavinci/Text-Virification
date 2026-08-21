@@ -103,8 +103,9 @@ def get_document_page(
     cursor: str | None = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
 ) -> DocumentPageResponse:
-    job = _require_ready_job(job_id, repository)
+    job = _require_job(job_id, repository)
     resolved_version_id = _require_version(job_id, version_id, revision_repository)
+    _require_ready_status(job)
     _require_analysis(job_id, analysis_repository, version_id=resolved_version_id)
     try:
         page = analysis_repository.list_document_blocks(
@@ -151,8 +152,9 @@ def get_issue_page(
     cursor: str | None = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> IssuePageResponse:
-    job = _require_ready_job(job_id, repository)
+    job = _require_job(job_id, repository)
     resolved_version_id = _require_version(job_id, version_id, revision_repository)
+    _require_ready_status(job)
     _require_analysis(job_id, analysis_repository, version_id=resolved_version_id)
     try:
         page = analysis_repository.list_issues(
@@ -195,8 +197,9 @@ def get_analysis_summary(
     revision_repository: Annotated[RevisionRepository, Depends(get_revision_repository)],
     version_id: UUID | None = None,
 ) -> AnalysisSummaryResponse:
-    job = _require_ready_job(job_id, repository)
+    job = _require_job(job_id, repository)
     resolved_version_id = _require_version(job_id, version_id, revision_repository)
+    _require_ready_status(job)
     _require_analysis(job_id, analysis_repository, version_id=resolved_version_id)
     summary = analysis_repository.summarize_issues(job_id, resolved_version_id)
     return AnalysisSummaryResponse(
@@ -222,9 +225,18 @@ def get_analysis_summary(
 
 
 def _require_ready_job(job_id: UUID, repository: JobRepository) -> JobRead:
+    job = _require_job(job_id, repository)
+    return _require_ready_status(job)
+
+
+def _require_job(job_id: UUID, repository: JobRepository) -> JobRead:
     job = repository.get_job(job_id)
     if job is None:
         raise _http_error(status.HTTP_404_NOT_FOUND, JOB_NOT_FOUND_CODE, "作业不存在。")
+    return job
+
+
+def _require_ready_status(job: JobRead) -> JobRead:
     if job.status == JobStatus.FAILED:
         raise _http_error(
             status.HTTP_409_CONFLICT,

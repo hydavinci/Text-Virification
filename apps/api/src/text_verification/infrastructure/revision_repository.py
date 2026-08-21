@@ -285,17 +285,17 @@ class RevisionRepository:
             raise StaleDraftRevisionError(current_revision=row.revision)
 
         self._validate_draft_block_ids(current_blocks, blocks)
-        if current_blocks == blocks:
-            return _to_draft_read(row)
-
         updates_by_block_id = {block.block_id: block.text for block in blocks}
-        updated_blocks = [
+        normalized_blocks = [
             DraftBlock(block_id=block.block_id, text=updates_by_block_id[block.block_id])
             for block in current_blocks
         ]
-        row.blocks_json = [block.model_dump(mode="json") for block in updated_blocks]
+        if current_blocks == normalized_blocks:
+            return _to_draft_read(row)
+
+        row.blocks_json = [block.model_dump(mode="json") for block in normalized_blocks]
         row.revision += 1
-        row.content_sha256 = draft_blocks_sha256(updated_blocks)
+        row.content_sha256 = draft_blocks_sha256(normalized_blocks)
         row.updated_at = datetime.now(UTC)
         self._session.flush()
         return _to_draft_read(row)

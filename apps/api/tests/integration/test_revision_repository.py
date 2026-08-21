@@ -12,6 +12,7 @@ from text_verification.domain.documents import DocumentModel, FileType, TextBloc
 from text_verification.domain.issues import Issue, IssueSeverity
 from text_verification.domain.revisions import (
     DocumentVersionStatus,
+    DraftBlock,
     ImmutableDocumentVersionError,
 )
 from text_verification.infrastructure.analysis_repositories import AnalysisRepository
@@ -122,6 +123,46 @@ def test_failed_version_never_becomes_active(
     ]
 
 
+def test_update_draft_reordered_semantic_noop_preserves_revision(
+    db_session: Session,
+) -> None:
+    revisions = RevisionRepository(db_session)
+    job_id = _seed_job(db_session)
+    document = _build_multi_block_document(version=1, texts=["第一段", "第二段"])
+    version = revisions.create_queued_version(
+        job_id,
+        parent_version_id=None,
+        reason="upload",
+        idempotency_key=None,
+    )
+    revisions.complete_analysis(version.version_id, document, [], {})
+    draft = revisions.create_draft(job_id, version.version_id)
+    db_session.commit()
+
+    updated = revisions.update_draft(
+        job_id,
+        draft.draft_id,
+        expected_revision=draft.revision,
+        blocks=[
+            DraftBlock(block_id="p-000002", text="第二段"),
+            DraftBlock(block_id="p-000001", text="第一段"),
+        ],
+    )
+    db_session.commit()
+
+    reread = revisions.get_draft(job_id, draft.draft_id)
+
+    assert updated.revision == draft.revision
+    assert updated.updated_at == draft.updated_at
+    assert reread is not None
+    assert reread.revision == draft.revision
+    assert reread.updated_at == draft.updated_at
+    assert [block.model_dump() for block in reread.blocks] == [
+        {"block_id": "p-000001", "text": "第一段"},
+        {"block_id": "p-000002", "text": "第二段"},
+    ]
+
+
 def _seed_job(db_session: Session) -> UUID:
     now = datetime.now(UTC)
     job_id = uuid4()
@@ -140,6 +181,10 @@ def _seed_job(db_session: Session) -> UUID:
 
 
 def _build_document(*, version: int, text: str) -> DocumentModel:
+    return _build_multi_block_document(version=version, texts=[text])
+
+
+def _build_multi_block_document(*, version: int, texts: list[str]) -> DocumentModel:
     return DocumentModel(
         document_id=UUID("00000000-0000-0000-0000-000000000001"),
         file_type=FileType.TXT,
@@ -147,15 +192,16 @@ def _build_document(*, version: int, text: str) -> DocumentModel:
         version=version,
         blocks=[
             TextBlock(
-                block_id="p-000001",
+                block_id=f"p-{index + 1:06d}",
                 kind="paragraph",
                 text=text,
-                page=1,
-                paragraph_index=0,
+                page=index + 1,
+                paragraph_index=index,
                 parent_id=None,
                 style={"style_name": "Normal"},
-                source_locator={"paragraph_index": 0},
+                source_locator={"paragraph_index": index},
             )
+            for index, text in enumerate(texts)
         ],
         metadata={"language": "zh-CN"},
     )
