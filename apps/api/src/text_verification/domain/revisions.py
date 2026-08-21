@@ -17,6 +17,15 @@ class DocumentVersionStatus(StrEnum):
     FAILED = "failed"
 
 
+class ImmutableDocumentVersionError(ValueError):
+    def __init__(self, version_id: UUID, status: DocumentVersionStatus) -> None:
+        self.version_id = version_id
+        self.status = status
+        super().__init__(
+            f"Document version {version_id} is immutable after reaching {status.value}."
+        )
+
+
 class DraftBlock(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

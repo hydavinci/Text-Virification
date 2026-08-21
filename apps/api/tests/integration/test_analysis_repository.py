@@ -11,7 +11,10 @@ from sqlalchemy.orm import Session
 from text_verification.checkers.models import CheckCategory, CheckerFailure
 from text_verification.domain.documents import DocumentModel, FileType, TextBlock
 from text_verification.domain.issues import DecisionAction, DecisionCommand, Issue, IssueSeverity
-from text_verification.domain.revisions import DocumentVersionStatus
+from text_verification.domain.revisions import (
+    DocumentVersionStatus,
+    ImmutableDocumentVersionError,
+)
 from text_verification.infrastructure.analysis_repositories import (
     AnalysisRepository,
     DocumentQuery,
@@ -282,6 +285,84 @@ def test_replace_analysis_rejects_issue_with_page_mismatched_to_block(db_session
 
     stored = repository.get_document(job_id)
     assert stored == document
+
+
+@pytest.mark.parametrize(
+    "terminal_status",
+    [DocumentVersionStatus.SUCCEEDED, DocumentVersionStatus.FAILED],
+    ids=["succeeded", "failed"],
+)
+def test_persist_version_analysis_rejects_terminal_versions_without_changing_stored_content(
+    db_session: Session,
+    terminal_status: DocumentVersionStatus,
+) -> None:
+    repository = AnalysisRepository(db_session)
+    revisions = RevisionRepository(db_session)
+    job_id = seed_job(db_session)
+    original_document = build_document([("当前问题", 1)])
+    original_issue = build_issue(
+        original_document,
+        block_id="p-000001",
+        issue_id=UUID("00000000-0000-0000-0000-000000000031"),
+        original="当前",
+        suggestion="保留",
+        start=0,
+        end=2,
+        page=1,
+    )
+    active_version = revisions.create_queued_version(
+        job_id,
+        parent_version_id=None,
+        reason="upload",
+        idempotency_key=None,
+    )
+    revisions.complete_analysis(active_version.version_id, original_document, [original_issue], {})
+
+    target_version_id = active_version.version_id
+    if terminal_status == DocumentVersionStatus.FAILED:
+        failed_version = revisions.create_queued_version(
+            job_id,
+            parent_version_id=active_version.version_id,
+            reason="edited",
+            idempotency_key="failed-edit",
+        )
+        revisions.mark_analyzing(failed_version.version_id)
+        revisions.fail_version(
+            failed_version.version_id,
+            code="checker_failed",
+            message="分析失败。",
+        )
+        target_version_id = failed_version.version_id
+
+    db_session.commit()
+
+    stored_document = repository.get_document(job_id, target_version_id)
+    stored_issues = repository.list_all_issues(job_id, target_version_id)
+    replacement_document = build_document([("替换问题", 1)], version=2)
+    replacement_issue = build_issue(
+        replacement_document,
+        block_id="p-000001",
+        issue_id=UUID("00000000-0000-0000-0000-000000000032"),
+        original="替换",
+        suggestion="写入",
+        start=0,
+        end=2,
+        page=1,
+    )
+
+    with pytest.raises(ImmutableDocumentVersionError):
+        repository.persist_version_analysis(
+            target_version_id,
+            replacement_document,
+            [replacement_issue],
+            {},
+        )
+
+    assert repository.get_document(job_id, target_version_id) == stored_document
+    assert repository.list_all_issues(job_id, target_version_id) == stored_issues
+    active = revisions.get_active_version(job_id)
+    assert active is not None
+    assert active.version_id == active_version.version_id
 
 
 def test_list_issues_filters_and_paginates_stably(db_session: Session) -> None:

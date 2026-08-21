@@ -10,13 +10,13 @@ from sqlalchemy.orm import Session
 from text_verification.checkers.models import CheckCategory
 from text_verification.domain.documents import DocumentModel, FileType, TextBlock
 from text_verification.domain.issues import Issue, IssueSeverity
-from text_verification.domain.revisions import DocumentVersionStatus
+from text_verification.domain.revisions import (
+    DocumentVersionStatus,
+    ImmutableDocumentVersionError,
+)
 from text_verification.infrastructure.analysis_repositories import AnalysisRepository
 from text_verification.infrastructure.repositories import JobRepository
-from text_verification.infrastructure.revision_repository import (
-    ImmutableDocumentVersionError,
-    RevisionRepository,
-)
+from text_verification.infrastructure.revision_repository import RevisionRepository
 
 
 @dataclass(frozen=True)

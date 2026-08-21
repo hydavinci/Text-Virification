@@ -11,19 +11,14 @@ from sqlalchemy.orm import Session
 from text_verification.checkers.models import CheckCategory, CheckerFailure
 from text_verification.domain.documents import DocumentModel
 from text_verification.domain.issues import Issue
-from text_verification.domain.revisions import DocumentVersionRead, DocumentVersionStatus
+from text_verification.domain.revisions import (
+    DocumentVersionRead,
+    DocumentVersionStatus,
+    ImmutableDocumentVersionError,
+)
 from text_verification.infrastructure.analysis_repositories import AnalysisRepository
 from text_verification.infrastructure.orm import DocumentRow, DocumentVersionRow, JobRow
 from text_verification.infrastructure.repositories import JobRepository
-
-
-class ImmutableDocumentVersionError(ValueError):
-    def __init__(self, version_id: UUID, status: DocumentVersionStatus) -> None:
-        self.version_id = version_id
-        self.status = status
-        super().__init__(
-            f"Document version {version_id} is immutable after reaching {status.value}."
-        )
 
 
 class RevisionRepository:

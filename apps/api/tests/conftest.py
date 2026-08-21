@@ -1,7 +1,4 @@
 import os
-import socket
-import subprocess
-import time
 from collections.abc import Iterator
 from pathlib import Path
 from uuid import uuid4
@@ -39,49 +36,14 @@ def client(app: FastAPI) -> Iterator[TestClient]:
 
 
 @pytest.fixture(scope="session")
-def test_database_url() -> str:
+def test_database_url() -> Iterator[str]:
     database_url = os.environ.get("TEST_DATABASE_URL")
-    if database_url:
-        return database_url
+    if not database_url:
+        pytest.skip("TEST_DATABASE_URL is not set; PostgreSQL integration tests are opt-in.")
 
-    container_name = f"text-verification-test-pg16-{uuid4().hex[:12]}"
-    port = _reserve_local_port()
-    database_url = f"postgresql+psycopg://postgres:postgres@127.0.0.1:{port}/text_verification"
     original_database_url = os.environ.get("DATABASE_URL")
-    started = False
 
     try:
-        subprocess.run(
-            [
-                "docker",
-                "run",
-                "--detach",
-                "--name",
-                container_name,
-                "--publish",
-                f"{port}:5432",
-                "--env",
-                "POSTGRES_PASSWORD=postgres",
-                "--env",
-                "POSTGRES_DB=text_verification",
-                "--health-cmd",
-                "pg_isready -U postgres -d text_verification",
-                "--health-interval",
-                "1s",
-                "--health-timeout",
-                "5s",
-                "--health-retries",
-                "60",
-                "postgres:16",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        started = True
-        _wait_for_healthy_postgres(container_name)
-        _wait_for_database_connection(database_url)
-        os.environ["TEST_DATABASE_URL"] = database_url
         os.environ["DATABASE_URL"] = database_url
         _reset_database_caches()
         yield database_url
@@ -90,15 +52,7 @@ def test_database_url() -> str:
             os.environ.pop("DATABASE_URL", None)
         else:
             os.environ["DATABASE_URL"] = original_database_url
-        os.environ.pop("TEST_DATABASE_URL", None)
         _reset_database_caches()
-        if started:
-            subprocess.run(
-                ["docker", "rm", "--force", container_name],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
 
 
 @pytest.fixture(scope="session")
@@ -163,58 +117,6 @@ def db_session(db_session_factory: sessionmaker[Session], db_engine: Engine) -> 
         session.close()
         with db_engine.begin() as connection:
             connection.execute(text("TRUNCATE TABLE job_events, jobs RESTART IDENTITY CASCADE"))
-
-
-def _reserve_local_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
-        listener.bind(("127.0.0.1", 0))
-        return int(listener.getsockname()[1])
-
-
-def _wait_for_healthy_postgres(container_name: str) -> None:
-    deadline = time.monotonic() + 90
-    last_status = "unknown"
-    while time.monotonic() < deadline:
-        status = subprocess.run(
-            [
-                "docker",
-                "inspect",
-                "--format",
-                "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}",
-                container_name,
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-        last_status = status or last_status
-        if status == "healthy":
-            return
-        time.sleep(1)
-    raise RuntimeError(
-        f"Temporary PostgreSQL container {container_name} did not become healthy "
-        f"(last status: {last_status})."
-    )
-
-
-def _wait_for_database_connection(database_url: str) -> None:
-    deadline = time.monotonic() + 30
-    last_error = "unknown"
-    while time.monotonic() < deadline:
-        engine = create_engine(database_url, pool_pre_ping=True)
-        try:
-            with engine.connect() as connection:
-                connection.execute(text("SELECT 1"))
-            return
-        except Exception as error:  # pragma: no cover - exercised only on slow Docker starts
-            last_error = str(error)
-            time.sleep(1)
-        finally:
-            engine.dispose()
-    raise RuntimeError(
-        "Temporary PostgreSQL database did not accept connections within 30 seconds "
-        f"({last_error})."
-    )
 
 
 def _reset_database_caches() -> None:

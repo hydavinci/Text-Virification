@@ -18,6 +18,10 @@ from text_verification.domain.issues import (
     IssueDecisionSummary,
     IssueSeverity,
 )
+from text_verification.domain.revisions import (
+    DocumentVersionStatus,
+    ImmutableDocumentVersionError,
+)
 from text_verification.infrastructure.orm import (
     CheckerFailureRow,
     DocumentBlockRow,
@@ -145,12 +149,13 @@ class AnalysisRepository:
         issues: list[Issue],
         failures: dict[CheckCategory, CheckerFailure],
     ) -> None:
-        version = self._session.get(DocumentVersionRow, version_id)
-        if version is None:
-            raise LookupError(f"Document version {version_id} does not exist.")
+        version = self._lock_version(version_id)
+        status = DocumentVersionStatus(version.status)
+        if status in {DocumentVersionStatus.SUCCEEDED, DocumentVersionStatus.FAILED}:
+            raise ImmutableDocumentVersionError(version_id, status)
+
         job_id = version.job_id
         self._validate_issues(document, issues)
-
         self._session.execute(
             delete(CheckerFailureRow)
             .where(CheckerFailureRow.version_id == version_id)
@@ -564,6 +569,17 @@ class AnalysisRepository:
         if lock:
             statement = statement.with_for_update().execution_options(populate_existing=True)
         return self._session.execute(statement).scalar_one_or_none()
+
+    def _lock_version(self, version_id: UUID) -> DocumentVersionRow:
+        version = self._session.execute(
+            select(DocumentVersionRow)
+            .where(DocumentVersionRow.version_id == version_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+        if version is None:
+            raise LookupError(f"Document version {version_id} does not exist.")
+        return version
 
 
 def _to_issue(*, issue_row: IssueRow, decision_row: IssueDecisionRow | None) -> Issue:
