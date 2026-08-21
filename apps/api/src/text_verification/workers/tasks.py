@@ -55,14 +55,15 @@ def _get_job_storage() -> JobStorage:
     return JobStorage(settings.storage_root, settings.max_upload_bytes)
 
 
-def _repository_root() -> Path:
-    return Path(__file__).resolve().parents[5]
-
-
 def _resolve_resource_root(path: Path) -> Path:
     if path.is_absolute():
         return path
-    return (_repository_root() / path).resolve()
+    working_root = Path.cwd().resolve()
+    for application_root in (working_root, *working_root.parents):
+        candidate = (application_root / path).resolve()
+        if candidate.exists():
+            return candidate
+    return (working_root / path).resolve()
 
 
 SESSION_FACTORY_PROVIDER: SessionFactoryProvider = get_session_factory

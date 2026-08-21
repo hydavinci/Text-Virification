@@ -102,7 +102,8 @@ class StaleDocumentVersionError(ValueError):
         self.active_revision_number = active_revision_number
         super().__init__(
             "Document version "
-            f"{version_id} is older than active revision {active_revision_number}."
+            f"{version_id} must be strictly greater than active revision "
+            f"{active_revision_number}."
         )
 
 
@@ -119,10 +120,19 @@ class _ReanalysisRequest:
     client_key: str
 
 
+@dataclass(frozen=True)
+class ReanalysisVersionCreateResult:
+    version: DocumentVersionRead
+    created: bool
+
+
 class RevisionRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
         self._analysis = AnalysisRepository(session)
+
+    def commit(self) -> None:
+        self._session.commit()
 
     def create_queued_version(
         self,
@@ -183,7 +193,7 @@ class RevisionRepository:
         *,
         expected_draft_revision: int,
         idempotency_key: str,
-    ) -> DocumentVersionRead:
+    ) -> ReanalysisVersionCreateResult:
         draft_job_id = self._draft_job_id(draft_id)
         JobRepository(self._session).lock_job(draft_job_id)
         draft = self._lock_draft(draft_job_id, draft_id)
@@ -201,7 +211,10 @@ class RevisionRepository:
             .execution_options(populate_existing=True)
         ).scalar_one_or_none()
         if existing is not None:
-            return _to_version_read(existing)
+            return ReanalysisVersionCreateResult(
+                version=_to_version_read(existing),
+                created=False,
+            )
 
         self._require_editable_draft(draft)
         if draft.revision != expected_draft_revision:
@@ -210,11 +223,14 @@ class RevisionRepository:
         base_status = DocumentVersionStatus(base_version.status)
         if base_status != DocumentVersionStatus.SUCCEEDED:
             raise InvalidBaseVersionError(draft.base_version_id, base_status)
-        return self.create_queued_version(
-            draft_job_id,
-            parent_version_id=draft.base_version_id,
-            reason="edited",
-            idempotency_key=stored_idempotency_key,
+        return ReanalysisVersionCreateResult(
+            version=self.create_queued_version(
+                draft_job_id,
+                parent_version_id=draft.base_version_id,
+                reason="edited",
+                idempotency_key=stored_idempotency_key,
+            ),
+            created=True,
         )
 
     def mark_analyzing(self, version_id: UUID) -> DocumentVersionRead:
@@ -644,6 +660,7 @@ class RevisionRepository:
                 created_at=datetime.now(UTC),
             )
         )
+        self._session.flush()
 
     def _next_version_event_sequence(self, version_id: UUID) -> int:
         current_max = self._session.scalar(
@@ -719,9 +736,10 @@ def _encode_reanalysis_idempotency_key(
     expected_draft_revision: int,
     idempotency_key: str,
 ) -> str:
+    client_key_hash = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()
     return (
         f"{REANALYSIS_IDEMPOTENCY_PREFIX}:{draft_id}:{expected_draft_revision}:"
-        f"{idempotency_key}"
+        f"{client_key_hash}"
     )
 
 

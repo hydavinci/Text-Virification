@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator, Callable
+from datetime import UTC, datetime
 from importlib import import_module
 from time import monotonic
 from typing import Annotated
@@ -18,6 +19,7 @@ from text_verification.api.dependencies import (
     get_job_repository,
     get_revision_repository,
 )
+from text_verification.api.routes.analysis import JOB_EXPIRED_CODE
 from text_verification.api.routes.jobs import (
     JOB_NOT_FOUND_CODE,
     SSE_KEEPALIVE_SECONDS,
@@ -26,6 +28,7 @@ from text_verification.api.routes.jobs import (
     _http_error,
     _parse_last_event_id,
 )
+from text_verification.domain.jobs import JobStatus
 from text_verification.domain.revisions import (
     DocumentVersionEvent,
     DocumentVersionRead,
@@ -51,6 +54,7 @@ INVALID_DRAFT_BLOCKS_CODE = "invalid_draft_blocks"
 STALE_DRAFT_REVISION_CODE = "stale_draft_revision"
 VERSION_NOT_FOUND_CODE = "version_not_found"
 VERSION_NOT_FOUND_MESSAGE = "文档版本不存在。"
+DISPATCH_RECOVERY_MAX_ATTEMPTS = 3
 
 router = APIRouter(tags=["versions"])
 
@@ -94,6 +98,10 @@ class DraftReanalysisResponse(BaseModel):
 
     version: DocumentVersionRead
     events_url: str
+
+
+class ReanalysisDispatchRecoveryError(RuntimeError):
+    pass
 
 
 @router.get("/jobs/{job_id}/versions", response_model=VersionListResponse)
@@ -264,7 +272,7 @@ def reanalyze_draft(
     job_repository: Annotated[JobRepository, Depends(get_job_repository)],
     revision_repository: Annotated[RevisionRepository, Depends(get_revision_repository)],
 ) -> DraftReanalysisResponse:
-    _lock_job(job_id, job_repository)
+    _lock_reanalysis_job(job_id, job_repository)
     if revision_repository.get_draft(job_id, draft_id) is None:
         raise _http_error(
             status.HTTP_404_NOT_FOUND,
@@ -272,7 +280,7 @@ def reanalyze_draft(
             "草稿不存在。",
         )
     try:
-        version = revision_repository.create_reanalysis_version(
+        creation = revision_repository.create_reanalysis_version(
             draft_id,
             expected_draft_revision=payload.expected_draft_revision,
             idempotency_key=payload.idempotency_key,
@@ -302,15 +310,28 @@ def reanalyze_draft(
         session.rollback()
         raise
 
-    try:
-        dispatch_process_document_version(str(version.version_id))
-    except Exception as error:
-        _recover_from_reanalysis_dispatch_failure(session, revision_repository, version.version_id)
-        raise _http_error(
-            status.HTTP_500_INTERNAL_SERVER_ERROR,
-            "reanalysis_dispatch_failed",
-            "重新分析调度失败，请稍后重试。",
-        ) from error
+    version = creation.version
+    if creation.created:
+        try:
+            dispatch_process_document_version(str(version.version_id))
+        except Exception as error:
+            try:
+                _recover_from_reanalysis_dispatch_failure(
+                    session,
+                    revision_repository,
+                    version.version_id,
+                )
+            except ReanalysisDispatchRecoveryError as recovery_error:
+                raise _http_error(
+                    status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    "reanalysis_dispatch_recovery_failed",
+                    "重新分析调度失败且状态恢复未完成，请稍后重试。",
+                ) from recovery_error
+            raise _http_error(
+                status.HTTP_500_INTERNAL_SERVER_ERROR,
+                "reanalysis_dispatch_failed",
+                "重新分析调度失败，请稍后重试。",
+            ) from error
 
     return DraftReanalysisResponse(
         version=version,
@@ -327,6 +348,23 @@ def _lock_job(job_id: UUID, repository: JobRepository) -> None:
             JOB_NOT_FOUND_CODE,
             "作业不存在。",
         ) from error
+
+
+def _lock_reanalysis_job(job_id: UUID, repository: JobRepository) -> None:
+    try:
+        job = repository.lock_job(job_id)
+    except LookupError as error:
+        raise _http_error(
+            status.HTTP_404_NOT_FOUND,
+            JOB_NOT_FOUND_CODE,
+            "作业不存在。",
+        ) from error
+    if JobStatus(job.status) == JobStatus.EXPIRED or job.expires_at <= datetime.now(UTC):
+        raise _http_error(
+            status.HTTP_410_GONE,
+            JOB_EXPIRED_CODE,
+            "作业已过期，请重新上传文件。",
+        )
 
 
 def _require_job(job_id: UUID, repository: JobRepository) -> None:
@@ -397,15 +435,28 @@ def _recover_from_reanalysis_dispatch_failure(
     revision_repository: RevisionRepository,
     version_id: UUID,
 ) -> None:
-    try:
-        revision_repository.fail_version(
-            version_id,
-            code="reanalysis_dispatch_failed",
-            message="重新分析调度失败，请稍后重试。",
-        )
-        session.commit()
-    except Exception:
-        session.rollback()
+    last_error: Exception | None = None
+    for _ in range(DISPATCH_RECOVERY_MAX_ATTEMPTS):
+        try:
+            version = revision_repository.get_version(version_id)
+            if version is None or version.status in {
+                DocumentVersionStatus.SUCCEEDED,
+                DocumentVersionStatus.FAILED,
+            }:
+                return
+            revision_repository.fail_version(
+                version_id,
+                code="reanalysis_dispatch_failed",
+                message="重新分析调度失败，请稍后重试。",
+            )
+            session.commit()
+            return
+        except Exception as persist_error:
+            last_error = persist_error
+            session.rollback()
+    raise ReanalysisDispatchRecoveryError(
+        f"Failed to persist dispatch failure for document version {version_id}."
+    ) from last_error
 
 
 async def _version_event_stream(
@@ -420,7 +471,11 @@ async def _version_event_stream(
         if await request.is_disconnected():
             return
 
-        events, version = _poll_version_state(session_factory, version_id, after_sequence)
+        events, version, job_expired = _poll_version_state(
+            session_factory,
+            version_id,
+            after_sequence,
+        )
         emitted = False
         for event in events:
             yield _format_version_event(event)
@@ -428,7 +483,7 @@ async def _version_event_stream(
             last_keepalive = monotonic()
             emitted = True
 
-        if version is None:
+        if version is None or job_expired:
             yield _format_control_event("expired")
             return
 
@@ -450,13 +505,21 @@ def _poll_version_state(
     session_factory: sessionmaker[Session],
     version_id: UUID,
     after_sequence: int,
-) -> tuple[list[DocumentVersionEvent], DocumentVersionRead | None]:
+) -> tuple[list[DocumentVersionEvent], DocumentVersionRead | None, bool]:
     session = session_factory()
     try:
         repository = REVISION_REPOSITORY_FACTORY(session)
         version = repository.get_version(version_id)
         events = repository.list_version_events_after(version_id, after_sequence)
-        return events, version
+        if version is None:
+            return events, None, True
+        job = JobRepository(session).get_job(version.job_id)
+        job_expired = (
+            job is None
+            or job.status == JobStatus.EXPIRED
+            or job.expires_at <= datetime.now(UTC)
+        )
+        return events, version, job_expired
     finally:
         session.close()
 

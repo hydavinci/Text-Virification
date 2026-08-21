@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
+from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from uuid import UUID
 
-from text_verification.checkers.models import CheckCategory
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from text_verification.checkers.models import CheckCategory
 
 HEX_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 

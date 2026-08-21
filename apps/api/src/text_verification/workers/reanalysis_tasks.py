@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any, NoReturn, cast
 from uuid import UUID
 
@@ -12,7 +13,7 @@ from text_verification.checkers.dictionary_loader import DictionaryConfiguration
 from text_verification.checkers.models import CHECK_CATEGORY_ORDER, CheckOptions, CheckScenario
 from text_verification.checkers.rule_loader import RuleConfigurationError
 from text_verification.domain.documents import DocumentModel
-from text_verification.domain.jobs import JobRead
+from text_verification.domain.jobs import JobRead, JobStatus
 from text_verification.domain.revisions import DocumentVersionStatus, EditDraftRead
 from text_verification.infrastructure.analysis_repositories import AnalysisRepository
 from text_verification.infrastructure.database import get_session_factory
@@ -34,11 +35,22 @@ logger = logging.getLogger(__name__)
 
 PROCESS_DOCUMENT_VERSION_MAX_RETRIES = 2
 PROCESS_DOCUMENT_VERSION_RETRY_BACKOFF_CAP_SECONDS = 4
+VERSION_FAILURE_PERSIST_MAX_ATTEMPTS = 3
 REANALYSIS_FAILURE_CODE = "reanalysis_failed"
 REANALYSIS_FAILURE_MESSAGE = "重新分析失败，请稍后重试。"
 
 SessionFactoryProvider = Callable[[], sessionmaker[Session]]
 RunnerFactory = Callable[[Session, JobRepository], Any]
+
+
+class ExpiredReanalysisJobError(RuntimeError):
+    pass
+
+
+class VersionFailurePersistenceError(RuntimeError):
+    def __init__(self, version_id: UUID) -> None:
+        self.version_id = version_id
+        super().__init__(f"Failed to persist terminal state for document version {version_id}.")
 
 
 def _build_runner(session: Session, repository: JobRepository):
@@ -53,6 +65,8 @@ def _process_document_version(task: Task, version_id: str) -> None:
     parsed_version_id = UUID(version_id)
     try:
         _run_process_document_version_attempt(parsed_version_id)
+    except VersionFailurePersistenceError:
+        raise
     except Exception as error:
         if task.request.retries < PROCESS_DOCUMENT_VERSION_MAX_RETRIES:
             raise task.retry(
@@ -80,6 +94,8 @@ def _run_process_document_version_attempt(version_id: UUID) -> None:
         job = repository.get_job(version.job_id)
         if job is None:
             return
+        if job.status == JobStatus.EXPIRED or job.expires_at <= datetime.now(UTC):
+            raise ExpiredReanalysisJobError(version.job_id)
 
         draft = revisions.get_reanalysis_draft(
             version.job_id,
@@ -144,6 +160,7 @@ _EXPECTED_REANALYSIS_FAILURES = (
     InvalidReanalysisVersionError,
     RuleConfigurationError,
     DictionaryConfigurationError,
+    ExpiredReanalysisJobError,
     StaleDocumentVersionError,
     StaleDraftRevisionError,
 )
@@ -151,7 +168,12 @@ _EXPECTED_REANALYSIS_FAILURES = (
 
 def _persist_expected_failure(version_id: UUID, error: Exception) -> None:
     code, message = _expected_failure_details(error)
-    _persist_failure(version_id, code=code, message=message)
+    _persist_failure(
+        version_id,
+        code=code,
+        message=message,
+        original_error=error,
+    )
 
 
 def _persist_exhausted_failure(version_id: UUID, error: Exception) -> None:
@@ -170,38 +192,47 @@ def _persist_failure(
     message: str,
     original_error: Exception | None = None,
 ) -> None:
-    session: Session | None = None
-    try:
-        session_factory = SESSION_FACTORY_PROVIDER()
-        session = session_factory()
-        revisions = RevisionRepository(session)
-        version = revisions.get_version(version_id)
-        if version is None or version.status in {
-            DocumentVersionStatus.SUCCEEDED,
-            DocumentVersionStatus.FAILED,
-        }:
+    last_error: Exception | None = None
+    for attempt in range(1, VERSION_FAILURE_PERSIST_MAX_ATTEMPTS + 1):
+        session: Session | None = None
+        try:
+            session_factory = SESSION_FACTORY_PROVIDER()
+            session = session_factory()
+            revisions = RevisionRepository(session)
+            version = revisions.get_version(version_id)
+            if version is None or version.status in {
+                DocumentVersionStatus.SUCCEEDED,
+                DocumentVersionStatus.FAILED,
+            }:
+                return
+            revisions.fail_version(version_id, code=code, message=message)
+            session.commit()
             return
-        revisions.fail_version(version_id, code=code, message=message)
-        session.commit()
-    except Exception as persist_error:
-        if session is not None:
-            session.rollback()
-        logger.error(
-            "process_document_version_failure_persist_failed",
-            extra={
-                "version_id": str(version_id),
-                "original_error_type": (
-                    None if original_error is None else type(original_error).__name__
-                ),
-                "persistence_error_type": type(persist_error).__name__,
-            },
-        )
-    finally:
-        if session is not None:
-            session.close()
+        except Exception as persist_error:
+            last_error = persist_error
+            if session is not None:
+                session.rollback()
+            logger.error(
+                "process_document_version_failure_persist_failed",
+                extra={
+                    "version_id": str(version_id),
+                    "attempt": attempt,
+                    "original_error_type": (
+                        None if original_error is None else type(original_error).__name__
+                    ),
+                    "persistence_error_type": type(persist_error).__name__,
+                },
+            )
+        finally:
+            if session is not None:
+                session.close()
+
+    raise VersionFailurePersistenceError(version_id) from last_error
 
 
 def _expected_failure_details(error: Exception) -> tuple[str, str]:
+    if isinstance(error, ExpiredReanalysisJobError):
+        return "job_expired", "作业已过期，请重新上传文件。"
     if isinstance(error, DraftNotFoundError):
         return "draft_not_found", "草稿不存在。"
     if isinstance(error, DraftConsumedError):

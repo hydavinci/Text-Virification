@@ -728,6 +728,10 @@ def test_analyze_document_reuses_checker_execution_for_versioned_documents(
             field(default_factory=list)
         )
         completed_versions: list[tuple[UUID, DocumentModel]] = field(default_factory=list)
+        commit_count: int = 0
+
+        def commit(self) -> None:
+            self.commit_count += 1
 
         def mark_analyzing(self, version_id: UUID) -> None:
             self.marked_version_ids.append(version_id)
@@ -783,10 +787,37 @@ def test_analyze_document_reuses_checker_execution_for_versioned_documents(
         ),
     ]
     assert revision_repository.completed_versions == [(version_id, document)]
+    assert revision_repository.commit_count == 3
     assert result.completed_categories == {
         CheckCategory.CHARACTER,
         CheckCategory.SECURITY,
     }
+
+
+def test_relative_worker_resources_resolve_from_container_working_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from text_verification.workers import tasks
+
+    application_root = tmp_path / "app"
+    rules_root = application_root / "resources" / "rules"
+    rules_root.mkdir(parents=True)
+    installed_module = (
+        tmp_path
+        / "usr"
+        / "local"
+        / "lib"
+        / "python3.12"
+        / "site-packages"
+        / "text_verification"
+        / "workers"
+        / "tasks.py"
+    )
+    monkeypatch.chdir(application_root)
+    monkeypatch.setattr(tasks, "__file__", str(installed_module))
+
+    assert tasks._resolve_resource_root(Path("./resources/rules")) == rules_root.resolve()
 
 
 def test_process_job_marks_partial_and_keeps_available_issues(
