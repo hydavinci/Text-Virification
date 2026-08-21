@@ -30,8 +30,12 @@ ANALYSIS_FAILED_FALLBACK_MESSAGE = "分析失败，请重新上传文件后重�
 ANALYSIS_NOT_FOUND_MESSAGE = "分析结果不存在，请重新上传后重试。"
 
 READY_STATUSES = {JobStatus.COMPLETED, JobStatus.PARTIAL}
-ISSUE_DECISIONS = Literal["accepted", "custom", "ignored", "unreviewed"]
-SUMMARY_DECISION_STATES = tuple(action.value for action in DecisionAction) + ("unreviewed",)
+ISSUE_DECISIONS = Literal["accepted", "ignored", "unreviewed"]
+SUMMARY_DECISION_STATES = (
+    DecisionAction.ACCEPTED.value,
+    DecisionAction.IGNORED.value,
+    DecisionAction.UNREVIEWED.value,
+)
 
 router = APIRouter(tags=["analysis"])
 

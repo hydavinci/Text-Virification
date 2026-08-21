@@ -16,7 +16,7 @@ class IssueSeverity(StrEnum):
 class DecisionAction(StrEnum):
     ACCEPTED = "accepted"
     IGNORED = "ignored"
-    CUSTOM = "custom"
+    UNREVIEWED = "unreviewed"
 
 
 NON_WHITESPACE_PATTERN = re.compile(r"\S")
@@ -40,21 +40,25 @@ class IssueDecisionSummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     issue_version: int = Field(gt=0)
+    revision: int = Field(default=0, ge=0)
     action: DecisionAction
-    replacement: str | None = None
+    replacement: CustomReplacement | None = None
+    suggestion_id: UUID | None = None
     updated_at: datetime
 
     @model_validator(mode="after")
     def validate_replacement(self) -> "IssueDecisionSummary":
-        if self.action == DecisionAction.CUSTOM:
+        if self.action == DecisionAction.ACCEPTED:
             if (
                 self.replacement is None
                 or NON_WHITESPACE_PATTERN.search(self.replacement) is None
             ):
-                raise ValueError("custom decisions require a non-empty replacement")
+                raise ValueError("accepted decisions require a non-empty replacement")
             return self
-        if self.replacement is not None:
-            raise ValueError("replacement is only allowed for custom decisions")
+        if self.action == DecisionAction.UNREVIEWED:
+            raise ValueError("unreviewed is a command-only decision state")
+        if self.replacement is not None or self.suggestion_id is not None:
+            raise ValueError("ignored decisions must not include replacement details")
         return self
 
 
@@ -95,22 +99,49 @@ class DecisionCommand(BaseModel):
 
     issue_id: UUID
     issue_version: int = Field(gt=0)
+    expected_revision: int = Field(ge=0)
     action: DecisionAction
     replacement: CustomReplacement | None = None
+    suggestion_id: UUID | None = None
 
     @model_validator(mode="after")
     def validate_replacement(self) -> "DecisionCommand":
-        if self.action == DecisionAction.CUSTOM:
+        if self.action == DecisionAction.ACCEPTED:
             if (
                 self.replacement is None
                 or NON_WHITESPACE_PATTERN.search(self.replacement) is None
             ):
-                raise ValueError("custom decisions require a non-empty replacement")
+                raise ValueError("accepted decisions require a non-empty replacement")
             return self
-        if self.replacement is not None:
-            raise ValueError("replacement is only allowed for custom decisions")
+        if self.replacement is not None or self.suggestion_id is not None:
+            raise ValueError(
+                f"{self.action.value} decisions must not include replacement details"
+            )
         return self
 
 
-class IssueDecision(DecisionCommand):
+class IssueDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    issue_id: UUID
+    issue_version: int = Field(gt=0)
+    revision: int = Field(default=0, ge=0)
+    action: DecisionAction
+    replacement: CustomReplacement | None = None
+    suggestion_id: UUID | None = None
     updated_at: datetime
+
+    @model_validator(mode="after")
+    def validate_replacement(self) -> "IssueDecision":
+        if self.action == DecisionAction.ACCEPTED:
+            if (
+                self.replacement is None
+                or NON_WHITESPACE_PATTERN.search(self.replacement) is None
+            ):
+                raise ValueError("accepted decisions require a non-empty replacement")
+            return self
+        if self.action == DecisionAction.UNREVIEWED:
+            raise ValueError("unreviewed is a command-only decision state")
+        if self.replacement is not None or self.suggestion_id is not None:
+            raise ValueError("ignored decisions must not include replacement details")
+        return self

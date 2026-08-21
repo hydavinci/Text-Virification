@@ -20,7 +20,6 @@ HTML: Any = None
 
 DECISION_ORDER = (
     DecisionAction.ACCEPTED.value,
-    DecisionAction.CUSTOM.value,
     DecisionAction.IGNORED.value,
     "unreviewed",
 )
@@ -50,8 +49,7 @@ SEVERITY_LABELS: dict[IssueSeverity, str] = {
 }
 
 DECISION_LABELS: dict[str, str] = {
-    DecisionAction.ACCEPTED.value: "接受建议",
-    DecisionAction.CUSTOM.value: "自定义替换",
+    DecisionAction.ACCEPTED.value: "接受修改",
     DecisionAction.IGNORED.value: "忽略",
     "unreviewed": "未处理",
 }
@@ -198,8 +196,6 @@ class ReportExporter:
         decision_key = "unreviewed" if decision is None else decision.action.value
         decision_value = None
         if decision is not None and decision.action == DecisionAction.ACCEPTED:
-            decision_value = issue.suggestion
-        elif decision is not None and decision.action == DecisionAction.CUSTOM:
             decision_value = decision.replacement
 
         return {

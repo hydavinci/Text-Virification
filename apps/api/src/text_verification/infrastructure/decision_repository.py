@@ -9,10 +9,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from text_verification.domain.issues import DecisionAction, DecisionCommand, IssueDecision
-from text_verification.infrastructure.orm import DocumentRow, IssueDecisionRow, IssueRow
+from text_verification.infrastructure.orm import DocumentRow, IssueDecisionRow, IssueRow, JobRow
 
 ISSUE_NOT_FOUND_CODE = "issue_not_found"
 STALE_ISSUE_VERSION_CODE = "stale_issue_version"
+UNSUPPORTED_DECISION_ACTION_CODE = "unsupported_decision_action"
 
 
 class DecisionOutcomeStatus(StrEnum):
@@ -49,6 +50,12 @@ class DecisionRepository:
         self._session = session
 
     def apply(self, job_id: UUID, command: DecisionCommand) -> DecisionOutcome:
+        if command.action == DecisionAction.UNREVIEWED:
+            return DecisionOutcome(
+                issue_id=command.issue_id,
+                status=DecisionOutcomeStatus.INVALID,
+                code=UNSUPPORTED_DECISION_ACTION_CODE,
+            )
         issue_row = self._session.execute(
             select(IssueRow)
             .where(
@@ -60,7 +67,9 @@ class DecisionRepository:
         ).scalar_one_or_none()
         if issue_row is None:
             current_document_version = self._session.scalar(
-                select(DocumentRow.version).where(DocumentRow.job_id == job_id)
+                select(DocumentRow.version)
+                .join(JobRow, JobRow.active_version_id == DocumentRow.version_id)
+                .where(JobRow.job_id == job_id)
             )
             if (
                 current_document_version is not None
@@ -100,18 +109,26 @@ class DecisionRepository:
         if decision_row is None:
             decision_row = IssueDecisionRow(
                 issue_id=command.issue_id,
+                version_id=issue_row.version_id,
                 job_id=job_id,
                 issue_version=command.issue_version,
+                revision=0,
                 action=command.action.value,
                 replacement=command.replacement,
+                final_replacement=command.replacement,
+                suggestion_id=command.suggestion_id,
+                operation_batch_id=None,
                 updated_at=updated_at,
             )
             self._session.add(decision_row)
         else:
+            decision_row.version_id = issue_row.version_id
             decision_row.job_id = job_id
             decision_row.issue_version = command.issue_version
             decision_row.action = command.action.value
             decision_row.replacement = command.replacement
+            decision_row.final_replacement = command.replacement
+            decision_row.suggestion_id = command.suggestion_id
             decision_row.updated_at = updated_at
 
         self._session.flush()
@@ -127,7 +144,8 @@ def _matches_command(row: IssueDecisionRow, command: DecisionCommand) -> bool:
     return (
         row.issue_version == command.issue_version
         and row.action == command.action.value
-        and row.replacement == command.replacement
+        and (row.final_replacement or row.replacement) == command.replacement
+        and row.suggestion_id == command.suggestion_id
     )
 
 
@@ -135,7 +153,9 @@ def _to_issue_decision(row: IssueDecisionRow) -> IssueDecision:
     return IssueDecision(
         issue_id=row.issue_id,
         issue_version=row.issue_version,
+        revision=row.revision,
         action=DecisionAction(row.action),
-        replacement=row.replacement,
+        replacement=row.final_replacement or row.replacement,
+        suggestion_id=row.suggestion_id,
         updated_at=row.updated_at,
     )

@@ -830,7 +830,9 @@ def _seed_reviewed_docx_job(
         DecisionCommand(
             issue_id=issue.issue_id,
             issue_version=document.version,
+            expected_revision=0,
             action=DecisionAction.ACCEPTED,
+            replacement=issue.suggestion,
         ),
     )
     assert outcome.decision is not None

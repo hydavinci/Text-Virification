@@ -26,6 +26,7 @@ from text_verification.infrastructure.repositories import JobRepository
 class SeededIssue:
     issue_id: UUID
     document_version: int
+    accepted_replacement: str | None
 
 
 def test_batch_decisions_return_per_item_outcomes_in_request_order(
@@ -41,14 +42,18 @@ def test_batch_decisions_return_per_item_outcomes_in_request_order(
                 {
                     "issue_id": str(current_issue.issue_id),
                     "issue_version": current_issue.document_version,
+                    "expected_revision": 0,
                     "action": "accepted",
-                    "replacement": None,
+                    "replacement": current_issue.accepted_replacement,
+                    "suggestion_id": None,
                 },
                 {
                     "issue_id": str(stale_issue.issue_id),
                     "issue_version": stale_issue.document_version,
+                    "expected_revision": 0,
                     "action": "ignored",
                     "replacement": None,
+                    "suggestion_id": None,
                 },
             ]
         },
@@ -61,7 +66,7 @@ def test_batch_decisions_return_per_item_outcomes_in_request_order(
     assert payload["outcomes"][0]["decision"]["issue_id"] == str(current_issue.issue_id)
     assert payload["outcomes"][0]["decision"]["issue_version"] == current_issue.document_version
     assert payload["outcomes"][0]["decision"]["action"] == "accepted"
-    assert payload["outcomes"][0]["decision"]["replacement"] is None
+    assert payload["outcomes"][0]["decision"]["replacement"] == current_issue.accepted_replacement
     assert payload["outcomes"][1] == {
         "issue_id": str(stale_issue.issue_id),
         "status": "conflict",
@@ -84,14 +89,18 @@ def test_batch_decisions_reject_duplicate_issue_ids_with_structured_error(
                 {
                     "issue_id": str(current_issue.issue_id),
                     "issue_version": current_issue.document_version,
+                    "expected_revision": 0,
                     "action": "accepted",
-                    "replacement": None,
+                    "replacement": current_issue.accepted_replacement,
+                    "suggestion_id": None,
                 },
                 {
                     "issue_id": str(current_issue.issue_id),
                     "issue_version": current_issue.document_version,
+                    "expected_revision": 0,
                     "action": "ignored",
                     "replacement": None,
+                    "suggestion_id": None,
                 },
             ]
         },
@@ -112,8 +121,10 @@ def test_batch_decisions_require_known_job_with_analysis(client, db_session: Ses
             {
                 "issue_id": str(uuid4()),
                 "issue_version": 1,
+                "expected_revision": 0,
                 "action": "accepted",
-                "replacement": None,
+                "replacement": "替换",
+                "suggestion_id": None,
             }
         ]
     }
@@ -147,8 +158,10 @@ def test_batch_decisions_reject_more_than_500_items(client) -> None:
                 {
                     "issue_id": str(uuid4()),
                     "issue_version": 1,
+                    "expected_revision": 0,
                     "action": "accepted",
-                    "replacement": None,
+                    "replacement": "替换",
+                    "suggestion_id": None,
                 }
                 for _ in range(501)
             ]
@@ -167,7 +180,7 @@ def test_batch_decisions_reject_more_than_500_items(client) -> None:
     ["before\0after", "🙂" * 10_001],
     ids=["nul", "over-limit"],
 )
-def test_batch_decisions_reject_invalid_custom_replacement_with_structured_error(
+def test_batch_decisions_reject_invalid_accepted_replacement_with_structured_error(
     client,
     db_session: Session,
     replacement: str,
@@ -181,8 +194,10 @@ def test_batch_decisions_reject_invalid_custom_replacement_with_structured_error
                 {
                     "issue_id": str(current_issue.issue_id),
                     "issue_version": current_issue.document_version,
-                    "action": "custom",
+                    "expected_revision": 0,
+                    "action": "accepted",
                     "replacement": replacement,
+                    "suggestion_id": None,
                 }
             ]
         },
@@ -196,7 +211,7 @@ def test_batch_decisions_reject_invalid_custom_replacement_with_structured_error
     assert _count_decisions(db_session, current_issue.issue_id) == 0
 
 
-def test_batch_decisions_accept_custom_replacement_at_10_000_code_point_boundary(
+def test_batch_decisions_accept_accepted_replacement_at_10_000_code_point_boundary(
     client,
     db_session: Session,
 ) -> None:
@@ -210,8 +225,10 @@ def test_batch_decisions_accept_custom_replacement_at_10_000_code_point_boundary
                 {
                     "issue_id": str(current_issue.issue_id),
                     "issue_version": current_issue.document_version,
-                    "action": "custom",
+                    "expected_revision": 0,
+                    "action": "accepted",
                     "replacement": replacement,
+                    "suggestion_id": None,
                 }
             ]
         },
@@ -240,14 +257,18 @@ def test_batch_decisions_return_ordered_applied_and_invalid_outcomes_and_persist
                 {
                     "issue_id": str(current_issue.issue_id),
                     "issue_version": current_issue.document_version,
+                    "expected_revision": 0,
                     "action": "accepted",
-                    "replacement": None,
+                    "replacement": current_issue.accepted_replacement,
+                    "suggestion_id": None,
                 },
                 {
                     "issue_id": str(missing_issue_id),
                     "issue_version": current_issue.document_version,
+                    "expected_revision": 0,
                     "action": "ignored",
                     "replacement": None,
+                    "suggestion_id": None,
                 },
             ]
         },
@@ -462,10 +483,12 @@ def _seed_two_versioned_issues(db_session: Session) -> tuple[UUID, SeededIssue, 
         SeededIssue(
             issue_id=current_issue_row.issue_id,
             document_version=current_issue_row.document_version,
+            accepted_replacement=current_issue.suggestion,
         ),
         SeededIssue(
             issue_id=stale_issue.issue_id,
             document_version=stale_document.version,
+            accepted_replacement=stale_issue.suggestion,
         ),
     )
 
@@ -493,8 +516,8 @@ def _seed_two_current_issues(
 
     return (
         job_id,
-        SeededIssue(first_issue.issue_id, document.version),
-        SeededIssue(second_issue.issue_id, document.version),
+        SeededIssue(first_issue.issue_id, document.version, first_issue.suggestion),
+        SeededIssue(second_issue.issue_id, document.version, second_issue.suggestion),
     )
 
 
@@ -506,8 +529,10 @@ def _decision_payload(
             {
                 "issue_id": str(issue.issue_id),
                 "issue_version": issue.document_version,
+                "expected_revision": 0,
                 "action": action,
-                "replacement": None,
+                "replacement": issue.accepted_replacement if action == "accepted" else None,
+                "suggestion_id": None,
             }
             for issue, action in decisions
         ]

@@ -111,7 +111,6 @@ def test_analysis_endpoints_paginate_and_summarize_completed_results(
     assert summary_payload["by_decision"] == {
         "accepted": 0,
         "ignored": 0,
-        "custom": 0,
         "unreviewed": 2,
     }
     assert summary_payload["checker_failures"] == {}
@@ -333,7 +332,9 @@ def test_issue_query_filters_by_decision_and_returns_decision_metadata(
         DecisionCommand(
             issue_id=UUID("00000000-0000-0000-0000-000000000011"),
             issue_version=1,
+            expected_revision=0,
             action=DecisionAction.ACCEPTED,
+            replacement="采纳",
         ),
     )
     repository.apply(
@@ -341,6 +342,7 @@ def test_issue_query_filters_by_decision_and_returns_decision_metadata(
         DecisionCommand(
             issue_id=UUID("00000000-0000-0000-0000-000000000012"),
             issue_version=1,
+            expected_revision=0,
             action=DecisionAction.IGNORED,
         ),
     )
@@ -349,7 +351,8 @@ def test_issue_query_filters_by_decision_and_returns_decision_metadata(
         DecisionCommand(
             issue_id=UUID("00000000-0000-0000-0000-000000000013"),
             issue_version=1,
-            action=DecisionAction.CUSTOM,
+            expected_revision=0,
+            action=DecisionAction.ACCEPTED,
             replacement="建议文本",
         ),
     )
@@ -363,10 +366,6 @@ def test_issue_query_filters_by_decision_and_returns_decision_metadata(
         f"/api/v1/jobs/{job_id}/issues",
         params={"decision": "ignored"},
     )
-    custom_response = client.get(
-        f"/api/v1/jobs/{job_id}/issues",
-        params={"decision": "custom"},
-    )
     unreviewed_response = client.get(
         f"/api/v1/jobs/{job_id}/issues",
         params={"decision": "unreviewed"},
@@ -374,14 +373,18 @@ def test_issue_query_filters_by_decision_and_returns_decision_metadata(
 
     assert accepted_response.status_code == 200
     accepted_payload = accepted_response.json()
-    assert accepted_payload["total"] == 1
-    assert accepted_payload["items"][0]["rule_id"] == "security-001"
+    assert accepted_payload["total"] == 2
+    assert [item["rule_id"] for item in accepted_payload["items"]] == [
+        "security-001",
+        "character-001",
+    ]
     assert accepted_payload["items"][0]["document_version"] == 1
     assert accepted_payload["items"][0]["decision"]["action"] == "accepted"
-    assert accepted_payload["items"][0]["decision"]["replacement"] is None
+    assert accepted_payload["items"][0]["decision"]["replacement"] == "采纳"
     assert accepted_payload["items"][0]["decision"]["issue_version"] == 1
     assert accepted_payload["items"][0]["decision"]["updated_at"] is not None
     assert "issue_id" not in accepted_payload["items"][0]["decision"]
+    assert accepted_payload["items"][1]["decision"]["replacement"] == "建议文本"
 
     assert ignored_response.status_code == 200
     ignored_payload = ignored_response.json()
@@ -390,17 +393,6 @@ def test_issue_query_filters_by_decision_and_returns_decision_metadata(
     assert ignored_payload["items"][0]["decision"]["action"] == "ignored"
     assert ignored_payload["items"][0]["decision"]["replacement"] is None
     assert ignored_payload["items"][0]["decision"]["issue_version"] == 1
-
-    assert custom_response.status_code == 200
-    custom_payload = custom_response.json()
-    assert custom_payload["total"] == 1
-    assert custom_payload["items"][0]["rule_id"] == "character-001"
-    assert custom_payload["items"][0]["decision"] == {
-        "action": "custom",
-        "replacement": "建议文本",
-        "issue_version": 1,
-        "updated_at": custom_payload["items"][0]["decision"]["updated_at"],
-    }
 
     assert unreviewed_response.status_code == 200
     unreviewed_payload = unreviewed_response.json()
@@ -413,9 +405,8 @@ def test_issue_query_filters_by_decision_and_returns_decision_metadata(
 
     assert summary_response.status_code == 200
     assert summary_response.json()["by_decision"] == {
-        "accepted": 1,
+        "accepted": 2,
         "ignored": 1,
-        "custom": 1,
         "unreviewed": 1,
     }
 

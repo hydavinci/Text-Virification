@@ -13,7 +13,7 @@ from text_verification.domain.issues import (
 from text_verification.exporters import Replacement, ReplacementPlanner
 
 
-def test_planner_includes_only_accepted_and_custom_replacements_in_document_order() -> None:
+def test_planner_includes_only_accepted_replacements_in_document_order() -> None:
     document = build_document(["第一段", "第二段"])
 
     plan = ReplacementPlanner().build(
@@ -32,7 +32,7 @@ def test_planner_includes_only_accepted_and_custom_replacements_in_document_orde
                 block_index=0,
                 start=0,
                 end=2,
-                action=DecisionAction.CUSTOM,
+                action=DecisionAction.ACCEPTED,
                 replacement="首段",
             ),
             build_issue(
@@ -141,21 +141,31 @@ def test_planner_warns_when_original_text_does_not_match_document() -> None:
     assert [warning.code for warning in plan.warnings] == ["original_text_mismatch"]
 
 
-def test_planner_warns_when_accepted_issue_has_no_suggestion() -> None:
+def test_planner_warns_when_accepted_issue_has_no_final_replacement() -> None:
     document = build_document(["正文"])
+    issue = build_issue(
+        document,
+        block_index=0,
+        start=0,
+        end=2,
+        suggestion=None,
+        action=None,
+    ).model_copy(
+        update={
+            "decision": IssueDecisionSummary.model_construct(
+                issue_version=document.version,
+                revision=0,
+                action=DecisionAction.ACCEPTED,
+                replacement=None,
+                suggestion_id=None,
+                updated_at=datetime.now(UTC),
+            )
+        }
+    )
 
     plan = ReplacementPlanner().build(
         document,
-        [
-            build_issue(
-                document,
-                block_index=0,
-                start=0,
-                end=2,
-                suggestion=None,
-                action=DecisionAction.ACCEPTED,
-            )
-        ],
+        [issue],
     )
 
     assert plan.applicable == []
@@ -265,10 +275,14 @@ def build_issue(
     if action is None:
         decision = None
     else:
+        decision_replacement = replacement
+        if action == DecisionAction.ACCEPTED and decision_replacement is None:
+            decision_replacement = suggestion
         decision = IssueDecisionSummary(
             issue_version=document.version,
+            revision=0,
             action=action,
-            replacement=replacement if action == DecisionAction.CUSTOM else None,
+            replacement=decision_replacement,
             updated_at=datetime.now(UTC),
         )
 

@@ -19,7 +19,7 @@ from text_verification.domain.issues import (
 )
 from text_verification.exporters.replacements import ExportWarning
 
-DECISION_ORDER = ("accepted", "custom", "ignored", "unreviewed")
+DECISION_ORDER = ("accepted", "ignored", "unreviewed")
 
 
 def test_html_and_pdf_reports_share_title_counts_issues_failures_and_warnings(
@@ -39,7 +39,7 @@ def test_html_and_pdf_reports_share_title_counts_issues_failures_and_warnings(
             category=CheckCategory.SECURITY,
             original="风险词",
             suggestion="中性词",
-            action=DecisionAction.CUSTOM,
+            action=DecisionAction.ACCEPTED,
             replacement="稳妥词",
         ),
     ]
@@ -91,7 +91,7 @@ def test_report_html_escapes_source_issue_and_warning_values(tmp_path: Path) -> 
             category=CheckCategory.VOCABULARY,
             original="<b>原文</b>",
             suggestion="<i>建议</i>",
-            action=DecisionAction.CUSTOM,
+            action=DecisionAction.ACCEPTED,
             replacement="<u>替换</u>",
             message="<strong>提示</strong>",
             context="<section>上下文</section>",
@@ -271,10 +271,14 @@ def build_issue(
     if action is None:
         decision = None
     else:
+        decision_replacement = replacement
+        if action == DecisionAction.ACCEPTED and decision_replacement is None:
+            decision_replacement = suggestion
         decision = IssueDecisionSummary(
             issue_version=1,
+            revision=0,
             action=action,
-            replacement=replacement if action == DecisionAction.CUSTOM else None,
+            replacement=decision_replacement,
             updated_at=datetime(2026, 8, 17, 9, 31, tzinfo=UTC),
         )
 

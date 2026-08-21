@@ -105,7 +105,9 @@ def test_replace_analysis_removes_stale_decisions_when_new_version_persists(
         DecisionCommand(
             issue_id=original_issue.issue_id,
             issue_version=original_document.version,
+            expected_revision=0,
             action=DecisionAction.ACCEPTED,
+            replacement=original_issue.suggestion,
         ),
     )
     db_session.commit()
@@ -157,6 +159,7 @@ def test_replace_analysis_rejects_non_increasing_document_version_before_deletin
         DecisionCommand(
             issue_id=current_issue.issue_id,
             issue_version=current_document.version,
+            expected_revision=0,
             action=DecisionAction.IGNORED,
         ),
     )

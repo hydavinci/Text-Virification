@@ -1,11 +1,20 @@
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
 
 from text_verification.domain.documents import DocumentModel, FileType, TextBlock
-from text_verification.domain.issues import Issue, IssueSeverity
+from text_verification.domain.issues import DecisionAction, DecisionCommand, Issue, IssueSeverity
 from text_verification.domain.jobs import JobRead, JobStatus
+from text_verification.domain.revisions import (
+    DocumentVersionRead,
+    DocumentVersionStatus,
+    DraftBlock,
+    EditDraftRead,
+)
+
+NOW = datetime(2026, 8, 21, 0, 0, tzinfo=UTC)
 
 
 def test_document_owns_block_local_offsets() -> None:
@@ -54,6 +63,82 @@ def test_text_block_rejects_empty_block_id() -> None:
             parent_id=None,
             style={},
             source_locator={},
+        )
+
+
+def test_accepted_decision_requires_final_replacement() -> None:
+    with pytest.raises(ValidationError):
+        DecisionCommand(
+            issue_id=uuid4(),
+            issue_version=1,
+            expected_revision=0,
+            action=DecisionAction.ACCEPTED,
+            replacement=None,
+            suggestion_id=None,
+        )
+
+
+def test_ignored_decision_rejects_replacement_and_suggestion_id() -> None:
+    with pytest.raises(ValidationError):
+        DecisionCommand(
+            issue_id=uuid4(),
+            issue_version=1,
+            expected_revision=0,
+            action=DecisionAction.IGNORED,
+            replacement="保留",
+            suggestion_id=uuid4(),
+        )
+
+
+def test_draft_rejects_duplicate_block_ids() -> None:
+    block = DraftBlock(block_id="p-1", text="正文")
+    with pytest.raises(ValidationError):
+        EditDraftRead(
+            draft_id=uuid4(),
+            job_id=uuid4(),
+            base_version_id=uuid4(),
+            revision=1,
+            blocks=[block, block],
+            created_at=NOW,
+            updated_at=NOW,
+        )
+
+
+def test_failed_version_requires_failure_fields() -> None:
+    with pytest.raises(ValidationError):
+        DocumentVersionRead(
+            version_id=uuid4(),
+            job_id=uuid4(),
+            parent_version_id=None,
+            revision_number=1,
+            status=DocumentVersionStatus.FAILED,
+            source_kind="upload",
+            created_reason="initial_upload",
+            content_sha256=None,
+            created_at=NOW,
+            started_at=NOW,
+            completed_at=NOW,
+            failure_code=None,
+            failure_message=None,
+        )
+
+
+def test_succeeded_version_rejects_failure_fields() -> None:
+    with pytest.raises(ValidationError):
+        DocumentVersionRead(
+            version_id=uuid4(),
+            job_id=uuid4(),
+            parent_version_id=None,
+            revision_number=1,
+            status=DocumentVersionStatus.SUCCEEDED,
+            source_kind="upload",
+            created_reason="initial_upload",
+            content_sha256="sha256",
+            created_at=NOW,
+            started_at=NOW,
+            completed_at=NOW,
+            failure_code="analysis_failed",
+            failure_message="失败",
         )
 
 

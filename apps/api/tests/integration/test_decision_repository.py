@@ -25,49 +25,53 @@ def postgres_session(db_session: Session) -> Session:
 
 
 @pytest.mark.parametrize(
-    ("action_name", "replacement"),
+    ("action_name", "replacement", "suggestion_id"),
     [
-        ("CUSTOM", None),
-        ("CUSTOM", "   "),
-        ("CUSTOM", "\t"),
-        ("CUSTOM", "\n"),
-        ("CUSTOM", "before\0after"),
-        ("CUSTOM", "🙂" * 10_001),
-        ("ACCEPTED", "replacement"),
-        ("IGNORED", "replacement"),
+        ("ACCEPTED", None, None),
+        ("ACCEPTED", "   ", None),
+        ("ACCEPTED", "\t", None),
+        ("ACCEPTED", "\n", None),
+        ("ACCEPTED", "before\0after", None),
+        ("ACCEPTED", "🙂" * 10_001, None),
+        ("IGNORED", "replacement", None),
+        ("IGNORED", None, uuid4()),
     ],
     ids=[
-        "custom-none",
-        "custom-spaces",
-        "custom-tab",
-        "custom-newline",
-        "custom-nul",
-        "custom-over-limit",
-        "accepted-with-replacement",
+        "accepted-none",
+        "accepted-spaces",
+        "accepted-tab",
+        "accepted-newline",
+        "accepted-nul",
+        "accepted-over-limit",
         "ignored-with-replacement",
+        "ignored-with-suggestion-id",
     ],
 )
 def test_decision_rejects_invalid_replacement(
     action_name: str,
     replacement: str | None,
+    suggestion_id: UUID | None,
 ) -> None:
     DecisionAction, DecisionCommand, *_ = _decision_symbols()
     with pytest.raises(ValidationError):
         DecisionCommand(
             issue_id=uuid4(),
             issue_version=1,
+            expected_revision=0,
             action=getattr(DecisionAction, action_name),
             replacement=replacement,
+            suggestion_id=suggestion_id,
         )
 
 
-def test_decision_accepts_custom_replacement_at_10_000_code_point_boundary() -> None:
+def test_decision_accepts_accepted_replacement_at_10_000_code_point_boundary() -> None:
     DecisionAction, DecisionCommand, *_ = _decision_symbols()
 
     command = DecisionCommand(
         issue_id=uuid4(),
         issue_version=1,
-        action=DecisionAction.CUSTOM,
+        expected_revision=0,
+        action=DecisionAction.ACCEPTED,
         replacement="🙂" * 10_000,
     )
 
@@ -86,7 +90,9 @@ def test_apply_rejects_stale_issue_version(postgres_session: Session) -> None:
         DecisionCommand(
             issue_id=issue.issue_id,
             issue_version=1,
+            expected_revision=0,
             action=DecisionAction.ACCEPTED,
+            replacement=issue.suggestion,
         ),
     )
 
@@ -117,6 +123,7 @@ def test_apply_returns_conflict_for_removed_issue_from_stale_document_version(
         DecisionCommand(
             issue_id=stale_issue.issue_id,
             issue_version=stale_issue.document_version,
+            expected_revision=0,
             action=DecisionAction.IGNORED,
         ),
     )
@@ -135,6 +142,7 @@ def test_apply_same_decision_is_idempotent(postgres_session: Session) -> None:
     command = DecisionCommand(
         issue_id=issue.issue_id,
         issue_version=1,
+        expected_revision=0,
         action=DecisionAction.IGNORED,
     )
     repository = DecisionRepository(postgres_session)
@@ -161,7 +169,9 @@ def test_apply_updates_existing_decision_when_command_changes(postgres_session: 
         DecisionCommand(
             issue_id=issue.issue_id,
             issue_version=issue.document_version,
+            expected_revision=0,
             action=DecisionAction.ACCEPTED,
+            replacement=issue.suggestion,
         ),
     )
     second = repository.apply(
@@ -169,7 +179,8 @@ def test_apply_updates_existing_decision_when_command_changes(postgres_session: 
         DecisionCommand(
             issue_id=issue.issue_id,
             issue_version=issue.document_version,
-            action=DecisionAction.CUSTOM,
+            expected_revision=0,
+            action=DecisionAction.ACCEPTED,
             replacement="建议文本",
         ),
     )
@@ -180,7 +191,7 @@ def test_apply_updates_existing_decision_when_command_changes(postgres_session: 
     assert first.decision is not None
     assert second.decision is not None
     assert first.decision.action == DecisionAction.ACCEPTED
-    assert second.decision.action == DecisionAction.CUSTOM
+    assert second.decision.action == DecisionAction.ACCEPTED
     assert second.decision.replacement == "建议文本"
     assert count_decisions(postgres_session, issue.issue_id) == 1
 
@@ -198,6 +209,7 @@ def test_apply_returns_invalid_outcome_for_unknown_current_version_issue(
         DecisionCommand(
             issue_id=uuid4(),
             issue_version=issue.document_version,
+            expected_revision=0,
             action=DecisionAction.IGNORED,
         ),
     )
@@ -208,7 +220,7 @@ def test_apply_returns_invalid_outcome_for_unknown_current_version_issue(
 
 
 @pytest.mark.parametrize("replacement", ["\t", "\n", "\r\n\t"])
-def test_issue_decision_table_rejects_whitespace_only_custom_replacement(
+def test_issue_decision_table_rejects_whitespace_only_accepted_replacement(
     postgres_session: Session,
     replacement: str,
 ) -> None:
@@ -218,10 +230,12 @@ def test_issue_decision_table_rejects_whitespace_only_custom_replacement(
     postgres_session.add(
         IssueDecisionRow(
             issue_id=issue.issue_id,
+            version_id=issue.version_id,
             job_id=job_id,
             issue_version=issue.document_version,
-            action="custom",
+            action="accepted",
             replacement=replacement,
+            final_replacement=None,
             updated_at=datetime.now(UTC),
         )
     )

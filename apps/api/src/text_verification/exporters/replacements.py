@@ -106,8 +106,6 @@ def _resolve_replacement_value(issue: Issue) -> str | None:
     if decision is None:
         return None
     if decision.action == DecisionAction.ACCEPTED:
-        return issue.suggestion
-    if decision.action == DecisionAction.CUSTOM:
         return decision.replacement
     return None
 

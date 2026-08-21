@@ -356,7 +356,8 @@ def test_export_uses_decision_snapshot_taken_before_later_decision_change(
         DecisionCommand(
             issue_id=issue.issue_id,
             issue_version=1,
-            action=DecisionAction.CUSTOM,
+            expected_revision=0,
+            action=DecisionAction.ACCEPTED,
             replacement="后改的",
         ),
     )
@@ -1004,13 +1005,20 @@ def _apply_decision(
     job_id: UUID,
     issue: Issue,
     action: DecisionAction,
+    *,
+    replacement: str | None = None,
 ) -> None:
+    resolved_replacement = replacement
+    if action == DecisionAction.ACCEPTED and resolved_replacement is None:
+        resolved_replacement = issue.suggestion
     outcome = DecisionRepository(session).apply(
         job_id,
         DecisionCommand(
             issue_id=issue.issue_id,
             issue_version=1,
+            expected_revision=0,
             action=action,
+            replacement=resolved_replacement,
         ),
     )
     assert outcome.decision is not None

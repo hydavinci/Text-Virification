@@ -186,8 +186,10 @@ def test_txt_upload_options_review_and_html_report_download(
                 {
                     "issue_id": first_issue["issue_id"],
                     "issue_version": first_issue["document_version"],
+                    "expected_revision": 0,
                     "action": "accepted",
-                    "replacement": None,
+                    "replacement": first_issue["suggestion"],
+                    "suggestion_id": None,
                 }
             ]
         },
