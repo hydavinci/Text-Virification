@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from text_verification.api.dependencies import get_db_session, get_job_storage
 from text_verification.checkers.models import CheckCategory
+from text_verification.domain.derived_content import derive_document
 from text_verification.domain.documents import DocumentModel, FileType, TextBlock
 from text_verification.domain.exports import (
     ExportCheckerFailureSnapshot,
@@ -139,6 +140,62 @@ def test_reports_allow_unreviewed_issues_and_use_server_derived_extension(
     assert "storage_key" not in payload
     assert "snapshot" not in payload
     assert export_api_dependencies == [payload["export_id"]]
+
+
+def test_create_export_snapshot_v2_records_requested_version_and_decision_hash(
+    client,
+    db_session: Session,
+    export_api_dependencies: list[str],
+) -> None:
+    issue = _build_issue(file_type=FileType.TXT)
+    job_id = _seed_job_with_analysis(
+        db_session,
+        file_type=FileType.TXT,
+        issues=[issue],
+    )
+    first_version_id = db_session.get(JobRow, job_id).active_version_id
+    assert first_version_id is not None
+    _apply_decision(
+        db_session,
+        job_id,
+        issue,
+        DecisionAction.ACCEPTED,
+        replacement="人工最终",
+    )
+    AnalysisRepository(db_session).replace_analysis(
+        job_id,
+        _build_document(file_type=FileType.TXT, version=2),
+        [],
+        {},
+    )
+    db_session.commit()
+
+    response = client.post(
+        f"/api/v1/jobs/{job_id}/exports",
+        json={
+            "type": "modified_document",
+            "version_id": str(first_version_id),
+        },
+    )
+
+    assert response.status_code == 202
+    assert export_api_dependencies == [response.json()["export_id"]]
+    stored = ExportRepository(db_session).get(UUID(response.json()["export_id"]))
+    assert stored is not None
+    stored_row = db_session.get(ExportRow, stored.export_id)
+    assert stored_row is not None
+    assert stored_row.version_id == first_version_id
+    assert stored.snapshot is not None
+    assert stored.snapshot.schema_version == 2
+    assert stored.snapshot.document_version_id == first_version_id
+    assert stored.snapshot.issues[0].decision is not None
+    assert stored.snapshot.issues[0].decision.replacement == "人工最终"
+    assert stored.snapshot.issues[0].suggestion == "修改后的"
+    assert stored.snapshot.decision_snapshot_sha256 == derive_document(
+        first_version_id,
+        stored.snapshot.document,
+        stored.snapshot.issues,
+    ).decision_snapshot_sha256
 
 
 def test_modified_docx_warnings_require_confirmation_without_creating_export(
@@ -734,12 +791,13 @@ def _build_document(
     *,
     file_type: FileType,
     document_id: UUID | None = None,
+    version: int = 1,
 ) -> DocumentModel:
     return DocumentModel(
         document_id=document_id or uuid4(),
         file_type=file_type,
         source_name=f"sample.{file_type.value}",
-        version=1,
+        version=version,
         blocks=[
             TextBlock(
                 block_id="p-000001",
@@ -840,6 +898,31 @@ def _seed_reviewed_docx_job(
     return job_id, issue
 
 
+def _apply_decision(
+    session: Session,
+    job_id: UUID,
+    issue: Issue,
+    action: DecisionAction,
+    *,
+    replacement: str | None = None,
+) -> None:
+    resolved_replacement = replacement
+    if action == DecisionAction.ACCEPTED and resolved_replacement is None:
+        resolved_replacement = issue.suggestion
+    outcome = DecisionRepository(session).apply(
+        job_id,
+        DecisionCommand(
+            issue_id=issue.issue_id,
+            issue_version=1,
+            expected_revision=0,
+            action=action,
+            replacement=resolved_replacement,
+        ),
+    )
+    assert outcome.decision is not None
+    session.commit()
+
+
 def _snapshot_for_job(session: Session, job_id: UUID) -> ExportSnapshot:
     job = JobRepository(session).get_job(job_id)
     document = AnalysisRepository(session).get_document(job_id)
@@ -849,8 +932,21 @@ def _snapshot_for_job(session: Session, job_id: UUID) -> ExportSnapshot:
     issues = repository.list_all_issues(job_id)
     summary = repository.summarize_issues(job_id)
     failures = repository.get_checker_failures(job_id)
-    warnings = ReplacementPlanner().build(document, issues).warnings
+    version_id = session.get(JobRow, job_id).active_version_id
+    snapshot_kwargs: dict[str, object]
+    if version_id is None:
+        warnings = ReplacementPlanner().build(document, issues).warnings
+        snapshot_kwargs = {"schema_version": 1}
+    else:
+        derived = derive_document(version_id, document, issues)
+        warnings = ReplacementPlanner().from_derived(derived).warnings
+        snapshot_kwargs = {
+            "schema_version": 2,
+            "document_version_id": version_id,
+            "decision_snapshot_sha256": derived.decision_snapshot_sha256,
+        }
     return ExportSnapshot(
+        **snapshot_kwargs,
         captured_at=datetime.now(UTC),
         source_name=job.source_name,
         source_type=job.file_type,

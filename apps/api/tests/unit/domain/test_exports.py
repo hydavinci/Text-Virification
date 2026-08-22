@@ -1,8 +1,15 @@
 from importlib import import_module
 from pathlib import PurePosixPath
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
+from pydantic import ValidationError
+
+from text_verification.domain.exports import (
+    ExportSnapshot,
+    deserialize_export_snapshot,
+    serialize_export_snapshot,
+)
 
 
 @pytest.mark.parametrize(
@@ -68,6 +75,39 @@ def test_build_export_artifact_rejects_mismatched_type_and_extension(
         )
 
 
+def test_export_snapshot_v2_requires_version_and_decision_hash() -> None:
+    payload = _snapshot_payload(schema_version=2)
+
+    with pytest.raises(ValidationError):
+        ExportSnapshot.model_validate(payload)
+
+
+def test_export_snapshot_v2_serializes_version_and_decision_hash() -> None:
+    version_id = UUID("00000000-0000-0000-0000-000000000100")
+    snapshot = ExportSnapshot.model_validate(
+        {
+            **_snapshot_payload(schema_version=2),
+            "document_version_id": str(version_id),
+            "decision_snapshot_sha256": "a" * 64,
+        }
+    )
+
+    serialized = serialize_export_snapshot(snapshot)
+
+    assert serialized["schema_version"] == 2
+    assert serialized["document_version_id"] == str(version_id)
+    assert serialized["decision_snapshot_sha256"] == "a" * 64
+
+
+def test_deserialize_export_snapshot_accepts_queued_schema_v1_payload() -> None:
+    snapshot = deserialize_export_snapshot(_snapshot_payload(schema_version=1))
+
+    assert snapshot is not None
+    assert snapshot.schema_version == 1
+    assert snapshot.document_version_id is None
+    assert snapshot.decision_snapshot_sha256 is None
+
+
 def _export_symbols():
     try:
         module = import_module("text_verification.domain.exports")
@@ -78,3 +118,34 @@ def _export_symbols():
         return module.ExportType, module.build_export_artifact
     except AttributeError as error:
         pytest.fail(f"Export naming is not implemented yet: {error}")
+
+
+def _snapshot_payload(*, schema_version: int) -> dict[str, object]:
+    return {
+        "schema_version": schema_version,
+        "captured_at": "2026-08-22T04:00:00Z",
+        "source_name": "analysis.txt",
+        "source_type": "txt",
+        "source_size_bytes": 4,
+        "source_sha256": None,
+        "scenario": "general",
+        "enabled_categories": [],
+        "completed_categories": [],
+        "checker_failures": [],
+        "summary": {
+            "total": 0,
+            "by_category": {},
+            "by_severity": {},
+            "by_decision": {},
+        },
+        "document": {
+            "document_id": "00000000-0000-0000-0000-000000000001",
+            "file_type": "txt",
+            "source_name": "analysis.txt",
+            "version": 1,
+            "blocks": [],
+            "metadata": {},
+        },
+        "issues": [],
+        "preflight_warnings": [],
+    }

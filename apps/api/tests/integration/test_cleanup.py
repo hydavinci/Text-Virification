@@ -200,6 +200,9 @@ def test_deleting_job_cascades_export_rows(db_session: Session) -> None:
         ExportType.MODIFIED_DOCUMENT,
         "txt",
         snapshot=ExportSnapshot(
+            schema_version=2,
+            document_version_id=UUID("00000000-0000-0000-0000-000000000100"),
+            decision_snapshot_sha256="0" * 64,
             captured_at=now,
             source_name="sample.txt",
             source_type=FileType.TXT,

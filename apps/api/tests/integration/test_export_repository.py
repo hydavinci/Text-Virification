@@ -302,6 +302,9 @@ def seed_job(postgres_session: Session) -> tuple[UUID, datetime]:
 def build_snapshot(*, file_type: FileType) -> ExportSnapshot:
     source_name = f"analysis.{file_type.value}"
     return ExportSnapshot(
+        schema_version=2,
+        document_version_id=UUID("00000000-0000-0000-0000-000000000100"),
+        decision_snapshot_sha256="0" * 64,
         captured_at=datetime.now(UTC),
         source_name=source_name,
         source_type=file_type,

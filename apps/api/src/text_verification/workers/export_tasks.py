@@ -14,6 +14,7 @@ from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from text_verification.config import get_settings
+from text_verification.domain.derived_content import derive_document
 from text_verification.domain.documents import FileType
 from text_verification.domain.exports import (
     ExportRead,
@@ -262,7 +263,7 @@ def _render_export(session: Session, export: ExportRead) -> list[ExportWarning]:
         source = storage.source_path(export.job_id, FileType.DOCX)
         _verify_immutable_source(snapshot, source)
 
-    plan = ReplacementPlanner().build(snapshot.document, snapshot.issues)
+    plan = _plan_from_snapshot(snapshot)
     if snapshot.source_type == FileType.DOCX:
         if source is None:
             raise ExportError("export_source_missing", "导出源文件不存在。")
@@ -338,6 +339,23 @@ def _write_export(
         report_exporter.render_pdf(report_model, staging)
         return plan.warnings
     raise ExportError("unsupported_export_type", "不支持所选导出格式。")
+
+
+def _plan_from_snapshot(snapshot: ExportSnapshot) -> ReplacementPlan:
+    if (
+        snapshot.document_version_id is None
+        or snapshot.decision_snapshot_sha256 is None
+    ):
+        return ReplacementPlanner().build(snapshot.document, snapshot.issues)
+
+    derived = derive_document(
+        snapshot.document_version_id,
+        snapshot.document,
+        snapshot.issues,
+    )
+    if derived.decision_snapshot_sha256 != snapshot.decision_snapshot_sha256:
+        raise ExportError("export_snapshot_mismatch", "导出快照校验失败，请重新创建。")
+    return ReplacementPlanner().from_derived(derived)
 
 
 def _build_report_model(

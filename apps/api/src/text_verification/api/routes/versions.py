@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from importlib import import_module
 from time import monotonic
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
@@ -15,11 +15,20 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session, sessionmaker
 
 from text_verification.api.dependencies import (
+    get_analysis_repository,
     get_db_session,
     get_job_repository,
     get_revision_repository,
 )
-from text_verification.api.routes.analysis import JOB_EXPIRED_CODE
+from text_verification.api.routes.analysis import (
+    ANALYSIS_FAILED_CODE,
+    ANALYSIS_FAILED_FALLBACK_MESSAGE,
+    ANALYSIS_NOT_FOUND_CODE,
+    ANALYSIS_NOT_FOUND_MESSAGE,
+    ANALYSIS_NOT_READY_CODE,
+    JOB_EXPIRED_CODE,
+    READY_STATUSES,
+)
 from text_verification.api.routes.jobs import (
     JOB_NOT_FOUND_CODE,
     SSE_KEEPALIVE_SECONDS,
@@ -28,7 +37,9 @@ from text_verification.api.routes.jobs import (
     _http_error,
     _parse_last_event_id,
 )
-from text_verification.domain.jobs import JobStatus
+from text_verification.domain.derived_content import DiffSegment, derive_document, myers_diff
+from text_verification.domain.documents import TextBlock
+from text_verification.domain.jobs import JobRead, JobStatus
 from text_verification.domain.revisions import (
     DocumentVersionEvent,
     DocumentVersionRead,
@@ -36,6 +47,7 @@ from text_verification.domain.revisions import (
     DraftBlock,
     EditDraftRead,
 )
+from text_verification.infrastructure.analysis_repositories import AnalysisRepository
 from text_verification.infrastructure.database import get_session_factory
 from text_verification.infrastructure.repositories import JobRepository
 from text_verification.infrastructure.revision_repository import (
@@ -55,6 +67,7 @@ STALE_DRAFT_REVISION_CODE = "stale_draft_revision"
 VERSION_NOT_FOUND_CODE = "version_not_found"
 VERSION_NOT_FOUND_MESSAGE = "文档版本不存在。"
 DISPATCH_RECOVERY_MAX_ATTEMPTS = 3
+DerivedView = Literal["modified", "diff"]
 
 router = APIRouter(tags=["versions"])
 
@@ -100,6 +113,22 @@ class DraftReanalysisResponse(BaseModel):
     events_url: str
 
 
+class DerivedDiffBlock(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    block_id: str
+    segments: list[DiffSegment]
+
+
+class DerivedContentResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: UUID
+    version_id: UUID
+    decision_snapshot_sha256: str
+    blocks: list[TextBlock] | list[DerivedDiffBlock]
+
+
 class ReanalysisDispatchRecoveryError(RuntimeError):
     pass
 
@@ -138,6 +167,53 @@ async def stream_version_events(
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
         },
+    )
+
+
+@router.get(
+    "/jobs/{job_id}/versions/{version_id}/derived",
+    response_model=DerivedContentResponse,
+)
+def get_derived_content(
+    job_id: UUID,
+    version_id: UUID,
+    job_repository: Annotated[JobRepository, Depends(get_job_repository)],
+    analysis_repository: Annotated[AnalysisRepository, Depends(get_analysis_repository)],
+    revision_repository: Annotated[RevisionRepository, Depends(get_revision_repository)],
+    view: DerivedView = "modified",
+) -> DerivedContentResponse:
+    job = _require_job(job_id, job_repository)
+    _require_ready_status(job)
+    version = _require_succeeded_version(job_id, version_id, revision_repository)
+    document = analysis_repository.get_document(job_id, version.version_id)
+    if document is None:
+        raise _http_error(
+            status.HTTP_404_NOT_FOUND,
+            ANALYSIS_NOT_FOUND_CODE,
+            ANALYSIS_NOT_FOUND_MESSAGE,
+        )
+
+    issues = analysis_repository.list_all_issues(job_id, version.version_id)
+    derived = derive_document(version.version_id, document, issues)
+    if view == "modified":
+        blocks: list[TextBlock] | list[DerivedDiffBlock] = derived.document.blocks
+    else:
+        blocks = [
+            DerivedDiffBlock(
+                block_id=original_block.block_id,
+                segments=list(myers_diff(original_block.text, derived_block.text)),
+            )
+            for original_block, derived_block in zip(
+                document.blocks,
+                derived.document.blocks,
+                strict=True,
+            )
+        ]
+    return DerivedContentResponse(
+        job_id=job_id,
+        version_id=version.version_id,
+        decision_snapshot_sha256=derived.decision_snapshot_sha256,
+        blocks=blocks,
     )
 
 
@@ -367,12 +443,35 @@ def _lock_reanalysis_job(job_id: UUID, repository: JobRepository) -> None:
         )
 
 
-def _require_job(job_id: UUID, repository: JobRepository) -> None:
-    if repository.get_job(job_id) is None:
+def _require_job(job_id: UUID, repository: JobRepository) -> JobRead:
+    job = repository.get_job(job_id)
+    if job is None:
         raise _http_error(
             status.HTTP_404_NOT_FOUND,
             JOB_NOT_FOUND_CODE,
             "作业不存在。",
+        )
+    return job
+
+
+def _require_ready_status(job: JobRead) -> None:
+    if job.status == JobStatus.FAILED:
+        raise _http_error(
+            status.HTTP_409_CONFLICT,
+            ANALYSIS_FAILED_CODE,
+            job.error_message or ANALYSIS_FAILED_FALLBACK_MESSAGE,
+        )
+    if job.status == JobStatus.EXPIRED or job.expires_at <= datetime.now(UTC):
+        raise _http_error(
+            status.HTTP_410_GONE,
+            JOB_EXPIRED_CODE,
+            "作业已过期，请重新上传文件。",
+        )
+    if job.status not in READY_STATUSES:
+        raise _http_error(
+            status.HTTP_409_CONFLICT,
+            ANALYSIS_NOT_READY_CODE,
+            "分析结果尚未就绪，请稍后重试。",
         )
 
 
@@ -388,6 +487,27 @@ def _require_version(
             VERSION_NOT_FOUND_CODE,
             VERSION_NOT_FOUND_MESSAGE,
         )
+
+
+def _require_succeeded_version(
+    job_id: UUID,
+    version_id: UUID,
+    repository: RevisionRepository,
+) -> DocumentVersionRead:
+    version = repository.get_version(version_id)
+    if version is None or version.job_id != job_id:
+        raise _http_error(
+            status.HTTP_404_NOT_FOUND,
+            VERSION_NOT_FOUND_CODE,
+            VERSION_NOT_FOUND_MESSAGE,
+        )
+    if version.status != DocumentVersionStatus.SUCCEEDED:
+        raise _http_error(
+            status.HTTP_409_CONFLICT,
+            ANALYSIS_NOT_READY_CODE,
+            "分析结果尚未就绪，请稍后重试。",
+        )
+    return version
 
 
 def _draft_conflict(current_revision: int) -> HTTPException:

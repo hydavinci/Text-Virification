@@ -3,6 +3,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import UUID
 
+import pytest
+
+from text_verification.domain.derived_content import (
+    DerivedContentValidationError,
+    OverlappingReplacementsError,
+)
 from text_verification.domain.documents import DocumentModel, FileType, TextBlock
 from text_verification.domain.issues import (
     DecisionAction,
@@ -24,8 +30,9 @@ def test_planner_includes_only_accepted_replacements_in_document_order() -> None
                 block_index=1,
                 start=0,
                 end=2,
-                suggestion="末段",
+                suggestion="系统首选",
                 action=DecisionAction.ACCEPTED,
+                replacement="末段",
             ),
             build_issue(
                 document,
@@ -77,68 +84,59 @@ def test_planner_includes_only_accepted_replacements_in_document_order() -> None
 
 def test_planner_warns_when_referenced_block_is_missing() -> None:
     document = build_document(["正文"])
-
-    plan = ReplacementPlanner().build(
+    issue = build_issue(
         document,
-        [
-            build_issue(
-                document,
-                block_index=0,
-                block_id="missing-block",
-                start=0,
-                end=2,
-                suggestion="替换",
-                action=DecisionAction.ACCEPTED,
-            )
-        ],
+        block_index=0,
+        block_id="missing-block",
+        start=0,
+        end=2,
+        suggestion="替换",
+        action=DecisionAction.ACCEPTED,
     )
 
-    assert plan.applicable == []
-    assert [warning.code for warning in plan.warnings] == ["missing_block"]
+    with pytest.raises(DerivedContentValidationError) as raised:
+        ReplacementPlanner().build(document, [issue])
+
+    assert raised.value.code == "missing_block"
+    assert raised.value.issue_ids == (issue.issue_id,)
 
 
 def test_planner_warns_when_replacement_range_is_out_of_bounds() -> None:
     document = build_document(["正文"])
-
-    plan = ReplacementPlanner().build(
+    issue = build_issue(
         document,
-        [
-            build_issue(
-                document,
-                block_index=0,
-                start=0,
-                end=10,
-                original="正文扩展",
-                suggestion="替换",
-                action=DecisionAction.ACCEPTED,
-            )
-        ],
+        block_index=0,
+        start=0,
+        end=10,
+        original="正文扩展",
+        suggestion="替换",
+        action=DecisionAction.ACCEPTED,
     )
 
-    assert plan.applicable == []
-    assert [warning.code for warning in plan.warnings] == ["replacement_out_of_bounds"]
+    with pytest.raises(DerivedContentValidationError) as raised:
+        ReplacementPlanner().build(document, [issue])
+
+    assert raised.value.code == "replacement_out_of_bounds"
+    assert raised.value.issue_ids == (issue.issue_id,)
 
 
 def test_planner_warns_when_original_text_does_not_match_document() -> None:
     document = build_document(["正文"])
-
-    plan = ReplacementPlanner().build(
+    issue = build_issue(
         document,
-        [
-            build_issue(
-                document,
-                block_index=0,
-                start=0,
-                end=2,
-                original="错文",
-                suggestion="替换",
-                action=DecisionAction.ACCEPTED,
-            )
-        ],
+        block_index=0,
+        start=0,
+        end=2,
+        original="错文",
+        suggestion="替换",
+        action=DecisionAction.ACCEPTED,
     )
 
-    assert plan.applicable == []
-    assert [warning.code for warning in plan.warnings] == ["original_text_mismatch"]
+    with pytest.raises(DerivedContentValidationError) as raised:
+        ReplacementPlanner().build(document, [issue])
+
+    assert raised.value.code == "original_text_mismatch"
+    assert raised.value.issue_ids == (issue.issue_id,)
 
 
 def test_planner_warns_when_accepted_issue_has_no_final_replacement() -> None:
@@ -163,45 +161,39 @@ def test_planner_warns_when_accepted_issue_has_no_final_replacement() -> None:
         }
     )
 
-    plan = ReplacementPlanner().build(
-        document,
-        [issue],
-    )
+    with pytest.raises(DerivedContentValidationError) as raised:
+        ReplacementPlanner().build(document, [issue])
 
-    assert plan.applicable == []
-    assert [warning.code for warning in plan.warnings] == ["missing_replacement_value"]
+    assert raised.value.code == "missing_replacement_value"
+    assert raised.value.issue_ids == (issue.issue_id,)
 
 
 def test_planner_rejects_overlapping_replacements() -> None:
     document = build_document(["甲乙丙丁"])
 
-    plan = ReplacementPlanner().build(
+    first = build_issue(
         document,
-        [
-            build_issue(
-                document,
-                block_index=0,
-                start=0,
-                end=3,
-                suggestion="A",
-                action=DecisionAction.ACCEPTED,
-            ),
-            build_issue(
-                document,
-                block_index=0,
-                start=2,
-                end=4,
-                suggestion="B",
-                action=DecisionAction.ACCEPTED,
-            ),
-        ],
+        block_index=0,
+        start=0,
+        end=3,
+        suggestion="A",
+        action=DecisionAction.ACCEPTED,
+    )
+    second = build_issue(
+        document,
+        block_index=0,
+        start=2,
+        end=4,
+        suggestion="B",
+        action=DecisionAction.ACCEPTED,
     )
 
-    assert plan.applicable == []
-    assert [warning.code for warning in plan.warnings] == [
-        "overlapping_replacements",
-        "overlapping_replacements",
-    ]
+    with pytest.raises(OverlappingReplacementsError) as raised:
+        ReplacementPlanner().build(document, [first, second])
+
+    assert raised.value.issue_ids == tuple(
+        sorted((first.issue_id, second.issue_id), key=str)
+    )
 
 
 def test_planner_accepts_adjacent_half_open_replacement_ranges() -> None:

@@ -19,6 +19,7 @@ from text_verification.api.dependencies import (
     get_db_session,
     get_job_repository,
     get_job_storage,
+    get_revision_repository,
 )
 from text_verification.api.routes.analysis import (
     ANALYSIS_FAILED_CODE,
@@ -26,10 +27,13 @@ from text_verification.api.routes.analysis import (
     ANALYSIS_NOT_READY_CODE,
     JOB_EXPIRED_CODE,
     READY_STATUSES,
+    VERSION_NOT_FOUND_CODE,
+    VERSION_NOT_FOUND_MESSAGE,
     _require_analysis,
 )
 from text_verification.api.routes.jobs import JOB_NOT_FOUND_CODE, _http_error
 from text_verification.checkers.models import CheckCategory, CheckScenario
+from text_verification.domain.derived_content import derive_document
 from text_verification.domain.documents import FileType
 from text_verification.domain.exports import (
     MAX_EXPORT_SNAPSHOT_BYTES,
@@ -45,11 +49,13 @@ from text_verification.domain.exports import (
     ExportWarning,
 )
 from text_verification.domain.jobs import JobStatus
+from text_verification.domain.revisions import DocumentVersionStatus
 from text_verification.exporters import DocxApplicabilityEvaluator, ReplacementPlanner
 from text_verification.infrastructure.analysis_repositories import AnalysisRepository
 from text_verification.infrastructure.export_repository import ExportRepository
 from text_verification.infrastructure.orm import JobRow
 from text_verification.infrastructure.repositories import JobRepository
+from text_verification.infrastructure.revision_repository import RevisionRepository
 from text_verification.infrastructure.storage import InvalidUpload, JobStorage
 
 EXPORT_DECISIONS_REQUIRED_CODE = "export_decisions_required"
@@ -82,6 +88,7 @@ class ExportCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     type: str = Field(min_length=1, max_length=32)
+    version_id: UUID | None = None
     confirm_warnings: bool = False
 
 
@@ -150,13 +157,20 @@ def create_export(
     session: Annotated[Session, Depends(get_db_session)],
     job_repository: Annotated[JobRepository, Depends(get_job_repository)],
     analysis_repository: Annotated[AnalysisRepository, Depends(get_analysis_repository)],
+    revision_repository: Annotated[RevisionRepository, Depends(get_revision_repository)],
     storage: Annotated[JobStorage, Depends(get_job_storage)],
 ) -> ExportCreateResponse:
     try:
         job = _lock_ready_job(job_id, job_repository)
+        version_id = _resolve_export_version(
+            job_id,
+            payload.version_id,
+            revision_repository,
+        )
         _require_analysis(
             job_id,
             analysis_repository,
+            version_id=version_id,
             missing_status_code=status.HTTP_409_CONFLICT,
             missing_code=ANALYSIS_NOT_READY_CODE,
             missing_message="分析结果尚未就绪，请稍后重试。",
@@ -164,15 +178,15 @@ def create_export(
         export_type = _parse_export_type(payload.type)
         file_type = FileType(job.file_type)
         extension = _resolve_extension(file_type, export_type)
-        document = analysis_repository.get_document(job_id)
+        document = analysis_repository.get_document(job_id, version_id)
         if document is None:
             raise _http_error(
                 status.HTTP_409_CONFLICT,
                 ANALYSIS_NOT_READY_CODE,
                 "分析结果尚未就绪，请稍后重试。",
             )
-        issues = analysis_repository.list_all_issues(job_id)
-        summary = analysis_repository.summarize_issues(job_id)
+        issues = analysis_repository.list_all_issues(job_id, version_id)
+        summary = analysis_repository.summarize_issues(job_id, version_id)
         if export_type == ExportType.MODIFIED_DOCUMENT:
             if (
                 summary.total > 0
@@ -183,7 +197,8 @@ def create_export(
                     EXPORT_DECISIONS_REQUIRED_CODE,
                     "请先处理至少一个问题，再导出修改版文件。",
                 )
-        plan = ReplacementPlanner().build(document, issues)
+        derived = derive_document(version_id, document, issues)
+        plan = ReplacementPlanner().from_derived(derived)
         source_sha256: str | None = None
         source_size_bytes = job.size_bytes
         if file_type == FileType.DOCX:
@@ -199,12 +214,15 @@ def create_export(
         ):
             raise _confirmation_required(plan.warnings)
 
-        failures = analysis_repository.get_checker_failures(job_id)
+        failures = analysis_repository.get_checker_failures(job_id, version_id)
         enabled_categories = [
             CheckCategory(category) for category in job.enabled_categories_json
         ]
         captured_at = datetime.now(UTC)
         snapshot = ExportSnapshot(
+            schema_version=2,
+            document_version_id=version_id,
+            decision_snapshot_sha256=derived.decision_snapshot_sha256,
             captured_at=captured_at,
             source_name=job.source_name,
             source_type=file_type,
@@ -239,6 +257,7 @@ def create_export(
             export_type,
             extension,
             snapshot=snapshot,
+            version_id=version_id,
             warnings=plan.warnings,
             expires_at=job.expires_at,
             maximum_snapshot_bytes=MAX_EXPORT_SNAPSHOT_BYTES,
@@ -390,6 +409,37 @@ def _lock_ready_job(job_id: UUID, repository: JobRepository) -> JobRow:
             "分析结果尚未就绪，请稍后重试。",
         )
     return job
+
+
+def _resolve_export_version(
+    job_id: UUID,
+    requested_version_id: UUID | None,
+    repository: RevisionRepository,
+) -> UUID:
+    if requested_version_id is None:
+        version = repository.get_active_version(job_id)
+        if version is None:
+            raise _http_error(
+                status.HTTP_409_CONFLICT,
+                ANALYSIS_NOT_READY_CODE,
+                "分析结果尚未就绪，请稍后重试。",
+            )
+    else:
+        version = repository.get_version(requested_version_id)
+        if version is None or version.job_id != job_id:
+            raise _http_error(
+                status.HTTP_404_NOT_FOUND,
+                VERSION_NOT_FOUND_CODE,
+                VERSION_NOT_FOUND_MESSAGE,
+            )
+
+    if version.status != DocumentVersionStatus.SUCCEEDED:
+        raise _http_error(
+            status.HTTP_409_CONFLICT,
+            ANALYSIS_NOT_READY_CODE,
+            "分析结果尚未就绪，请稍后重试。",
+        )
+    return version.version_id
 
 
 def _resolve_extension(file_type: FileType, export_type: ExportType) -> str:

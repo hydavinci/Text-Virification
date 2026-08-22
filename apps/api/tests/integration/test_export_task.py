@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from text_verification.api.dependencies import get_db_session, get_job_storage
 from text_verification.checkers.models import CheckCategory, CheckerFailure
+from text_verification.domain.derived_content import derive_document
 from text_verification.domain.documents import DocumentModel, FileType
 from text_verification.domain.exports import (
     ExportCheckerFailureSnapshot,
@@ -36,7 +37,7 @@ from text_verification.exporters import ExportError, ReplacementPlanner, TxtExpo
 from text_verification.infrastructure.analysis_repositories import AnalysisRepository
 from text_verification.infrastructure.decision_repository import DecisionRepository
 from text_verification.infrastructure.export_repository import ExportRepository
-from text_verification.infrastructure.orm import ExportRow, IssueDecisionRow
+from text_verification.infrastructure.orm import ExportRow, IssueDecisionRow, JobRow
 from text_verification.infrastructure.repositories import JobRepository
 from text_verification.infrastructure.storage import JobStorage
 from text_verification.parsers import DocxParser, TxtParser
@@ -1118,8 +1119,21 @@ def _snapshot_for_job(session: Session, job_id: UUID) -> ExportSnapshot:
         summary_by_category = summary.by_category
         summary_by_severity = summary.by_severity
         summary_by_decision = summary.by_decision
-    warnings = ReplacementPlanner().build(document, issues).warnings
+    version_id = session.get(JobRow, job_id).active_version_id
+    snapshot_kwargs: dict[str, object]
+    if version_id is None:
+        warnings = ReplacementPlanner().build(document, issues).warnings
+        snapshot_kwargs = {"schema_version": 1}
+    else:
+        derived = derive_document(version_id, document, issues)
+        warnings = ReplacementPlanner().from_derived(derived).warnings
+        snapshot_kwargs = {
+            "schema_version": 2,
+            "document_version_id": version_id,
+            "decision_snapshot_sha256": derived.decision_snapshot_sha256,
+        }
     return ExportSnapshot(
+        **snapshot_kwargs,
         captured_at=datetime.now(UTC),
         source_name=job.source_name,
         source_type=job.file_type,

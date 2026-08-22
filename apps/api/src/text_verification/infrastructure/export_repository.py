@@ -51,6 +51,7 @@ class ExportRepository:
         extension: str,
         *,
         snapshot: ExportSnapshot,
+        version_id: UUID | None = None,
         warnings: Sequence[ExportWarning] = (),
         expires_at: datetime | None = None,
         maximum_snapshot_bytes: int = MAX_EXPORT_SNAPSHOT_BYTES,
@@ -74,6 +75,7 @@ class ExportRepository:
         row = ExportRow(
             export_id=export_id,
             job_id=job_id,
+            version_id=version_id,
             export_type=_normalize_export_type(export_type).value,
             status=ExportStatus.QUEUED.value,
             file_name=artifact.file_name,

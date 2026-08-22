@@ -9,8 +9,15 @@ from sqlalchemy.orm import Session
 
 from text_verification.api.dependencies import get_db_session
 from text_verification.domain.documents import DocumentModel, FileType, TextBlock
+from text_verification.domain.issues import (
+    DecisionAction,
+    DecisionCommand,
+    Issue,
+    IssueSeverity,
+)
 from text_verification.domain.jobs import JobStatus
 from text_verification.domain.revisions import DocumentVersionRead
+from text_verification.infrastructure.decision_repository import DecisionRepository
 from text_verification.infrastructure.repositories import JobRepository
 from text_verification.infrastructure.revision_repository import RevisionRepository
 
@@ -309,10 +316,68 @@ def test_delete_draft_only_removes_requested_draft(client, db_session: Session) 
     assert remaining_response.json()["draft_id"] == second_draft["draft_id"]
 
 
+def test_derived_endpoint_returns_modified_blocks_and_diff_segments(
+    client,
+    db_session: Session,
+) -> None:
+    job_id = _seed_job(db_session, status=JobStatus.COMPLETED)
+    document = _build_document([("原始正文", 1), ("第二段", 2)], version=1)
+    issue = _build_issue(
+        document,
+        block_index=0,
+        start=0,
+        end=2,
+        suggestion="系统首选",
+    )
+    version = _create_succeeded_version(
+        RevisionRepository(db_session),
+        job_id,
+        document,
+        issues=[issue],
+    )
+    _apply_decision(db_session, job_id, issue, replacement="最终")
+    db_session.commit()
+
+    modified = client.get(
+        f"/api/v1/jobs/{job_id}/versions/{version.version_id}/derived",
+        params={"view": "modified"},
+    )
+    diff = client.get(
+        f"/api/v1/jobs/{job_id}/versions/{version.version_id}/derived",
+        params={"view": "diff"},
+    )
+
+    assert modified.status_code == 200
+    assert diff.status_code == 200
+    assert modified.json()["decision_snapshot_sha256"] == diff.json()[
+        "decision_snapshot_sha256"
+    ]
+    assert len(modified.json()["decision_snapshot_sha256"]) == 64
+    assert [block["text"] for block in modified.json()["blocks"]] == [
+        "最终正文",
+        "第二段",
+    ]
+    assert diff.json()["blocks"] == [
+        {
+            "block_id": "p-000001",
+            "segments": [
+                {"kind": "delete", "text": "原始"},
+                {"kind": "insert", "text": "最终"},
+                {"kind": "equal", "text": "正文"},
+            ],
+        },
+        {
+            "block_id": "p-000002",
+            "segments": [{"kind": "equal", "text": "第二段"}],
+        },
+    ]
+
+
 @pytest.mark.parametrize(
     ("method", "path", "payload"),
     [
         ("GET", "/api/v1/jobs/{job_id}/versions", None),
+        ("GET", "/api/v1/jobs/{job_id}/versions/{draft_id}/derived?view=modified", None),
         ("POST", "/api/v1/jobs/{job_id}/drafts", {"base_version_id": str(uuid4())}),
         ("GET", "/api/v1/jobs/{job_id}/drafts/{draft_id}", None),
         (
@@ -385,6 +450,7 @@ def _create_succeeded_version(
     job_id: UUID,
     document: DocumentModel,
     *,
+    issues: list[Issue] | None = None,
     parent_version_id: UUID | None = None,
     idempotency_key: str | None = None,
 ) -> DocumentVersionRead:
@@ -394,7 +460,7 @@ def _create_succeeded_version(
         reason="upload" if parent_version_id is None else "edited",
         idempotency_key=idempotency_key,
     )
-    return revisions.complete_analysis(version.version_id, document, [], {})
+    return revisions.complete_analysis(version.version_id, document, issues or [], {})
 
 
 def _create_failed_version(
@@ -440,3 +506,56 @@ def _build_document(block_specs: list[tuple[str, int | None]], *, version: int) 
         blocks=blocks,
         metadata={"language": "zh-CN"},
     )
+
+
+def _build_issue(
+    document: DocumentModel,
+    *,
+    block_index: int,
+    start: int,
+    end: int,
+    suggestion: str,
+) -> Issue:
+    block = document.blocks[block_index]
+    return Issue(
+        issue_id=UUID(f"00000000-0000-0000-0000-{start + end + 1:012d}"),
+        document_id=document.document_id,
+        document_version=document.version,
+        block_id=block.block_id,
+        page=block.page,
+        start=start,
+        end=end,
+        original=block.text[start:end],
+        suggestion=suggestion,
+        alternatives=[suggestion],
+        type="literal",
+        severity=IssueSeverity.WARNING,
+        layer="character",
+        message="命中规则。",
+        rule_id="character-001",
+        source="test",
+        source_version="1",
+        confidence=1.0,
+        auto_fixable=True,
+        context=block.text,
+    )
+
+
+def _apply_decision(
+    session: Session,
+    job_id: UUID,
+    issue: Issue,
+    *,
+    replacement: str,
+) -> None:
+    outcome = DecisionRepository(session).apply(
+        job_id,
+        DecisionCommand(
+            issue_id=issue.issue_id,
+            issue_version=issue.document_version or 1,
+            expected_revision=0,
+            action=DecisionAction.ACCEPTED,
+            replacement=replacement,
+        ),
+    )
+    assert outcome.decision is not None

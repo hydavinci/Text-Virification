@@ -177,7 +177,12 @@ class ExportIssueSummarySnapshot(BaseModel):
 class ExportSnapshot(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[1, 2] = 2
+    document_version_id: UUID | None = None
+    decision_snapshot_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
     captured_at: datetime
     source_name: str = Field(min_length=1, max_length=255)
     source_type: FileType
@@ -194,6 +199,13 @@ class ExportSnapshot(BaseModel):
 
     @model_validator(mode="after")
     def validate_source(self) -> ExportSnapshot:
+        if self.schema_version == 2 and (
+            self.document_version_id is None
+            or self.decision_snapshot_sha256 is None
+        ):
+            raise ValueError(
+                "schema-v2 export snapshots require document version and decision hash"
+            )
         if self.document.file_type != self.source_type:
             raise ValueError("snapshot source type must match the normalized document")
         if self.document.source_name != self.source_name:

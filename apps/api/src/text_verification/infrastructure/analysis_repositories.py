@@ -684,7 +684,11 @@ def _to_issue_decision_summary(row: IssueDecisionRow | None) -> IssueDecisionSum
         issue_version=row.issue_version,
         revision=row.revision,
         action=DecisionAction(row.action),
-        replacement=row.final_replacement or row.replacement,
+        replacement=(
+            row.final_replacement
+            if row.final_replacement is not None
+            else row.replacement
+        ),
         suggestion_id=row.suggestion_id,
         updated_at=row.updated_at,
     )
