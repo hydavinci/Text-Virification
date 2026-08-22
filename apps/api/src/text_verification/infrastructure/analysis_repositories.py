@@ -668,6 +668,8 @@ def _ordered_unique_suggestions(
     ordered: list[str] = []
     seen: set[str] = set()
     for value in ([suggestion] if suggestion is not None else []) + alternatives:
+        if not value.strip():
+            continue
         if value in seen:
             continue
         seen.add(value)

@@ -21,7 +21,11 @@ from text_verification.infrastructure.analysis_repositories import (
     IssueQuery,
 )
 from text_verification.infrastructure.decision_repository import DecisionRepository
-from text_verification.infrastructure.orm import IssueDecisionRow, IssueRow
+from text_verification.infrastructure.orm import (
+    IssueDecisionRow,
+    IssueRow,
+    IssueSuggestionRow,
+)
 from text_verification.infrastructure.repositories import JobRepository
 from text_verification.infrastructure.revision_repository import RevisionRepository
 
@@ -65,6 +69,39 @@ def test_repository_round_trips_document_issue_and_failures_exactly(db_session: 
     assert persisted_issue.document_id == issue.document_id
     assert persisted_issue.page == issue.page
     assert persisted_issue.issue_type == issue.type
+
+
+def test_repository_skips_blank_suggestion_candidates(db_session: Session) -> None:
+    repository = AnalysisRepository(db_session)
+    job_id = seed_job(db_session)
+    document = build_document([("空建议", 1)])
+    issue = build_issue(
+        document,
+        block_id="p-000001",
+        original="空建议",
+        suggestion="",
+        start=0,
+        end=3,
+        page=1,
+    ).model_copy(update={"alternatives": ["", "   ", "\t"]})
+
+    repository.replace_analysis(job_id, document, [issue], {})
+    db_session.commit()
+
+    page = repository.list_issues(job_id, IssueQuery(limit=20))
+    export_issues = repository.list_all_issues(job_id)
+    suggestion_count = int(
+        db_session.scalar(
+            select(func.count())
+            .select_from(IssueSuggestionRow)
+            .where(IssueSuggestionRow.issue_id == issue.issue_id)
+        )
+        or 0
+    )
+
+    assert page.items[0].suggestions == []
+    assert export_issues[0].suggestions == []
+    assert suggestion_count == 0
 
 
 def test_replace_analysis_is_atomic(db_session: Session) -> None:

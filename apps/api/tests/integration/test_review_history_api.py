@@ -392,6 +392,76 @@ def test_history_returns_batches_newest_first_without_crossing_versions(
     ]
 
 
+def test_undo_historical_batch_after_new_version_activation(
+    client,
+    db_session: Session,
+    seeded_review: SeededReview,
+) -> None:
+    historical_batch = _put_decision(
+        client,
+        seeded_review,
+        seeded_review.first_issue,
+        action="ignored",
+        replacement=None,
+        expected_revision=0,
+    )
+    next_document = _build_document(version=2)
+    next_issue = _build_issue(
+        next_document,
+        issue_id=UUID("00000000-0000-0000-0000-000000000054"),
+        start=0,
+        end=2,
+        original="甲乙",
+        suggestion="新",
+    )
+    AnalysisRepository(db_session).replace_analysis(
+        seeded_review.job_id,
+        next_document,
+        [next_issue],
+        {},
+    )
+    db_session.commit()
+    next_issue_row = db_session.get(IssueRow, next_issue.issue_id)
+    job = db_session.get(JobRow, seeded_review.job_id)
+    assert next_issue_row is not None
+    assert job is not None
+    db_session.refresh(job)
+    assert job.active_version_id is not None
+    active_version_id = job.active_version_id
+    next_review = SeededReview(
+        seeded_review.job_id,
+        active_version_id,
+        next_issue_row,
+        next_issue_row,
+    )
+    _put_decision(
+        client,
+        next_review,
+        next_issue_row,
+        action="ignored",
+        replacement=None,
+        expected_revision=0,
+    )
+    active_decision = db_session.get(IssueDecisionRow, next_issue.issue_id)
+    assert active_decision is not None
+    active_batch_id = active_decision.operation_batch_id
+
+    undo = client.post(
+        f"/api/v1/jobs/{seeded_review.job_id}/operation-batches/"
+        f"{historical_batch['batch_id']}/undo"
+    )
+
+    assert undo.status_code == 200
+    assert undo.json()["version_id"] == str(seeded_review.version_id)
+    assert db_session.get(IssueDecisionRow, seeded_review.first_issue.issue_id) is None
+    db_session.refresh(job)
+    assert job.active_version_id == active_version_id
+    unchanged_active_decision = db_session.get(IssueDecisionRow, next_issue.issue_id)
+    assert unchanged_active_decision is not None
+    assert unchanged_active_decision.action == "ignored"
+    assert unchanged_active_decision.operation_batch_id == active_batch_id
+
+
 def test_long_term_undo_has_no_deadline(
     client,
     db_session: Session,

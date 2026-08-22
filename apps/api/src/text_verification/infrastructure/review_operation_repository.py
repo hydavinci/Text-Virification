@@ -14,6 +14,7 @@ from text_verification.domain.review_operations import (
 )
 from text_verification.infrastructure.orm import (
     DocumentRow,
+    DocumentVersionRow,
     IssueDecisionRow,
     IssueRow,
     IssueSuggestionRow,
@@ -226,8 +227,7 @@ class ReviewOperationRepository:
         job_id: UUID,
         batch_id: UUID,
     ) -> ReviewOperationBatchRead:
-        job = self._lock_job(job_id)
-        active_version_id = self._active_version_id(job)
+        self._lock_job(job_id)
         original = self._session.execute(
             select(ReviewOperationBatchRow)
             .where(
@@ -237,7 +237,15 @@ class ReviewOperationRepository:
             .with_for_update()
             .execution_options(populate_existing=True)
         ).scalar_one_or_none()
-        if original is None or original.version_id != active_version_id:
+        if original is None:
+            raise OperationBatchNotFound(batch_id)
+        version_owned_by_job = self._session.scalar(
+            select(DocumentVersionRow.version_id).where(
+                DocumentVersionRow.version_id == original.version_id,
+                DocumentVersionRow.job_id == job_id,
+            )
+        )
+        if version_owned_by_job is None:
             raise OperationBatchNotFound(batch_id)
 
         item_ids = list(

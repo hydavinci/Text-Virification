@@ -25,6 +25,10 @@ from text_verification.domain.jobs import (
     JobStatus,
     TerminalJobStateError,
 )
+from text_verification.infrastructure.analysis_repositories import (
+    AnalysisRepository,
+    IssueQuery,
+)
 from text_verification.infrastructure.repositories import JobRepository
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
@@ -461,6 +465,127 @@ def test_0010_export_snapshot_migration_round_trips_from_0009(
                 "block_id=p-000001]"
             )
         ]
+
+
+def test_0011_upgrade_skips_blank_legacy_suggestions(
+    test_database_url: str,
+) -> None:
+    with migrated_schema(test_database_url) as (engine, alembic_config):
+        command.upgrade(alembic_config, "0010_export_snapshots")
+        job_id = uuid4()
+        document_id = uuid4()
+        issue_id = uuid4()
+        created_at = datetime.now(UTC)
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO jobs (
+                        job_id, source_name, file_type, size_bytes, storage_key,
+                        status, progress, error_code, error_message, scenario,
+                        enabled_categories, created_at, updated_at, expires_at
+                    ) VALUES (
+                        :job_id, 'legacy.txt', 'txt', 8, :storage_key,
+                        'completed', 100, NULL, NULL, 'general',
+                        CAST(:enabled_categories AS jsonb),
+                        :created_at, :created_at, :expires_at
+                    )
+                    """
+                ),
+                {
+                    "job_id": job_id,
+                    "storage_key": str(job_id),
+                    "enabled_categories": json.dumps(["security"]),
+                    "created_at": created_at,
+                    "expires_at": created_at + timedelta(hours=1),
+                },
+            )
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO documents (
+                        job_id, document_id, version, file_type, source_name,
+                        metadata_json
+                    ) VALUES (
+                        :job_id, :document_id, 1, 'txt', 'legacy.txt',
+                        CAST(:metadata AS jsonb)
+                    )
+                    """
+                ),
+                {
+                    "job_id": job_id,
+                    "document_id": document_id,
+                    "metadata": json.dumps({"language": "zh-CN"}),
+                },
+            )
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO document_blocks (
+                        job_id, block_id, block_order, kind, text, page,
+                        paragraph_index, parent_id, style_json, source_locator_json
+                    ) VALUES (
+                        :job_id, 'p-000001', 0, 'paragraph', '旧文本', 1,
+                        0, NULL, '{}'::jsonb, '{}'::jsonb
+                    )
+                    """
+                ),
+                {"job_id": job_id},
+            )
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO issues (
+                        issue_id, job_id, document_version, category, severity,
+                        rule_id, block_id, start_offset, end_offset, original,
+                        suggestion, alternatives_json, message, source,
+                        source_version, confidence, auto_fixable, context,
+                        document_id, page, issue_type
+                    ) VALUES (
+                        :issue_id, :job_id, 1, 'security', 'warning',
+                        'security-blank', 'p-000001', 0, 1, '旧',
+                        '', CAST(:alternatives AS jsonb), '命中规则。', 'test',
+                        '1', 1.0, TRUE, '旧文本',
+                        :document_id, 1, 'literal'
+                    )
+                    """
+                ),
+                {
+                    "issue_id": issue_id,
+                    "job_id": job_id,
+                    "document_id": document_id,
+                    "alternatives": json.dumps([" ", "替换", "\t", "替换"]),
+                },
+            )
+
+        command.upgrade(alembic_config, "head")
+        with engine.connect() as connection:
+            suggestions = connection.execute(
+                text(
+                    """
+                    SELECT text, rank, preferred
+                    FROM issue_suggestions
+                    WHERE issue_id = :issue_id
+                    ORDER BY rank
+                    """
+                ),
+                {"issue_id": issue_id},
+            ).all()
+        assert suggestions == [("替换", 0, True)]
+
+        session = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
+        try:
+            repository = AnalysisRepository(session)
+            page = repository.list_issues(job_id, IssueQuery(limit=20))
+            export_issues = repository.list_all_issues(job_id)
+            assert [suggestion.text for suggestion in page.items[0].suggestions] == [
+                "替换"
+            ]
+            assert [suggestion.text for suggestion in export_issues[0].suggestions] == [
+                "替换"
+            ]
+        finally:
+            session.close()
 
 
 def test_repository_persists_job_and_ordered_events(db_session: Session) -> None:
