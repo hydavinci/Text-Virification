@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
@@ -22,12 +22,18 @@ from text_verification.domain.issues import DecisionCommand
 from text_verification.infrastructure.analysis_repositories import AnalysisRepository
 from text_verification.infrastructure.decision_repository import (
     DecisionOutcome,
-    DecisionRepository,
 )
 from text_verification.infrastructure.repositories import JobRepository
+from text_verification.infrastructure.review_operation_repository import (
+    DecisionBatchConflict,
+    OverlappingDecisions,
+    ReviewOperationRepository,
+)
 
+DECISION_BATCH_CONFLICT_CODE = "decision_batch_conflict"
 DUPLICATE_ISSUE_DECISION_CODE = "duplicate_issue_decision"
 MAX_DECISIONS_PER_BATCH = 500
+OVERLAPPING_DECISIONS_CODE = "overlapping_decisions"
 
 router = APIRouter(tags=["decisions"])
 
@@ -41,6 +47,7 @@ class DecisionBatchRequest(BaseModel):
 class DecisionBatchResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    batch_id: UUID
     outcomes: list[DecisionOutcome]
 
 
@@ -62,19 +69,51 @@ def put_decisions(
         missing_message="分析结果尚未就绪，请稍后重试。",
     )
 
-    job_repository.lock_job(job_id)
-    repository = DecisionRepository(session)
-    outcomes: list[DecisionOutcome] = []
+    repository = ReviewOperationRepository(session)
     try:
-        for command in payload.decisions:
-            with session.begin_nested():
-                outcomes.append(repository.apply(job_id, command))
+        result = repository.apply_decisions(job_id, payload.decisions)
         session.commit()
+    except DecisionBatchConflict as error:
+        session.rollback()
+        raise _http_error_with_issue_ids(
+            status.HTTP_409_CONFLICT,
+            DECISION_BATCH_CONFLICT_CODE,
+            "问题决策已过期或无效，请刷新后重试。",
+            sorted(error.conflicts),
+        ) from error
+    except OverlappingDecisions as error:
+        session.rollback()
+        raise _http_error_with_issue_ids(
+            status.HTTP_409_CONFLICT,
+            OVERLAPPING_DECISIONS_CODE,
+            "接受的修改范围相互重叠，请仅保留其中一个。",
+            error.issue_ids,
+        ) from error
     except Exception:
         session.rollback()
         raise
 
-    return DecisionBatchResponse(outcomes=outcomes)
+    outcomes = [
+        DecisionOutcome(
+            issue_id=item.command.issue_id,
+            status="applied",
+            decision=(
+                None
+                if item.after is None
+                else {
+                    "issue_id": item.command.issue_id,
+                    "issue_version": item.after["issue_version"],
+                    "revision": item.after["revision"],
+                    "action": item.after["action"],
+                    "replacement": item.after["final_replacement"],
+                    "suggestion_id": item.after["suggestion_id"],
+                    "updated_at": item.updated_at,
+                }
+            ),
+        )
+        for item in result.items
+    ]
+    return DecisionBatchResponse(batch_id=result.batch.batch_id, outcomes=outcomes)
 
 
 def _ensure_unique_issue_ids(decisions: list[DecisionCommand]) -> None:
@@ -87,3 +126,19 @@ def _ensure_unique_issue_ids(decisions: list[DecisionCommand]) -> None:
                 "同一请求中不能重复提交同一问题的决策。",
             )
         seen.add(command.issue_id)
+
+
+def _http_error_with_issue_ids(
+    status_code: int,
+    code: str,
+    message: str,
+    issue_ids: list[UUID],
+) -> HTTPException:
+    return HTTPException(
+        status_code=status_code,
+        detail={
+            "code": code,
+            "message": message,
+            "issue_ids": [str(issue_id) for issue_id in issue_ids],
+        },
+    )

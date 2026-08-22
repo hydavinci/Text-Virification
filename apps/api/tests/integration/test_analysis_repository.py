@@ -55,7 +55,9 @@ def test_repository_round_trips_document_issue_and_failures_exactly(db_session: 
     persisted_issue = db_session.get(IssueRow, issue.issue_id)
 
     assert stored == document
-    assert page.items == [issue]
+    assert len(page.items) == 1
+    assert page.items[0].model_copy(update={"suggestions": []}) == issue
+    assert [suggestion.text for suggestion in page.items[0].suggestions] == ["领先"]
     assert page.total == 1
     assert page.next_cursor is None
     assert repository.get_checker_failures(job_id) == failures
@@ -155,7 +157,11 @@ def test_replace_analysis_preserves_parent_versions_and_scopes_current_reads(
     assert count_decisions(db_session, original_issue.issue_id) == 1
     assert repository.get_document(job_id) == replacement_document
     assert repository.get_document(job_id, first_version.version_id) == original_document
-    assert current_page.items == [replacement_issue]
+    assert len(current_page.items) == 1
+    assert (
+        current_page.items[0].model_copy(update={"suggestions": []})
+        == replacement_issue
+    )
     assert current_page.items[0].decision is None
     assert [item.issue_id for item in original_page.items] == [original_issue.issue_id]
     assert original_page.items[0].decision is not None
@@ -410,17 +416,23 @@ def test_list_issues_filters_and_paginates_stably(db_session: Session) -> None:
     db_session.commit()
 
     first_page = repository.list_issues(job_id, IssueQuery(limit=2))
-    assert first_page.items == [issue_first, issue_second]
+    assert [
+        item.model_copy(update={"suggestions": []}) for item in first_page.items
+    ] == [issue_first, issue_second]
     assert first_page.total == 3
     assert first_page.next_cursor is not None
 
     second_page = repository.list_issues(job_id, IssueQuery(limit=2, cursor=first_page.next_cursor))
-    assert second_page.items == [issue_third]
+    assert [
+        item.model_copy(update={"suggestions": []}) for item in second_page.items
+    ] == [issue_third]
     assert second_page.total == 3
     assert second_page.next_cursor is None
 
     search_page = repository.list_issues(job_id, IssueQuery(search="absolute", limit=10))
-    assert search_page.items == [issue_first, issue_third]
+    assert [
+        item.model_copy(update={"suggestions": []}) for item in search_page.items
+    ] == [issue_first, issue_third]
 
     filtered_page = repository.list_issues(
         job_id,
@@ -430,7 +442,9 @@ def test_list_issues_filters_and_paginates_stably(db_session: Session) -> None:
             limit=10,
         ),
     )
-    assert filtered_page.items == [issue_first]
+    assert [
+        item.model_copy(update={"suggestions": []}) for item in filtered_page.items
+    ] == [issue_first]
 
 
 def seed_job(db_session: Session) -> UUID:

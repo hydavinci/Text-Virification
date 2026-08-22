@@ -18,7 +18,13 @@ from text_verification.domain.documents import DocumentModel, FileType, TextBloc
 from text_verification.domain.issues import Issue, IssueSeverity
 from text_verification.domain.jobs import JobStatus
 from text_verification.infrastructure.analysis_repositories import AnalysisRepository
-from text_verification.infrastructure.orm import IssueDecisionRow, IssueRow
+from text_verification.infrastructure.orm import (
+    IssueDecisionRow,
+    IssueRow,
+    IssueSuggestionRow,
+    ReviewOperationBatchRow,
+    ReviewOperationItemRow,
+)
 from text_verification.infrastructure.repositories import JobRepository
 
 
@@ -29,7 +35,7 @@ class SeededIssue:
     accepted_replacement: str | None
 
 
-def test_batch_decisions_return_per_item_outcomes_in_request_order(
+def test_one_stale_item_rolls_back_complete_batch(
     client,
     db_session: Session,
 ) -> None:
@@ -59,21 +65,15 @@ def test_batch_decisions_return_per_item_outcomes_in_request_order(
         },
     )
 
-    assert response.status_code == 200
-    payload = response.json()
-    assert [item["status"] for item in payload["outcomes"]] == ["applied", "conflict"]
-    assert payload["outcomes"][0]["issue_id"] == str(current_issue.issue_id)
-    assert payload["outcomes"][0]["decision"]["issue_id"] == str(current_issue.issue_id)
-    assert payload["outcomes"][0]["decision"]["issue_version"] == current_issue.document_version
-    assert payload["outcomes"][0]["decision"]["action"] == "accepted"
-    assert payload["outcomes"][0]["decision"]["replacement"] == current_issue.accepted_replacement
-    assert payload["outcomes"][1] == {
-        "issue_id": str(stale_issue.issue_id),
-        "status": "conflict",
-        "code": "stale_issue_version",
-        "decision": None,
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "decision_batch_conflict",
+        "message": "问题决策已过期或无效，请刷新后重试。",
+        "issue_ids": [str(stale_issue.issue_id)],
     }
-    assert _count_decisions(db_session, current_issue.issue_id) == 1
+    assert _count_decisions(db_session, current_issue.issue_id) == 0
+    assert _count_decisions(db_session, stale_issue.issue_id) == 0
+    assert _count_operation_batches(db_session) == 0
 
 
 def test_batch_decisions_reject_duplicate_issue_ids_with_structured_error(
@@ -243,7 +243,7 @@ def test_batch_decisions_accept_accepted_replacement_at_10_000_code_point_bounda
     ) == replacement
 
 
-def test_batch_decisions_return_ordered_applied_and_invalid_outcomes_and_persist_sibling(
+def test_one_missing_item_rolls_back_complete_batch(
     client,
     db_session: Session,
 ) -> None:
@@ -274,18 +274,246 @@ def test_batch_decisions_return_ordered_applied_and_invalid_outcomes_and_persist
         },
     )
 
-    assert response.status_code == 200
-    assert [outcome["status"] for outcome in response.json()["outcomes"]] == [
-        "applied",
-        "invalid",
-    ]
-    assert response.json()["outcomes"][1] == {
-        "issue_id": str(missing_issue_id),
-        "status": "invalid",
-        "code": "issue_not_found",
-        "decision": None,
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "decision_batch_conflict",
+        "message": "问题决策已过期或无效，请刷新后重试。",
+        "issue_ids": [str(missing_issue_id)],
     }
-    assert _count_decisions(db_session, current_issue.issue_id) == 1
+    assert _count_decisions(db_session, current_issue.issue_id) == 0
+    assert _count_operation_batches(db_session) == 0
+
+
+def test_successful_batch_returns_batch_id_and_records_snapshots(
+    client,
+    db_session: Session,
+) -> None:
+    job_id, first_issue, second_issue = _seed_two_current_issues(db_session)
+
+    response = client.put(
+        f"/api/v1/jobs/{job_id}/decisions",
+        json=_decision_payload(
+            [
+                (first_issue, "accepted"),
+                (second_issue, "ignored"),
+            ]
+        ),
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    batch_id = UUID(payload["batch_id"])
+    assert [outcome["issue_id"] for outcome in payload["outcomes"]] == [
+        str(first_issue.issue_id),
+        str(second_issue.issue_id),
+    ]
+    assert [outcome["status"] for outcome in payload["outcomes"]] == [
+        "applied",
+        "applied",
+    ]
+    batch = db_session.get(ReviewOperationBatchRow, batch_id)
+    assert batch is not None
+    assert batch.affected_count == 2
+    items = db_session.scalars(
+        select(ReviewOperationItemRow)
+        .where(ReviewOperationItemRow.operation_batch_id == batch_id)
+        .order_by(ReviewOperationItemRow.sequence)
+    ).all()
+    assert [item.issue_id for item in items] == [
+        first_issue.issue_id,
+        second_issue.issue_id,
+    ]
+    assert all(item.before_json is None for item in items)
+    assert all(item.after_json is not None for item in items)
+    assert [item.after_json["issue_id"] for item in items if item.after_json] == [
+        str(first_issue.issue_id),
+        str(second_issue.issue_id),
+    ]
+    assert all(
+        item.after_json["operation_batch_id"] == str(batch_id)
+        for item in items
+        if item.after_json
+    )
+    assert all("updated_at" in item.after_json for item in items if item.after_json)
+
+
+def test_issue_response_exposes_ordered_unique_suggestions_and_accepts_edited_candidate(
+    client,
+    db_session: Session,
+) -> None:
+    job_id, issue = _seed_issue_with_suggestions(db_session)
+
+    issue_response = client.get(f"/api/v1/jobs/{job_id}/issues")
+
+    assert issue_response.status_code == 200
+    suggestions = issue_response.json()["items"][0]["suggestions"]
+    assert [
+        {
+            "text": item["text"],
+            "source": item["source"],
+            "explanation": item["explanation"],
+            "rank": item["rank"],
+            "preferred": item["preferred"],
+        }
+        for item in suggestions
+    ] == [
+        {
+            "text": "首选",
+            "source": "rule",
+            "explanation": None,
+            "rank": 0,
+            "preferred": True,
+        },
+        {
+            "text": "备选",
+            "source": "rule",
+            "explanation": None,
+            "rank": 1,
+            "preferred": False,
+        },
+        {
+            "text": "另一个",
+            "source": "rule",
+            "explanation": None,
+            "rank": 2,
+            "preferred": False,
+        },
+    ]
+
+    response = client.put(
+        f"/api/v1/jobs/{job_id}/decisions",
+        json={
+            "decisions": [
+                {
+                    "issue_id": str(issue.issue_id),
+                    "issue_version": issue.document_version,
+                    "expected_revision": 0,
+                    "action": "accepted",
+                    "replacement": "编辑后的候选",
+                    "suggestion_id": suggestions[1]["suggestion_id"],
+                }
+            ]
+        },
+    )
+
+    assert response.status_code == 200
+    decision = response.json()["outcomes"][0]["decision"]
+    assert decision["replacement"] == "编辑后的候选"
+    assert decision["suggestion_id"] == suggestions[1]["suggestion_id"]
+    stored = db_session.get(IssueDecisionRow, issue.issue_id)
+    assert stored is not None
+    assert stored.final_replacement == "编辑后的候选"
+
+
+def test_batch_rejects_suggestion_from_another_issue(
+    client,
+    db_session: Session,
+) -> None:
+    job_id, first_issue, second_issue = _seed_two_current_issues(db_session)
+    foreign_suggestion_id = db_session.scalar(
+        select(IssueSuggestionRow.suggestion_id).where(
+            IssueSuggestionRow.issue_id == second_issue.issue_id
+        )
+    )
+    assert foreign_suggestion_id is not None
+
+    response = client.put(
+        f"/api/v1/jobs/{job_id}/decisions",
+        json={
+            "decisions": [
+                {
+                    "issue_id": str(first_issue.issue_id),
+                    "issue_version": first_issue.document_version,
+                    "expected_revision": 0,
+                    "action": "accepted",
+                    "replacement": "编辑后的候选",
+                    "suggestion_id": str(foreign_suggestion_id),
+                }
+            ]
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "decision_batch_conflict"
+    assert response.json()["detail"]["issue_ids"] == [str(first_issue.issue_id)]
+    assert _count_decisions(db_session, first_issue.issue_id) == 0
+    assert _count_operation_batches(db_session) == 0
+
+
+def test_overlapping_accepted_decisions_roll_back_complete_batch(
+    client,
+    db_session: Session,
+) -> None:
+    job_id, first_issue, second_issue = _seed_two_current_issues(db_session)
+
+    response = client.put(
+        f"/api/v1/jobs/{job_id}/decisions",
+        json=_decision_payload(
+            [
+                (first_issue, "accepted"),
+                (second_issue, "accepted"),
+            ]
+        ),
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "overlapping_decisions",
+        "message": "接受的修改范围相互重叠，请仅保留其中一个。",
+        "issue_ids": [
+            str(first_issue.issue_id),
+            str(second_issue.issue_id),
+        ],
+    }
+    assert _count_decisions(db_session, first_issue.issue_id) == 0
+    assert _count_decisions(db_session, second_issue.issue_id) == 0
+    assert _count_operation_batches(db_session) == 0
+
+
+def test_new_accepted_decision_cannot_overlap_existing_accepted_decision(
+    client,
+    db_session: Session,
+) -> None:
+    job_id, first_issue, second_issue = _seed_two_current_issues(db_session)
+    first = client.put(
+        f"/api/v1/jobs/{job_id}/decisions",
+        json=_decision_payload([(first_issue, "accepted")]),
+    )
+    assert first.status_code == 200
+
+    response = client.put(
+        f"/api/v1/jobs/{job_id}/decisions",
+        json=_decision_payload([(second_issue, "accepted")]),
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "overlapping_decisions"
+    assert set(response.json()["detail"]["issue_ids"]) == {
+        str(first_issue.issue_id),
+        str(second_issue.issue_id),
+    }
+    assert _count_decisions(db_session, first_issue.issue_id) == 1
+    assert _count_decisions(db_session, second_issue.issue_id) == 0
+    assert _count_operation_batches(db_session) == 1
+
+
+def test_overlap_conflict_reports_every_nested_issue(
+    client,
+    db_session: Session,
+) -> None:
+    job_id, issues = _seed_nested_current_issues(db_session)
+
+    response = client.put(
+        f"/api/v1/jobs/{job_id}/decisions",
+        json=_decision_payload([(issue, "accepted") for issue in issues]),
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "overlapping_decisions"
+    assert set(response.json()["detail"]["issue_ids"]) == {
+        str(issue.issue_id) for issue in issues
+    }
+    assert _count_operation_batches(db_session) == 0
 
 
 def test_reversed_concurrent_batches_serialize_without_deadlock(
@@ -334,8 +562,8 @@ def test_reversed_concurrent_batches_serialize_without_deadlock(
     )
     second_payload = _decision_payload(
         [
-            (second_issue, "accepted"),
-            (first_issue, "ignored"),
+            (second_issue, "ignored"),
+            (first_issue, "accepted"),
         ]
     )
 
@@ -351,12 +579,18 @@ def test_reversed_concurrent_batches_serialize_without_deadlock(
             ]
             responses = [future.result(timeout=10) for future in futures]
 
-    assert [response.status_code for response in responses] == [200, 200]
-    assert all(
-        [outcome["status"] for outcome in response.json()["outcomes"]]
-        == ["applied", "applied"]
-        for response in responses
-    )
+    assert sorted(response.status_code for response in responses) == [200, 409]
+    successful = next(response for response in responses if response.status_code == 200)
+    conflict = next(response for response in responses if response.status_code == 409)
+    assert [outcome["status"] for outcome in successful.json()["outcomes"]] == [
+        "applied",
+        "applied",
+    ]
+    assert conflict.json()["detail"]["code"] == "decision_batch_conflict"
+    assert set(conflict.json()["detail"]["issue_ids"]) == {
+        str(first_issue.issue_id),
+        str(second_issue.issue_id),
+    }
 
 
 def test_batch_and_reanalysis_serialize_without_deadlock(
@@ -521,6 +755,89 @@ def _seed_two_current_issues(
     )
 
 
+def _seed_issue_with_suggestions(
+    db_session: Session,
+) -> tuple[UUID, SeededIssue]:
+    job_id = _seed_job(db_session, status=JobStatus.COMPLETED)
+    repository = AnalysisRepository(db_session)
+    document = _build_document(version=1, text="候选建议")
+    issue = _build_issue(
+        document=document,
+        issue_id=UUID("00000000-0000-0000-0000-000000000041"),
+        original="候选",
+        suggestion="首选",
+        alternatives=["备选", "首选", "另一个", "备选"],
+    )
+    repository.replace_analysis(job_id, document, [issue], {})
+    db_session.commit()
+
+    return (
+        job_id,
+        SeededIssue(issue.issue_id, document.version, issue.suggestion),
+    )
+
+
+def _seed_nested_current_issues(
+    db_session: Session,
+) -> tuple[UUID, list[SeededIssue]]:
+    job_id = _seed_job(db_session, status=JobStatus.COMPLETED)
+    repository = AnalysisRepository(db_session)
+    document = _build_document(version=1, text="四字文本")
+    issue_specs = [
+        (
+            UUID("00000000-0000-0000-0000-000000000061"),
+            0,
+            4,
+            "四字文本",
+        ),
+        (
+            UUID("00000000-0000-0000-0000-000000000062"),
+            1,
+            2,
+            "字",
+        ),
+        (
+            UUID("00000000-0000-0000-0000-000000000063"),
+            2,
+            3,
+            "文",
+        ),
+    ]
+    issues = [
+        Issue(
+            issue_id=issue_id,
+            document_id=document.document_id,
+            block_id="p-000001",
+            page=1,
+            start=start,
+            end=end,
+            original=original,
+            suggestion="替换",
+            alternatives=["替换"],
+            type="literal",
+            severity=IssueSeverity.WARNING,
+            layer=CheckCategory.SECURITY.value,
+            message="命中规则。",
+            rule_id=f"security-{index}",
+            source="test",
+            source_version="1",
+            confidence=1.0,
+            auto_fixable=True,
+            context=original,
+        )
+        for index, (issue_id, start, end, original) in enumerate(issue_specs)
+    ]
+    repository.replace_analysis(job_id, document, issues, {})
+    db_session.commit()
+    return (
+        job_id,
+        [
+            SeededIssue(issue.issue_id, document.version, issue.suggestion)
+            for issue in issues
+        ],
+    )
+
+
 def _decision_payload(
     decisions: list[tuple[SeededIssue, str]],
 ) -> dict[str, list[dict[str, object]]]:
@@ -546,6 +863,13 @@ def _count_decisions(db_session: Session, issue_id: UUID) -> int:
             .select_from(IssueDecisionRow)
             .where(IssueDecisionRow.issue_id == issue_id)
         )
+        or 0
+    )
+
+
+def _count_operation_batches(db_session: Session) -> int:
+    return int(
+        db_session.scalar(select(func.count()).select_from(ReviewOperationBatchRow))
         or 0
     )
 
@@ -606,6 +930,7 @@ def _build_issue(
     issue_id: UUID,
     original: str,
     suggestion: str | None,
+    alternatives: list[str] | None = None,
 ) -> Issue:
     return Issue(
         issue_id=issue_id,
@@ -616,7 +941,11 @@ def _build_issue(
         end=len(original),
         original=original,
         suggestion=suggestion,
-        alternatives=[] if suggestion is None else [suggestion],
+        alternatives=(
+            [] if suggestion is None else [suggestion]
+        )
+        if alternatives is None
+        else alternatives,
         type="literal",
         severity=IssueSeverity.WARNING,
         layer=CheckCategory.SECURITY.value,

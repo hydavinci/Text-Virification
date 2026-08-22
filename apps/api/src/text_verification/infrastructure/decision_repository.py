@@ -1,15 +1,17 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 from enum import StrEnum
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, model_validator
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from text_verification.domain.issues import DecisionAction, DecisionCommand, IssueDecision
-from text_verification.infrastructure.orm import DocumentRow, IssueDecisionRow, IssueRow, JobRow
+from text_verification.infrastructure.review_operation_repository import (
+    DecisionBatchConflict,
+    ReviewOperationRepository,
+)
 
 ISSUE_NOT_FOUND_CODE = "issue_not_found"
 STALE_ISSUE_VERSION_CODE = "stale_issue_version"
@@ -33,8 +35,6 @@ class DecisionOutcome(BaseModel):
     @model_validator(mode="after")
     def validate_shape(self) -> DecisionOutcome:
         if self.status == DecisionOutcomeStatus.APPLIED:
-            if self.decision is None:
-                raise ValueError("applied outcomes must include a decision")
             if self.code is not None:
                 raise ValueError("applied outcomes must not include a code")
             return self
@@ -50,121 +50,63 @@ class DecisionRepository:
         self._session = session
 
     def apply(self, job_id: UUID, command: DecisionCommand) -> DecisionOutcome:
-        if command.action == DecisionAction.UNREVIEWED:
+        try:
+            result = ReviewOperationRepository(self._session).apply_decisions(
+                job_id,
+                [command],
+            )
+        except DecisionBatchConflict as error:
+            code = error.conflicts[command.issue_id]
             return DecisionOutcome(
                 issue_id=command.issue_id,
-                status=DecisionOutcomeStatus.INVALID,
-                code=UNSUPPORTED_DECISION_ACTION_CODE,
-            )
-        active_version_id = self._session.scalar(
-            select(JobRow.active_version_id).where(JobRow.job_id == job_id)
-        )
-        if active_version_id is None:
-            active_version_id = self._session.scalar(
-                select(DocumentRow.version_id)
-                .where(DocumentRow.job_id == job_id)
-                .order_by(DocumentRow.version.desc())
-                .limit(1)
-            )
-        issue_row = self._session.execute(
-            select(IssueRow)
-            .where(
-                IssueRow.job_id == job_id,
-                IssueRow.issue_id == command.issue_id,
-                IssueRow.version_id == active_version_id,
-            )
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        ).scalar_one_or_none()
-        if issue_row is None:
-            current_document_version = self._session.scalar(
-                select(DocumentRow.version).where(DocumentRow.version_id == active_version_id)
-            )
-            if (
-                current_document_version is not None
-                and current_document_version > command.issue_version
-            ):
-                return DecisionOutcome(
-                    issue_id=command.issue_id,
-                    status=DecisionOutcomeStatus.CONFLICT,
-                    code=STALE_ISSUE_VERSION_CODE,
-                )
-            return DecisionOutcome(
-                issue_id=command.issue_id,
-                status=DecisionOutcomeStatus.INVALID,
-                code=ISSUE_NOT_FOUND_CODE,
-            )
-        if issue_row.document_version != command.issue_version:
-            return DecisionOutcome(
-                issue_id=command.issue_id,
-                status=DecisionOutcomeStatus.CONFLICT,
-                code=STALE_ISSUE_VERSION_CODE,
+                status=(
+                    DecisionOutcomeStatus.CONFLICT
+                    if code.startswith("stale_")
+                    else DecisionOutcomeStatus.INVALID
+                ),
+                code=code,
             )
 
-        decision_row = self._session.execute(
-            select(IssueDecisionRow)
-            .where(IssueDecisionRow.issue_id == command.issue_id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        ).scalar_one_or_none()
-        if decision_row is not None and _matches_command(decision_row, command):
-            return DecisionOutcome(
-                issue_id=command.issue_id,
-                status=DecisionOutcomeStatus.APPLIED,
-                decision=_to_issue_decision(decision_row),
-            )
-
-        updated_at = datetime.now(UTC)
-        if decision_row is None:
-            decision_row = IssueDecisionRow(
-                issue_id=command.issue_id,
-                version_id=issue_row.version_id,
-                job_id=job_id,
-                issue_version=command.issue_version,
-                revision=0,
-                action=command.action.value,
-                replacement=command.replacement,
-                final_replacement=command.replacement,
-                suggestion_id=command.suggestion_id,
-                operation_batch_id=None,
-                updated_at=updated_at,
-            )
-            self._session.add(decision_row)
-        else:
-            decision_row.version_id = issue_row.version_id
-            decision_row.job_id = job_id
-            decision_row.issue_version = command.issue_version
-            decision_row.action = command.action.value
-            decision_row.replacement = command.replacement
-            decision_row.final_replacement = command.replacement
-            decision_row.suggestion_id = command.suggestion_id
-            decision_row.updated_at = updated_at
-
-        self._session.flush()
-
+        item = result.items[0]
         return DecisionOutcome(
             issue_id=command.issue_id,
             status=DecisionOutcomeStatus.APPLIED,
-            decision=_to_issue_decision(decision_row),
+            decision=(
+                None
+                if item.after is None
+                else _snapshot_to_decision(
+                    command.issue_id,
+                    item.after,
+                    updated_at=item.updated_at,
+                )
+            ),
         )
 
 
-def _matches_command(row: IssueDecisionRow, command: DecisionCommand) -> bool:
-    return (
-        row.issue_version == command.issue_version
-        and row.action == command.action.value
-        and (row.final_replacement or row.replacement) == command.replacement
-        and row.suggestion_id == command.suggestion_id
-    )
-
-
-def _to_issue_decision(row: IssueDecisionRow) -> IssueDecision:
+def _snapshot_to_decision(
+    issue_id: UUID,
+    snapshot: dict[str, object],
+    *,
+    updated_at: datetime,
+) -> IssueDecision:
     return IssueDecision(
-        issue_id=row.issue_id,
-        issue_version=row.issue_version,
-        revision=row.revision,
-        action=DecisionAction(row.action),
-        replacement=row.final_replacement or row.replacement,
-        suggestion_id=row.suggestion_id,
-        updated_at=row.updated_at,
+        issue_id=issue_id,
+        issue_version=_required_int(snapshot["issue_version"]),
+        revision=_required_int(snapshot["revision"]),
+        action=DecisionAction(str(snapshot["action"])),
+        replacement=(
+            None
+            if snapshot["final_replacement"] is None
+            else str(snapshot["final_replacement"])
+        ),
+        suggestion_id=(
+            None if snapshot["suggestion_id"] is None else UUID(str(snapshot["suggestion_id"]))
+        ),
+        updated_at=updated_at,
     )
+
+
+def _required_int(value: object) -> int:
+    if not isinstance(value, int):
+        raise TypeError("decision snapshot integer field is invalid")
+    return value

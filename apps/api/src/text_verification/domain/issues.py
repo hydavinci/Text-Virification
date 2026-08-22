@@ -6,6 +6,8 @@ from uuid import UUID
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
+from text_verification.domain.review_operations import IssueSuggestion
+
 
 class IssueSeverity(StrEnum):
     ERROR = "error"
@@ -75,6 +77,7 @@ class Issue(BaseModel):
     original: str
     suggestion: str | None
     alternatives: list[str]
+    suggestions: list[IssueSuggestion] = Field(default_factory=list)
     type: str
     severity: IssueSeverity
     layer: str

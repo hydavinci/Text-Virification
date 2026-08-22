@@ -18,6 +18,7 @@ from text_verification.domain.issues import (
     IssueDecisionSummary,
     IssueSeverity,
 )
+from text_verification.domain.review_operations import IssueSuggestion, SuggestionSource
 from text_verification.domain.revisions import (
     DocumentVersionStatus,
     ImmutableDocumentVersionError,
@@ -29,6 +30,7 @@ from text_verification.infrastructure.orm import (
     DocumentVersionRow,
     IssueDecisionRow,
     IssueRow,
+    IssueSuggestionRow,
     JobRow,
 )
 
@@ -206,32 +208,45 @@ class AnalysisRepository:
         self._session.flush()
 
         for issue in issues:
-            self._session.add(
-                IssueRow(
-                    issue_id=issue.issue_id,
-                    version_id=version_id,
-                    job_id=job_id,
-                    document_id=issue.document_id,
-                    document_version=document.version,
-                    category=issue.layer,
-                    severity=issue.severity.value,
-                    rule_id=issue.rule_id,
-                    block_id=issue.block_id,
-                    page=issue.page,
-                    start_offset=issue.start,
-                    end_offset=issue.end,
-                    original=issue.original,
-                    suggestion=issue.suggestion,
-                    alternatives_json=issue.alternatives,
-                    issue_type=issue.type,
-                    message=issue.message,
-                    source=issue.source,
-                    source_version=issue.source_version,
-                    confidence=issue.confidence,
-                    auto_fixable=issue.auto_fixable,
-                    context=issue.context,
-                )
+            issue_row = IssueRow(
+                issue_id=issue.issue_id,
+                version_id=version_id,
+                job_id=job_id,
+                document_id=issue.document_id,
+                document_version=document.version,
+                category=issue.layer,
+                severity=issue.severity.value,
+                rule_id=issue.rule_id,
+                block_id=issue.block_id,
+                page=issue.page,
+                start_offset=issue.start,
+                end_offset=issue.end,
+                original=issue.original,
+                suggestion=issue.suggestion,
+                alternatives_json=issue.alternatives,
+                issue_type=issue.type,
+                message=issue.message,
+                source=issue.source,
+                source_version=issue.source_version,
+                confidence=issue.confidence,
+                auto_fixable=issue.auto_fixable,
+                context=issue.context,
             )
+            self._session.add(issue_row)
+            for rank, text in enumerate(
+                _ordered_unique_suggestions(issue.suggestion, issue.alternatives)
+            ):
+                self._session.add(
+                    IssueSuggestionRow(
+                        issue_id=issue.issue_id,
+                        version_id=version_id,
+                        text=text,
+                        source=SuggestionSource.RULE.value,
+                        explanation=None,
+                        rank=rank,
+                        preferred=rank == 0,
+                    )
+                )
 
         for category, failure in failures.items():
             self._session.add(
@@ -392,8 +407,15 @@ class AnalysisRepository:
 
         result_rows = self._session.execute(statement).all()
         visible_rows = result_rows[: query.limit]
+        suggestions_by_issue = self._load_suggestions(
+            [issue_row.issue_id for issue_row, _block_order, _decision_row in visible_rows]
+        )
         items = [
-            _to_issue(issue_row=issue_row, decision_row=decision_row)
+            _to_issue(
+                issue_row=issue_row,
+                decision_row=decision_row,
+                suggestions=suggestions_by_issue.get(issue_row.issue_id, []),
+            )
             for issue_row, _block_order, decision_row in visible_rows
         ]
         next_cursor = None
@@ -434,8 +456,15 @@ class AnalysisRepository:
                 IssueRow.issue_id,
             )
         ).all()
+        suggestions_by_issue = self._load_suggestions(
+            [issue_row.issue_id for issue_row, _block_order, _decision_row in rows]
+        )
         return [
-            _to_issue(issue_row=issue_row, decision_row=decision_row)
+            _to_issue(
+                issue_row=issue_row,
+                decision_row=decision_row,
+                suggestions=suggestions_by_issue.get(issue_row.issue_id, []),
+            )
             for issue_row, _block_order, decision_row in rows
         ]
 
@@ -520,6 +549,24 @@ class AnalysisRepository:
             statement = statement.where(IssueRow.original.ilike(f"%{query.search}%"))
         return statement
 
+    def _load_suggestions(
+        self,
+        issue_ids: list[UUID],
+    ) -> dict[UUID, list[IssueSuggestion]]:
+        if not issue_ids:
+            return {}
+        rows = self._session.scalars(
+            select(IssueSuggestionRow)
+            .where(IssueSuggestionRow.issue_id.in_(issue_ids))
+            .order_by(IssueSuggestionRow.issue_id, IssueSuggestionRow.rank)
+        ).all()
+        suggestions_by_issue: dict[UUID, list[IssueSuggestion]] = {}
+        for row in rows:
+            suggestions_by_issue.setdefault(row.issue_id, []).append(
+                IssueSuggestion.model_validate(row)
+            )
+        return suggestions_by_issue
+
     def _validate_issues(self, document: DocumentModel, issues: list[Issue]) -> None:
         block_pages = {block.block_id: block.page for block in document.blocks}
         for issue in issues:
@@ -582,7 +629,12 @@ class AnalysisRepository:
         return version
 
 
-def _to_issue(*, issue_row: IssueRow, decision_row: IssueDecisionRow | None) -> Issue:
+def _to_issue(
+    *,
+    issue_row: IssueRow,
+    decision_row: IssueDecisionRow | None,
+    suggestions: list[IssueSuggestion],
+) -> Issue:
     return Issue(
         issue_id=issue_row.issue_id,
         document_id=issue_row.document_id,
@@ -594,6 +646,7 @@ def _to_issue(*, issue_row: IssueRow, decision_row: IssueDecisionRow | None) -> 
         original=issue_row.original,
         suggestion=issue_row.suggestion,
         alternatives=issue_row.alternatives_json,
+        suggestions=suggestions,
         type=issue_row.issue_type,
         severity=IssueSeverity(issue_row.severity),
         layer=issue_row.category,
@@ -606,6 +659,20 @@ def _to_issue(*, issue_row: IssueRow, decision_row: IssueDecisionRow | None) -> 
         context=issue_row.context,
         decision=_to_issue_decision_summary(decision_row),
     )
+
+
+def _ordered_unique_suggestions(
+    suggestion: str | None,
+    alternatives: list[str],
+) -> list[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for value in ([suggestion] if suggestion is not None else []) + alternatives:
+        if value in seen:
+            continue
+        seen.add(value)
+        ordered.append(value)
+    return ordered
 
 
 def _to_issue_decision_summary(row: IssueDecisionRow | None) -> IssueDecisionSummary | None:

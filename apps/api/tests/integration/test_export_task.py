@@ -360,7 +360,7 @@ def test_export_uses_decision_snapshot_taken_before_later_decision_change(
         DecisionCommand(
             issue_id=issue.issue_id,
             issue_version=1,
-            expected_revision=0,
+            expected_revision=1,
             action=DecisionAction.ACCEPTED,
             replacement="后改的",
         ),

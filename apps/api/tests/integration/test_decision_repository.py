@@ -134,7 +134,7 @@ def test_apply_returns_conflict_for_removed_issue_from_stale_document_version(
     assert count_decisions(postgres_session, stale_issue.issue_id) == 0
 
 
-def test_apply_same_decision_is_idempotent(postgres_session: Session) -> None:
+def test_apply_same_decision_requires_current_revision(postgres_session: Session) -> None:
     DecisionAction, DecisionCommand, DecisionRepository, DecisionOutcomeStatus, _ = (
         _decision_symbols()
     )
@@ -148,16 +148,25 @@ def test_apply_same_decision_is_idempotent(postgres_session: Session) -> None:
     repository = DecisionRepository(postgres_session)
 
     first = repository.apply(job_id, command)
-    second = repository.apply(job_id, command)
+    assert first.decision is not None
+    second = repository.apply(
+        job_id,
+        command.model_copy(update={"expected_revision": first.decision.revision}),
+    )
     postgres_session.commit()
 
     assert first.status == DecisionOutcomeStatus.APPLIED
     assert second.status == DecisionOutcomeStatus.APPLIED
-    assert first.decision == second.decision
+    assert first.decision is not None
+    assert second.decision is not None
+    assert second.decision.action == first.decision.action
+    assert second.decision.revision == first.decision.revision + 1
     assert count_decisions(postgres_session, issue.issue_id) == 1
 
 
-def test_apply_updates_existing_decision_when_command_changes(postgres_session: Session) -> None:
+def test_apply_updates_existing_decision_when_command_revision_is_current(
+    postgres_session: Session,
+) -> None:
     DecisionAction, DecisionCommand, DecisionRepository, DecisionOutcomeStatus, _ = (
         _decision_symbols()
     )
@@ -174,12 +183,13 @@ def test_apply_updates_existing_decision_when_command_changes(postgres_session: 
             replacement=issue.suggestion,
         ),
     )
+    assert first.decision is not None
     second = repository.apply(
         job_id,
         DecisionCommand(
             issue_id=issue.issue_id,
             issue_version=issue.document_version,
-            expected_revision=0,
+            expected_revision=first.decision.revision,
             action=DecisionAction.ACCEPTED,
             replacement="建议文本",
         ),
