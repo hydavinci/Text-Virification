@@ -179,3 +179,19 @@ environment skips.
 - FastAPI TestClient emits the existing Starlette/httpx deprecation warning.
 - The two known Windows-local WeasyPrint tests remain excluded as instructed.
 - No Task 5 functional concerns remain.
+
+## Runtime stop follow-up — 2026-08-22
+
+Status: `DONE_WITH_CONCERNS`.
+
+- Stopped broad exploration/testing immediately; no new suite was started.
+- No long-running command remained active. The only listed legacy shell was already
+  completed with exit code 1.
+- Git was clean at `6d124da` before this report-only update.
+- The coherent Task 5 implementation remains committed at `5ebb9c3`.
+- Focused Task 5 evidence remains `44 passed`; it was not rerun during this stop.
+
+Missing brief requirements: none identified in the committed implementation.
+
+Concern: the earlier session ran broader verification than was acceptable for the
+runtime budget. This follow-up intentionally performs no additional test execution.
