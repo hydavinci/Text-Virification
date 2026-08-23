@@ -5,7 +5,7 @@ import type { DecisionCommand, IssueDecision } from '../src/types/analysis'
 
 type AcceptedDecisionCommand = Extract<DecisionCommand, { action: 'accepted' }>
 type IgnoredDecisionCommand = Extract<DecisionCommand, { action: 'ignored' }>
-type CustomDecisionCommand = Extract<DecisionCommand, { action: 'custom' }>
+type UnreviewedDecisionCommand = Extract<DecisionCommand, { action: 'unreviewed' }>
 
 function buildAcceptedDecisionCommand(
   overrides: Partial<Omit<AcceptedDecisionCommand, 'action'>> = {}
@@ -13,7 +13,10 @@ function buildAcceptedDecisionCommand(
   return {
     issue_id: '11111111-1111-1111-1111-111111111111',
     issue_version: 3,
+    expected_revision: 1,
     action: 'accepted',
+    replacement: '替换建议',
+    suggestion_id: null,
     ...overrides
   }
 }
@@ -24,19 +27,24 @@ function buildIgnoredDecisionCommand(
   return {
     issue_id: '11111111-1111-1111-1111-111111111111',
     issue_version: 3,
+    expected_revision: 1,
     action: 'ignored',
+    replacement: null,
+    suggestion_id: null,
     ...overrides
   }
 }
 
-function buildCustomDecisionCommand(
-  overrides: Partial<Omit<CustomDecisionCommand, 'action'>> = {}
-): CustomDecisionCommand {
+function buildUnreviewedDecisionCommand(
+  overrides: Partial<Omit<UnreviewedDecisionCommand, 'action'>> = {}
+): UnreviewedDecisionCommand {
   return {
     issue_id: '11111111-1111-1111-1111-111111111111',
     issue_version: 3,
-    action: 'custom',
-    replacement: '替换建议',
+    expected_revision: 1,
+    action: 'unreviewed',
+    replacement: null,
+    suggestion_id: null,
     ...overrides
   }
 }
@@ -77,12 +85,13 @@ describe('createAnalysisApi', () => {
     })
 
     const result = await createAnalysisApi({ fetch: fetchMock }).getDocumentPage('job-1', {
+      version_id: 'version/1',
       cursor: 'cursor-1',
       limit: 25
     })
 
     expect(fetchMock).toHaveBeenCalledWith(
-      '/api/v1/jobs/job-1/document?cursor=cursor-1&limit=25',
+      '/api/v1/jobs/job-1/document?version_id=version%2F1&cursor=cursor-1&limit=25',
       undefined
     )
     expect(result.blocks[0]?.kind).toBe('paragraph')
@@ -129,19 +138,20 @@ describe('createAnalysisApi', () => {
     await createAnalysisApi({ fetch: fetchMock }).getIssues('job-1', {
       category: 'security',
       decision: 'unreviewed',
+      version_id: 'version/1',
       cursor: 'next',
       limit: 50
     })
 
     expect(fetchMock).toHaveBeenCalledWith(
-      '/api/v1/jobs/job-1/issues?category=security&decision=unreviewed&cursor=next&limit=50',
+      '/api/v1/jobs/job-1/issues?category=security&decision=unreviewed&version_id=version%2F1&cursor=next&limit=50',
       undefined
     )
   })
 
   it('returns every decision outcome', async () => {
     const acceptedDecision = buildAcceptedDecisionCommand()
-    const staleDecision = buildCustomDecisionCommand({
+    const staleDecision = buildAcceptedDecisionCommand({
       issue_id: '22222222-2222-2222-2222-222222222222',
       replacement: '替换建议'
     })
@@ -151,13 +161,16 @@ describe('createAnalysisApi', () => {
     const appliedDecision = {
       issue_id: acceptedDecision.issue_id,
       issue_version: acceptedDecision.issue_version,
+      revision: acceptedDecision.expected_revision + 1,
       action: acceptedDecision.action,
-      replacement: null,
+      replacement: acceptedDecision.replacement,
+      suggestion_id: acceptedDecision.suggestion_id,
       updated_at: '2026-08-15T12:00:00Z'
     } satisfies IssueDecision
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
+        batch_id: 'batch-1',
         outcomes: [
           {
             issue_id: acceptedDecision.issue_id,
@@ -235,7 +248,6 @@ describe('createAnalysisApi', () => {
         },
         by_decision: {
           accepted: 1,
-          custom: 0,
           ignored: 1,
           unreviewed: 1
         },
@@ -243,9 +255,42 @@ describe('createAnalysisApi', () => {
       })
     })
 
-    const result = await createAnalysisApi({ fetch: fetchMock }).getSummary('job-1')
+    const result = await createAnalysisApi({ fetch: fetchMock }).getSummary('job-1', {
+      version_id: 'version/1'
+    })
 
-    expect(fetchMock).toHaveBeenCalledWith('/api/v1/jobs/job-1/summary', undefined)
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/jobs/job-1/summary?version_id=version%2F1',
+      undefined
+    )
     expect(result.by_decision.unreviewed).toBe(1)
+  })
+
+  it('sends unreviewed decisions as command-only requests', async () => {
+    const command = buildUnreviewedDecisionCommand()
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        batch_id: 'batch-1',
+        outcomes: [
+          {
+            issue_id: command.issue_id,
+            status: 'applied',
+            code: null,
+            decision: null
+          }
+        ]
+      })
+    })
+
+    await createAnalysisApi({ fetch: fetchMock }).putDecisions('job-1', [command])
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/jobs/job-1/decisions',
+      expect.objectContaining({
+        method: 'PUT',
+        body: JSON.stringify({ decisions: [command] })
+      })
+    )
   })
 })

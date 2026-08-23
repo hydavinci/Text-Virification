@@ -2394,8 +2394,10 @@ describe('ReviewWorkspaceView', () => {
       {
         issue_id: 'issue-1',
         issue_version: 1,
-        action: 'custom',
-        replacement: '专业'
+        expected_revision: 0,
+        action: 'accepted',
+        replacement: '专业',
+        suggestion_id: null
       }
     ])
     expect(wrapper.get('[data-highlight-range-issue-ids~="issue-1"]').text()).toBe(
@@ -3054,17 +3056,26 @@ describe('ReviewWorkspaceView', () => {
       {
         issue_id: 'issue-1',
         issue_version: 1,
-        action: 'accepted'
+        expected_revision: 0,
+        action: 'accepted',
+        replacement: '首段',
+        suggestion_id: null
       },
       {
         issue_id: 'issue-2',
         issue_version: 1,
-        action: 'accepted'
+        expected_revision: 0,
+        action: 'accepted',
+        replacement: '首段',
+        suggestion_id: null
       },
       {
         issue_id: 'issue-3',
         issue_version: 1,
-        action: 'accepted'
+        expected_revision: 0,
+        action: 'accepted',
+        replacement: '首段',
+        suggestion_id: null
       }
     ])
     expect(getIssues).toHaveBeenCalledTimes(2)
@@ -3198,7 +3209,10 @@ describe('ReviewWorkspaceView', () => {
       {
         issue_id: 'issue-2',
         issue_version: 1,
-        action: 'ignored'
+        expected_revision: 0,
+        action: 'ignored',
+        replacement: null,
+        suggestion_id: null
       }
     ])
 
@@ -3284,7 +3298,10 @@ describe('ReviewWorkspaceView', () => {
       {
         issue_id: 'issue-error',
         issue_version: 1,
-        action: 'accepted'
+        expected_revision: 0,
+        action: 'accepted',
+        replacement: '首段',
+        suggestion_id: null
       }
     ])
   })
@@ -3459,7 +3476,10 @@ describe('ReviewWorkspaceView', () => {
       {
         issue_id: 'issue-1',
         issue_version: 1,
-        action: 'accepted'
+        expected_revision: 0,
+        action: 'accepted',
+        replacement: '首段',
+        suggestion_id: null
       }
     ])
     expect(wrapper.get('[data-highlight-range-issue-ids~="issue-1"]').text()).toBe(
@@ -3823,20 +3843,26 @@ describe('ReviewWorkspaceView', () => {
       {
         issue_id: 'issue-1',
         issue_version: 1,
-        action: 'custom',
-        replacement: '条目'
+        expected_revision: 0,
+        action: 'accepted',
+        replacement: '条目',
+        suggestion_id: null
       },
       {
         issue_id: 'issue-2',
         issue_version: 1,
-        action: 'custom',
-        replacement: '条目'
+        expected_revision: 0,
+        action: 'accepted',
+        replacement: '条目',
+        suggestion_id: null
       },
       {
         issue_id: 'issue-3',
         issue_version: 1,
-        action: 'custom',
-        replacement: '条目'
+        expected_revision: 0,
+        action: 'accepted',
+        replacement: '条目',
+        suggestion_id: null
       }
     ])
     expect(rawBlock.text).toBe('甲😀项目乙😀项目丙项目')

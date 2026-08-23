@@ -15,7 +15,6 @@ const CATEGORY_LABELS: Record<CheckCategory, string> = {
 const DECISION_LABELS: Record<IssueDecisionState, string> = {
   accepted: '已接受',
   ignored: '已忽略',
-  custom: '已自定义',
   unreviewed: '未处理'
 }
 

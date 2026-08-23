@@ -20,6 +20,18 @@ export async function requestJson<T>(
   return (await response.json()) as T
 }
 
+export async function requestVoid(
+  dependencies: RequestJsonDependencies,
+  path: string,
+  init?: RequestInit
+): Promise<void> {
+  const response = await dependencies.fetch.call(globalThis, buildApiPath(path), init)
+
+  if (!response.ok) {
+    throw await buildApiError(response)
+  }
+}
+
 export function buildApiPath(path: string): string {
   return `${API_BASE}${path}`
 }

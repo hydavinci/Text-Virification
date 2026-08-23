@@ -38,8 +38,7 @@ const categoryOrder = CHECK_CATEGORY_VALUES
 const decisionOrder: IssueDecisionState[] = [
   'unreviewed',
   'accepted',
-  'ignored',
-  'custom'
+  'ignored'
 ]
 const category = ref<CheckCategory | ''>(props.filters.category ?? '')
 const severity = ref<IssueSeverity | ''>(props.filters.severity ?? '')

@@ -3,6 +3,7 @@ import type { InjectionKey } from 'vue'
 import { requestJson, type RequestJsonDependencies } from './client'
 import type {
   AnalysisSummaryResponse,
+  AnalysisSummaryQuery,
   DecisionBatchResponse,
   DecisionCommand,
   DocumentPageQuery,
@@ -16,7 +17,7 @@ const MAX_DECISIONS_PER_BATCH = 500
 export interface AnalysisApi {
   getDocumentPage(jobId: string, query?: DocumentPageQuery): Promise<DocumentPageResponse>
   getIssues(jobId: string, query?: IssuesQuery): Promise<IssuePageResponse>
-  getSummary(jobId: string): Promise<AnalysisSummaryResponse>
+  getSummary(jobId: string, query?: AnalysisSummaryQuery): Promise<AnalysisSummaryResponse>
   putDecisions(jobId: string, decisions: DecisionCommand[]): Promise<DecisionBatchResponse>
 }
 
@@ -47,10 +48,10 @@ export function createAnalysisApi(
         withSearch(`/jobs/${encodeURIComponent(jobId)}/issues`, buildIssuesQueryParams(query))
       )
     },
-    getSummary(jobId) {
+    getSummary(jobId, query) {
       return requestJson<AnalysisSummaryResponse>(
         dependencies,
-        `/jobs/${encodeURIComponent(jobId)}/summary`
+        withSearch(`/jobs/${encodeURIComponent(jobId)}/summary`, buildSummaryQueryParams(query))
       )
     },
     async putDecisions(jobId, decisions) {
@@ -71,6 +72,9 @@ export function createAnalysisApi(
 
 function buildDocumentQueryParams(query: DocumentPageQuery | undefined): URLSearchParams {
   const params = new URLSearchParams()
+  if (query?.version_id) {
+    params.set('version_id', query.version_id)
+  }
   if (query?.cursor) {
     params.set('cursor', query.cursor)
   }
@@ -95,6 +99,9 @@ function buildIssuesQueryParams(query: IssuesQuery | undefined): URLSearchParams
   if (query?.search) {
     params.set('search', query.search)
   }
+  if (query?.version_id) {
+    params.set('version_id', query.version_id)
+  }
   if (query?.cursor) {
     params.set('cursor', query.cursor)
   }
@@ -102,6 +109,14 @@ function buildIssuesQueryParams(query: IssuesQuery | undefined): URLSearchParams
     params.set('limit', String(query.limit))
   }
 
+  return params
+}
+
+function buildSummaryQueryParams(query: AnalysisSummaryQuery | undefined): URLSearchParams {
+  const params = new URLSearchParams()
+  if (query?.version_id) {
+    params.set('version_id', query.version_id)
+  }
   return params
 }
 

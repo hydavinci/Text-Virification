@@ -12,6 +12,7 @@ import type {
 export type CheckerFailureMap = Partial<Record<CheckCategory, CheckerFailure>>
 
 export interface DocumentPageQuery {
+  version_id?: string | null
   cursor?: string | null
   limit?: number
 }
@@ -21,17 +22,24 @@ export interface IssuesQuery {
   severity?: IssueSeverity
   decision?: IssueDecisionState
   search?: string
+  version_id?: string | null
   cursor?: string | null
   limit?: number
+}
+
+export interface AnalysisSummaryQuery {
+  version_id?: string | null
 }
 
 interface DecisionCommandFields {
   issue_id: string
   issue_version: number
+  expected_revision: number
 }
 
 interface IssueDecisionSummaryFields {
   issue_version: number
+  revision?: number
   updated_at: string
 }
 
@@ -41,48 +49,54 @@ interface IssueDecisionFields extends IssueDecisionSummaryFields {
 
 type AcceptedRequestedDecision<TFields> = TFields & {
   action: 'accepted'
-  replacement?: null
+  replacement: string
+  suggestion_id: string | null
 }
 
 type IgnoredRequestedDecision<TFields> = TFields & {
   action: 'ignored'
-  replacement?: null
+  replacement: null
+  suggestion_id: null
 }
 
-type CustomRequestedDecision<TFields> = TFields & {
-  action: 'custom'
-  replacement: string
+type UnreviewedRequestedDecision<TFields> = TFields & {
+  action: 'unreviewed'
+  replacement: null
+  suggestion_id: null
 }
 
 type AcceptedPersistedDecision<TFields> = TFields & {
   action: 'accepted'
-  replacement: null
+  replacement: string | null
+  suggestion_id?: string | null
 }
 
 type IgnoredPersistedDecision<TFields> = TFields & {
   action: 'ignored'
   replacement: null
+  suggestion_id?: null
 }
 
-type CustomPersistedDecision<TFields> = TFields & {
+type LegacyCustomPersistedDecision<TFields> = TFields & {
   action: 'custom'
   replacement: string
+  suggestion_id?: string | null
 }
 
 export type DecisionCommand =
   | AcceptedRequestedDecision<DecisionCommandFields>
   | IgnoredRequestedDecision<DecisionCommandFields>
-  | CustomRequestedDecision<DecisionCommandFields>
+  | UnreviewedRequestedDecision<DecisionCommandFields>
 
 export type IssueDecisionSummary =
   | AcceptedPersistedDecision<IssueDecisionSummaryFields>
   | IgnoredPersistedDecision<IssueDecisionSummaryFields>
-  | CustomPersistedDecision<IssueDecisionSummaryFields>
+  | LegacyCustomPersistedDecision<IssueDecisionSummaryFields>
 
 export type IssueDecision =
   | AcceptedPersistedDecision<IssueDecisionFields>
   | IgnoredPersistedDecision<IssueDecisionFields>
-  | CustomPersistedDecision<IssueDecisionFields>
+  | LegacyCustomPersistedDecision<IssueDecisionFields>
 
 export interface DocumentBlock {
   block_id: string
@@ -106,6 +120,14 @@ export interface Issue {
   original: string
   suggestion: string | null
   alternatives: string[]
+  suggestions?: Array<{
+    suggestion_id: string
+    text: string
+    source: 'rule' | 'dictionary' | 'llm' | 'manual'
+    explanation: string | null
+    rank: number
+    preferred: boolean
+  }>
   type: string
   severity: IssueSeverity
   layer: string
@@ -148,7 +170,7 @@ export interface AnalysisSummaryResponse {
   total_issues: number
   by_category: Record<CheckCategory, number>
   by_severity: Record<IssueSeverity, number>
-  by_decision: Record<IssueDecisionState, number>
+  by_decision: Record<IssueDecisionState, number> & Partial<Record<'custom', number>>
   checker_failures: CheckerFailureMap
 }
 
@@ -156,7 +178,7 @@ export interface AppliedDecisionOutcome {
   issue_id: string
   status: Extract<DecisionOutcomeStatus, 'applied'>
   code: null
-  decision: IssueDecision
+  decision: IssueDecision | null
 }
 
 export interface NonAppliedDecisionOutcome {
@@ -169,5 +191,6 @@ export interface NonAppliedDecisionOutcome {
 export type DecisionOutcome = AppliedDecisionOutcome | NonAppliedDecisionOutcome
 
 export interface DecisionBatchResponse {
+  batch_id?: string
   outcomes: DecisionOutcome[]
 }

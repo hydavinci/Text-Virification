@@ -28,11 +28,11 @@ export const ISSUE_SEVERITY_VALUES = ['error', 'warning', 'info'] as const
 
 export type IssueSeverity = (typeof ISSUE_SEVERITY_VALUES)[number]
 
-export const DECISION_ACTION_VALUES = ['accepted', 'ignored', 'custom'] as const
+export const DECISION_ACTION_VALUES = ['accepted', 'ignored', 'unreviewed'] as const
 
 export type DecisionAction = (typeof DECISION_ACTION_VALUES)[number]
 
-export const ISSUE_DECISION_VALUES = ['accepted', 'ignored', 'custom', 'unreviewed'] as const
+export const ISSUE_DECISION_VALUES = ['accepted', 'ignored', 'unreviewed'] as const
 
 export type IssueDecisionState = (typeof ISSUE_DECISION_VALUES)[number]
 

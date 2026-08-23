@@ -6,6 +6,8 @@ import type { DecisionAction } from '../../types/review'
 import { categoryLabel, issueTypeLabel } from './presentation'
 import { describeSeverity } from './severity'
 
+type ReviewDecisionAction = DecisionAction | 'custom'
+
 const props = defineProps<{
   issue: Issue | null
   decisionError: string | null
@@ -13,7 +15,7 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  decide: [action: DecisionAction, replacement?: string]
+  decide: [action: ReviewDecisionAction, replacement?: string]
   retryDecision: []
 }>()
 
@@ -44,13 +46,15 @@ watch(
   () => props.issue,
   (issue) => {
     customReplacement.value =
-      issue?.decision?.action === 'custom' ? issue.decision.replacement : ''
+      issue?.decision?.action === 'accepted' || issue?.decision?.action === 'custom'
+        ? issue.decision.replacement ?? ''
+        : ''
     customReplacementError.value = null
   },
   { immediate: true }
 )
 
-function submitDecision(action: Exclude<DecisionAction, 'custom'>): void {
+function submitDecision(action: Extract<DecisionAction, 'accepted' | 'ignored'>): void {
   customReplacementError.value = null
   emit('decide', action)
 }

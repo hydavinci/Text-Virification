@@ -55,34 +55,47 @@ const analysisApi: AnalysisApi = {
     const updatedAt = new Date('2026-08-20T00:00:00.000Z').toISOString()
 
     return {
+      batch_id: 'batch-1',
       outcomes: decisions.map((decision) => {
         const baseDecision = {
           issue_id: decision.issue_id,
           issue_version: decision.issue_version,
+          revision: decision.expected_revision + 1,
           updated_at: updatedAt
         }
 
-        if (decision.action === 'custom') {
+        if (decision.action === 'accepted') {
           return {
             issue_id: decision.issue_id,
             status: 'applied',
             code: null,
             decision: {
               ...baseDecision,
-              action: 'custom' as const,
-              replacement: decision.replacement
+              action: 'accepted' as const,
+              replacement: decision.replacement,
+              suggestion_id: decision.suggestion_id
             }
+          }
+        }
+
+        if (decision.action === 'unreviewed') {
+          return {
+            issue_id: decision.issue_id,
+            status: 'applied' as const,
+            code: null,
+            decision: null
           }
         }
 
         return {
           issue_id: decision.issue_id,
-          status: 'applied',
+          status: 'applied' as const,
           code: null,
           decision: {
             ...baseDecision,
-            action: decision.action,
-            replacement: null
+            action: 'ignored' as const,
+            replacement: null,
+            suggestion_id: null
           }
         }
       })

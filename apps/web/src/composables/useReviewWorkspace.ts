@@ -26,6 +26,8 @@ const DOCUMENT_PAGE_LIMIT = 100
 const ISSUE_PAGE_LIMIT = 50
 const MAX_VISIBLE_BATCH_DECISIONS = 500
 
+type ReviewDecisionAction = DecisionAction | 'custom'
+
 export type ReviewIssueFilters = Omit<IssuesQuery, 'cursor' | 'limit'>
 
 interface LoadingState {
@@ -95,8 +97,8 @@ export interface ReviewWorkspaceState {
   selectIssue(issueId: string): void
   selectHighlight(issueId: string): void
   setFilters(filters: ReviewIssueFilters): Promise<void>
-  decide(action: DecisionAction, replacement?: string): Promise<void>
-  decideVisible(action: Exclude<DecisionAction, 'custom'>): Promise<void>
+  decide(action: ReviewDecisionAction, replacement?: string): Promise<void>
+  decideVisible(action: Extract<DecisionAction, 'accepted' | 'ignored'>): Promise<void>
   retryDecision(): Promise<void>
   loadNextBlocks(): Promise<void>
   loadNextIssues(): Promise<void>
@@ -682,30 +684,37 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     failedDecisions.value = nextFailedDecisions
   }
 
-  function optimisticDecision(command: DecisionCommand): IssueDecisionSummary {
+  function optimisticDecision(command: DecisionCommand): IssueDecisionSummary | null {
     const fields = {
       issue_version: command.issue_version,
+      revision: command.expected_revision + 1,
       updated_at: new Date().toISOString()
     }
 
-    if (command.action === 'custom') {
+    if (command.action === 'accepted') {
       return {
         ...fields,
-        action: 'custom',
-        replacement: command.replacement
+        action: 'accepted',
+        replacement: command.replacement,
+        suggestion_id: command.suggestion_id
       }
+    }
+
+    if (command.action === 'unreviewed') {
+      return null
     }
 
     return {
       ...fields,
-      action: command.action,
-      replacement: null
+      action: 'ignored',
+      replacement: null,
+      suggestion_id: null
     }
   }
 
   function decisionCommand(
     issue: Issue,
-    action: DecisionAction,
+    action: ReviewDecisionAction,
     replacement?: string
   ): DecisionCommand | null {
     if (issue.document_version === null) {
@@ -714,7 +723,8 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
 
     const fields = {
       issue_id: issue.issue_id,
-      issue_version: issue.document_version
+      issue_version: issue.document_version,
+      expected_revision: issue.decision?.revision ?? 0
     }
 
     if (action === 'custom') {
@@ -723,14 +733,27 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
       }
       return {
         ...fields,
-        action: 'custom',
-        replacement
+        action: 'accepted',
+        replacement,
+        suggestion_id: null
+      }
+    }
+
+    if (action === 'accepted') {
+      const acceptedReplacement = replacement ?? issue.suggestion ?? issue.original
+      return {
+        ...fields,
+        action: 'accepted',
+        replacement: acceptedReplacement,
+        suggestion_id: null
       }
     }
 
     return {
       ...fields,
-      action
+      action,
+      replacement: null,
+      suggestion_id: null
     }
   }
 
@@ -795,7 +818,7 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
   }
 
   async function decide(
-    action: DecisionAction,
+    action: ReviewDecisionAction,
     replacement?: string
   ): Promise<void> {
     const issue = selectedIssue.value
@@ -904,7 +927,7 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
   }
 
   async function decideVisible(
-    action: Exclude<DecisionAction, 'custom'>
+    action: Extract<DecisionAction, 'accepted' | 'ignored'>
   ): Promise<void> {
     findReplaceError.value = null
     if (loading.issues) {
@@ -1203,8 +1226,6 @@ function decisionStatusLabel(decision: IssueDecisionSummary | null): string {
       return '已接受'
     case 'ignored':
       return '已忽略'
-    case 'custom':
-      return '已自定义'
     default:
       return '未处理'
   }

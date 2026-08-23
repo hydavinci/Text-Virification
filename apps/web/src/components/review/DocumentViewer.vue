@@ -245,7 +245,7 @@ function renderModelForBlock(block: DocumentBlock): BlockRenderModel {
 
 function previewText(issue: Issue): string {
   if (issue.decision?.action === 'accepted') {
-    return issue.suggestion ?? issue.original
+    return issue.decision.replacement ?? issue.suggestion ?? issue.original
   }
   if (issue.decision?.action === 'custom') {
     return issue.decision.replacement
