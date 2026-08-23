@@ -17,9 +17,9 @@ export interface EditDraftState {
   conflict: Ref<DraftConflict | null>
   begin(baseVersionId: string): Promise<void>
   updateBlock(blockId: string, text: string): void
-  save(): Promise<EditDraft>
+  save(expectedBaseVersionId?: string | null): Promise<EditDraft>
   discard(): Promise<void>
-  reanalyze(): Promise<DocumentVersion>
+  reanalyze(expectedBaseVersionId?: string | null): Promise<DocumentVersion>
 }
 
 export function useEditDraft(
@@ -71,11 +71,12 @@ export function useEditDraft(
     conflict.value = null
   }
 
-  async function save(): Promise<EditDraft> {
+  async function save(expectedBaseVersionId: string | null = null): Promise<EditDraft> {
     const currentDraft = draft.value
     if (!currentDraft) {
       throw new Error('No active edit draft.')
     }
+    ensureExpectedBaseVersion(currentDraft, expectedBaseVersionId)
 
     const submittedBlocks = cloneBlocks(localBlocks.value)
     const requestGeneration = ++saveGeneration
@@ -135,14 +136,15 @@ export function useEditDraft(
     reanalysisKeys.clear()
   }
 
-  async function reanalyze(): Promise<DocumentVersion> {
+  async function reanalyze(expectedBaseVersionId: string | null = null): Promise<DocumentVersion> {
     const startingDraft = draft.value
     const requestLifecycleGeneration = lifecycleGeneration
     if (!startingDraft) {
       throw new Error('No active edit draft.')
     }
+    ensureExpectedBaseVersion(startingDraft, expectedBaseVersionId)
 
-    const savedDraft = dirty.value ? await save() : draft.value
+    const savedDraft = dirty.value ? await save(expectedBaseVersionId) : draft.value
     if (
       !savedDraft ||
       !isCurrentLifecycle(requestLifecycleGeneration) ||
@@ -151,6 +153,7 @@ export function useEditDraft(
     ) {
       throw new Error('Draft request is stale.')
     }
+    ensureExpectedBaseVersion(savedDraft, expectedBaseVersionId)
 
     const requestGeneration = ++reanalysisGeneration
     const draftKey = `${savedDraft.draft_id}:${savedDraft.revision}`
@@ -210,6 +213,15 @@ export function useEditDraft(
     save,
     discard,
     reanalyze
+  }
+}
+
+function ensureExpectedBaseVersion(
+  draft: EditDraft,
+  expectedBaseVersionId: string | null
+): void {
+  if (expectedBaseVersionId !== null && draft.base_version_id !== expectedBaseVersionId) {
+    throw new Error('Draft base version does not match the selected version.')
   }
 }
 

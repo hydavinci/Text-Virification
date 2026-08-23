@@ -59,6 +59,7 @@ const props = defineProps<{
   modifiedBlocks: DocumentBlock[]
   diffBlocks: DerivedDiffBlock[]
   draftBlocks: DraftBlock[]
+  draftActive: boolean
   issues: Issue[]
   selectedIssueId: string | null
   selectedBlockId: string | null
@@ -475,6 +476,7 @@ onBeforeUnmount(() => {
       :selected-version-id="selectedVersionId"
       :mode="mode"
       :editing="mode === 'edit'"
+      :draft-active="draftActive"
       :busy="draftBusy"
       @select-version="emit('selectVersion', $event)"
       @set-mode="emit('setMode', $event)"
@@ -506,6 +508,15 @@ onBeforeUnmount(() => {
       <button type="button" name="retry-reanalysis" @click="emit('retryReanalysis')">
         重试
       </button>
+    </div>
+
+    <div
+      v-if="draftError && mode !== 'edit'"
+      class="document-viewer__error"
+      data-testid="draft-error"
+      role="alert"
+    >
+      <p>{{ draftError }}</p>
     </div>
 
     <div v-if="error" class="document-viewer__error" data-testid="document-error" role="alert">

@@ -122,8 +122,21 @@ const reanalysisError = ref<string | null>(null)
 const modifiedBlocks = computed(() => derivedPreview.modified.value?.blocks ?? [])
 const diffBlocks = computed(() => derivedPreview.diff.value?.blocks ?? [])
 const draftBlocks = computed(() => draft.localBlocks.value)
+const draftActive = computed(() => draft.draft.value !== null)
 const derivedLoading = computed(() => derivedPreview.loading.value)
 const derivedError = computed(() => derivedPreview.error.value)
+const dismissedReanalysisFailureKey = ref<string | null>(null)
+const reanalysisFailureKey = computed(() =>
+  reanalysis.value?.status === 'failed'
+    ? `${reanalysis.value.versionId}:${reanalysis.value.sequence}`
+    : null
+)
+const visibleReanalysis = computed(() =>
+  reanalysisFailureKey.value &&
+  reanalysisFailureKey.value === dismissedReanalysisFailureKey.value
+    ? null
+    : reanalysis.value
+)
 const phoneBackLabel = computed(() =>
   phoneIssueDetailOrigin.value === 'document' ? '返回文档' : '返回问题列表'
 )
@@ -322,6 +335,7 @@ async function startDraft(): Promise<void> {
   draftPending.value = true
   draftError.value = null
   reanalysisError.value = null
+  dismissedReanalysisFailureKey.value = null
   try {
     await draft.begin(baseVersionId)
     documentMode.value = 'edit'
@@ -349,8 +363,9 @@ async function saveDraftAndReanalyze(): Promise<void> {
   draftPending.value = true
   draftError.value = null
   reanalysisError.value = null
+  dismissedReanalysisFailureKey.value = null
   try {
-    await draft.reanalyze()
+    await draft.reanalyze(selectedVersionId.value)
     documentMode.value = 'original'
   } catch (error) {
     reanalysisError.value = errorMessage(error, '重新检查失败。')
@@ -362,6 +377,7 @@ async function saveDraftAndReanalyze(): Promise<void> {
 
 function returnToDraft(): void {
   reanalysisError.value = null
+  dismissedReanalysisFailureKey.value = reanalysisFailureKey.value
   documentMode.value = 'edit'
 }
 
@@ -482,6 +498,7 @@ onBeforeUnmount(() => {
             :modified-blocks="modifiedBlocks"
             :diff-blocks="diffBlocks"
             :draft-blocks="draftBlocks"
+            :draft-active="draftActive"
             :issues="issues"
             :selected-issue-id="selectedIssueId"
             :selected-block-id="selectedBlockId"
@@ -492,7 +509,7 @@ onBeforeUnmount(() => {
             :derived-error="derivedError"
             :draft-busy="draftPending"
             :draft-error="draftError"
-            :reanalysis="reanalysis"
+            :reanalysis="visibleReanalysis"
             :reanalysis-error="reanalysisError"
             @select-highlight="selectHighlightAndShowDetails"
             @load-next="loadNextBlocks"
@@ -693,6 +710,7 @@ onBeforeUnmount(() => {
         :modified-blocks="modifiedBlocks"
         :diff-blocks="diffBlocks"
         :draft-blocks="draftBlocks"
+        :draft-active="draftActive"
         :issues="issues"
         :selected-issue-id="selectedIssueId"
         :selected-block-id="selectedBlockId"
@@ -703,7 +721,7 @@ onBeforeUnmount(() => {
         :derived-error="derivedError"
         :draft-busy="draftPending"
         :draft-error="draftError"
-        :reanalysis="reanalysis"
+        :reanalysis="visibleReanalysis"
         :reanalysis-error="reanalysisError"
         @select-highlight="selectHighlightAndShowDetails"
         @load-next="loadNextBlocks"

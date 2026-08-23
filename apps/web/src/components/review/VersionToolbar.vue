@@ -13,6 +13,7 @@ const props = defineProps<{
   selectedVersionId: string | null
   mode: EditableDocumentMode
   editing: boolean
+  draftActive: boolean
   busy: boolean
 }>()
 
@@ -34,7 +35,15 @@ const isHistorical = computed(
     selectedVersion.value.version_id !== props.activeVersionId
 )
 const canStartDraft = computed(
-  () => selectedVersion.value?.status === 'succeeded' && !props.editing && !props.busy
+  () =>
+    selectedVersion.value?.status === 'succeeded' &&
+    !props.editing &&
+    !props.draftActive &&
+    !props.busy
+)
+const controlsLocked = computed(() => props.busy || props.draftActive)
+const selectedTabMode = computed<DocumentViewMode>(() =>
+  props.mode === 'edit' ? 'original' : props.mode
 )
 const editLabel = computed(() =>
   isHistorical.value ? '从此版本创建新版本' : '编辑当前版本'
@@ -58,10 +67,7 @@ function tabLabel(mode: DocumentViewMode): string {
 }
 
 function tabindexForMode(mode: DocumentViewMode): 0 | -1 {
-  if (props.mode === mode) {
-    return 0
-  }
-  if (props.mode === 'edit' && mode === 'original') {
+  if (!controlsLocked.value && selectedTabMode.value === mode) {
     return 0
   }
   return -1
@@ -96,7 +102,7 @@ function onTabKeydown(event: KeyboardEvent, mode: DocumentViewMode): void {
       <select
         aria-label="版本"
         :value="selectedVersionId ?? ''"
-        :disabled="busy || versions.length === 0"
+        :disabled="controlsLocked || versions.length === 0"
         @change="onSelectVersion"
       >
         <option
@@ -116,9 +122,9 @@ function onTabKeydown(event: KeyboardEvent, mode: DocumentViewMode): void {
         type="button"
         role="tab"
         :data-mode="viewMode"
-        :aria-selected="mode === viewMode ? 'true' : 'false'"
+        :aria-selected="selectedTabMode === viewMode ? 'true' : 'false'"
         :tabindex="tabindexForMode(viewMode)"
-        :disabled="busy"
+        :disabled="controlsLocked"
         ref="tabButtons"
         @click="emit('setMode', viewMode)"
         @keydown="onTabKeydown($event, viewMode)"

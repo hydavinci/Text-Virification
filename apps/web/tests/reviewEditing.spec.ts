@@ -366,6 +366,106 @@ describe('review editing state', () => {
     expect(createDraft).toHaveBeenLastCalledWith(jobId, 'version-1')
   })
 
+  it('prevents version and view switching while an edit draft is active', async () => {
+    const revisionsApi = createRevisionsApiMock()
+    const wrapper = mountReviewWorkspaceView(createAnalysisApiMock(), revisionsApi)
+    await flushPromises()
+
+    await wrapper.get('button[name="edit-version"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('select[aria-label="版本"]').attributes('disabled')).toBeDefined()
+    expect(
+      wrapper
+        .findAll('button[role="tab"][data-mode]')
+        .map((tab) => tab.attributes('disabled'))
+    ).toEqual(['', '', ''])
+  })
+
+  it('rejects draft saves and reanalysis when the expected base version no longer matches', async () => {
+    const updateDraft = vi.fn()
+    const reanalyze = vi.fn()
+    const revisionsApi = createRevisionsApiMock({ updateDraft, reanalyze })
+    let draftState!: ReturnType<typeof useEditDraft>
+    const Harness = defineComponent({
+      setup() {
+        draftState = useEditDraft(jobId, revisionsApi)
+        return {}
+      },
+      template: '<div />'
+    })
+    mount(Harness)
+
+    await draftState.begin('version-2')
+    draftState.updateBlock('block-1', '不应提交的旧草稿')
+
+    await expect(draftState.save('version-1')).rejects.toThrow(
+      'Draft base version does not match the selected version.'
+    )
+    await expect(draftState.reanalyze('version-1')).rejects.toThrow(
+      'Draft base version does not match the selected version.'
+    )
+    expect(updateDraft).not.toHaveBeenCalled()
+    expect(reanalyze).not.toHaveBeenCalled()
+  })
+
+  it('dismisses an SSE-reported reanalysis failure when returning to the draft', async () => {
+    let progressHandler!: (event: VersionEvent) => void
+    const revisionsApi = createRevisionsApiMock({
+      subscribeVersionEvents: vi.fn().mockImplementation(
+        (
+          _jobId: string,
+          _versionId: string,
+          onEvent: (event: VersionEvent) => void
+        ) => {
+          progressHandler = onEvent
+          return vi.fn()
+        }
+      )
+    })
+    const wrapper = mountReviewWorkspaceView(createAnalysisApiMock(), revisionsApi)
+    await flushPromises()
+
+    await wrapper.get('button[name="edit-version"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('button[name="save-reanalyze"]').trigger('click')
+    await flushPromises()
+    progressHandler({
+      sequence: 1,
+      status: 'failed',
+      progress: 100,
+      message: '重新检查服务失败',
+      created_at: '2026-08-23T12:01:00Z',
+      metadata: null
+    })
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="reanalysis-failure"]').text()).toContain(
+      '重新检查服务失败'
+    )
+
+    await wrapper.get('button[name="return-to-draft"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="reanalysis-failure"]').exists()).toBe(false)
+    expect(wrapper.find('textarea[aria-label="第 1 段"]').exists()).toBe(true)
+  })
+
+  it('surfaces draft creation failures before the editor is mounted', async () => {
+    const revisionsApi = createRevisionsApiMock({
+      createDraft: vi.fn().mockRejectedValue(new Error('无法创建草稿'))
+    })
+    const wrapper = mountReviewWorkspaceView(createAnalysisApiMock(), revisionsApi)
+    await flushPromises()
+
+    await wrapper.get('button[name="edit-version"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="draft-error"]').attributes('role')).toBe('alert')
+    expect(wrapper.get('[data-testid="draft-error"]').text()).toContain('无法创建草稿')
+    expect(wrapper.find('textarea[aria-label="第 1 段"]').exists()).toBe(false)
+  })
+
   it('keeps edited draft text after a failed reanalysis returns to the editor', async () => {
     const revisionsApi = createRevisionsApiMock({
       createDraft: vi.fn().mockResolvedValue(
