@@ -2,8 +2,12 @@
 const props = defineProps<{
   query: string
   replacement: string
+  regex: boolean
+  caseSensitive: boolean
   status: string
   canNavigate: boolean
+  canReplace: boolean
+  canReplaceCurrent: boolean
   canReplaceAll: boolean
   busy: boolean
   error: string | null
@@ -12,10 +16,27 @@ const props = defineProps<{
 const emit = defineEmits<{
   updateQuery: [value: string]
   updateReplacement: [value: string]
+  updateRegex: [value: boolean]
+  updateCaseSensitive: [value: boolean]
+  clear: []
   previousMatch: []
   nextMatch: []
+  replaceCurrent: []
   replaceAll: []
 }>()
+
+function onSearchKeydown(event: KeyboardEvent): void {
+  if (event.key !== 'Enter') {
+    return
+  }
+
+  event.preventDefault()
+  if (event.shiftKey) {
+    emit('previousMatch')
+  } else {
+    emit('nextMatch')
+  }
+}
 </script>
 
 <template>
@@ -34,9 +55,30 @@ const emit = defineEmits<{
           aria-label="查找内容"
           placeholder="输入要查找的文本"
           @input="emit('updateQuery', ($event.target as HTMLInputElement).value)"
+          @keydown="onSearchKeydown"
         />
       </label>
-      <label>
+      <div class="find-replace__flags" aria-label="查找选项">
+        <label>
+          <input
+            :checked="caseSensitive"
+            type="checkbox"
+            aria-label="区分大小写"
+            @change="emit('updateCaseSensitive', ($event.target as HTMLInputElement).checked)"
+          />
+          <span>区分大小写</span>
+        </label>
+        <label>
+          <input
+            :checked="regex"
+            type="checkbox"
+            aria-label="使用正则表达式"
+            @change="emit('updateRegex', ($event.target as HTMLInputElement).checked)"
+          />
+          <span>正则</span>
+        </label>
+      </div>
+      <label v-if="canReplace">
         <span>替换为</span>
         <input
           :value="replacement"
@@ -67,6 +109,24 @@ const emit = defineEmits<{
         </button>
       </div>
       <button
+        type="button"
+        name="clear-find"
+        :disabled="busy || (!query && !replacement)"
+        @click="emit('clear')"
+      >
+        清除
+      </button>
+      <button
+        v-if="canReplace"
+        type="button"
+        name="replace-current"
+        :disabled="busy || !canReplaceCurrent"
+        @click="emit('replaceCurrent')"
+      >
+        替换当前
+      </button>
+      <button
+        v-if="canReplace"
         type="button"
         name="replace-all"
         :disabled="busy || !canReplaceAll"
@@ -121,6 +181,26 @@ const emit = defineEmits<{
   font-weight: 700;
 }
 
+.find-replace__flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--review-space-2);
+}
+
+.find-replace__flags label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  font-size: 0.72rem;
+}
+
+.find-replace__flags input {
+  width: auto;
+  min-height: auto;
+  padding: 0;
+}
+
 .find-replace__fields input {
   width: 100%;
   min-width: 0;
@@ -134,6 +214,7 @@ const emit = defineEmits<{
 }
 
 .find-replace__fields input:focus-visible,
+.find-replace__flags input:focus-visible,
 .find-replace__actions button:focus-visible {
   outline: 2px solid #6579e8;
   outline-offset: 2px;

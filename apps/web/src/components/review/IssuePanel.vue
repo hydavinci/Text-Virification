@@ -15,12 +15,37 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  decide: [action: ReviewDecisionAction, replacement?: string]
+  decide: [action: ReviewDecisionAction, replacement?: string, suggestionId?: string | null]
   retryDecision: []
 }>()
 
-const customReplacement = ref('')
-const customReplacementError = ref<string | null>(null)
+const finalReplacement = ref('')
+const selectedSuggestionId = ref<string | null>(null)
+const finalReplacementError = ref<string | null>(null)
+const suggestions = computed(() => {
+  if (!props.issue) {
+    return []
+  }
+
+  if (props.issue.suggestions?.length) {
+    return [...props.issue.suggestions].sort(
+      (left, right) => left.rank - right.rank
+    )
+  }
+
+  return props.issue.suggestion
+    ? [
+        {
+          suggestion_id: 'legacy-suggestion',
+          text: props.issue.suggestion,
+          source: 'rule' as const,
+          explanation: null,
+          rank: 1,
+          preferred: true
+        }
+      ]
+    : []
+})
 const decisionLabel = computed(() => {
   switch (props.issue?.decision?.action) {
     case 'accepted':
@@ -45,40 +70,88 @@ const severityLabel = computed(() => {
 watch(
   () => props.issue,
   (issue) => {
-    customReplacement.value =
+    const preferredSuggestion =
+      issue?.suggestions?.find((suggestion) => suggestion.preferred) ??
+      suggestions.value[0] ??
+      null
+    selectedSuggestionId.value =
+      issue?.decision?.action === 'accepted'
+        ? issue.decision.suggestion_id ?? preferredSuggestion?.suggestion_id ?? null
+        : preferredSuggestion?.suggestion_id ?? null
+    finalReplacement.value =
       issue?.decision?.action === 'accepted' || issue?.decision?.action === 'custom'
         ? issue.decision.replacement ?? ''
-        : ''
-    customReplacementError.value = null
+        : preferredSuggestion?.text ?? issue?.suggestion ?? ''
+    finalReplacementError.value = null
   },
   { immediate: true }
 )
 
 function submitDecision(action: Extract<DecisionAction, 'accepted' | 'ignored'>): void {
-  customReplacementError.value = null
+  finalReplacementError.value = null
+  if (action === 'accepted') {
+    const error = validateFinalReplacement(finalReplacement.value)
+    finalReplacementError.value = error
+    if (error) {
+      return
+    }
+    emit('decide', action, finalReplacement.value, selectedSuggestionId.value)
+    return
+  }
+
   emit('decide', action)
 }
 
 function submitCustomDecision(): void {
-  const error = validateCustomReplacement(customReplacement.value)
-  customReplacementError.value = error
+  const error = validateFinalReplacement(finalReplacement.value)
+  finalReplacementError.value = error
   if (error) {
     return
   }
-  emit('decide', 'custom', customReplacement.value)
+  emit('decide', 'accepted', finalReplacement.value, selectedSuggestionId.value)
 }
 
-function validateCustomReplacement(replacement: string): string | null {
+function restoreUnreviewed(): void {
+  finalReplacementError.value = null
+  emit('decide', 'unreviewed')
+}
+
+function selectSuggestion(suggestionId: string): void {
+  const suggestion = suggestions.value.find(
+    (candidate) => candidate.suggestion_id === suggestionId
+  )
+  if (!suggestion) {
+    return
+  }
+  selectedSuggestionId.value = suggestion.suggestion_id
+  finalReplacement.value = suggestion.text
+  finalReplacementError.value = null
+}
+
+function validateFinalReplacement(replacement: string): string | null {
   if (!replacement.trim()) {
-    return '请输入自定义替换内容。'
+    return '请输入最终替换内容。'
   }
   if (replacement.includes('\u0000')) {
-    return '自定义替换不能包含 NUL 字符。'
+    return '最终替换不能包含 NUL 字符。'
   }
   if (Array.from(replacement).length > 10_000) {
-    return '自定义替换不能超过 10,000 个 Unicode 字符。'
+    return '最终替换不能超过 10,000 个 Unicode 字符。'
   }
   return null
+}
+
+function suggestionSourceLabel(source: string): string {
+  switch (source) {
+    case 'dictionary':
+      return '词典'
+    case 'llm':
+      return '模型'
+    case 'manual':
+      return '人工'
+    default:
+      return '规则'
+  }
 }
 </script>
 
@@ -130,13 +203,36 @@ function validateCustomReplacement(replacement: string): string | null {
             忽略问题
           </button>
         </div>
+        <fieldset v-if="suggestions.length" class="issue-panel__suggestions">
+          <legend>候选建议</legend>
+          <label
+            v-for="suggestion in suggestions"
+            :key="suggestion.suggestion_id"
+            class="issue-panel__suggestion"
+          >
+            <input
+              type="radio"
+              name="suggestion"
+              :value="suggestion.text"
+              :checked="selectedSuggestionId === suggestion.suggestion_id"
+              @change="selectSuggestion(suggestion.suggestion_id)"
+            />
+            <span>
+              <strong>{{ suggestion.text }}</strong>
+              <small>
+                {{ suggestionSourceLabel(suggestion.source) }}
+                <template v-if="suggestion.explanation"> · {{ suggestion.explanation }}</template>
+              </small>
+            </span>
+          </label>
+        </fieldset>
         <label>
-          <span>自定义替换</span>
+          <span>最终替换内容</span>
           <textarea
-            v-model="customReplacement"
-            aria-label="自定义替换"
+            v-model="finalReplacement"
+            aria-label="最终替换内容"
             rows="4"
-            @input="customReplacementError = null"
+            @input="finalReplacementError = null"
           />
         </label>
         <button
@@ -145,15 +241,24 @@ function validateCustomReplacement(replacement: string): string | null {
           class="issue-panel__custom-button"
           @click="submitCustomDecision"
         >
-          保存自定义替换
+          保存最终替换
+        </button>
+        <button
+          v-if="issue.decision"
+          type="button"
+          name="restore-unreviewed"
+          class="issue-panel__restore-button"
+          @click="restoreUnreviewed"
+        >
+          恢复为未处理
         </button>
         <p
-          v-if="customReplacementError"
+          v-if="finalReplacementError"
           class="issue-panel__validation-error"
-          data-testid="custom-replacement-error"
+          data-testid="final-replacement-error"
           role="alert"
         >
-          {{ customReplacementError }}
+          {{ finalReplacementError }}
         </p>
         <div
           v-if="decisionError"
@@ -313,6 +418,47 @@ dd {
   gap: var(--review-space-2);
 }
 
+.issue-panel__suggestions {
+  display: grid;
+  gap: var(--review-space-2);
+  min-width: 0;
+  padding: 0;
+  margin: 0;
+  border: 0;
+}
+
+.issue-panel__suggestions legend {
+  padding: 0;
+  color: var(--review-text-muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.issue-panel__suggestion {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: flex-start;
+  padding: 9px;
+  color: var(--review-text);
+  background: var(--review-surface);
+  border: 1px solid var(--review-border);
+  border-radius: calc(var(--review-panel-radius) - 4px);
+}
+
+.issue-panel__suggestion input {
+  margin-top: 3px;
+}
+
+.issue-panel__suggestion strong,
+.issue-panel__suggestion small {
+  display: block;
+}
+
+.issue-panel__suggestion small {
+  margin-top: 3px;
+  color: var(--review-text-muted);
+  font-weight: 600;
+}
+
 .issue-panel__decisions button {
   min-height: 44px;
   padding: 9px 10px;
@@ -357,6 +503,7 @@ dd {
 }
 
 .issue-panel__decisions button:focus-visible,
+.issue-panel__suggestion input:focus-visible,
 .issue-panel__decisions textarea:focus-visible {
   outline: 3px solid #8ea2ff;
   outline-offset: 2px;

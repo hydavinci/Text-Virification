@@ -25,7 +25,8 @@ const toolItems: ToolItem[] = [
   { id: 'document', label: '文档', icon: 'M6 4.5h8l4 4V19.5H6z M14 4.5V8.5h4' },
   { id: 'issues', label: '问题', icon: 'M7 6.5h10M7 11h10M7 15.5h6' },
   { id: 'search', label: '查找', icon: 'M10 6.5a4 4 0 1 0 0 8 4 4 0 0 0 0-8Zm4 7.5 3.5 3.5' },
-  { id: 'batch', label: '批量', icon: 'M7 7h10v3H7zM7 14h10v3H7z' }
+  { id: 'batch', label: '批量', icon: 'M7 7h10v3H7zM7 14h10v3H7z' },
+  { id: 'history', label: '历史', icon: 'M7 7h6m-6 4h10m-10 4h7M16 7l2 2-2 2' }
 ]
 
 const railStyle = computed(() =>
@@ -196,7 +197,7 @@ defineExpose({ focusExportButton, focusTool })
 
 .tool-rail--bottom {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   align-items: stretch;
   padding: 10px;
   gap: var(--review-space-2);
@@ -216,8 +217,8 @@ defineExpose({ focusExportButton, focusTool })
 
 .tool-rail--bottom .tool-rail__main {
   display: grid;
-  grid-column: 1 / span 4;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-column: 1 / span 5;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   align-items: stretch;
 }
 
@@ -232,7 +233,7 @@ defineExpose({ focusExportButton, focusTool })
 }
 
 .tool-rail--bottom .tool-rail__footer {
-  grid-column: 5;
+  grid-column: 6;
   align-items: stretch;
 }
 

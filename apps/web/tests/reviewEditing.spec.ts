@@ -16,6 +16,7 @@ import type {
   DocumentBlock,
   DocumentPageResponse,
   Issue,
+  IssueDecision,
   IssuePageResponse
 } from '../src/types/analysis'
 import type {
@@ -209,6 +210,20 @@ function buildBatch(overrides: Partial<OperationBatch> = {}): OperationBatch {
     undoes_batch_id: null,
     created_at: '2026-08-23T12:00:00Z',
     ...overrides
+  }
+}
+
+function buildAppliedResponse(decision: IssueDecision | null): DecisionBatchResponse {
+  return {
+    batch_id: 'batch-1',
+    outcomes: [
+      {
+        issue_id: 'issue-1',
+        status: 'applied',
+        code: null,
+        decision
+      }
+    ]
   }
 }
 
@@ -1217,4 +1232,264 @@ describe('review editing state', () => {
     expect(analysisApi.getSummary).toHaveBeenCalledTimes(summaryCalls)
     expect(analysisApi.getIssues).toHaveBeenCalledTimes(issueCalls)
   })
+
+  it('accepts an edited candidate as the final replacement', async () => {
+    const putDecisions = vi.fn().mockResolvedValue(buildAppliedResponse({
+      issue_id: 'issue-1',
+      issue_version: 1,
+      revision: 1,
+      action: 'accepted',
+      replacement: '人工调整',
+      suggestion_id: 'suggestion-1',
+      updated_at: '2026-08-23T12:00:00Z'
+    }))
+    const analysisApi = createAnalysisApiMock({
+      getIssues: vi.fn().mockResolvedValue(
+        buildIssuePage({
+          items: [
+            buildIssue({
+              suggestion: '候选一',
+              suggestions: [
+                {
+                  suggestion_id: 'suggestion-1',
+                  text: '候选一',
+                  source: 'rule',
+                  explanation: '规则候选',
+                  rank: 1,
+                  preferred: true
+                },
+                {
+                  suggestion_id: 'suggestion-2',
+                  text: '候选二',
+                  source: 'llm',
+                  explanation: '模型候选',
+                  rank: 2,
+                  preferred: false
+                }
+              ]
+            })
+          ]
+        })
+      ),
+      putDecisions
+    })
+    const wrapper = mountReviewWorkspaceView(analysisApi)
+    await flushPromises()
+
+    await wrapper.get('[name="suggestion"]').setValue('候选一')
+    await wrapper.get('[aria-label="最终替换内容"]').setValue('人工调整')
+    await wrapper.get('[name="accept"]').trigger('click')
+
+    expect(putDecisions).toHaveBeenCalledWith(jobId, [{
+      issue_id: 'issue-1',
+      issue_version: 1,
+      expected_revision: 0,
+      action: 'accepted',
+      replacement: '人工调整',
+      suggestion_id: 'suggestion-1'
+    }])
+  })
+
+  it('restores an existing decision to unreviewed through a reversible command', async () => {
+    const putDecisions = vi.fn().mockResolvedValue(buildAppliedResponse(null))
+    const wrapper = mountReviewWorkspaceView(
+      createAnalysisApiMock({
+        getIssues: vi.fn().mockResolvedValue(
+          buildIssuePage({
+            items: [
+              buildIssue({
+                decision: {
+                  issue_version: 1,
+                  revision: 3,
+                  action: 'accepted',
+                  replacement: '已接受',
+                  suggestion_id: 'suggestion-1',
+                  updated_at: '2026-08-23T12:00:00Z'
+                }
+              })
+            ]
+          })
+        ),
+        putDecisions
+      })
+    )
+    await flushPromises()
+
+    await wrapper.get('button[name="restore-unreviewed"]').trigger('click')
+
+    expect(putDecisions).toHaveBeenCalledWith(jobId, [{
+      issue_id: 'issue-1',
+      issue_version: 1,
+      expected_revision: 3,
+      action: 'unreviewed',
+      replacement: null,
+      suggestion_id: null
+    }])
+  })
+
+  it('shows find with flags and clear in review mode while hiding replacement controls', async () => {
+    const wrapper = mountReviewWorkspaceView(
+      createAnalysisApiMock({
+        getDocumentPage: vi.fn().mockResolvedValue(
+          buildDocumentPage({
+            blocks: [buildBlock({ text: 'Item item ITEM' })],
+            total_blocks: 1
+          })
+        )
+      })
+    )
+    await flushPromises()
+
+    await wrapper.get('[data-tool="search"]').trigger('click')
+    await wrapper.get('[aria-label="查找内容"]').setValue('item')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="find-status"]').text()).toContain('第 1 / 3 处')
+    expect(wrapper.find('[aria-label="替换为"]').exists()).toBe(false)
+    expect(wrapper.find('button[name="replace-current"]').exists()).toBe(false)
+    expect(wrapper.find('button[name="replace-all"]').exists()).toBe(false)
+
+    await wrapper.get('[aria-label="区分大小写"]').setValue(true)
+    await flushPromises()
+    expect(wrapper.get('[data-testid="find-status"]').text()).toContain('第 1 / 1 处')
+
+    await wrapper.get('[aria-label="使用正则表达式"]').setValue(true)
+    await wrapper.get('[aria-label="区分大小写"]').setValue(false)
+    await wrapper.get('[aria-label="查找内容"]').setValue('item|ITEM')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="find-status"]').text()).toContain('第 1 / 3 处')
+
+    await wrapper.get('button[name="clear-find"]').trigger('click')
+    expect((wrapper.get('[aria-label="查找内容"]').element as HTMLInputElement).value).toBe('')
+  })
+
+  it('surfaces invalid regex errors inline without navigating matches', async () => {
+    const wrapper = mountReviewWorkspaceView()
+    await flushPromises()
+
+    await wrapper.get('[data-tool="search"]').trigger('click')
+    await wrapper.get('[aria-label="使用正则表达式"]').setValue(true)
+    await wrapper.get('[aria-label="查找内容"]').setValue('(')
+    await flushPromises()
+
+    expect(wrapper.get('[role="alert"]').text()).toContain('正则表达式无效')
+    expect(wrapper.get('[data-testid="find-status"]').text()).toContain('正则表达式无效')
+    expect(wrapper.get('button[name="next-match"]').attributes('disabled')).toBeDefined()
+  })
+
+  it('supports Enter and Shift+Enter match navigation', async () => {
+    const wrapper = mountReviewWorkspaceView(
+      createAnalysisApiMock({
+        getDocumentPage: vi.fn().mockResolvedValue(
+          buildDocumentPage({
+            blocks: [buildBlock({ text: '项目一 项目二 项目三' })],
+            total_blocks: 1
+          })
+        )
+      })
+    )
+    await flushPromises()
+
+    await wrapper.get('[data-tool="search"]').trigger('click')
+    await wrapper.get('[aria-label="查找内容"]').setValue('项目')
+    await flushPromises()
+    await wrapper.get('[aria-label="查找内容"]').trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+    expect(wrapper.get('[data-testid="find-status"]').text()).toContain('第 2 / 3 处')
+
+    await wrapper.get('[aria-label="查找内容"]').trigger('keydown', { key: 'Enter', shiftKey: true })
+    await flushPromises()
+    expect(wrapper.get('[data-testid="find-status"]').text()).toContain('第 1 / 3 处')
+  })
+
+  it('replaces the current and all search matches only in an editable draft', async () => {
+    const updateDraft = vi.fn().mockResolvedValue(
+      buildDraft({
+        revision: 2,
+        blocks: [{ block_id: 'block-1', text: '条目一 条目二 条目三' }]
+      })
+    )
+    const wrapper = mountReviewWorkspaceView(
+      createAnalysisApiMock(),
+      createRevisionsApiMock({
+        createDraft: vi.fn().mockResolvedValue(
+          buildDraft({
+            blocks: [{ block_id: 'block-1', text: '项目一 项目二 项目三' }]
+          })
+        ),
+        updateDraft
+      })
+    )
+    await flushPromises()
+
+    await wrapper.get('button[name="edit-version"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-tool="search"]').trigger('click')
+    await wrapper.get('[aria-label="查找内容"]').setValue('项目')
+    await wrapper.get('[aria-label="替换为"]').setValue('条目')
+    await wrapper.get('button[name="replace-current"]').trigger('click')
+    await flushPromises()
+
+    expect((wrapper.get('textarea[aria-label="第 1 段"]').element as HTMLTextAreaElement).value).toBe(
+      '条目一 项目二 项目三'
+    )
+
+    await wrapper.get('button[name="replace-all"]').trigger('click')
+    await flushPromises()
+    expect((wrapper.get('textarea[aria-label="第 1 段"]').element as HTMLTextAreaElement).value).toBe(
+      '条目一 条目二 条目三'
+    )
+    expect(wrapper.emitted('dirtyChange')?.at(-1)).toEqual([true])
+  })
+
+  it('shows toast undo and history undo using the same history state', async () => {
+    const undoBatch = vi.fn().mockResolvedValue(
+      buildBatch({
+        batch_id: 'undo-batch-1',
+        operation_type: 'undo',
+        undoes_batch_id: 'batch-1'
+      })
+    )
+    const wrapper = mountReviewWorkspaceView(
+      createAnalysisApiMock(),
+      createRevisionsApiMock({ undoBatch })
+    )
+    await flushPromises()
+
+    await wrapper.get('button[name="accept"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[role="status"][data-testid="undo-toast"]').text()).toContain('可撤销')
+    await wrapper.get('[data-testid="undo-toast"] button[name="undo-latest"]').trigger('click')
+    await flushPromises()
+    expect(undoBatch).toHaveBeenCalledWith(jobId, 'batch-1')
+
+    await wrapper.get('button[name="accept"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-tool="history"]').trigger('click')
+    await wrapper.get('[data-testid="history-undo-latest"]').trigger('click')
+    await flushPromises()
+
+    expect(undoBatch).toHaveBeenCalledTimes(2)
+  })
+
+  it('shows undo conflict messages in the toast and history panel', async () => {
+    const wrapper = mountReviewWorkspaceView(
+      createAnalysisApiMock(),
+      createRevisionsApiMock({
+        undoBatch: vi.fn().mockRejectedValue(new Error('历史已变化，请刷新后重试'))
+      })
+    )
+    await flushPromises()
+
+    await wrapper.get('button[name="accept"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-testid="undo-toast"] button[name="undo-latest"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="undo-toast"]').text()).toContain('历史已变化，请刷新后重试')
+    await wrapper.get('[data-tool="history"]').trigger('click')
+    expect(wrapper.get('[data-testid="operation-history"]').text()).toContain('历史已变化，请刷新后重试')
+  })
+
 })

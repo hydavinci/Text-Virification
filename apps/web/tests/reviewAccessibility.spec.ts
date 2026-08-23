@@ -300,7 +300,7 @@ describe('review workspace accessibility', () => {
     expect(actionRule).toContain('height: 44px')
   })
 
-  it('ships a five-track bottom rail with shrinkable 44px controls', () => {
+  it('ships a six-track bottom rail with shrinkable 44px controls', () => {
     const bottomRailRule = sourceRuleBody(ToolRailSource, '\\.tool-rail--bottom')
     const bottomMainRule = sourceRuleBody(ToolRailSource, '\\.tool-rail--bottom \\.tool-rail__main')
     const bottomFooterRule = sourceRuleBody(ToolRailSource, '\\.tool-rail--bottom \\.tool-rail__footer')
@@ -308,12 +308,12 @@ describe('review workspace accessibility', () => {
     const bottomButtonRule = sourceRuleBody(ToolRailSource, '\\.tool-rail--bottom \\.tool-rail__button')
 
     expect(bottomRailRule).toContain('display: grid')
-    expect(bottomRailRule).toContain('grid-template-columns: repeat(5, minmax(0, 1fr))')
+    expect(bottomRailRule).toContain('grid-template-columns: repeat(6, minmax(0, 1fr))')
     expect(bottomRailRule).toContain('align-items: stretch')
     expect(bottomMainRule).toContain('display: grid')
-    expect(bottomMainRule).toContain('grid-column: 1 / span 4')
-    expect(bottomMainRule).toContain('grid-template-columns: repeat(4, minmax(0, 1fr))')
-    expect(bottomFooterRule).toContain('grid-column: 5')
+    expect(bottomMainRule).toContain('grid-column: 1 / span 5')
+    expect(bottomMainRule).toContain('grid-template-columns: repeat(5, minmax(0, 1fr))')
+    expect(bottomFooterRule).toContain('grid-column: 6')
     expect(buttonRule).toContain('min-height: 44px')
     expect(bottomButtonRule).toContain('min-width: 0')
   })

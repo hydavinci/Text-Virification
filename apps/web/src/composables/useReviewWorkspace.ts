@@ -75,6 +75,11 @@ interface ReviewFindMatch {
   autoFixable: boolean
 }
 
+interface SearchBlock {
+  block_id: string
+  text: string
+}
+
 export interface ReviewWorkspaceState {
   summary: Ref<AnalysisSummaryResponse | null>
   versions: DocumentVersionsState['versions']
@@ -108,23 +113,30 @@ export interface ReviewWorkspaceState {
   bulkActionPending: Ref<boolean>
   findQuery: Ref<string>
   replaceText: Ref<string>
+  findRegex: Ref<boolean>
+  findCaseSensitive: Ref<boolean>
   findStatus: ComputedRef<string>
   canNavigateMatches: ComputedRef<boolean>
+  canReplaceCurrentMatch: ComputedRef<boolean>
   canReplaceAllMatches: ComputedRef<boolean>
-  findReplaceError: Ref<string | null>
+  findReplaceError: ComputedRef<string | null>
   selectIssue(issueId: string): void
   selectHighlight(issueId: string): void
   setFilters(filters: ReviewIssueFilters): Promise<void>
   selectVersion(versionId: string): Promise<void>
-  decide(action: ReviewDecisionAction, replacement?: string): Promise<void>
+  decide(action: ReviewDecisionAction, replacement?: string, suggestionId?: string | null): Promise<void>
   decideVisible(action: Extract<DecisionAction, 'accepted' | 'ignored'>): Promise<void>
   retryDecision(): Promise<void>
   loadNextBlocks(): Promise<void>
   loadNextIssues(): Promise<void>
   setFindQuery(value: string): void
   setReplaceText(value: string): void
+  setFindRegex(value: boolean): void
+  setFindCaseSensitive(value: boolean): void
+  clearFind(): void
   goToPreviousMatch(): void
   goToNextMatch(): void
+  replaceCurrentMatch(): void
   replaceAllMatches(): Promise<void>
   retrySummary(): Promise<void>
   retryDocument(): Promise<void>
@@ -156,7 +168,9 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
   const bulkActionPending = ref(false)
   const findQuery = ref('')
   const replaceText = ref('')
-  const findReplaceError = ref<string | null>(null)
+  const findRegex = ref(false)
+  const findCaseSensitive = ref(false)
+  const replacementError = ref<string | null>(null)
   const documentCheckerFailures = ref<CheckerFailureMap>({})
   const issueCheckerFailures = ref<CheckerFailureMap>({})
   const loading = reactive<LoadingState>({
@@ -215,8 +229,35 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     const issueId = selectedIssueId.value
     return issueId ? issuesById.value[issueId] ?? null : null
   })
+  const searchableBlocks = computed(() =>
+    draft.draft.value
+      ? draft.localBlocks.value.map((block) => ({
+          block_id: block.block_id,
+          text: block.text
+        }))
+      : blocks.value
+  )
+  const compiledSearch = computed(() => {
+    if (!findQuery.value) {
+      return { pattern: null, error: null }
+    }
+
+    try {
+      return {
+        pattern: compileSearch(findQuery.value, findRegex.value, findCaseSensitive.value),
+        error: null
+      }
+    } catch {
+      return {
+        pattern: null,
+        error: '正则表达式无效。'
+      }
+    }
+  })
   const findMatches = computed(() =>
-    findDocumentMatches(blocks.value, issues.value, findQuery.value)
+    compiledSearch.value.pattern
+      ? findDocumentMatches(searchableBlocks.value, issues.value, compiledSearch.value.pattern)
+      : []
   )
   const currentFindMatch = computed(() => {
     const matches = findMatches.value
@@ -259,6 +300,10 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
       return '仅在已加载内容中查找'
     }
 
+    if (compiledSearch.value.error) {
+      return '正则表达式无效'
+    }
+
     const matches = findMatches.value
     if (!matches.length) {
       return '未找到匹配'
@@ -268,18 +313,16 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     return `第 ${index + 1} / ${matches.length} 处`
   })
   const canNavigateMatches = computed(() => findMatches.value.length > 0)
-  const canReplaceAllMatches = computed(() => {
-    if (!isValidCustomReplacement(replaceText.value)) {
-      return false
-    }
-
-    const matches = findMatches.value
-    if (!matches.length || matches.length > MAX_VISIBLE_BATCH_DECISIONS) {
-      return false
-    }
-
-    return matches.every((match) => match.matchedIssueId !== null && match.autoFixable)
-  })
+  const canReplaceCurrentMatch = computed(
+    () => draft.draft.value !== null && currentFindMatch.value !== null && !compiledSearch.value.error
+  )
+  const canReplaceAllMatches = computed(
+    () =>
+      draft.draft.value !== null &&
+      findMatches.value.length > 0 &&
+      !compiledSearch.value.error
+  )
+  const findReplaceError = computed(() => compiledSearch.value.error ?? replacementError.value)
   const canEditSelectedVersion = computed(
     () =>
       documentVersions.selectedVersion.value?.version_id ===
@@ -806,6 +849,7 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     issue: Issue,
     action: ReviewDecisionAction,
     replacement?: string,
+    candidateSuggestionId?: string | null,
     options: { requirePreferredSuggestion?: boolean } = {}
   ): DecisionCommand | null {
     if (issue.document_version === null) {
@@ -837,10 +881,11 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
         (issue.decision?.action === 'accepted' && issue.decision.replacement !== null
           ? issue.decision.replacement
           : preferredSuggestion?.text ?? issue.suggestion ?? issue.original)
-      const suggestionId =
-        issue.decision?.action === 'accepted'
+      const selectedSuggestionIdForCommand =
+        candidateSuggestionId ??
+        (issue.decision?.action === 'accepted'
           ? issue.decision.suggestion_id ?? null
-          : null
+          : preferredSuggestion?.suggestion_id ?? null)
       if (
         options.requirePreferredSuggestion &&
         !(
@@ -855,7 +900,7 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
         ...fields,
         action: 'accepted',
         replacement: acceptedReplacement,
-        suggestion_id: suggestionId
+        suggestion_id: selectedSuggestionIdForCommand
       }
     }
 
@@ -930,14 +975,15 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
 
   async function decide(
     action: ReviewDecisionAction,
-    replacement?: string
+    replacement?: string,
+    suggestionId?: string | null
   ): Promise<void> {
     const issue = selectedIssue.value
     if (!issue) {
       return
     }
 
-    const command = decisionCommand(issue, action, replacement)
+    const command = decisionCommand(issue, action, replacement, suggestionId)
     if (!command) {
       setFailedDecision(issue.issue_id, {
         message:
@@ -1050,14 +1096,14 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
   async function decideVisible(
     action: Extract<DecisionAction, 'accepted' | 'ignored'>
   ): Promise<void> {
-    findReplaceError.value = null
+    replacementError.value = null
     if (loading.issues) {
       return
     }
 
     const commands: DecisionCommand[] = []
     for (const issue of visibleBatchIssues.value) {
-      const command = decisionCommand(issue, action, undefined, {
+      const command = decisionCommand(issue, action, undefined, undefined, {
         requirePreferredSuggestion: action === 'accepted'
       })
       if (!command) {
@@ -1085,13 +1131,34 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
   function setFindQuery(value: string): void {
     findQuery.value = value
     currentFindMatchIndex.value = value ? 0 : -1
-    findReplaceError.value = null
+    replacementError.value = null
     syncCurrentFindMatchSelection()
   }
 
   function setReplaceText(value: string): void {
     replaceText.value = value
-    findReplaceError.value = null
+    replacementError.value = null
+  }
+
+  function setFindRegex(value: boolean): void {
+    findRegex.value = value
+    currentFindMatchIndex.value = findQuery.value ? 0 : -1
+    replacementError.value = null
+    syncCurrentFindMatchSelection()
+  }
+
+  function setFindCaseSensitive(value: boolean): void {
+    findCaseSensitive.value = value
+    currentFindMatchIndex.value = findQuery.value ? 0 : -1
+    replacementError.value = null
+    syncCurrentFindMatchSelection()
+  }
+
+  function clearFind(): void {
+    findQuery.value = ''
+    replaceText.value = ''
+    currentFindMatchIndex.value = -1
+    replacementError.value = null
   }
 
   function syncCurrentFindMatchSelection(): void {
@@ -1133,27 +1200,64 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     syncCurrentFindMatchSelection()
   }
 
+  function replaceCurrentMatch(): void {
+    batchDecisionError.value = null
+    replacementError.value = null
+
+    const match = currentFindMatch.value
+    if (!draft.draft.value || !match) {
+      replacementError.value = '请先创建可编辑草稿。'
+      return
+    }
+
+    replaceDraftMatches([match], replaceText.value)
+  }
+
+  function replaceDraftMatches(matches: ReviewFindMatch[], replacement: string): void {
+    const matchesByBlock = new Map<string, ReviewFindMatch[]>()
+    for (const match of matches) {
+      const blockMatches = matchesByBlock.get(match.blockId)
+      if (blockMatches) {
+        blockMatches.push(match)
+      } else {
+        matchesByBlock.set(match.blockId, [match])
+      }
+    }
+
+    for (const [blockId, blockMatches] of matchesByBlock) {
+      const block = draft.localBlocks.value.find((candidate) => candidate.block_id === blockId)
+      if (!block) {
+        continue
+      }
+      const points = Array.from(block.text)
+      for (const match of [...blockMatches].sort((left, right) => right.start - left.start)) {
+        points.splice(match.start, match.end - match.start, replacement)
+      }
+      draft.updateBlock(blockId, points.join(''))
+    }
+
+    currentFindMatchIndex.value = normalizeFindMatchIndex(
+      currentFindMatchIndex.value,
+      findMatches.value.length
+    )
+  }
+
   async function replaceAllMatches(): Promise<void> {
     batchDecisionError.value = null
+    replacementError.value = null
 
-    if (!canReplaceAllMatches.value) {
-      findReplaceError.value = '仅支持替换与单个可自动修复问题完全对应的匹配项。'
+    if (!draft.draft.value) {
+      replacementError.value = '请先创建可编辑草稿。'
       return
     }
 
-    const replacement = replaceText.value
-    const commands = findMatches.value.flatMap((match) => {
-      const issue = match.matchedIssueId ? issuesById.value[match.matchedIssueId] : null
-      const command = issue ? decisionCommand(issue, 'custom', replacement) : null
-      return command ? [command] : []
-    })
-
-    if (commands.length !== findMatches.value.length) {
-      findReplaceError.value = '仅支持替换与单个可自动修复问题完全对应的匹配项。'
+    const matches = findMatches.value
+    if (!matches.length) {
+      replacementError.value = '未找到可替换内容。'
       return
     }
 
-    await submitDecisionBatch(commands, findReplaceError, '批量替换失败。')
+    replaceDraftMatches(matches, replaceText.value)
   }
 
   async function loadNextBlocks(): Promise<void> {
@@ -1251,8 +1355,11 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     bulkActionPending,
     findQuery,
     replaceText,
+    findRegex,
+    findCaseSensitive,
     findStatus,
     canNavigateMatches,
+    canReplaceCurrentMatch,
     canReplaceAllMatches,
     findReplaceError,
     selectIssue,
@@ -1266,8 +1373,12 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     loadNextIssues,
     setFindQuery,
     setReplaceText,
+    setFindRegex,
+    setFindCaseSensitive,
+    clearFind,
     goToPreviousMatch,
     goToNextMatch,
+    replaceCurrentMatch,
     replaceAllMatches,
     retrySummary,
     retryDocument,
@@ -1320,16 +1431,20 @@ function normalizeFindMatchIndex(index: number, length: number): number {
   return index
 }
 
-function findDocumentMatches(
-  blocks: DocumentBlock[],
-  issues: Issue[],
-  query: string
-): ReviewFindMatch[] {
-  const queryPoints = Array.from(query)
-  if (!queryPoints.length) {
-    return []
-  }
+export function compileSearch(query: string, regex: boolean, caseSensitive: boolean): RegExp {
+  const source = regex ? query : escapeRegExp(query)
+  return new RegExp(source, caseSensitive ? 'gu' : 'giu')
+}
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function findDocumentMatches(
+  blocks: SearchBlock[],
+  issues: Issue[],
+  pattern: RegExp
+): ReviewFindMatch[] {
   const exactIssueByRange = new Map<string, Issue[]>()
   for (const issue of issues) {
     const key = `${issue.block_id}:${issue.start}:${issue.end}`
@@ -1345,15 +1460,15 @@ function findDocumentMatches(
 
   for (const block of blocks) {
     const points = Array.from(block.text)
-    const maxStart = points.length - queryPoints.length
-
-    for (let start = 0; start <= maxStart; start += 1) {
-      const end = start + queryPoints.length
-      const slice = points.slice(start, end)
-      if (slice.length !== queryPoints.length || slice.join('') !== query) {
-        continue
-      }
-
+    const codeUnitToPoint = codeUnitPointMap(block.text)
+    pattern.lastIndex = 0
+    let result: RegExpExecArray | null
+    while ((result = pattern.exec(block.text)) !== null) {
+      const matchedText = result[0] ?? ''
+      const start = codeUnitToPoint.get(result.index) ?? 0
+      const end =
+        codeUnitToPoint.get(result.index + matchedText.length) ??
+        Array.from(block.text.slice(0, result.index + matchedText.length)).length
       const exactIssues = exactIssueByRange.get(`${block.block_id}:${start}:${end}`) ?? []
       const exactIssue = exactIssues.length === 1 ? exactIssues[0] : null
 
@@ -1365,10 +1480,29 @@ function findDocumentMatches(
         matchedIssueId: exactIssue?.issue_id ?? null,
         autoFixable: exactIssue?.auto_fixable ?? false
       })
+
+      if (matchedText.length === 0) {
+        const nextCodeUnitIndex =
+          result.index + (points[start]?.length ?? 1)
+        pattern.lastIndex = Math.max(pattern.lastIndex, nextCodeUnitIndex)
+      }
     }
   }
 
   return matches
+}
+
+function codeUnitPointMap(text: string): Map<number, number> {
+  const map = new Map<number, number>()
+  let codeUnitIndex = 0
+  let pointIndex = 0
+  map.set(0, 0)
+  for (const point of Array.from(text)) {
+    codeUnitIndex += point.length
+    pointIndex += 1
+    map.set(codeUnitIndex, pointIndex)
+  }
+  return map
 }
 
 function isHighRiskSecurityIssue(issue: Issue): boolean {

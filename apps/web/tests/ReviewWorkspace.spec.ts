@@ -638,7 +638,7 @@ describe('ReviewWorkspaceView', () => {
 
       expect(
         bottomRail.findAll('button').map((button) => button.attributes('data-tool'))
-      ).toEqual(['document', 'issues', 'search', 'batch', 'export'])
+      ).toEqual(['document', 'issues', 'search', 'batch', 'history', 'export'])
 
       await trigger.trigger('click')
       await flushPromises()
@@ -1385,7 +1385,7 @@ describe('ReviewWorkspaceView', () => {
     expect(wrapper.get('.checker-failures__category').text()).not.toContain('security')
   })
 
-  it('uses five-entry bottom navigation at compact widths and preserves panel state', async () => {
+  it('uses six-entry bottom navigation at compact widths and preserves panel state', async () => {
     const restoreViewport = mockViewportWidth(1024)
 
     try {
@@ -1407,7 +1407,7 @@ describe('ReviewWorkspaceView', () => {
       expect(wrapper.get('[data-testid="document-header"]').text()).toContain('sample.txt')
       expect(
         bottomRail.findAll('button').map((button) => button.attributes('data-tool'))
-      ).toEqual(['document', 'issues', 'search', 'batch', 'export'])
+      ).toEqual(['document', 'issues', 'search', 'batch', 'history', 'export'])
 
       await wrapper.get('[data-tool="search"]').trigger('click')
       await flushPromises()
@@ -1538,7 +1538,7 @@ describe('ReviewWorkspaceView', () => {
       await wrapper.get('[data-tool="issues"]').trigger('click')
       await wrapper.get('[aria-label="搜索问题"]').setValue('待处理草稿')
       await wrapper.get('[data-issue-id="issue-2"]').trigger('click')
-      await wrapper.get('[aria-label="自定义替换"]').setValue('自定义草稿')
+      await wrapper.get('[aria-label="最终替换内容"]').setValue('自定义草稿')
 
       viewport.setWidth(768)
       await flushPromises()
@@ -1546,7 +1546,7 @@ describe('ReviewWorkspaceView', () => {
       expect((wrapper.get('[aria-label="搜索问题"]').element as HTMLInputElement).value).toBe(
         '待处理草稿'
       )
-      expect((wrapper.get('[aria-label="自定义替换"]').element as HTMLTextAreaElement).value).toBe(
+      expect((wrapper.get('[aria-label="最终替换内容"]').element as HTMLTextAreaElement).value).toBe(
         '自定义草稿'
       )
 
@@ -1557,7 +1557,7 @@ describe('ReviewWorkspaceView', () => {
       expect((wrapper.get('[aria-label="搜索问题"]').element as HTMLInputElement).value).toBe(
         '待处理草稿'
       )
-      expect((wrapper.get('[aria-label="自定义替换"]').element as HTMLTextAreaElement).value).toBe(
+      expect((wrapper.get('[aria-label="最终替换内容"]').element as HTMLTextAreaElement).value).toBe(
         '自定义草稿'
       )
 
@@ -1672,7 +1672,7 @@ describe('ReviewWorkspaceView', () => {
     await flushPromises()
 
     await wrapper.get('[aria-label="搜索问题"]').trigger('keydown', { key: 'j' })
-    await wrapper.get('[aria-label="自定义替换"]').trigger('keydown', { key: 'k' })
+    await wrapper.get('[aria-label="最终替换内容"]').trigger('keydown', { key: 'k' })
 
     expect(wrapper.get('[data-issue-id="issue-1"]').attributes('aria-current')).toBe('true')
     expect(
@@ -2397,7 +2397,7 @@ describe('ReviewWorkspaceView', () => {
     )
     await flushPromises()
 
-    await wrapper.get('[aria-label="自定义替换"]').setValue('专业')
+    await wrapper.get('[aria-label="最终替换内容"]').setValue('专业')
     await wrapper.get('button[name="custom-decision"]').trigger('click')
 
     expect(putDecisions).toHaveBeenCalledWith(jobId, [
@@ -2407,7 +2407,7 @@ describe('ReviewWorkspaceView', () => {
         expected_revision: 0,
         action: 'accepted',
         replacement: '专业',
-        suggestion_id: null
+        suggestion_id: 'suggestion-1'
       }
     ])
     expect(wrapper.get('[data-highlight-range-issue-ids~="issue-1"]').text()).toBe(
@@ -2501,7 +2501,7 @@ describe('ReviewWorkspaceView', () => {
     )
     await flushPromises()
 
-    await wrapper.get('[aria-label="自定义替换"]').setValue('客户端替换')
+    await wrapper.get('[aria-label="最终替换内容"]').setValue('客户端替换')
     await wrapper.get('button[name="custom-decision"]').trigger('click')
     expect(wrapper.get('[data-highlight-range-issue-ids~="issue-1"]').text()).toBe(
       '客户端替换'
@@ -2551,7 +2551,7 @@ describe('ReviewWorkspaceView', () => {
         issue_version: 1,
         action: 'accepted',
         replacement: '首段',
-        suggestion_id: null,
+        suggestion_id: 'suggestion-1',
         updated_at: '2026-08-18T01:00:00Z'
       })
     )
@@ -2612,7 +2612,7 @@ describe('ReviewWorkspaceView', () => {
         issue_version: 1,
         action: 'accepted',
         replacement: '首段',
-        suggestion_id: null,
+        suggestion_id: 'suggestion-1',
         updated_at: '2026-08-18T01:00:00Z'
       })
     )
@@ -2650,7 +2650,7 @@ describe('ReviewWorkspaceView', () => {
       issue_version: 1,
       action: 'accepted' as const,
       replacement: '首段',
-      suggestion_id: null,
+      suggestion_id: 'suggestion-1',
       updated_at: '2026-08-18T01:00:00Z'
     }
     const ignoredDecision = {
@@ -2812,7 +2812,7 @@ describe('ReviewWorkspaceView', () => {
           issue_version: 1,
           action: 'accepted' as const,
           replacement: '首段',
-          suggestion_id: null,
+          suggestion_id: 'suggestion-1',
           updated_at: '2026-08-18T01:00:00Z'
         }
       }))
@@ -2869,7 +2869,7 @@ describe('ReviewWorkspaceView', () => {
           issue_version: 1,
           action: 'accepted' as const,
           replacement: '首段',
-          suggestion_id: null,
+          suggestion_id: 'suggestion-1',
           updated_at: '2026-08-18T01:00:00Z'
         }
       }))
@@ -3021,7 +3021,7 @@ describe('ReviewWorkspaceView', () => {
       issue_version: 1,
       action: 'accepted' as const,
       replacement: '首段',
-      suggestion_id: null,
+      suggestion_id: 'suggestion-1',
       updated_at: '2026-08-18T02:00:00Z'
     }
     const ignoredDecision = {
@@ -3126,7 +3126,7 @@ describe('ReviewWorkspaceView', () => {
         expected_revision: 0,
         action: 'accepted',
         replacement: '首段',
-        suggestion_id: null
+        suggestion_id: 'suggestion-1'
       },
       {
         issue_id: 'issue-2',
@@ -3134,7 +3134,7 @@ describe('ReviewWorkspaceView', () => {
         expected_revision: 0,
         action: 'accepted',
         replacement: '首段',
-        suggestion_id: null
+        suggestion_id: 'suggestion-1'
       },
       {
         issue_id: 'issue-3',
@@ -3142,7 +3142,7 @@ describe('ReviewWorkspaceView', () => {
         expected_revision: 0,
         action: 'accepted',
         replacement: '首段',
-        suggestion_id: null
+        suggestion_id: 'suggestion-1'
       }
     ])
     expect(getIssues).toHaveBeenCalledTimes(2)
@@ -3164,7 +3164,7 @@ describe('ReviewWorkspaceView', () => {
       issue_version: 1,
       action: 'accepted' as const,
       replacement: '首段',
-      suggestion_id: null,
+      suggestion_id: 'suggestion-1',
       updated_at: '2026-08-18T03:00:00Z'
     }
     const newerIgnoredDecision = {
@@ -3369,7 +3369,7 @@ describe('ReviewWorkspaceView', () => {
         expected_revision: 0,
         action: 'accepted',
         replacement: '首段',
-        suggestion_id: null
+        suggestion_id: 'suggestion-1'
       }
     ])
   })
@@ -3547,7 +3547,7 @@ describe('ReviewWorkspaceView', () => {
         expected_revision: 0,
         action: 'accepted',
         replacement: '首段',
-        suggestion_id: null
+        suggestion_id: 'suggestion-1'
       }
     ])
     expect(wrapper.get('[data-highlight-range-issue-ids~="issue-1"]').text()).toBe(
@@ -3560,7 +3560,7 @@ describe('ReviewWorkspaceView', () => {
         issue_version: 1,
         action: 'accepted',
         replacement: '首段',
-        suggestion_id: null,
+        suggestion_id: 'suggestion-1',
         updated_at: '2026-08-18T01:00:00Z'
       })
     )
@@ -3626,7 +3626,7 @@ describe('ReviewWorkspaceView', () => {
         issue_version: 1,
         action: 'accepted',
         replacement: '首段',
-        suggestion_id: null,
+        suggestion_id: 'suggestion-1',
         updated_at: '2026-08-18T01:00:00Z'
       })
     )
@@ -3648,11 +3648,11 @@ describe('ReviewWorkspaceView', () => {
     const wrapper = mountReviewWorkspace(createAnalysisApiMock({ putDecisions }))
     await flushPromises()
 
-    await wrapper.get('[aria-label="自定义替换"]').setValue(replacement)
+    await wrapper.get('[aria-label="最终替换内容"]').setValue(replacement)
     await wrapper.get('button[name="custom-decision"]').trigger('click')
 
     expect(putDecisions).not.toHaveBeenCalled()
-    expect(wrapper.get('[data-testid="custom-replacement-error"]').attributes('role')).toBe(
+    expect(wrapper.get('[data-testid="final-replacement-error"]').attributes('role')).toBe(
       'alert'
     )
   })
@@ -3817,47 +3817,8 @@ describe('ReviewWorkspaceView', () => {
     expect(viewerScroll).not.toHaveBeenCalled()
   })
 
-  it('replaces every exact auto-fixable match with custom decisions only', async () => {
-    const putDecisions = vi.fn().mockResolvedValue({
-      outcomes: [
-        {
-          issue_id: 'issue-1',
-          status: 'applied',
-          code: null,
-          decision: {
-            issue_id: 'issue-1',
-            issue_version: 1,
-            action: 'custom',
-            replacement: '条目',
-            updated_at: '2026-08-18T03:00:00Z'
-          }
-        },
-        {
-          issue_id: 'issue-2',
-          status: 'applied',
-          code: null,
-          decision: {
-            issue_id: 'issue-2',
-            issue_version: 1,
-            action: 'custom',
-            replacement: '条目',
-            updated_at: '2026-08-18T03:00:00Z'
-          }
-        },
-        {
-          issue_id: 'issue-3',
-          status: 'applied',
-          code: null,
-          decision: {
-            issue_id: 'issue-3',
-            issue_version: 1,
-            action: 'custom',
-            replacement: '条目',
-            updated_at: '2026-08-18T03:00:00Z'
-          }
-        }
-      ]
-    } satisfies DecisionBatchResponse)
+  it('keeps replacement controls hidden until an editable draft is active', async () => {
+    const putDecisions = vi.fn()
     const rawBlock = buildBlock({
       text: '甲😀项目乙😀项目丙项目'
     })
@@ -3905,36 +3866,12 @@ describe('ReviewWorkspaceView', () => {
     await wrapper.get('[data-tool="search"]').trigger('click')
     await flushPromises()
     await wrapper.get('[aria-label="查找内容"]').setValue('项目')
-    await wrapper.get('[aria-label="替换为"]').setValue('条目')
-    await wrapper.get('button[name="replace-all"]').trigger('click')
     await flushPromises()
 
-    expect(putDecisions).toHaveBeenCalledWith(jobId, [
-      {
-        issue_id: 'issue-1',
-        issue_version: 1,
-        expected_revision: 0,
-        action: 'accepted',
-        replacement: '条目',
-        suggestion_id: null
-      },
-      {
-        issue_id: 'issue-2',
-        issue_version: 1,
-        expected_revision: 0,
-        action: 'accepted',
-        replacement: '条目',
-        suggestion_id: null
-      },
-      {
-        issue_id: 'issue-3',
-        issue_version: 1,
-        expected_revision: 0,
-        action: 'accepted',
-        replacement: '条目',
-        suggestion_id: null
-      }
-    ])
+    expect(wrapper.get('[data-testid="find-status"]').text()).toContain('第 1 / 3 处')
+    expect(wrapper.find('[aria-label="替换为"]').exists()).toBe(false)
+    expect(wrapper.find('button[name="replace-all"]').exists()).toBe(false)
+    expect(putDecisions).not.toHaveBeenCalled()
     expect(rawBlock.text).toBe('甲😀项目乙😀项目丙项目')
   })
 

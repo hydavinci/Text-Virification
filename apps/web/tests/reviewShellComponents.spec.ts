@@ -22,8 +22,10 @@ describe('ToolRail', () => {
     expect(wrapper.text()).toContain('问题')
     expect(wrapper.text()).toContain('查找')
     expect(wrapper.text()).toContain('批量')
+    expect(wrapper.text()).toContain('历史')
     expect(wrapper.text()).toContain('导出')
     expect(wrapper.find('[data-tool="document"]').exists()).toBe(false)
+    expect(wrapper.get('[data-tool="history"]').attributes('aria-pressed')).toBe('false')
     expect(wrapper.get('[data-tool="issues"]').attributes('aria-pressed')).toBe('true')
     expect(wrapper.get('[data-tool="issues"] .tool-rail__active-indicator').text()).toBe('✓')
     expect(wrapper.find('[data-tool="search"] .tool-rail__active-indicator').exists()).toBe(false)
@@ -65,12 +67,32 @@ describe('ToolRail', () => {
     expect(wrapper.get('[data-tool="export"] .tool-rail__active-indicator').text()).toBe('✓')
     const rail = wrapper.vm as {
       focusExportButton(): void
-      focusTool(tool: 'issues' | 'batch'): void
+      focusTool(tool: 'issues' | 'batch' | 'history'): void
     }
     rail.focusExportButton()
     expect(document.activeElement).toBe(wrapper.get('[data-tool="export"]').element)
-    rail.focusTool('batch')
-    expect(document.activeElement).toBe(wrapper.get('[data-tool="batch"]').element)
+    rail.focusTool('history')
+    expect(document.activeElement).toBe(wrapper.get('[data-tool="history"]').element)
+    wrapper.unmount()
+  })
+
+
+  it('adds history to bottom navigation and keeps export keyboard order after it', async () => {
+    const wrapper = mount(ToolRail, {
+      attachTo: document.body,
+      props: {
+        mode: 'bottom',
+        activeTool: 'history',
+        sidePanelOpen: false,
+        exportOpen: false
+      }
+    })
+
+    expect(wrapper.get('[data-tool="history"]').attributes('aria-current')).toBeUndefined()
+    expect(wrapper.get('[data-tool="history"]').attributes('aria-pressed')).toBe('true')
+
+    await wrapper.get('[data-tool="history"]').trigger('keydown', { key: 'ArrowRight' })
+    expect(document.activeElement).toBe(wrapper.get('[data-tool="export"]').element)
     wrapper.unmount()
   })
 })

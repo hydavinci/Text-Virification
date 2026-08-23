@@ -8,8 +8,10 @@ import DocumentViewer from '../components/review/DocumentViewer.vue'
 import ExportPanel from '../components/review/ExportPanel.vue'
 import FindReplace from '../components/review/FindReplace.vue'
 import IssuePanel from '../components/review/IssuePanel.vue'
+import OperationHistory from '../components/review/OperationHistory.vue'
 import ReviewNavigation from '../components/review/ReviewNavigation.vue'
 import ToolRail from '../components/review/ToolRail.vue'
+import UndoToast from '../components/review/UndoToast.vue'
 import WorkspaceSidePanel from '../components/review/WorkspaceSidePanel.vue'
 import { useReviewWorkspace } from '../composables/useReviewWorkspace'
 import type { FileType } from '../types/review'
@@ -41,6 +43,7 @@ const {
   reanalysis,
   draft,
   derivedPreview,
+  history,
   filters,
   blocks,
   issues,
@@ -63,8 +66,11 @@ const {
   bulkActionPending,
   findQuery,
   replaceText,
+  findRegex,
+  findCaseSensitive,
   findStatus,
   canNavigateMatches,
+  canReplaceCurrentMatch,
   canReplaceAllMatches,
   findReplaceError,
   selectIssue,
@@ -77,8 +83,12 @@ const {
   loadNextIssues,
   setFindQuery,
   setReplaceText,
+  setFindRegex,
+  setFindCaseSensitive,
+  clearFind,
   goToPreviousMatch,
   goToNextMatch,
+  replaceCurrentMatch,
   replaceAllMatches,
   selectVersion,
   retrySummary,
@@ -119,11 +129,23 @@ const documentMode = ref<DocumentViewMode | 'edit'>('original')
 const draftPending = ref(false)
 const draftError = ref<string | null>(null)
 const reanalysisError = ref<string | null>(null)
+const undoPending = ref(false)
 const modifiedBlocks = computed(() => derivedPreview.modified.value?.blocks ?? [])
 const diffBlocks = computed(() => derivedPreview.diff.value?.blocks ?? [])
 const draftBlocks = computed(() => draft.localBlocks.value)
+const findCanReplace = computed(() => documentMode.value === 'edit' && draft.draft.value !== null)
 const derivedLoading = computed(() => derivedPreview.loading.value)
 const derivedError = computed(() => derivedPreview.error.value)
+const sidePanelTitle = computed(() => {
+  switch (activeSidePanelTool.value) {
+    case 'batch':
+      return '批量'
+    case 'history':
+      return '历史'
+    default:
+      return '问题'
+  }
+})
 const dismissedReanalysisFailureKey = ref<string | null>(null)
 const reanalysisFailureKey = computed(() =>
   reanalysis.value?.status === 'failed'
@@ -212,6 +234,14 @@ function activateCompactView(tool: WorkspaceTool): void {
 
   if (tool === 'search') {
     activeInspectorTab.value = 'search'
+    if (isPhone.value) {
+      phoneIssueSubview.value = 'list'
+    }
+    return
+  }
+
+  if (tool === 'history' && isPhone.value) {
+    phoneIssueSubview.value = 'list'
   }
 }
 
@@ -241,6 +271,15 @@ function activateDesktopTool(tool: WorkspaceTool): void {
 
   if (tool === 'issues') {
     activeInspectorTab.value = 'details'
+  }
+}
+
+async function undoLatestOperation(): Promise<void> {
+  undoPending.value = true
+  try {
+    await history.undoLatestBatch()
+  } finally {
+    undoPending.value = false
   }
 }
 
@@ -597,15 +636,23 @@ onBeforeUnmount(() => {
             <FindReplace
               :query="findQuery"
               :replacement="replaceText"
+              :regex="findRegex"
+              :case-sensitive="findCaseSensitive"
               :status="findStatus"
               :can-navigate="canNavigateMatches"
+              :can-replace="findCanReplace"
+              :can-replace-current="canReplaceCurrentMatch"
               :can-replace-all="canReplaceAllMatches"
               :busy="bulkActionPending"
               :error="findReplaceError"
               @update-query="setFindQuery"
               @update-replacement="setReplaceText"
+              @update-regex="setFindRegex"
+              @update-case-sensitive="setFindCaseSensitive"
+              @clear="clearFind"
               @previous-match="goToPreviousMatch"
               @next-match="goToNextMatch"
+              @replace-current="replaceCurrentMatch"
               @replace-all="replaceAllMatches"
             />
           </div>
@@ -625,6 +672,23 @@ onBeforeUnmount(() => {
               :error="batchDecisionError"
               @accept-visible="decideVisible('accepted')"
               @ignore-visible="decideVisible('ignored')"
+            />
+          </div>
+        </section>
+
+        <section
+          v-show="activeCompactView === 'history'"
+          class="review-workspace__compact-panel"
+          aria-label="历史"
+        >
+          <div class="review-workspace__compact-surface review-workspace__compact-surface--padded">
+            <OperationHistory
+              :history-page="history.historyPage.value"
+              :latest-batch="history.latestBatch.value"
+              :can-undo-latest-batch="history.canUndoLatestBatch.value"
+              :undo-conflict="history.undoConflict.value"
+              :busy="undoPending"
+              @undo-latest="undoLatestOperation"
             />
           </div>
         </section>
@@ -664,7 +728,7 @@ onBeforeUnmount(() => {
 
       <WorkspaceSidePanel
         :open="isSidePanelOpen"
-        :title="activeSidePanelTool === 'issues' ? '问题' : '批量'"
+        :title="sidePanelTitle"
         @close="closeSidePanel"
       >
         <div
@@ -690,7 +754,7 @@ onBeforeUnmount(() => {
           </template>
 
           <BatchActions
-            v-else
+            v-else-if="activeSidePanelTool === 'batch'"
             :issue-count="visibleIssueCount"
             :batch-limit="batchLimit"
             :high-risk-security-count="highRiskVisibleIssueCount"
@@ -698,6 +762,16 @@ onBeforeUnmount(() => {
             :error="batchDecisionError"
             @accept-visible="decideVisible('accepted')"
             @ignore-visible="decideVisible('ignored')"
+          />
+
+          <OperationHistory
+            v-else
+            :history-page="history.historyPage.value"
+            :latest-batch="history.latestBatch.value"
+            :can-undo-latest-batch="history.canUndoLatestBatch.value"
+            :undo-conflict="history.undoConflict.value"
+            :busy="undoPending"
+            @undo-latest="undoLatestOperation"
           />
         </div>
       </WorkspaceSidePanel>
@@ -759,15 +833,23 @@ onBeforeUnmount(() => {
           <FindReplace
             :query="findQuery"
             :replacement="replaceText"
+            :regex="findRegex"
+            :case-sensitive="findCaseSensitive"
             :status="findStatus"
             :can-navigate="canNavigateMatches"
+            :can-replace="findCanReplace"
+            :can-replace-current="canReplaceCurrentMatch"
             :can-replace-all="canReplaceAllMatches"
             :busy="bulkActionPending"
             :error="findReplaceError"
             @update-query="setFindQuery"
             @update-replacement="setReplaceText"
+            @update-regex="setFindRegex"
+            @update-case-sensitive="setFindCaseSensitive"
+            @clear="clearFind"
             @previous-match="goToPreviousMatch"
             @next-match="goToNextMatch"
+            @replace-current="replaceCurrentMatch"
             @replace-all="replaceAllMatches"
           />
         </template>
@@ -780,6 +862,14 @@ onBeforeUnmount(() => {
       :file-type="fileType"
       :open="isExportOpen"
       @close="closeExport"
+    />
+
+    <UndoToast
+      :visible="history.undoToastVisible.value"
+      :conflict="history.undoConflict.value"
+      :can-undo="history.canUndoLatestBatch.value"
+      :busy="undoPending"
+      @undo="undoLatestOperation"
     />
 
     <p
