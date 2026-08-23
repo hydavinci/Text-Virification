@@ -67,8 +67,14 @@ type UnreviewedRequestedDecision<TFields> = TFields & {
 
 type AcceptedPersistedDecision<TFields> = TFields & {
   action: 'accepted'
-  replacement: string | null
-  suggestion_id?: string | null
+  replacement: string
+  suggestion_id: string | null
+}
+
+type LegacyAcceptedPersistedDecision<TFields> = TFields & {
+  action: 'accepted'
+  replacement: null
+  suggestion_id?: null
 }
 
 type IgnoredPersistedDecision<TFields> = TFields & {
@@ -90,6 +96,7 @@ export type DecisionCommand =
 
 export type IssueDecisionSummary =
   | AcceptedPersistedDecision<IssueDecisionSummaryFields>
+  | LegacyAcceptedPersistedDecision<IssueDecisionSummaryFields>
   | IgnoredPersistedDecision<IssueDecisionSummaryFields>
   | LegacyCustomPersistedDecision<IssueDecisionSummaryFields>
 

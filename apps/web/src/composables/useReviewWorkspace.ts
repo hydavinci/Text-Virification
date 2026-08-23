@@ -740,12 +740,18 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     }
 
     if (action === 'accepted') {
-      const acceptedReplacement = replacement ?? issue.suggestion ?? issue.original
+      const acceptedReplacement =
+        replacement ??
+        (issue.decision?.action === 'accepted' && issue.decision.replacement !== null
+          ? issue.decision.replacement
+          : issue.suggestion ?? issue.original)
+      const suggestionId =
+        issue.decision?.action === 'accepted' ? issue.decision.suggestion_id ?? null : null
       return {
         ...fields,
         action: 'accepted',
         replacement: acceptedReplacement,
-        suggestion_id: null
+        suggestion_id: suggestionId
       }
     }
 

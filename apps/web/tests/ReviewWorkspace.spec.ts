@@ -2407,6 +2407,57 @@ describe('ReviewWorkspaceView', () => {
     wrapper.unmount()
   })
 
+  it('resubmits an accepted decision with the persisted final replacement', async () => {
+    const putDecisions = vi.fn().mockResolvedValue(
+      buildAppliedResponse({
+        issue_id: 'issue-1',
+        issue_version: 1,
+        revision: 5,
+        action: 'accepted',
+        replacement: '已存替换',
+        suggestion_id: 'suggestion-1',
+        updated_at: '2026-08-18T01:00:00Z'
+      })
+    )
+    const wrapper = mountReviewWorkspace(
+      createAnalysisApiMock({
+        getIssues: vi.fn().mockResolvedValue(
+          buildIssuePage({
+            total: 1,
+            items: [
+              buildIssue({
+                suggestion: '当前建议',
+                decision: {
+                  issue_version: 1,
+                  revision: 4,
+                  action: 'accepted',
+                  replacement: '已存替换',
+                  suggestion_id: 'suggestion-1',
+                  updated_at: '2026-08-18T00:00:00Z'
+                }
+              })
+            ]
+          })
+        ),
+        putDecisions
+      })
+    )
+    await flushPromises()
+
+    await wrapper.get('button[name="accept"]').trigger('click')
+
+    expect(putDecisions).toHaveBeenCalledWith(jobId, [
+      {
+        issue_id: 'issue-1',
+        issue_version: 1,
+        expected_revision: 4,
+        action: 'accepted',
+        replacement: '已存替换',
+        suggestion_id: 'suggestion-1'
+      }
+    ])
+  })
+
   it('reconciles an applied decision with the returned server decision', async () => {
     const decisionResponse = createDeferred<DecisionBatchResponse>()
     const putDecisions = vi.fn().mockReturnValue(decisionResponse.promise)
@@ -2489,7 +2540,8 @@ describe('ReviewWorkspaceView', () => {
         issue_id: 'issue-1',
         issue_version: 1,
         action: 'accepted',
-        replacement: null,
+        replacement: '首段',
+        suggestion_id: null,
         updated_at: '2026-08-18T01:00:00Z'
       })
     )
@@ -2549,7 +2601,8 @@ describe('ReviewWorkspaceView', () => {
         issue_id: 'issue-1',
         issue_version: 1,
         action: 'accepted',
-        replacement: null,
+        replacement: '首段',
+        suggestion_id: null,
         updated_at: '2026-08-18T01:00:00Z'
       })
     )
@@ -2586,7 +2639,8 @@ describe('ReviewWorkspaceView', () => {
     const acceptedDecision = {
       issue_version: 1,
       action: 'accepted' as const,
-      replacement: null,
+      replacement: '首段',
+      suggestion_id: null,
       updated_at: '2026-08-18T01:00:00Z'
     }
     const ignoredDecision = {
@@ -2747,7 +2801,8 @@ describe('ReviewWorkspaceView', () => {
           issue_id: issue.issue_id,
           issue_version: 1,
           action: 'accepted' as const,
-          replacement: null,
+          replacement: '首段',
+          suggestion_id: null,
           updated_at: '2026-08-18T01:00:00Z'
         }
       }))
@@ -2803,7 +2858,8 @@ describe('ReviewWorkspaceView', () => {
           issue_id: issue.issue_id,
           issue_version: 1,
           action: 'accepted' as const,
-          replacement: null,
+          replacement: '首段',
+          suggestion_id: null,
           updated_at: '2026-08-18T01:00:00Z'
         }
       }))
@@ -2954,7 +3010,8 @@ describe('ReviewWorkspaceView', () => {
     const acceptedDecision = {
       issue_version: 1,
       action: 'accepted' as const,
-      replacement: null,
+      replacement: '首段',
+      suggestion_id: null,
       updated_at: '2026-08-18T02:00:00Z'
     }
     const ignoredDecision = {
@@ -3096,7 +3153,8 @@ describe('ReviewWorkspaceView', () => {
     const batchAcceptedDecision = {
       issue_version: 1,
       action: 'accepted' as const,
-      replacement: null,
+      replacement: '首段',
+      suggestion_id: null,
       updated_at: '2026-08-18T03:00:00Z'
     }
     const newerIgnoredDecision = {
@@ -3491,7 +3549,8 @@ describe('ReviewWorkspaceView', () => {
         issue_id: 'issue-1',
         issue_version: 1,
         action: 'accepted',
-        replacement: null,
+        replacement: '首段',
+        suggestion_id: null,
         updated_at: '2026-08-18T01:00:00Z'
       })
     )
@@ -3556,7 +3615,8 @@ describe('ReviewWorkspaceView', () => {
         issue_id: 'issue-1',
         issue_version: 1,
         action: 'accepted',
-        replacement: null,
+        replacement: '首段',
+        suggestion_id: null,
         updated_at: '2026-08-18T01:00:00Z'
       })
     )

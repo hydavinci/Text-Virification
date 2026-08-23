@@ -6,7 +6,6 @@ import type {
   EditDraft,
   OperationBatch,
   OperationBatchPage,
-  OperationBatchQuery,
   ReanalysisResponse,
   ReanalyzeRequest,
   UpdateDraftRequest,
@@ -50,8 +49,7 @@ export interface RevisionsApi {
   ): () => void
   listHistory(
     jobId: string,
-    versionId: string,
-    query?: OperationBatchQuery
+    versionId: string
   ): Promise<OperationBatchPage>
   undoBatch(jobId: string, batchId: string): Promise<OperationBatch>
 }
@@ -253,13 +251,11 @@ export function createRevisionsApi(
 
       return close
     },
-    listHistory(jobId, versionId, query) {
+    listHistory(jobId, versionId) {
       return requestJson<OperationBatchPage>(
         dependencies,
         withSearch(`/jobs/${encodeURIComponent(jobId)}/operation-batches`, [
-          ['version_id', versionId],
-          ['cursor', query?.cursor],
-          ['limit', query?.limit]
+          ['version_id', versionId]
         ])
       )
     },

@@ -120,8 +120,3 @@ export interface OperationBatchPage {
   items: OperationBatch[]
   next_cursor: string | null
 }
-
-export interface OperationBatchQuery {
-  cursor?: string | null
-  limit?: number
-}

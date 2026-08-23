@@ -300,7 +300,7 @@ describe('createRevisionsApi', () => {
     expect(eventSource.closeCalls).toBe(1)
   })
 
-  it('lists history with encoded version id and pagination cursor', async () => {
+  it('lists history with encoded version id only', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       okJson({
         job_id: 'job-1',
@@ -311,13 +311,14 @@ describe('createRevisionsApi', () => {
       })
     )
 
+    // @ts-expect-error history pagination is intentionally not public until the backend supports it
     await createRevisionsApi({ fetch: fetchMock }).listHistory('job-1', 'version/1', {
       cursor: 'batch/1',
       limit: 25
     })
 
     expect(fetchMock).toHaveBeenCalledWith(
-      '/api/v1/jobs/job-1/operation-batches?version_id=version%2F1&cursor=batch%2F1&limit=25',
+      '/api/v1/jobs/job-1/operation-batches?version_id=version%2F1',
       undefined
     )
   })
