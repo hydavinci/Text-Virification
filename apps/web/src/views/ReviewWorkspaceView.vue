@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, type Ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch, type Ref } from 'vue'
 
 import BatchActions from '../components/review/BatchActions.vue'
 import CheckerFailureNotice from '../components/review/CheckerFailureNotice.vue'
@@ -13,6 +13,7 @@ import ToolRail from '../components/review/ToolRail.vue'
 import WorkspaceSidePanel from '../components/review/WorkspaceSidePanel.vue'
 import { useReviewWorkspace } from '../composables/useReviewWorkspace'
 import type { FileType } from '../types/review'
+import type { DocumentViewMode } from '../types/revisions'
 import type {
   CompactWorkspaceView,
   InspectorTab,
@@ -29,10 +30,17 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   processAnotherFile: []
+  dirtyChange: [dirty: boolean]
 }>()
 
 const {
   summary,
+  versions,
+  activeVersionId,
+  selectedVersionId,
+  reanalysis,
+  draft,
+  derivedPreview,
   filters,
   blocks,
   issues,
@@ -72,6 +80,7 @@ const {
   goToPreviousMatch,
   goToNextMatch,
   replaceAllMatches,
+  selectVersion,
   retrySummary,
   retryDocument,
   retryIssues
@@ -106,6 +115,15 @@ const documentViewer = ref<{ focusSelectedHighlight(): void } | null>(null)
 const lastPhoneIssueTrigger = ref<HTMLElement | null>(null)
 const phoneIssueDetailOrigin = ref<'document' | 'list'>('list')
 const lastExportTrigger = ref<HTMLElement | null>(null)
+const documentMode = ref<DocumentViewMode | 'edit'>('original')
+const draftPending = ref(false)
+const draftError = ref<string | null>(null)
+const reanalysisError = ref<string | null>(null)
+const modifiedBlocks = computed(() => derivedPreview.modified.value?.blocks ?? [])
+const diffBlocks = computed(() => derivedPreview.diff.value?.blocks ?? [])
+const draftBlocks = computed(() => draft.localBlocks.value)
+const derivedLoading = computed(() => derivedPreview.loading.value)
+const derivedError = computed(() => derivedPreview.error.value)
 const phoneBackLabel = computed(() =>
   phoneIssueDetailOrigin.value === 'document' ? '返回文档' : '返回问题列表'
 )
@@ -149,6 +167,16 @@ function bindMediaQuery(
 
 const cleanupCompactMediaQuery = bindMediaQuery(compactMediaQuery, isCompact)
 const cleanupPhoneMediaQuery = bindMediaQuery(phoneMediaQuery, isPhone)
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('beforeunload', onBeforeUnload)
+}
+
+watch(
+  () => draft.dirty.value,
+  (dirty) => emit('dirtyChange', dirty),
+  { immediate: true }
+)
 
 function activateCompactView(tool: WorkspaceTool): void {
   activeCompactView.value = tool
@@ -256,9 +284,93 @@ function closeExport(): void {
   if (!isExportOpen.value) {
     return
   }
-
   isExportOpen.value = false
   focusExportTrigger()
+}
+
+function errorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error ? error.message : fallback
+}
+
+async function loadDerivedMode(mode: Extract<DocumentViewMode, 'modified' | 'diff'>): Promise<void> {
+  const versionId = selectedVersionId.value
+  if (!versionId) {
+    return
+  }
+  await derivedPreview.load(mode, versionId)
+}
+
+function setDocumentMode(mode: DocumentViewMode): void {
+  documentMode.value = mode
+  if (mode === 'modified' || mode === 'diff') {
+    void loadDerivedMode(mode)
+  }
+}
+
+async function selectDocumentVersion(versionId: string): Promise<void> {
+  await selectVersion(versionId)
+  if (documentMode.value === 'modified' || documentMode.value === 'diff') {
+    await loadDerivedMode(documentMode.value)
+  }
+}
+
+async function startDraft(): Promise<void> {
+  const baseVersionId = selectedVersionId.value
+  if (!baseVersionId) {
+    return
+  }
+  draftPending.value = true
+  draftError.value = null
+  reanalysisError.value = null
+  try {
+    await draft.begin(baseVersionId)
+    documentMode.value = 'edit'
+  } catch (error) {
+    draftError.value = errorMessage(error, '无法创建草稿。')
+  } finally {
+    draftPending.value = false
+  }
+}
+
+async function discardDraft(): Promise<void> {
+  draftPending.value = true
+  draftError.value = null
+  try {
+    await draft.discard()
+    documentMode.value = 'original'
+  } catch (error) {
+    draftError.value = errorMessage(error, '无法放弃草稿。')
+  } finally {
+    draftPending.value = false
+  }
+}
+
+async function saveDraftAndReanalyze(): Promise<void> {
+  draftPending.value = true
+  draftError.value = null
+  reanalysisError.value = null
+  try {
+    await draft.reanalyze()
+    documentMode.value = 'original'
+  } catch (error) {
+    reanalysisError.value = errorMessage(error, '重新检查失败。')
+    documentMode.value = 'original'
+  } finally {
+    draftPending.value = false
+  }
+}
+
+function returnToDraft(): void {
+  reanalysisError.value = null
+  documentMode.value = 'edit'
+}
+
+function onBeforeUnload(event: BeforeUnloadEvent): void {
+  if (!draft.dirty.value) {
+    return
+  }
+  event.preventDefault()
+  event.returnValue = ''
 }
 
 function toggleExport(trigger: HTMLElement | null): void {
@@ -335,6 +447,9 @@ function onWorkspaceKeydown(event: KeyboardEvent): void {
 onBeforeUnmount(() => {
   cleanupCompactMediaQuery?.()
   cleanupPhoneMediaQuery?.()
+  if (typeof window !== 'undefined') {
+    window.removeEventListener('beforeunload', onBeforeUnload)
+  }
 })
 </script>
 
@@ -359,18 +474,39 @@ onBeforeUnmount(() => {
             :total-issues="summary?.total_issues ?? null"
             :summary-loading="loading.summary"
             :summary-error="errors.summary"
+            :versions="versions"
+            :active-version-id="activeVersionId"
+            :selected-version-id="selectedVersionId"
+            :mode="documentMode"
             :blocks="blocks"
+            :modified-blocks="modifiedBlocks"
+            :diff-blocks="diffBlocks"
+            :draft-blocks="draftBlocks"
             :issues="issues"
             :selected-issue-id="selectedIssueId"
             :selected-block-id="selectedBlockId"
             :next-cursor="blockCursor"
             :loading="loading.document"
             :error="errors.document"
+            :derived-loading="derivedLoading"
+            :derived-error="derivedError"
+            :draft-busy="draftPending"
+            :draft-error="draftError"
+            :reanalysis="reanalysis"
+            :reanalysis-error="reanalysisError"
             @select-highlight="selectHighlightAndShowDetails"
             @load-next="loadNextBlocks"
             @retry-summary="retrySummary"
             @retry="retryDocument"
             @process-another-file="emit('processAnotherFile')"
+            @select-version="selectDocumentVersion"
+            @set-mode="setDocumentMode"
+            @edit="startDraft"
+            @update-draft-block="draft.updateBlock"
+            @save-reanalyze="saveDraftAndReanalyze"
+            @discard-draft="discardDraft"
+            @return-to-draft="returnToDraft"
+            @retry-reanalysis="saveDraftAndReanalyze"
           />
         </section>
 
@@ -549,18 +685,39 @@ onBeforeUnmount(() => {
         :total-issues="summary?.total_issues ?? null"
         :summary-loading="loading.summary"
         :summary-error="errors.summary"
+        :versions="versions"
+        :active-version-id="activeVersionId"
+        :selected-version-id="selectedVersionId"
+        :mode="documentMode"
         :blocks="blocks"
+        :modified-blocks="modifiedBlocks"
+        :diff-blocks="diffBlocks"
+        :draft-blocks="draftBlocks"
         :issues="issues"
         :selected-issue-id="selectedIssueId"
         :selected-block-id="selectedBlockId"
         :next-cursor="blockCursor"
         :loading="loading.document"
         :error="errors.document"
+        :derived-loading="derivedLoading"
+        :derived-error="derivedError"
+        :draft-busy="draftPending"
+        :draft-error="draftError"
+        :reanalysis="reanalysis"
+        :reanalysis-error="reanalysisError"
         @select-highlight="selectHighlightAndShowDetails"
         @load-next="loadNextBlocks"
         @retry-summary="retrySummary"
         @retry="retryDocument"
         @process-another-file="emit('processAnotherFile')"
+        @select-version="selectDocumentVersion"
+        @set-mode="setDocumentMode"
+        @edit="startDraft"
+        @update-draft-block="draft.updateBlock"
+        @save-reanalyze="saveDraftAndReanalyze"
+        @discard-draft="discardDraft"
+        @return-to-draft="returnToDraft"
+        @retry-reanalysis="saveDraftAndReanalyze"
       />
 
       <ContextInspector v-model:active-tab="activeInspectorTab">

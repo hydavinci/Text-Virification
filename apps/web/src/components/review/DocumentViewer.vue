@@ -3,7 +3,17 @@ import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 
 import type { DocumentBlock, Issue } from '../../types/analysis'
 import type { FileType } from '../../types/review'
+import type {
+  DerivedDiffBlock,
+  DocumentVersion,
+  DocumentViewMode,
+  DraftBlock,
+  VersionEvent
+} from '../../types/revisions'
+import DocumentDiff from './DocumentDiff.vue'
+import DocumentEditor from './DocumentEditor.vue'
 import DocumentHeader from './DocumentHeader.vue'
+import VersionToolbar from './VersionToolbar.vue'
 import {
   browserReviewIntersectionObserverFactory,
   reviewIntersectionObserverFactoryKey,
@@ -33,19 +43,38 @@ interface OverlapComponent {
   issueIds: string[]
 }
 
+type EditableDocumentMode = DocumentViewMode | 'edit'
+
 const props = defineProps<{
   sourceName: string
   fileType: FileType
   totalIssues: number | null
   summaryLoading: boolean
   summaryError: string | null
+  versions: DocumentVersion[]
+  activeVersionId: string | null
+  selectedVersionId: string | null
+  mode: EditableDocumentMode
   blocks: DocumentBlock[]
+  modifiedBlocks: DocumentBlock[]
+  diffBlocks: DerivedDiffBlock[]
+  draftBlocks: DraftBlock[]
   issues: Issue[]
   selectedIssueId: string | null
   selectedBlockId: string | null
   nextCursor: string | null
   loading: boolean
   error: string | null
+  derivedLoading: DocumentViewMode | null
+  derivedError: string | null
+  draftBusy: boolean
+  draftError: string | null
+  reanalysis: {
+    status: VersionEvent['status']
+    progress: number
+    message: string
+  } | null
+  reanalysisError: string | null
 }>()
 
 const emit = defineEmits<{
@@ -54,6 +83,14 @@ const emit = defineEmits<{
   retrySummary: []
   retry: []
   processAnotherFile: []
+  selectVersion: [versionId: string]
+  setMode: [mode: DocumentViewMode]
+  edit: []
+  updateDraftBlock: [blockId: string, text: string]
+  saveReanalyze: []
+  discardDraft: []
+  returnToDraft: []
+  retryReanalysis: []
 }>()
 
 const observerFactory = inject(
@@ -70,6 +107,22 @@ let active = true
 
 const loadedParagraphCount = computed(
   () => props.blocks.filter(({ kind }) => kind === 'paragraph').length
+)
+const visibleModifiedBlocks = computed(() =>
+  props.mode === 'modified' ? props.modifiedBlocks : []
+)
+const reanalysisFailed = computed(
+  () => props.reanalysis?.status === 'failed' || props.reanalysisError !== null
+)
+const reanalysisMessage = computed(
+  () => props.reanalysisError ?? props.reanalysis?.message ?? '版本重新检查失败。'
+)
+const reanalysisInProgress = computed(
+  () =>
+    props.reanalysis !== null &&
+    props.reanalysis.status !== 'succeeded' &&
+    props.reanalysis.status !== 'failed' &&
+    props.reanalysisError === null
 )
 
 function issuesForBlock(blockId: string): Issue[] {
@@ -416,6 +469,45 @@ onBeforeUnmount(() => {
       @process-another-file="emit('processAnotherFile')"
     />
 
+    <VersionToolbar
+      :versions="versions"
+      :active-version-id="activeVersionId"
+      :selected-version-id="selectedVersionId"
+      :mode="mode"
+      :editing="mode === 'edit'"
+      :busy="draftBusy"
+      @select-version="emit('selectVersion', $event)"
+      @set-mode="emit('setMode', $event)"
+      @edit="emit('edit')"
+    />
+
+    <div
+      v-if="reanalysisInProgress"
+      class="document-viewer__progress"
+      role="status"
+      data-testid="reanalysis-progress"
+    >
+      <p>{{ reanalysis?.message || '正在重新检查版本…' }}</p>
+      <progress :value="reanalysis?.progress ?? 0" max="100">
+        {{ reanalysis?.progress ?? 0 }}%
+      </progress>
+    </div>
+
+    <div
+      v-if="reanalysisFailed"
+      class="document-viewer__error"
+      data-testid="reanalysis-failure"
+      role="alert"
+    >
+      <p>{{ reanalysisMessage }}</p>
+      <button type="button" name="return-to-draft" @click="emit('returnToDraft')">
+        返回草稿
+      </button>
+      <button type="button" name="retry-reanalysis" @click="emit('retryReanalysis')">
+        重试
+      </button>
+    </div>
+
     <div v-if="error" class="document-viewer__error" data-testid="document-error" role="alert">
       <p>{{ error }}</p>
       <button type="button" data-testid="retry-document" @click="emit('retry')">
@@ -424,45 +516,87 @@ onBeforeUnmount(() => {
     </div>
 
     <div class="document-viewer__page">
-      <p
-        v-for="block in blocks"
-        :key="block.block_id"
-        class="document-block"
-        :class="{ 'document-block--active': block.block_id === selectedBlockId }"
-        :data-block-id="block.block_id"
-      >
-        <template v-for="segment in renderModelForBlock(block).segments" :key="segment.key">
-          <span
-            v-if="segment.issueIds.length"
-            class="document-highlight-range"
-            :class="{
-              'document-highlight-range--active': segment.selectedBounds
-            }"
-            role="button"
-            tabindex="0"
-            :data-highlight-range-issue-ids="segment.issueIds.join(' ')"
-            :data-highlight-selected="segment.selectedBounds ? 'true' : undefined"
-            :aria-label="highlightLabel(segment)"
-            :aria-current="segment.selectedBounds ? 'true' : 'false'"
-            @pointerdown="onHighlightPointerDown"
-            @click="onHighlightClick($event, segment.issueIds)"
-            @keydown="onHighlightKeydown($event, segment.issueIds)"
-          >{{ segment.text }}</span>
-          <template v-else>{{ segment.text }}</template>
-        </template>
-      </p>
+      <DocumentEditor
+        v-if="mode === 'edit'"
+        :blocks="blocks"
+        :draft-blocks="draftBlocks"
+        :busy="draftBusy"
+        :error="draftError"
+        @update-block="(blockId, text) => emit('updateDraftBlock', blockId, text)"
+        @save-reanalyze="emit('saveReanalyze')"
+        @discard="emit('discardDraft')"
+      />
+
+      <template v-else-if="mode === 'modified'">
+        <p
+          v-for="block in visibleModifiedBlocks"
+          :key="block.block_id"
+          class="document-block"
+          :data-block-id="block.block_id"
+        >
+          {{ block.text }}
+        </p>
+      </template>
+
+      <DocumentDiff v-else-if="mode === 'diff'" :blocks="diffBlocks" />
+
+      <template v-else>
+        <p
+          v-for="block in blocks"
+          :key="block.block_id"
+          class="document-block"
+          :class="{ 'document-block--active': block.block_id === selectedBlockId }"
+          :data-block-id="block.block_id"
+        >
+          <template v-for="segment in renderModelForBlock(block).segments" :key="segment.key">
+            <span
+              v-if="segment.issueIds.length"
+              class="document-highlight-range"
+              :class="{
+                'document-highlight-range--active': segment.selectedBounds
+              }"
+              role="button"
+              tabindex="0"
+              :data-highlight-range-issue-ids="segment.issueIds.join(' ')"
+              :data-highlight-selected="segment.selectedBounds ? 'true' : undefined"
+              :aria-label="highlightLabel(segment)"
+              :aria-current="segment.selectedBounds ? 'true' : 'false'"
+              @pointerdown="onHighlightPointerDown"
+              @click="onHighlightClick($event, segment.issueIds)"
+              @keydown="onHighlightKeydown($event, segment.issueIds)"
+            >{{ segment.text }}</span>
+            <template v-else>{{ segment.text }}</template>
+          </template>
+        </p>
+      </template>
 
       <p v-if="!loading && !error && !blocks.length" class="document-viewer__empty">
         文档中没有可显示的文本块。
       </p>
 
       <div
-        v-if="nextCursor"
+        v-if="mode === 'original' && nextCursor"
         ref="sentinel"
         class="document-viewer__sentinel"
         data-testid="document-sentinel"
         aria-hidden="true"
       />
+
+      <p
+        v-if="(mode === 'modified' || mode === 'diff') && derivedLoading === mode"
+        class="document-viewer__empty"
+        role="status"
+      >
+        正在加载预览…
+      </p>
+
+      <p
+        v-if="(mode === 'modified' || mode === 'diff') && derivedError"
+        class="document-viewer__error"
+        role="alert"
+      >
+        {{ derivedError }}
+      </p>
     </div>
   </article>
 </template>
@@ -553,8 +687,27 @@ onBeforeUnmount(() => {
   border-radius: calc(var(--review-panel-radius) - 2px);
 }
 
+.document-viewer__progress {
+  margin: 18px;
+  padding: 14px;
+  color: var(--review-text);
+  background: var(--review-surface);
+  border: 1px solid var(--review-border);
+  border-radius: calc(var(--review-panel-radius) - 2px);
+}
+
 .document-viewer__error p {
   margin: 0 0 10px;
+}
+
+.document-viewer__progress p {
+  margin: 0 0 10px;
+  color: var(--review-text-muted);
+  font-weight: 700;
+}
+
+.document-viewer__progress progress {
+  width: 100%;
 }
 
 .document-viewer__error button {

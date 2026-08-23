@@ -4,9 +4,11 @@ import { describe, expect, it, vi } from 'vitest'
 import { analysisApiKey, type AnalysisApi } from '../src/api/analysis'
 import { exportsApiKey, type ExportsApi } from '../src/api/exports'
 import { jobsApiKey, type JobsApi } from '../src/api/jobs'
+import { revisionsApiKey, type RevisionsApi } from '../src/api/revisions'
 import UploadWorkspace from '../src/components/UploadWorkspace.vue'
 import { type JobCreateOptions } from '../src/types/jobs'
 import { CHECK_CATEGORY_VALUES } from '../src/types/review'
+import type { DocumentVersion, EditDraft } from '../src/types/revisions'
 import WorkspaceView from '../src/views/WorkspaceView.vue'
 
 type UploadOptionsSnapshot = Readonly<Required<JobCreateOptions>>
@@ -131,6 +133,66 @@ function createExportsApiMock(overrides: Partial<ExportsApi> = {}): ExportsApi {
     downloadUrl: vi
       .fn()
       .mockReturnValue('/api/v1/jobs/6d96fe0f-f4fc-4b43-90fd-68e5bd09f21f/exports/export-1/download'),
+    ...overrides
+  }
+}
+
+function buildVersion(overrides: Partial<DocumentVersion> = {}): DocumentVersion {
+  return {
+    version_id: 'version-1',
+    job_id: '6d96fe0f-f4fc-4b43-90fd-68e5bd09f21f',
+    parent_version_id: null,
+    revision_number: 1,
+    status: 'succeeded',
+    source_kind: 'original',
+    created_reason: 'upload',
+    content_sha256: 'a'.repeat(64),
+    created_at: '2026-08-23T12:00:00Z',
+    started_at: '2026-08-23T12:00:01Z',
+    completed_at: '2026-08-23T12:00:02Z',
+    failure_code: null,
+    failure_message: null,
+    ...overrides
+  }
+}
+
+function buildDraft(overrides: Partial<EditDraft> = {}): EditDraft {
+  return {
+    draft_id: 'draft-1',
+    job_id: '6d96fe0f-f4fc-4b43-90fd-68e5bd09f21f',
+    base_version_id: 'version-1',
+    revision: 1,
+    blocks: [{ block_id: 'block-1', text: '服务器草稿' }],
+    content_sha256: null,
+    created_at: '2026-08-23T12:00:00Z',
+    updated_at: '2026-08-23T12:00:00Z',
+    consumed_at: null,
+    ...overrides
+  }
+}
+
+function createRevisionsApiMock(overrides: Partial<RevisionsApi> = {}): RevisionsApi {
+  return {
+    listVersions: vi.fn().mockResolvedValue({
+      job_id: '6d96fe0f-f4fc-4b43-90fd-68e5bd09f21f',
+      active_version_id: 'version-1',
+      versions: [buildVersion()]
+    }),
+    createDraft: vi.fn().mockResolvedValue(buildDraft()),
+    getDraft: vi.fn().mockResolvedValue(buildDraft()),
+    updateDraft: vi.fn().mockResolvedValue(buildDraft({ revision: 2 })),
+    deleteDraft: vi.fn().mockResolvedValue(undefined),
+    reanalyze: vi.fn(),
+    getDerived: vi.fn(),
+    subscribeVersionEvents: vi.fn().mockReturnValue(vi.fn()),
+    listHistory: vi.fn().mockResolvedValue({
+      job_id: '6d96fe0f-f4fc-4b43-90fd-68e5bd09f21f',
+      version_id: 'version-1',
+      total: 0,
+      items: [],
+      next_cursor: null
+    }),
+    undoBatch: vi.fn(),
     ...overrides
   }
 }
@@ -332,6 +394,54 @@ describe('WorkspaceView', () => {
     expect(wrapper.find('[aria-label="文档审阅工作台"]').exists()).toBe(false)
     expect(wrapper.get('[data-testid="upload-dropzone"]').isVisible()).toBe(true)
     expect(wrapper.get('main').classes()).not.toContain('workspace--review')
+  })
+
+  it('keeps the current review when processing another file is cancelled with a dirty draft', async () => {
+    const originalConfirm = globalThis.confirm
+    const confirm = vi.fn().mockReturnValue(false)
+    globalThis.confirm = confirm
+    const closeSubscription = vi.fn()
+    const createJob = vi.fn().mockResolvedValue(buildJobRead())
+    const subscribe = vi.fn((_jobId, onEvent) => {
+      onEvent({
+        sequence: 2,
+        status: 'completed',
+        progress: 100,
+        message: '处理完成',
+        created_at: '2026-08-14T00:02:00Z'
+      })
+      return closeSubscription
+    })
+
+    try {
+      const wrapper = mount(WorkspaceView, {
+        global: {
+          provide: {
+            [jobsApiKey as symbol]: { createJob, subscribe },
+            [analysisApiKey as symbol]: createAnalysisApiMock(),
+            [exportsApiKey as symbol]: createExportsApiMock(),
+            [revisionsApiKey as symbol]: createRevisionsApiMock()
+          }
+        }
+      })
+
+      await selectFile(wrapper, new File(['检查'], 'sample.txt', { type: 'text/plain' }))
+      await flushPromises()
+      await wrapper.get('button[name="edit-version"]').trigger('click')
+      await flushPromises()
+      await wrapper.get('textarea[aria-label="第 1 段"]').setValue('未保存文本')
+      await wrapper.get('button[name="process-another-file"]').trigger('click')
+      await flushPromises()
+
+      expect(confirm).toHaveBeenCalledTimes(1)
+      expect(closeSubscription).not.toHaveBeenCalled()
+      expect(wrapper.find('[aria-label="文档审阅工作台"]').exists()).toBe(true)
+      expect((wrapper.get('textarea[aria-label="第 1 段"]').element as HTMLTextAreaElement).value).toBe(
+        '未保存文本'
+      )
+    } finally {
+      globalThis.confirm = originalConfirm
+    }
   })
 
   it('opens the review workspace when analysis partially completes', async () => {

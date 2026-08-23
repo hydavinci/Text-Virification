@@ -17,11 +17,13 @@ import AppSource from '../src/App.vue?raw'
 import BatchActionsSource from '../src/components/review/BatchActions.vue?raw'
 import ContextInspectorSource from '../src/components/review/ContextInspector.vue?raw'
 import DocumentViewerSource from '../src/components/review/DocumentViewer.vue?raw'
+import DocumentDiffSource from '../src/components/review/DocumentDiff.vue?raw'
 import ExportPanelSource from '../src/components/review/ExportPanel.vue?raw'
 import FindReplaceSource from '../src/components/review/FindReplace.vue?raw'
 import ReviewNavigationSource from '../src/components/review/ReviewNavigation.vue?raw'
 import IssuePanelSource from '../src/components/review/IssuePanel.vue?raw'
 import ToolRailSource from '../src/components/review/ToolRail.vue?raw'
+import VersionToolbarSource from '../src/components/review/VersionToolbar.vue?raw'
 import ReviewWorkspaceViewSource from '../src/views/ReviewWorkspaceView.vue?raw'
 import WorkspaceViewSource from '../src/views/WorkspaceView.vue?raw'
 
@@ -244,6 +246,19 @@ describe('review workspace accessibility', () => {
     expect(ReviewNavigationSource).toContain(':focus-visible')
     expect(IssuePanelSource).toContain('min-height: 44px')
     expect(IssuePanelSource).toContain(':focus-visible')
+  })
+
+  it('ships accessible version controls, roving document tabs, and semantic diff markup', () => {
+    expect(VersionToolbarSource).toContain('role="tablist"')
+    expect(VersionToolbarSource).toContain('role="tab"')
+    expect(VersionToolbarSource).toContain('tabindexForMode')
+    expect(VersionToolbarSource).toContain('onTabKeydown')
+    expect(VersionToolbarSource).toContain('（当前）')
+    expect(VersionToolbarSource).toContain('（历史，只读）')
+    expect(VersionToolbarSource).toContain('从此版本创建新版本')
+    expect(DocumentDiffSource).toContain('<ins')
+    expect(DocumentDiffSource).toContain('<del')
+    expect(DocumentViewerSource).toContain('<DocumentDiff')
   })
 
   it('uses one inherited review visual system without obsolete export breakpoints', () => {

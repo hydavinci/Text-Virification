@@ -41,6 +41,7 @@ const uploadError = ref<string | null>(null)
 const isCreating = ref(false)
 const jobState = ref<JobProgressState | null>(null)
 const activeJob = ref<ActiveJob | null>(null)
+const reviewDirty = ref(false)
 const showsReviewWorkspace = computed(
   () =>
     activeJob.value !== null &&
@@ -145,12 +146,20 @@ function isRequestCurrent(generation: number): boolean {
 }
 
 function processAnotherFile(): void {
+  if (
+    reviewDirty.value &&
+    typeof globalThis.confirm === 'function' &&
+    !globalThis.confirm('当前草稿尚未保存，确定要处理其他文件吗？')
+  ) {
+    return
+  }
   requestGeneration += 1
   closeSubscription()
   activeJob.value = null
   jobState.value = null
   uploadError.value = null
   isCreating.value = false
+  reviewDirty.value = false
 }
 
 function defaultStatusMessage(status: JobStatus): string {
@@ -195,6 +204,7 @@ onBeforeUnmount(() => {
       :source-name="activeJob.sourceName"
       :file-type="activeJob.fileType"
       @process-another-file="processAnotherFile"
+      @dirty-change="reviewDirty = $event"
     />
 
     <template v-else>

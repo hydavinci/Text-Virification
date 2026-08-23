@@ -3,6 +3,7 @@ import { defineComponent } from 'vue'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { analysisApiKey, type AnalysisApi } from '../src/api/analysis'
+import { exportsApiKey, type ExportsApi } from '../src/api/exports'
 import { revisionsApiKey, type RevisionsApi } from '../src/api/revisions'
 import { useDerivedPreview } from '../src/composables/useDerivedPreview'
 import { useEditDraft } from '../src/composables/useEditDraft'
@@ -19,12 +20,15 @@ import type {
 } from '../src/types/analysis'
 import type {
   DocumentVersion,
+  DiffDerivedResponse,
   EditDraft,
+  ModifiedDerivedResponse,
   OperationBatch,
   OperationBatchPage,
   VersionEvent,
   VersionListResponse
 } from '../src/types/revisions'
+import ReviewWorkspaceView from '../src/views/ReviewWorkspaceView.vue'
 
 const jobId = 'job-1'
 
@@ -271,6 +275,15 @@ function createRevisionsApiMock(overrides: Partial<RevisionsApi> = {}): Revision
   }
 }
 
+function createExportsApiMock(overrides: Partial<ExportsApi> = {}): ExportsApi {
+  return {
+    create: vi.fn(),
+    get: vi.fn(),
+    downloadUrl: vi.fn().mockReturnValue('/api/v1/jobs/job-1/exports/export-1/download'),
+    ...overrides
+  }
+}
+
 function mountWorkspace(
   analysisApi = createAnalysisApiMock(),
   revisionsApi = createRevisionsApiMock()
@@ -296,12 +309,154 @@ function mountWorkspace(
   return workspace
 }
 
+function mountReviewWorkspaceView(
+  analysisApi = createAnalysisApiMock(),
+  revisionsApi = createRevisionsApiMock()
+) {
+  return mount(ReviewWorkspaceView, {
+    props: {
+      jobId,
+      sourceName: 'sample.txt',
+      fileType: 'txt'
+    },
+    global: {
+      provide: {
+        [analysisApiKey as symbol]: analysisApi,
+        [revisionsApiKey as symbol]: revisionsApi,
+        [exportsApiKey as symbol]: createExportsApiMock()
+      }
+    }
+  })
+}
+
 afterEach(() => {
   vi.restoreAllMocks()
   vi.useRealTimers()
 })
 
 describe('review editing state', () => {
+  it('renders version labels and creates active or historical drafts explicitly', async () => {
+    const createDraft = vi.fn().mockResolvedValue(buildDraft())
+    const revisionsApi = createRevisionsApiMock({ createDraft })
+    const wrapper = mountReviewWorkspaceView(createAnalysisApiMock(), revisionsApi)
+    await flushPromises()
+
+    expect(wrapper.find('select[aria-label="版本"]').exists()).toBe(true)
+    expect(wrapper.findAll('select[aria-label="版本"] option').map((option) => option.text())).toEqual([
+      '版本 1（历史，只读）',
+      '版本 2（当前）'
+    ])
+
+    await wrapper.get('button[name="edit-version"]').trigger('click')
+    await flushPromises()
+
+    expect(createDraft).toHaveBeenLastCalledWith(jobId, 'version-2')
+    expect(wrapper.find('textarea[aria-label="第 1 段"]').exists()).toBe(true)
+
+    await wrapper.get('button[name="discard-draft"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('select[aria-label="版本"]').setValue('version-1')
+    await flushPromises()
+
+    expect(wrapper.get('button[name="edit-version"]').text()).toBe('从此版本创建新版本')
+
+    await wrapper.get('button[name="edit-version"]').trigger('click')
+    await flushPromises()
+
+    expect(createDraft).toHaveBeenLastCalledWith(jobId, 'version-1')
+  })
+
+  it('keeps edited draft text after a failed reanalysis returns to the editor', async () => {
+    const revisionsApi = createRevisionsApiMock({
+      createDraft: vi.fn().mockResolvedValue(
+        buildDraft({
+          blocks: [
+            { block_id: 'block-1', text: '第一段文字' },
+            { block_id: 'block-2', text: '第二段文字' }
+          ]
+        })
+      ),
+      updateDraft: vi.fn().mockResolvedValue(
+        buildDraft({
+          revision: 2,
+          blocks: [
+            { block_id: 'block-1', text: '本地保留文本' },
+            { block_id: 'block-2', text: '第二段文字' }
+          ]
+        })
+      ),
+      reanalyze: vi.fn().mockRejectedValue(new Error('重新检查失败'))
+    })
+    const wrapper = mountReviewWorkspaceView(createAnalysisApiMock(), revisionsApi)
+    await flushPromises()
+
+    await wrapper.get('button[name="edit-version"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('textarea[aria-label="第 1 段"]').setValue('本地保留文本')
+
+    expect(wrapper.get('button[name="save-reanalyze"]').text()).toBe('保存草稿并重新检查')
+    expect(wrapper.get('button[name="discard-draft"]').text()).toBe('放弃草稿')
+
+    await wrapper.get('button[name="save-reanalyze"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="reanalysis-failure"]').text()).toContain('重新检查失败')
+
+    await wrapper.get('button[name="return-to-draft"]').trigger('click')
+    await flushPromises()
+
+    expect((wrapper.get('textarea[aria-label="第 1 段"]').element as HTMLTextAreaElement).value).toBe(
+      '本地保留文本'
+    )
+  })
+
+  it('renders modified and diff document views from derived preview state', async () => {
+    const modified: ModifiedDerivedResponse = {
+      job_id: jobId,
+      version_id: 'version-2',
+      decision_snapshot_sha256: 'hash-1',
+      blocks: [buildBlock({ text: '修改后文本' })]
+    }
+    const diff: DiffDerivedResponse = {
+      job_id: jobId,
+      version_id: 'version-2',
+      decision_snapshot_sha256: 'hash-1',
+      blocks: [
+        {
+          block_id: 'block-1',
+          segments: [
+            { kind: 'equal', text: '第一' },
+            { kind: 'delete', text: '段' },
+            { kind: 'insert', text: '节' }
+          ]
+        }
+      ]
+    }
+    const getDerived = vi
+      .fn()
+      .mockResolvedValueOnce(modified)
+      .mockResolvedValueOnce(diff)
+    const wrapper = mountReviewWorkspaceView(
+      createAnalysisApiMock(),
+      createRevisionsApiMock({ getDerived })
+    )
+    await flushPromises()
+
+    await wrapper.get('button[role="tab"][data-mode="modified"]').trigger('click')
+    await flushPromises()
+
+    expect(getDerived).toHaveBeenLastCalledWith(jobId, 'version-2', 'modified')
+    expect(wrapper.get('[data-block-id="block-1"]').text()).toBe('修改后文本')
+    expect(wrapper.find('[data-highlight-range-issue-ids]').exists()).toBe(false)
+
+    await wrapper.get('button[role="tab"][data-mode="diff"]').trigger('click')
+    await flushPromises()
+
+    expect(getDerived).toHaveBeenLastCalledWith(jobId, 'version-2', 'diff')
+    expect(wrapper.get('del').text()).toBe('段')
+    expect(wrapper.get('ins').text()).toBe('节')
+  })
+
   it('reloads document, issues, and summary with the selected historical version', async () => {
     const analysisApi = createAnalysisApiMock()
     const workspace = mountWorkspace(analysisApi)
