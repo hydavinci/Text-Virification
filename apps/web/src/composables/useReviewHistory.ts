@@ -23,7 +23,8 @@ export interface ReviewHistoryState {
 
 export function useReviewHistory(
   jobId: string,
-  revisionsApi: RevisionsApi
+  revisionsApi: RevisionsApi,
+  onUndoApplied?: (undoBatch: OperationBatch) => Promise<void> | void
 ): ReviewHistoryState {
   const latestBatch = ref<OperationBatch | null>(null)
   const undoToastDeadline = ref<Date | null>(null)
@@ -57,6 +58,13 @@ export function useReviewHistory(
       undoes_batch_id: null,
       created_at: new Date().toISOString()
     }
+    if (historyPage.value?.version_id === versionId) {
+      historyPage.value = {
+        ...historyPage.value,
+        total: historyPage.value.total + 1,
+        items: [latestBatch.value, ...historyPage.value.items]
+      }
+    }
     undoToastDeadline.value = new Date(Date.now() + UNDO_TOAST_DURATION_MS)
     undoToastVisible.value = true
     undoConflict.value = null
@@ -74,7 +82,7 @@ export function useReviewHistory(
     const generation = ++historyGeneration
     const page = await revisionsApi.listHistory(jobId, versionId)
     if (active && generation === historyGeneration) {
-      historyPage.value = page
+      applyHistoryPage(page)
     }
   }
 
@@ -85,15 +93,38 @@ export function useReviewHistory(
     }
 
     try {
-      await revisionsApi.undoBatch(jobId, batch.batch_id)
+      const undoBatch = await revisionsApi.undoBatch(jobId, batch.batch_id)
+      applyUndoBatch(undoBatch)
       undoConflict.value = null
       undoToastVisible.value = false
       if (toastTimer) {
         clearTimeout(toastTimer)
         toastTimer = null
       }
+      await onUndoApplied?.(undoBatch)
     } catch (error) {
       undoConflict.value = error instanceof Error ? error.message : '撤销失败。'
+    }
+  }
+
+  function applyHistoryPage(page: OperationBatchPage): void {
+    historyPage.value = page
+    latestBatch.value = latestUndoableBatch(page.items)
+  }
+
+  function applyUndoBatch(undoBatch: OperationBatch): void {
+    if (historyPage.value?.version_id === undoBatch.version_id) {
+      historyPage.value = {
+        ...historyPage.value,
+        total: historyPage.value.total + 1,
+        items: [undoBatch, ...historyPage.value.items]
+      }
+      latestBatch.value = latestUndoableBatch(historyPage.value.items)
+      return
+    }
+
+    if (latestBatch.value?.batch_id === undoBatch.undoes_batch_id) {
+      latestBatch.value = null
     }
   }
 
@@ -116,4 +147,22 @@ export function useReviewHistory(
     loadHistory,
     undoLatestBatch
   }
+}
+
+function latestUndoableBatch(items: OperationBatch[]): OperationBatch | null {
+  const undoneBatchIds = new Set(
+    items
+      .filter((item) => item.operation_type === 'undo' && item.undoes_batch_id)
+      .map((item) => item.undoes_batch_id as string)
+  )
+  const newestFirst = [...items].sort(
+    (left, right) =>
+      new Date(right.created_at).getTime() - new Date(left.created_at).getTime()
+  )
+
+  return (
+    newestFirst.find(
+      (item) => item.operation_type === 'decision' && !undoneBatchIds.has(item.batch_id)
+    ) ?? null
+  )
 }

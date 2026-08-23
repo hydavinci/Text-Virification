@@ -1,4 +1,4 @@
-import { computed, ref, type ComputedRef, type Ref } from 'vue'
+import { computed, onScopeDispose, ref, type ComputedRef, type Ref } from 'vue'
 
 import type { RevisionsApi } from '../api/revisions'
 import { ApiError } from '../types/api'
@@ -31,16 +31,29 @@ export function useEditDraft(
   const localBlocks = ref<DraftBlock[]>([])
   const conflict = ref<DraftConflict | null>(null)
 
+  let active = true
+  let lifecycleGeneration = 0
+  let saveGeneration = 0
+  let reanalysisGeneration = 0
+  const reanalysisKeys = new Map<string, string>()
+
   const dirty = computed(() => {
     const currentDraft = draft.value
     return currentDraft ? !blocksEqual(localBlocks.value, currentDraft.blocks) : false
   })
 
   async function begin(baseVersionId: string): Promise<void> {
+    const generation = ++lifecycleGeneration
+    saveGeneration += 1
+    reanalysisGeneration += 1
     const createdDraft = await revisionsApi.createDraft(jobId, baseVersionId)
+    if (!isCurrentLifecycle(generation)) {
+      return
+    }
     draft.value = createdDraft
     localBlocks.value = cloneBlocks(createdDraft.blocks)
     conflict.value = null
+    reanalysisKeys.clear()
   }
 
   function updateBlock(blockId: string, text: string): void {
@@ -65,17 +78,33 @@ export function useEditDraft(
     }
 
     const submittedBlocks = cloneBlocks(localBlocks.value)
+    const requestGeneration = ++saveGeneration
+    const requestLifecycleGeneration = lifecycleGeneration
     try {
       const savedDraft = await revisionsApi.updateDraft(jobId, currentDraft.draft_id, {
         expected_revision: currentDraft.revision,
         blocks: submittedBlocks
       })
+      if (
+        !isCurrentLifecycle(requestLifecycleGeneration) ||
+        requestGeneration !== saveGeneration ||
+        draft.value?.draft_id !== currentDraft.draft_id
+      ) {
+        return savedDraft
+      }
       draft.value = savedDraft
-      localBlocks.value = cloneBlocks(savedDraft.blocks)
+      if (blocksEqual(localBlocks.value, submittedBlocks)) {
+        localBlocks.value = cloneBlocks(savedDraft.blocks)
+      }
       conflict.value = null
       return savedDraft
     } catch (error) {
-      if (isDraftConflict(error)) {
+      if (
+        isDraftConflict(error) &&
+        isCurrentLifecycle(requestLifecycleGeneration) &&
+        requestGeneration === saveGeneration &&
+        draft.value?.draft_id === currentDraft.draft_id
+      ) {
         conflict.value = {
           code: error.detail.code,
           message: error.message,
@@ -88,12 +117,19 @@ export function useEditDraft(
 
   async function discard(): Promise<void> {
     const currentDraft = draft.value
+    const generation = ++lifecycleGeneration
+    saveGeneration += 1
+    reanalysisGeneration += 1
     if (currentDraft) {
       await revisionsApi.deleteDraft(jobId, currentDraft.draft_id)
+    }
+    if (!isCurrentLifecycle(generation)) {
+      return
     }
     draft.value = null
     localBlocks.value = []
     conflict.value = null
+    reanalysisKeys.clear()
   }
 
   async function reanalyze(): Promise<DocumentVersion> {
@@ -102,13 +138,47 @@ export function useEditDraft(
       throw new Error('No active edit draft.')
     }
 
+    const requestGeneration = ++reanalysisGeneration
+    const requestLifecycleGeneration = lifecycleGeneration
+    const draftKey = `${savedDraft.draft_id}:${savedDraft.revision}`
+    const idempotencyKey = getReanalysisKey(draftKey)
     const response = await revisionsApi.reanalyze(jobId, savedDraft.draft_id, {
       expected_draft_revision: savedDraft.revision,
-      idempotency_key: `reanalyze-${savedDraft.draft_id}-${savedDraft.revision}-${Date.now()}`
+      idempotency_key: idempotencyKey
     })
-    onReanalysisStarted?.(response.version)
+    reanalysisKeys.delete(draftKey)
+    if (
+      isCurrentLifecycle(requestLifecycleGeneration) &&
+      requestGeneration === reanalysisGeneration &&
+      draft.value?.draft_id === savedDraft.draft_id &&
+      draft.value.revision === savedDraft.revision
+    ) {
+      onReanalysisStarted?.(response.version)
+    }
     return response.version
   }
+
+  function getReanalysisKey(draftKey: string): string {
+    const existingKey = reanalysisKeys.get(draftKey)
+    if (existingKey) {
+      return existingKey
+    }
+
+    const nextKey = `reanalyze-${draftKey}-${Date.now()}`
+    reanalysisKeys.set(draftKey, nextKey)
+    return nextKey
+  }
+
+  function isCurrentLifecycle(generation: number): boolean {
+    return active && generation === lifecycleGeneration
+  }
+
+  onScopeDispose(() => {
+    active = false
+    lifecycleGeneration += 1
+    saveGeneration += 1
+    reanalysisGeneration += 1
+  })
 
   return {
     draft,

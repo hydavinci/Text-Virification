@@ -6,6 +6,7 @@ import { analysisApiKey, type AnalysisApi } from '../src/api/analysis'
 import { revisionsApiKey, type RevisionsApi } from '../src/api/revisions'
 import { useDerivedPreview } from '../src/composables/useDerivedPreview'
 import { useEditDraft } from '../src/composables/useEditDraft'
+import { useReviewHistory } from '../src/composables/useReviewHistory'
 import { useReviewWorkspace, type ReviewWorkspaceState } from '../src/composables/useReviewWorkspace'
 import { ApiError } from '../src/types/api'
 import type {
@@ -336,6 +337,32 @@ describe('review editing state', () => {
     expect(workspace.canEditSelectedVersion.value).toBe(false)
   })
 
+  it('keeps active-version default analysis calls unpinned until a historical version is selected', async () => {
+    const analysisApi = createAnalysisApiMock()
+    const workspace = mountWorkspace(analysisApi)
+    await flushPromises()
+
+    await workspace.setFilters({ severity: 'error' })
+    await flushPromises()
+
+    expect(analysisApi.getIssues).toHaveBeenLastCalledWith(jobId, {
+      severity: 'error',
+      cursor: null,
+      limit: 50
+    })
+
+    await workspace.selectVersion('version-1')
+    await flushPromises()
+    await workspace.setFilters({ severity: 'warning' })
+
+    expect(analysisApi.getIssues).toHaveBeenLastCalledWith(jobId, {
+      version_id: 'version-1',
+      severity: 'warning',
+      cursor: null,
+      limit: 50
+    })
+  })
+
   it('rejects visible batch acceptance before a request when an issue lacks a preferred suggestion', async () => {
     const putDecisions = vi.fn()
     const workspace = mountWorkspace(
@@ -386,6 +413,80 @@ describe('review editing state', () => {
     expect(draftState.conflict.value?.submittedBlocks).toEqual([
       { block_id: 'block-1', text: '本地保留文本' }
     ])
+  })
+
+  it('reuses a reanalysis idempotency key for the same draft revision retry and rotates after revision changes', async () => {
+    vi.spyOn(Date, 'now')
+      .mockReturnValueOnce(1000)
+      .mockReturnValueOnce(2000)
+      .mockReturnValueOnce(3000)
+    const reanalyze = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('暂时失败'))
+      .mockResolvedValueOnce({
+        version: buildVersion({ version_id: 'version-3', status: 'queued' }),
+        events_url: '/api/v1/jobs/job-1/versions/version-3/events'
+      })
+      .mockResolvedValueOnce({
+        version: buildVersion({ version_id: 'version-4', status: 'queued' }),
+        events_url: '/api/v1/jobs/job-1/versions/version-4/events'
+      })
+    const revisionsApi = createRevisionsApiMock({
+      reanalyze,
+      updateDraft: vi.fn().mockResolvedValue(buildDraft({ revision: 2 }))
+    })
+    let draftState!: ReturnType<typeof useEditDraft>
+    const Harness = defineComponent({
+      setup() {
+        draftState = useEditDraft(jobId, revisionsApi)
+        return {}
+      },
+      template: '<div />'
+    })
+    mount(Harness)
+
+    await draftState.begin('version-2')
+    await expect(draftState.reanalyze()).rejects.toThrow('暂时失败')
+    await draftState.reanalyze()
+
+    const firstKey = reanalyze.mock.calls[0]?.[2].idempotency_key
+    expect(reanalyze.mock.calls[1]?.[2].idempotency_key).toBe(firstKey)
+
+    draftState.updateBlock('block-1', '修订后')
+    await draftState.save()
+    await draftState.reanalyze()
+
+    expect(reanalyze.mock.calls[2]?.[2].idempotency_key).not.toBe(firstKey)
+  })
+
+  it('does not let a late save response erase newer local draft edits', async () => {
+    const saveResponse = createDeferred<EditDraft>()
+    const revisionsApi = createRevisionsApiMock({
+      updateDraft: vi.fn().mockReturnValue(saveResponse.promise)
+    })
+    let draftState!: ReturnType<typeof useEditDraft>
+    const Harness = defineComponent({
+      setup() {
+        draftState = useEditDraft(jobId, revisionsApi)
+        return {}
+      },
+      template: '<div />'
+    })
+    mount(Harness)
+
+    await draftState.begin('version-2')
+    draftState.updateBlock('block-1', '提交中的文本')
+    const save = draftState.save()
+    draftState.updateBlock('block-1', '新的本地文本')
+    saveResponse.resolve(
+      buildDraft({ revision: 2, blocks: [{ block_id: 'block-1', text: '提交中的文本' }] })
+    )
+    await save
+
+    expect(draftState.localBlocks.value).toEqual([
+      { block_id: 'block-1', text: '新的本地文本' }
+    ])
+    expect(draftState.dirty.value).toBe(true)
   })
 
   it('ignores reanalysis progress events from an older generation', async () => {
@@ -464,6 +565,130 @@ describe('review editing state', () => {
     expect(preview.modified.value?.blocks).toEqual([buildBlock({ text: '新结果' })])
   })
 
+  it('ignores a current derived response when its decision hash does not match the expected hash', async () => {
+    const revisionsApi = createRevisionsApiMock({
+      getDerived: vi
+        .fn()
+        .mockResolvedValueOnce({
+          job_id: jobId,
+          version_id: 'version-2',
+          decision_snapshot_sha256: 'new-hash',
+          blocks: [buildBlock({ text: '新结果' })]
+        })
+        .mockResolvedValueOnce({
+          job_id: jobId,
+          version_id: 'version-2',
+          decision_snapshot_sha256: 'old-hash',
+          blocks: [buildBlock({ text: '不应显示' })]
+        })
+    })
+    let preview!: ReturnType<typeof useDerivedPreview>
+    const Harness = defineComponent({
+      setup() {
+        preview = useDerivedPreview(jobId, revisionsApi)
+        return {}
+      },
+      template: '<div />'
+    })
+    mount(Harness)
+
+    await preview.load('modified', 'version-2', 'new-hash')
+    await preview.load('modified', 'version-2', 'new-hash')
+
+    expect(preview.modified.value?.blocks).toEqual([buildBlock({ text: '新结果' })])
+    expect(preview.decisionSnapshotSha256.value).toBe('new-hash')
+  })
+
+  it('derives the latest undoable batch from authoritative history', async () => {
+    const revisionsApi = createRevisionsApiMock({
+      listHistory: vi.fn().mockResolvedValue({
+        job_id: jobId,
+        version_id: 'version-2',
+        total: 3,
+        items: [
+          buildBatch({
+            batch_id: 'undo-batch-2',
+            operation_type: 'undo',
+            undoes_batch_id: 'batch-2',
+            created_at: '2026-08-23T12:03:00Z'
+          }),
+          buildBatch({
+            batch_id: 'batch-2',
+            operation_type: 'decision',
+            created_at: '2026-08-23T12:02:00Z'
+          }),
+          buildBatch({
+            batch_id: 'batch-1',
+            operation_type: 'decision',
+            created_at: '2026-08-23T12:01:00Z'
+          })
+        ],
+        next_cursor: null
+      })
+    })
+    let history!: ReturnType<typeof useReviewHistory>
+    const Harness = defineComponent({
+      setup() {
+        history = useReviewHistory(jobId, revisionsApi)
+        return {}
+      },
+      template: '<div />'
+    })
+    mount(Harness)
+
+    await history.loadHistory('version-2')
+
+    expect(history.latestBatch.value?.batch_id).toBe('batch-1')
+    expect(history.canUndoLatestBatch.value).toBe(true)
+  })
+
+  it('updates history state with the returned undo batch', async () => {
+    const revisionsApi = createRevisionsApiMock({
+      listHistory: vi.fn().mockResolvedValue({
+        job_id: jobId,
+        version_id: 'version-2',
+        total: 2,
+        items: [
+          buildBatch({
+            batch_id: 'batch-2',
+            operation_type: 'decision',
+            created_at: '2026-08-23T12:02:00Z'
+          }),
+          buildBatch({
+            batch_id: 'batch-1',
+            operation_type: 'decision',
+            created_at: '2026-08-23T12:01:00Z'
+          })
+        ],
+        next_cursor: null
+      }),
+      undoBatch: vi.fn().mockResolvedValue(
+        buildBatch({
+          batch_id: 'undo-batch-2',
+          operation_type: 'undo',
+          undoes_batch_id: 'batch-2',
+          created_at: '2026-08-23T12:03:00Z'
+        })
+      )
+    })
+    let history!: ReturnType<typeof useReviewHistory>
+    const Harness = defineComponent({
+      setup() {
+        history = useReviewHistory(jobId, revisionsApi)
+        return {}
+      },
+      template: '<div />'
+    })
+    mount(Harness)
+
+    await history.loadHistory('version-2')
+    await history.undoLatestBatch()
+
+    expect(history.historyPage.value?.items[0]?.batch_id).toBe('undo-batch-2')
+    expect(history.latestBatch.value?.batch_id).toBe('batch-1')
+    expect(history.canUndoLatestBatch.value).toBe(true)
+  })
+
   it('starts a 10-second undo deadline after a successful decision batch', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-08-23T12:00:00Z'))
@@ -493,5 +718,79 @@ describe('review editing state', () => {
     expect(workspace.history.undoToastVisible.value).toBe(false)
     expect(workspace.history.canUndoLatestBatch.value).toBe(true)
     expect(workspace.history.latestBatch.value?.batch_id).toBe('batch-1')
+  })
+
+  it('reloads workspace analysis and clears derived preview after undo', async () => {
+    const analysisApi = createAnalysisApiMock()
+    const revisionsApi = createRevisionsApiMock({
+      listHistory: vi.fn().mockResolvedValue({
+        job_id: jobId,
+        version_id: 'version-2',
+        total: 1,
+        items: [buildBatch({ batch_id: 'batch-1' })],
+        next_cursor: null
+      }),
+      undoBatch: vi.fn().mockResolvedValue(
+        buildBatch({
+          batch_id: 'undo-batch-1',
+          operation_type: 'undo',
+          undoes_batch_id: 'batch-1'
+        })
+      )
+    })
+    const workspace = mountWorkspace(analysisApi, revisionsApi)
+    await flushPromises()
+    await workspace.derivedPreview.load('modified', 'version-2', null)
+    expect(workspace.derivedPreview.modified.value).not.toBeNull()
+    const summaryCalls = vi.mocked(analysisApi.getSummary).mock.calls.length
+    const issueCalls = vi.mocked(analysisApi.getIssues).mock.calls.length
+
+    await workspace.history.undoLatestBatch()
+    await flushPromises()
+
+    expect(workspace.derivedPreview.modified.value).toBeNull()
+    expect(analysisApi.getSummary).toHaveBeenCalledTimes(summaryCalls + 1)
+    expect(analysisApi.getIssues).toHaveBeenCalledTimes(issueCalls + 1)
+  })
+
+  it('ignores a decision response submitted for a version that is no longer selected', async () => {
+    const decisionResponse = createDeferred<DecisionBatchResponse>()
+    const analysisApi = createAnalysisApiMock({
+      putDecisions: vi.fn().mockReturnValue(decisionResponse.promise)
+    })
+    const workspace = mountWorkspace(analysisApi)
+    await flushPromises()
+
+    void workspace.decideVisible('accepted')
+    await flushPromises()
+    await workspace.selectVersion('version-1')
+    await flushPromises()
+    const summaryCalls = vi.mocked(analysisApi.getSummary).mock.calls.length
+    const issueCalls = vi.mocked(analysisApi.getIssues).mock.calls.length
+
+    decisionResponse.resolve({
+      batch_id: 'stale-batch',
+      outcomes: [
+        {
+          issue_id: 'issue-1',
+          status: 'applied',
+          code: null,
+          decision: {
+            issue_id: 'issue-1',
+            issue_version: 1,
+            revision: 1,
+            action: 'accepted',
+            replacement: '首段',
+            suggestion_id: 'suggestion-1',
+            updated_at: '2026-08-23T12:00:00Z'
+          }
+        }
+      ]
+    })
+    await flushPromises()
+
+    expect(workspace.history.latestBatch.value?.batch_id).not.toBe('stale-batch')
+    expect(analysisApi.getSummary).toHaveBeenCalledTimes(summaryCalls)
+    expect(analysisApi.getIssues).toHaveBeenCalledTimes(issueCalls)
   })
 })

@@ -63,6 +63,7 @@ interface FailedDecision {
 interface DecisionRequestGuard {
   issueId: string
   generation: number
+  scopeGeneration: number
 }
 
 interface ReviewFindMatch {
@@ -174,6 +175,8 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
   let documentGeneration = 0
   let issueGeneration = 0
   let localizationGeneration = 0
+  let decisionScopeGeneration = 0
+  let explicitHistoricalVersionId: string | null = null
   let summaryRequest: Promise<void> | null = null
   let documentRequest: Promise<void> | null = null
   let issueRequest: Promise<void> | null = null
@@ -186,7 +189,10 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
   const currentFindMatchIndex = ref(-1)
   const documentVersions = useDocumentVersions(jobId, revisionsApi)
   const derivedPreview = useDerivedPreview(jobId, revisionsApi)
-  const history = useReviewHistory(jobId, revisionsApi)
+  const history = useReviewHistory(jobId, revisionsApi, async () => {
+    derivedPreview.clear()
+    await Promise.all([loadSummary(), loadIssuePage(null, false)])
+  })
   const draft = useEditDraft(jobId, revisionsApi, (version) => {
     documentVersions.trackReanalysis(version, async (versionId) => {
       await selectVersion(versionId)
@@ -286,8 +292,8 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
   }
 
   function selectedVersionQuery(): { version_id: string } | undefined {
-    return documentVersions.selectedVersionId.value
-      ? { version_id: documentVersions.selectedVersionId.value }
+    return explicitHistoricalVersionId
+      ? { version_id: explicitHistoricalVersionId }
       : undefined
   }
 
@@ -680,6 +686,10 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
 
   async function selectVersion(versionId: string): Promise<void> {
     await documentVersions.selectVersion(versionId)
+    explicitHistoricalVersionId =
+      versionId === documentVersions.activeVersionId.value ? null : versionId
+    decisionScopeGeneration += 1
+    decisionGenerations.clear()
     derivedPreview.clear()
     localizationGeneration += 1
     explicitlySelectedIssueId = null
@@ -704,21 +714,29 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     ])
   }
 
-  function nextDecisionGeneration(issueId: string): number {
+  function nextDecisionGeneration(issueId: string): DecisionRequestGuard {
     const generation = (decisionGenerations.get(issueId) ?? 0) + 1
     decisionGenerations.set(issueId, generation)
-    return generation
+    return {
+      issueId,
+      generation,
+      scopeGeneration: decisionScopeGeneration
+    }
   }
 
-  function isDecisionCurrent(issueId: string, generation: number): boolean {
-    return active && decisionGenerations.get(issueId) === generation
+  function isDecisionCurrent(guard: DecisionRequestGuard): boolean {
+    return (
+      active &&
+      decisionScopeGeneration === guard.scopeGeneration &&
+      decisionGenerations.get(guard.issueId) === guard.generation
+    )
   }
 
   function currentDecisionGuards(
     decisionGuards: DecisionRequestGuard | DecisionRequestGuard[]
   ): DecisionRequestGuard[] {
     const guards = Array.isArray(decisionGuards) ? decisionGuards : [decisionGuards]
-    return guards.filter((guard) => isDecisionCurrent(guard.issueId, guard.generation))
+    return guards.filter((guard) => isDecisionCurrent(guard))
   }
 
   function setIssueDecision(
@@ -850,7 +868,8 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
   }
 
   async function submitDecision(command: DecisionCommand): Promise<void> {
-    const generation = nextDecisionGeneration(command.issue_id)
+    const guard = nextDecisionGeneration(command.issue_id)
+    const submittedVersionId = documentVersions.selectedVersionId.value
     decisionAnnouncement.value = ''
     derivedPreview.clear()
     clearFailedDecision(command.issue_id)
@@ -858,7 +877,7 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
 
     try {
       const response = await analysisApi.putDecisions(jobId, [command])
-      if (!isDecisionCurrent(command.issue_id, generation)) {
+      if (!isDecisionCurrent(guard)) {
         return
       }
 
@@ -874,14 +893,11 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
         setIssueDecision(command.issue_id, outcome.decision)
         history.recordDecisionBatch(
           response.batch_id,
-          documentVersions.selectedVersionId.value,
+          submittedVersionId,
           1
         )
         await Promise.all([
-          reloadAuthoritativeIssues({
-            issueId: command.issue_id,
-            generation
-          }),
+          reloadAuthoritativeIssues(guard),
           loadSummary()
         ])
         return
@@ -893,14 +909,11 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
       )
       decisionAnnouncement.value = '结果已更新，请重新确认'
       await Promise.all([
-        reloadAuthoritativeIssues({
-          issueId: command.issue_id,
-          generation
-        }),
+        reloadAuthoritativeIssues(guard),
         loadSummary()
       ])
     } catch (error) {
-      if (!isDecisionCurrent(command.issue_id, generation)) {
+      if (!isDecisionCurrent(guard)) {
         return
       }
 
@@ -947,15 +960,16 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
       return
     }
 
-    const generations = new Map<string, number>()
+    const guards = new Map<string, DecisionRequestGuard>()
+    const submittedVersionId = documentVersions.selectedVersionId.value
     failureTarget.value = null
     bulkActionPending.value = true
     decisionAnnouncement.value = ''
     derivedPreview.clear()
 
     for (const command of commands) {
-      const generation = nextDecisionGeneration(command.issue_id)
-      generations.set(command.issue_id, generation)
+      const guard = nextDecisionGeneration(command.issue_id)
+      guards.set(command.issue_id, guard)
       clearFailedDecision(command.issue_id)
       setIssueDecision(command.issue_id, optimisticDecision(command))
     }
@@ -967,8 +981,8 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
       const authoritativeReloadGuards: DecisionRequestGuard[] = []
 
       for (const command of commands) {
-        const generation = generations.get(command.issue_id)
-        if (generation === undefined || !isDecisionCurrent(command.issue_id, generation)) {
+        const guard = guards.get(command.issue_id)
+        if (!guard || !isDecisionCurrent(guard)) {
           continue
         }
 
@@ -981,8 +995,7 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
         }
 
         authoritativeReloadGuards.push({
-          issueId: command.issue_id,
-          generation
+          ...guard
         })
 
         if (outcome.status === 'applied') {
@@ -999,10 +1012,14 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
         needsReviewCount += 1
       }
 
+      if (authoritativeReloadGuards.length === 0) {
+        return
+      }
+
       decisionAnnouncement.value = batchDecisionAnnouncement(appliedCount, needsReviewCount)
       history.recordDecisionBatch(
         response.batch_id,
-        documentVersions.selectedVersionId.value,
+        submittedVersionId,
         appliedCount
       )
       await Promise.all([
@@ -1013,8 +1030,8 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
       ])
     } catch (error) {
       for (const command of commands) {
-        const generation = generations.get(command.issue_id)
-        if (generation === undefined || !isDecisionCurrent(command.issue_id, generation)) {
+        const guard = guards.get(command.issue_id)
+        if (!guard || !isDecisionCurrent(guard)) {
           continue
         }
 
@@ -1198,6 +1215,7 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     documentGeneration += 1
     issueGeneration += 1
     localizationGeneration += 1
+    decisionScopeGeneration += 1
   })
 
   return {
