@@ -1093,4 +1093,16 @@ onBeforeUnmount(() => {
     max-height: min(420px, calc(100dvh - 140px));
   }
 }
+
+@media (min-width: 768px) and (max-width: 1279px) {
+  .review-workspace__compact-panel--issues {
+    align-content: stretch;
+    height: 100%;
+  }
+
+  .review-workspace__compact-issues {
+    grid-template-columns: minmax(0, 1fr) minmax(280px, 0.9fr);
+    height: 100%;
+  }
+}
 </style>

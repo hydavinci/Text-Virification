@@ -5,6 +5,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from shutil import copyfile
+from typing import cast
 from uuid import UUID
 
 from docx import Document as WordDocument
@@ -137,7 +138,7 @@ class _DocxRunResolver:
             column_index=target.column_index,
         )
         paragraph = cell.paragraphs[target.cell_paragraph_index]
-        return paragraph.runs[target.run_index]
+        return cast(Run, paragraph.runs[target.run_index])
 
     def _resolve_cell(
         self,

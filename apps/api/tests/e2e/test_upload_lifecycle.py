@@ -12,6 +12,11 @@ POLL_INTERVAL_SECONDS = 0.25
 DEFAULT_TIMEOUT_SECONDS = 60
 
 
+def normalize_export_text(text: str) -> str:
+    normalized_newlines = text.replace("\r\n", "\n").replace("\r", "\n")
+    return "\n".join(line.rstrip() for line in normalized_newlines.split("\n")).strip()
+
+
 @pytest.fixture
 def live_api_url() -> str:
     url = os.environ.get("LIVE_API_URL")
@@ -223,7 +228,7 @@ def test_txt_upload_options_review_and_html_report_download(
     )
     assert download_response.status_code == 200, download_response.text
 
-    html = download_response.content.decode("utf-8")
+    html = normalize_export_text(download_response.content.decode("utf-8"))
     assert "问题报告" in html
     assert "sample.txt" in html
     assert "启用分类" in html

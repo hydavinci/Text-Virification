@@ -14,6 +14,7 @@ from text_verification.domain.exports import ExportWarning
 from text_verification.domain.issues import DecisionAction, Issue
 
 _LEGACY_VERSION_ID = UUID(int=0)
+__all__ = ["ExportWarning", "Replacement", "ReplacementPlan", "ReplacementPlanner"]
 
 
 @dataclass(frozen=True, slots=True)

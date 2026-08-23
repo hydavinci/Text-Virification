@@ -53,7 +53,7 @@ class VersionFailurePersistenceError(RuntimeError):
         super().__init__(f"Failed to persist terminal state for document version {version_id}.")
 
 
-def _build_runner(session: Session, repository: JobRepository):
+def _build_runner(session: Session, repository: JobRepository) -> Any:
     return worker_tasks.RUNNER_FACTORY(session, repository, worker_tasks.STORAGE_FACTORY())
 
 

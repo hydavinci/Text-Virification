@@ -2,6 +2,7 @@ import { createApp } from 'vue'
 
 import { analysisApiKey, type AnalysisApi } from '../../src/api/analysis'
 import { exportsApiKey, type ExportsApi } from '../../src/api/exports'
+import { revisionsApiKey, type RevisionsApi } from '../../src/api/revisions'
 import type {
   AnalysisSummaryResponse,
   DecisionBatchResponse,
@@ -12,6 +13,14 @@ import type {
   IssuePageResponse
 } from '../../src/types/analysis'
 import type { ExportCreateRequest, ExportCreateResponse, ExportResponse } from '../../src/types/exports'
+import type {
+  DocumentVersion,
+  EditDraft,
+  OperationBatch,
+  OperationBatchPage,
+  ReanalyzeRequest,
+  UpdateDraftRequest
+} from '../../src/types/revisions'
 import ReviewWorkspaceView from '../../src/views/ReviewWorkspaceView.vue'
 
 const jobId = 'layout-job'
@@ -21,6 +30,9 @@ const fileType = 'docx'
 const blocks = buildBlocks()
 const issues = buildIssues()
 const summary = buildSummary(issues)
+const versions = buildVersions()
+const activeVersionId = 'version-2'
+let activeDraft: EditDraft | null = null
 
 const analysisApi: AnalysisApi = {
   async getSummary(): Promise<AnalysisSummaryResponse> {
@@ -103,6 +115,88 @@ const analysisApi: AnalysisApi = {
   }
 }
 
+const revisionsApi: RevisionsApi = {
+  async listVersions() {
+    return {
+      job_id: jobId,
+      active_version_id: activeVersionId,
+      versions
+    }
+  },
+  async createDraft(_requestedJobId: string, baseVersionId: string): Promise<EditDraft> {
+    activeDraft = {
+      draft_id: 'draft-layout-1',
+      job_id: jobId,
+      base_version_id: baseVersionId,
+      revision: 1,
+      blocks: blocks.map((block) => ({ block_id: block.block_id, text: block.text })),
+      content_sha256: 'layout-draft-sha',
+      created_at: '2026-08-20T00:00:00.000Z',
+      updated_at: '2026-08-20T00:00:00.000Z',
+      consumed_at: null
+    }
+    return activeDraft
+  },
+  async getDraft(): Promise<EditDraft> {
+    if (!activeDraft) {
+      throw new Error('Layout fixture draft has not been created.')
+    }
+    return activeDraft
+  },
+  async updateDraft(
+    _requestedJobId: string,
+    _draftId: string,
+    request: UpdateDraftRequest
+  ): Promise<EditDraft> {
+    if (!activeDraft) {
+      throw new Error('Layout fixture draft has not been created.')
+    }
+    activeDraft = {
+      ...activeDraft,
+      revision: request.expected_revision + 1,
+      blocks: request.blocks,
+      updated_at: '2026-08-20T00:00:01.000Z'
+    }
+    return activeDraft
+  },
+  async deleteDraft(): Promise<void> {
+    activeDraft = null
+  },
+  async reanalyze(
+    _requestedJobId: string,
+    _draftId: string,
+    _request: ReanalyzeRequest
+  ) {
+    return {
+      version: versions[0],
+      events_url: `/api/v1/jobs/${jobId}/versions/${versions[0].version_id}/events`
+    }
+  },
+  async getDerived(_requestedJobId: string, versionId: string) {
+    return {
+      job_id: jobId,
+      version_id: versionId,
+      decision_snapshot_sha256: 'layout-derived-sha',
+      blocks
+    }
+  },
+  subscribeVersionEvents() {
+    return () => {}
+  },
+  async listHistory(_requestedJobId: string, versionId: string): Promise<OperationBatchPage> {
+    return {
+      job_id: jobId,
+      version_id: versionId,
+      total: 1,
+      items: [buildOperationBatch(versionId)],
+      next_cursor: null
+    }
+  },
+  async undoBatch(_requestedJobId: string, batchId: string): Promise<OperationBatch> {
+    return buildOperationBatch(activeVersionId, batchId, 'undo')
+  }
+}
+
 const exportsApi: ExportsApi = {
   async create(
     _requestedJobId: string,
@@ -125,8 +219,60 @@ const app = createApp(ReviewWorkspaceView, {
 })
 
 app.provide(analysisApiKey, analysisApi)
+app.provide(revisionsApiKey, revisionsApi)
 app.provide(exportsApiKey, exportsApi)
 app.mount('#app')
+
+function buildVersions(): DocumentVersion[] {
+  return [
+    {
+      version_id: 'version-2',
+      job_id: jobId,
+      parent_version_id: 'version-1',
+      revision_number: 2,
+      status: 'succeeded',
+      source_kind: 'edit',
+      created_reason: 'edited',
+      content_sha256: 'layout-version-2-sha',
+      created_at: '2026-08-20T00:10:00.000Z',
+      started_at: '2026-08-20T00:10:01.000Z',
+      completed_at: '2026-08-20T00:10:02.000Z',
+      failure_code: null,
+      failure_message: null
+    },
+    {
+      version_id: 'version-1',
+      job_id: jobId,
+      parent_version_id: null,
+      revision_number: 1,
+      status: 'succeeded',
+      source_kind: 'upload',
+      created_reason: 'upload',
+      content_sha256: 'layout-version-1-sha',
+      created_at: '2026-08-20T00:00:00.000Z',
+      started_at: '2026-08-20T00:00:01.000Z',
+      completed_at: '2026-08-20T00:00:02.000Z',
+      failure_code: null,
+      failure_message: null
+    }
+  ]
+}
+
+function buildOperationBatch(
+  versionId: string,
+  batchId = 'batch-layout-1',
+  operationType: OperationBatch['operation_type'] = 'decision'
+): OperationBatch {
+  return {
+    batch_id: batchId,
+    job_id: jobId,
+    version_id: versionId,
+    operation_type: operationType,
+    affected_count: 2,
+    undoes_batch_id: operationType === 'undo' ? 'batch-layout-1' : null,
+    created_at: '2026-08-20T00:12:00.000Z'
+  }
+}
 
 function buildBlocks(): DocumentBlock[] {
   return Array.from({ length: 30 }, (_, index) => ({

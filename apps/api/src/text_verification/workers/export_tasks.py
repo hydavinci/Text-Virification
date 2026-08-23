@@ -344,6 +344,8 @@ def _write_export(
 def _plan_from_snapshot(snapshot: ExportSnapshot) -> ReplacementPlan:
     if snapshot.schema_version == 1:
         return ReplacementPlanner().build_legacy(snapshot.document, snapshot.issues)
+    if snapshot.document_version_id is None:
+        raise ExportError("export_snapshot_mismatch", "导出快照校验失败，请重新创建。")
 
     derived = derive_document(
         snapshot.document_version_id,
@@ -463,7 +465,7 @@ def _export_advisory_lock_key(export_id: UUID) -> int:
 
 
 def _retry_countdown(retries: int) -> int:
-    return min(2**retries, PROCESS_EXPORT_RETRY_BACKOFF_CAP_SECONDS)
+    return int(min(2**retries, PROCESS_EXPORT_RETRY_BACKOFF_CAP_SECONDS))
 
 
 def _log_export_failure(export_id: UUID, error: Exception) -> None:

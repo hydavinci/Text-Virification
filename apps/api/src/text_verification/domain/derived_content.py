@@ -155,7 +155,7 @@ def _validated_replacements(
     )
     overlapping_issue_ids = _overlapping_issue_ids(replacements)
     if overlapping_issue_ids:
-        raise OverlappingReplacementsError(overlapping_issue_ids)
+        raise OverlappingReplacementsError(sorted(overlapping_issue_ids))
     return replacements
 
 

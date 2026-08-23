@@ -6,6 +6,7 @@ from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -476,7 +477,8 @@ class RevisionRepository:
         row = self._lock_draft(job_id, draft_id)
         self._require_editable_draft(row)
         current_blocks = [
-            _to_draft_block(block["block_id"], str(block["text"])) for block in row.blocks
+            _to_draft_block(str(block["block_id"]), str(block["text"]))
+            for block in cast(list[dict[str, Any]], row.blocks)
         ]
         if row.revision != expected_revision:
             raise StaleDraftRevisionError(current_revision=row.revision)

@@ -147,20 +147,21 @@ class PipelineRunner:
     ) -> CheckRunResult:
         if self._revision_repository is None:
             raise RuntimeError("Revision repository is required for versioned analysis.")
+        revision_repository = self._revision_repository
 
-        self._revision_repository.mark_analyzing(version_id)
-        self._revision_repository.commit()
+        revision_repository.mark_analyzing(version_id)
+        revision_repository.commit()
 
         def persist_progress(progress: CheckerProgress) -> None:
-            self._revision_repository.record_progress(version_id, progress)
-            self._revision_repository.commit()
+            revision_repository.record_progress(version_id, progress)
+            revision_repository.commit()
 
         result = self._run_checks(
             document,
             options,
             on_progress=persist_progress,
         )
-        self._revision_repository.complete_analysis(
+        revision_repository.complete_analysis(
             version_id,
             document,
             result.issues,
