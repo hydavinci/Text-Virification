@@ -346,7 +346,7 @@ def _plan_from_snapshot(snapshot: ExportSnapshot) -> ReplacementPlan:
         snapshot.document_version_id is None
         or snapshot.decision_snapshot_sha256 is None
     ):
-        return ReplacementPlanner().build(snapshot.document, snapshot.issues)
+        return ReplacementPlanner().build_legacy(snapshot.document, snapshot.issues)
 
     derived = derive_document(
         snapshot.document_version_id,

@@ -46,23 +46,16 @@ def test_derived_document_uses_stored_final_replacement_not_suggestion() -> None
     assert derived.document.blocks[0].text == "最终文本正文"
 
 
-def test_derived_document_allows_empty_final_replacement() -> None:
-    issue = accepted_issue(0, 2, "删除", "临时").model_copy(
-        update={
-            "decision": IssueDecisionSummary.model_construct(
-                issue_version=1,
-                revision=1,
-                action=DecisionAction.ACCEPTED,
-                replacement="",
-                suggestion_id=None,
-                updated_at=datetime(2026, 8, 22, tzinfo=UTC),
-            )
-        }
-    )
-
-    derived = derive_document(VERSION_ID, document("删除正文"), [issue])
-
-    assert derived.document.blocks[0].text == "正文"
+def test_accepted_decision_rejects_empty_final_replacement() -> None:
+    with pytest.raises(ValueError, match="non-empty replacement"):
+        IssueDecisionSummary(
+            issue_version=1,
+            revision=1,
+            action=DecisionAction.ACCEPTED,
+            replacement="",
+            suggestion_id=None,
+            updated_at=datetime(2026, 8, 22, tzinfo=UTC),
+        )
 
 
 def test_derived_document_preserves_unchanged_blocks() -> None:

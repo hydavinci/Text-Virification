@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from importlib import import_module
 from pathlib import PurePosixPath
 from uuid import UUID, uuid4
@@ -5,11 +6,21 @@ from uuid import UUID, uuid4
 import pytest
 from pydantic import ValidationError
 
+from text_verification.checkers.models import CheckCategory
+from text_verification.domain.documents import DocumentModel, FileType
 from text_verification.domain.exports import (
+    ExportIssueSummarySnapshot,
     ExportSnapshot,
     deserialize_export_snapshot,
     serialize_export_snapshot,
 )
+from text_verification.domain.issues import (
+    DecisionAction,
+    Issue,
+    IssueDecisionSummary,
+    IssueSeverity,
+)
+from text_verification.workers.export_tasks import _plan_from_snapshot
 
 
 @pytest.mark.parametrize(
@@ -106,6 +117,88 @@ def test_deserialize_export_snapshot_accepts_queued_schema_v1_payload() -> None:
     assert snapshot.schema_version == 1
     assert snapshot.document_version_id is None
     assert snapshot.decision_snapshot_sha256 is None
+
+
+def test_schema_v1_export_snapshot_uses_legacy_warning_plan() -> None:
+    document_id = uuid4()
+    document = DocumentModel.model_validate(
+        {
+            "document_id": str(document_id),
+            "file_type": "txt",
+            "source_name": "analysis.txt",
+            "version": 1,
+            "blocks": [
+                {
+                    "block_id": "p-000001",
+                    "kind": "paragraph",
+                    "text": "正文",
+                    "page": None,
+                    "paragraph_index": 0,
+                    "parent_id": None,
+                    "style": {},
+                    "source_locator": {"paragraph_index": 0},
+                }
+            ],
+            "metadata": {"encoding": "utf-8"},
+        }
+    )
+    issue = Issue(
+        issue_id=uuid4(),
+        document_id=document_id,
+        block_id="p-000001",
+        page=None,
+        start=0,
+        end=2,
+        original="错文",
+        suggestion="替换",
+        alternatives=["替换"],
+        type="literal",
+        severity=IssueSeverity.WARNING,
+        layer=CheckCategory.CHARACTER.value,
+        message="命中规则。",
+        rule_id="character-001",
+        source="test",
+        source_version="1",
+        confidence=1.0,
+        auto_fixable=True,
+        context="错文",
+        decision=IssueDecisionSummary(
+            issue_version=1,
+            revision=0,
+            action=DecisionAction.ACCEPTED,
+            replacement="替换",
+            suggestion_id=None,
+            updated_at=datetime.now(UTC),
+        ),
+    )
+    snapshot = ExportSnapshot(
+        schema_version=1,
+        captured_at=datetime.now(UTC),
+        source_name="analysis.txt",
+        source_type=FileType.TXT,
+        source_size_bytes=6,
+        source_sha256=None,
+        scenario="general",
+        enabled_categories=[CheckCategory.CHARACTER],
+        completed_categories=[CheckCategory.CHARACTER],
+        checker_failures=[],
+        summary=ExportIssueSummarySnapshot(
+            total=1,
+            by_category={CheckCategory.CHARACTER: 1},
+            by_severity={IssueSeverity.WARNING: 1},
+            by_decision={"accepted": 1},
+        ),
+        document=document,
+        issues=[issue],
+        preflight_warnings=[],
+    )
+
+    plan = _plan_from_snapshot(snapshot)
+
+    assert plan.applicable == []
+    assert [(warning.code, warning.issue_id) for warning in plan.warnings] == [
+        ("original_text_mismatch", issue.issue_id)
+    ]
 
 
 def _export_symbols():

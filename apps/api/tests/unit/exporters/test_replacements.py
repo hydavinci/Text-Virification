@@ -196,6 +196,57 @@ def test_planner_rejects_overlapping_replacements() -> None:
     )
 
 
+def test_legacy_planner_skips_invalid_and_overlapping_replacements_with_warnings() -> None:
+    document = build_document(["甲乙丙丁"])
+    missing_block = build_issue(
+        document,
+        block_index=0,
+        block_id="missing-block",
+        start=0,
+        end=1,
+        suggestion="A",
+        action=DecisionAction.ACCEPTED,
+    )
+    mismatch = build_issue(
+        document,
+        block_index=0,
+        start=1,
+        end=2,
+        original="错",
+        suggestion="B",
+        action=DecisionAction.ACCEPTED,
+    )
+    first_overlap = build_issue(
+        document,
+        block_index=0,
+        start=0,
+        end=3,
+        suggestion="C",
+        action=DecisionAction.ACCEPTED,
+    )
+    second_overlap = build_issue(
+        document,
+        block_index=0,
+        start=2,
+        end=4,
+        suggestion="D",
+        action=DecisionAction.ACCEPTED,
+    )
+
+    plan = ReplacementPlanner().build_legacy(
+        document,
+        [missing_block, mismatch, first_overlap, second_overlap],
+    )
+
+    assert plan.applicable == []
+    assert [(warning.code, warning.issue_id) for warning in plan.warnings] == [
+        ("missing_block", missing_block.issue_id),
+        ("original_text_mismatch", mismatch.issue_id),
+        ("overlapping_replacements", first_overlap.issue_id),
+        ("overlapping_replacements", second_overlap.issue_id),
+    ]
+
+
 def test_planner_accepts_adjacent_half_open_replacement_ranges() -> None:
     document = build_document(["甲乙丙丁"])
 
