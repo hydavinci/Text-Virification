@@ -31,10 +31,17 @@ class RuleChecker:
         del context
         issues: list[Issue] = []
         for block in document.blocks:
-            issues.extend(self._check_block(document.document_id, block))
+            issues.extend(
+                self._check_block(document.document_id, document.version, block)
+            )
         return issues
 
-    def _check_block(self, document_id: UUID, block: TextBlock) -> list[Issue]:
+    def _check_block(
+        self,
+        document_id: UUID,
+        document_version: int,
+        block: TextBlock,
+    ) -> list[Issue]:
         issues: list[Issue] = []
         search_from = 0
         while True:
@@ -43,12 +50,13 @@ class RuleChecker:
                 return issues
 
             end = start + len(self._rule.pattern)
-            issues.append(self._build_issue(document_id, block, start, end))
+            issues.append(self._build_issue(document_id, document_version, block, start, end))
             search_from = start + 1
 
     def _build_issue(
         self,
         document_id: UUID,
+        document_version: int,
         block: TextBlock,
         start: int,
         end: int,
@@ -57,7 +65,10 @@ class RuleChecker:
         return Issue(
             issue_id=uuid5(
                 NAMESPACE_URL,
-                f"{document_id}:{self._rule.id}:{block.block_id}:{start}:{end}",
+                (
+                    f"{document_id}:v{document_version}:"
+                    f"{self._rule.id}:{block.block_id}:{start}:{end}"
+                ),
             ),
             document_id=document_id,
             block_id=block.block_id,

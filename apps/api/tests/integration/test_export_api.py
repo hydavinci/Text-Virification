@@ -35,7 +35,7 @@ from text_verification.exporters import ReplacementPlanner
 from text_verification.infrastructure.analysis_repositories import AnalysisRepository
 from text_verification.infrastructure.decision_repository import DecisionRepository
 from text_verification.infrastructure.export_repository import ExportRepository
-from text_verification.infrastructure.orm import ExportRow, JobRow
+from text_verification.infrastructure.orm import ExportRow, IssueDecisionRow, JobRow
 from text_verification.infrastructure.repositories import JobRepository
 from text_verification.infrastructure.storage import JobStorage
 from text_verification.parsers import DocxParser
@@ -112,6 +112,51 @@ def test_modified_document_requires_an_available_decision(
         "code": "export_decisions_required",
         "message": "请先处理至少一个问题，再导出修改版文件。",
     }
+
+
+def test_modified_document_export_returns_conflict_for_overlapping_replacements(
+    client,
+    db_session: Session,
+    export_api_dependencies: list[str],
+) -> None:
+    document_id = uuid4()
+    first = _build_issue(
+        file_type=FileType.TXT,
+        document_id=document_id,
+        start=0,
+        end=2,
+        suggestion="首次",
+    )
+    second = _build_issue(
+        file_type=FileType.TXT,
+        document_id=document_id,
+        start=1,
+        end=3,
+        suggestion="重叠",
+    )
+    job_id = _seed_job_with_analysis(
+        db_session,
+        file_type=FileType.TXT,
+        issues=[first, second],
+    )
+    version_id = db_session.get(JobRow, job_id).active_version_id
+    assert version_id is not None
+    _force_accepted_decision(db_session, job_id, version_id, first)
+    _force_accepted_decision(db_session, job_id, version_id, second)
+    db_session.commit()
+
+    response = client.post(
+        f"/api/v1/jobs/{job_id}/exports",
+        json={"type": "modified_document"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "overlapping_replacements",
+        "message": "已接受的修改范围存在冲突，请先保留其中一个后重试。",
+        "issue_ids": sorted([str(first.issue_id), str(second.issue_id)]),
+    }
+    assert export_api_dependencies == []
 
 
 def test_reports_allow_unreviewed_issues_and_use_server_derived_extension(
@@ -814,17 +859,24 @@ def _build_document(
     )
 
 
-def _build_issue(*, file_type: FileType) -> Issue:
+def _build_issue(
+    *,
+    file_type: FileType,
+    document_id: UUID | None = None,
+    start: int = 0,
+    end: int = 2,
+    suggestion: str = "修改后的",
+) -> Issue:
     return Issue(
         issue_id=uuid4(),
-        document_id=uuid4(),
+        document_id=document_id or uuid4(),
         block_id="p-000001",
         page=1 if file_type == FileType.PDF else None,
-        start=0,
-        end=2,
-        original="原始",
-        suggestion="修改后的",
-        alternatives=["修改后的"],
+        start=start,
+        end=end,
+        original="原始正文"[start:end],
+        suggestion=suggestion,
+        alternatives=[suggestion],
         type="literal",
         severity=IssueSeverity.WARNING,
         layer=CheckCategory.CHARACTER.value,
@@ -921,6 +973,29 @@ def _apply_decision(
     )
     assert outcome.decision is not None
     session.commit()
+
+
+def _force_accepted_decision(
+    session: Session,
+    job_id: UUID,
+    version_id: UUID,
+    issue: Issue,
+) -> None:
+    session.add(
+        IssueDecisionRow(
+            issue_id=issue.issue_id,
+            version_id=version_id,
+            job_id=job_id,
+            issue_version=issue.document_version or 1,
+            revision=1,
+            action=DecisionAction.ACCEPTED.value,
+            replacement=issue.suggestion,
+            final_replacement=issue.suggestion,
+            suggestion_id=None,
+            operation_batch_id=None,
+            updated_at=datetime.now(UTC),
+        )
+    )
 
 
 def _snapshot_for_job(session: Session, job_id: UUID) -> ExportSnapshot:

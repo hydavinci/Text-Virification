@@ -28,6 +28,18 @@ def test_rule_checker_generates_deterministic_issue_ids() -> None:
     assert [issue.issue_id for issue in first] == [issue.issue_id for issue in second]
 
 
+def test_rule_checker_scopes_deterministic_issue_ids_to_document_version() -> None:
+    checker = RuleChecker(build_rule("ad-001", CheckCategory.SECURITY, "绝对领先", "领先"))
+
+    first = checker.check(build_document("绝对领先", version=1), CheckContext((), ()))
+    second = checker.check(build_document("绝对领先", version=2), CheckContext((), ()))
+
+    assert [(issue.block_id, issue.start, issue.end) for issue in first] == [
+        (issue.block_id, issue.start, issue.end) for issue in second
+    ]
+    assert [issue.issue_id for issue in first] != [issue.issue_id for issue in second]
+
+
 def test_rule_checker_emits_each_repeated_literal_match() -> None:
     checker = RuleChecker(build_rule("repeat-001", CheckCategory.SENTENCE, "非常", "很"))
 
@@ -40,12 +52,12 @@ def test_rule_checker_emits_each_repeated_literal_match() -> None:
     ]
 
 
-def build_document(text: str) -> DocumentModel:
+def build_document(text: str, *, version: int = 1) -> DocumentModel:
     return DocumentModel(
         document_id=UUID("00000000-0000-0000-0000-000000000001"),
         file_type=FileType.TXT,
         source_name="sample.txt",
-        version=1,
+        version=version,
         blocks=[
             TextBlock(
                 block_id="p-000001",

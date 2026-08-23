@@ -32,12 +32,32 @@ def test_dictionary_checker_uses_loaded_terms_and_replacement_rules() -> None:
     ]
 
 
-def build_document(text: str) -> DocumentModel:
+def test_dictionary_checker_scopes_deterministic_issue_ids_to_document_version() -> None:
+    repository_root = Path(__file__).resolve().parents[5]
+    dictionaries = DictionaryLoader(repository_root / "resources" / "dictionaries").load()
+    checker = DictionaryChecker()
+
+    first = checker.check(
+        build_document("香港", version=1),
+        CheckContext((), (), shared_dictionaries=dictionaries),
+    )
+    second = checker.check(
+        build_document("香港", version=2),
+        CheckContext((), (), shared_dictionaries=dictionaries),
+    )
+
+    assert [(issue.block_id, issue.start, issue.end) for issue in first] == [
+        (issue.block_id, issue.start, issue.end) for issue in second
+    ]
+    assert [issue.issue_id for issue in first] != [issue.issue_id for issue in second]
+
+
+def build_document(text: str, *, version: int = 1) -> DocumentModel:
     return DocumentModel(
         document_id=UUID("00000000-0000-0000-0000-000000000001"),
         file_type=FileType.TXT,
         source_name="dictionary.txt",
-        version=1,
+        version=version,
         blocks=[
             TextBlock(
                 block_id="p-000001",

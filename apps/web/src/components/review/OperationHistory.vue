@@ -13,6 +13,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   undoLatest: []
+  undoBatch: [batchId: string]
 }>()
 
 function operationLabel(batch: OperationBatch): string {
@@ -27,6 +28,24 @@ const visibleBatches = computed(() =>
       : []
 )
 const visibleTotal = computed(() => props.historyPage?.total ?? visibleBatches.value.length)
+function canUndoBatch(batch: OperationBatch): boolean {
+  return (
+    !props.busy &&
+    batch.operation_type === 'decision' &&
+    !isBatchUndone(batch)
+  )
+}
+
+function isBatchUndone(batch: OperationBatch): boolean {
+  const batchTime = Date.parse(batch.created_at)
+  return visibleBatches.value.some((item) => {
+    if (item.operation_type !== 'undo' || item.undoes_batch_id !== batch.batch_id) {
+      return false
+    }
+    const undoTime = Date.parse(item.created_at)
+    return Number.isNaN(batchTime) || Number.isNaN(undoTime) || undoTime > batchTime
+  })
+}
 </script>
 
 <template>
@@ -55,8 +74,19 @@ const visibleTotal = computed(() => props.historyPage?.total ?? visibleBatches.v
 
     <ol v-if="visibleBatches.length" class="operation-history__list">
       <li v-for="batch in visibleBatches" :key="batch.batch_id">
-        <span>{{ operationLabel(batch) }}</span>
-        <small>{{ batch.affected_count }} 项 · {{ batch.created_at }}</small>
+        <div>
+          <span>{{ operationLabel(batch) }}</span>
+          <small>{{ batch.affected_count }} 项 · {{ batch.created_at }}</small>
+        </div>
+        <button
+          v-if="batch.operation_type === 'decision'"
+          type="button"
+          name="undo-batch"
+          :disabled="!canUndoBatch(batch)"
+          @click="emit('undoBatch', batch.batch_id)"
+        >
+          撤销此批次
+        </button>
       </li>
     </ol>
     <p v-else class="operation-history__empty">暂无操作历史。</p>

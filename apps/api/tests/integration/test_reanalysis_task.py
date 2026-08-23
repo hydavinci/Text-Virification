@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi import FastAPI
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from text_verification.api.dependencies import get_db_session
@@ -14,17 +15,20 @@ from text_verification.checkers.models import (
     CheckerProgress,
     CheckOptions,
     CheckRunResult,
+    LiteralRule,
 )
+from text_verification.checkers.rule_checker import RuleChecker
 from text_verification.checkers.rule_loader import RuleConfigurationError
 from text_verification.domain.documents import DocumentModel, FileType, TextBlock
 from text_verification.domain.jobs import JobStatus
+from text_verification.domain.ports import CheckContext
 from text_verification.domain.revisions import (
     DocumentVersionRead,
     DocumentVersionStatus,
     DraftBlock,
 )
 from text_verification.infrastructure.analysis_repositories import AnalysisRepository
-from text_verification.infrastructure.orm import DocumentVersionRow, JobRow
+from text_verification.infrastructure.orm import DocumentVersionRow, IssueRow, JobRow
 from text_verification.infrastructure.repositories import JobRepository
 from text_verification.infrastructure.revision_repository import RevisionRepository
 
@@ -137,6 +141,87 @@ def test_reanalysis_success_activates_new_version_and_consumes_draft(
     assert [block.source_locator for block in document.blocks] == [
         block.source_locator for block in seeded_edit_draft.base_document.blocks
     ]
+
+
+def test_reanalysis_persists_unchanged_rule_finding_with_new_issue_id(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    celery_eager,
+) -> None:
+    from text_verification.workers.reanalysis_tasks import process_document_version
+
+    job_id = _seed_job(db_session, status=JobStatus.COMPLETED)
+    checker = RuleChecker(
+        LiteralRule(
+            id="ad-001",
+            category=CheckCategory.SECURITY,
+            severity="warning",
+            pattern="绝对领先",
+            suggestion="领先",
+            message="避免使用绝对化表述。",
+            scenarios=frozenset(),
+            auto_fixable=True,
+        )
+    )
+    revisions = RevisionRepository(db_session)
+    base_document = _build_document(["这是绝对领先"], version=1)
+    base_issues = checker.check(base_document, CheckContext((), ()))
+    parent = revisions.create_queued_version(
+        job_id,
+        parent_version_id=None,
+        reason="upload",
+        idempotency_key=None,
+    )
+    revisions.complete_analysis(parent.version_id, base_document, base_issues, {})
+    draft = revisions.create_draft(job_id, parent.version_id)
+    version = revisions.create_reanalysis_version(
+        draft.draft_id,
+        expected_draft_revision=draft.revision,
+        idempotency_key="unchanged-finding",
+    ).version
+    db_session.commit()
+
+    class PersistingRuleRunner:
+        def __init__(self, session: Session) -> None:
+            self._session = session
+
+        def analyze_document(self, version_id, document, options) -> CheckRunResult:
+            del options
+            issues = checker.check(document, CheckContext((), ()))
+            RevisionRepository(self._session).mark_analyzing(version_id)
+            result = CheckRunResult(
+                issues=issues,
+                completed_categories={CheckCategory.SECURITY},
+                failures={},
+            )
+            RevisionRepository(self._session).complete_analysis(
+                version_id,
+                document,
+                result.issues,
+                result.failures,
+            )
+            return result
+
+    _configure_reanalysis_worker(
+        monkeypatch,
+        db_session,
+        runner_factory=lambda session, repository: PersistingRuleRunner(session),
+    )
+
+    result = process_document_version.delay(str(version.version_id))
+
+    assert result.successful()
+    db_session.expire_all()
+    stored_version = revisions.get_version(version.version_id)
+    assert stored_version is not None
+    assert stored_version.status == DocumentVersionStatus.SUCCEEDED
+    stored_issue_ids = list(
+        db_session.scalars(
+            select(IssueRow.issue_id).where(IssueRow.job_id == job_id).order_by(IssueRow.issue_id)
+        )
+    )
+    assert len(stored_issue_ids) == 2
+    assert stored_issue_ids[0] != stored_issue_ids[1]
 
 
 def test_reanalysis_failure_keeps_parent_active_and_draft_editable(

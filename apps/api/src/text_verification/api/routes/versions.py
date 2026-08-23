@@ -37,7 +37,12 @@ from text_verification.api.routes.jobs import (
     _http_error,
     _parse_last_event_id,
 )
-from text_verification.domain.derived_content import DiffSegment, derive_document, myers_diff
+from text_verification.domain.derived_content import (
+    DerivedContentValidationError,
+    DiffSegment,
+    derive_document,
+    myers_diff,
+)
 from text_verification.domain.documents import TextBlock
 from text_verification.domain.jobs import JobRead, JobStatus
 from text_verification.domain.revisions import (
@@ -194,7 +199,10 @@ def get_derived_content(
         )
 
     issues = analysis_repository.list_all_issues(job_id, version.version_id)
-    derived = derive_document(version.version_id, document, issues)
+    try:
+        derived = derive_document(version.version_id, document, issues)
+    except DerivedContentValidationError as error:
+        raise _derived_content_conflict(error) from error
     if view == "modified":
         blocks: list[TextBlock] | list[DerivedDiffBlock] = derived.document.blocks
     else:
@@ -542,6 +550,23 @@ def _invalid_draft_blocks(error: InvalidDraftBlocksError) -> HTTPException:
             "unexpected_block_ids": list(error.unexpected_block_ids),
         },
     )
+
+
+def _derived_content_conflict(error: DerivedContentValidationError) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "code": error.code,
+            "message": _derived_content_error_message(error.code),
+            "issue_ids": [str(issue_id) for issue_id in error.issue_ids],
+        },
+    )
+
+
+def _derived_content_error_message(code: str) -> str:
+    if code == "overlapping_replacements":
+        return "已接受的修改范围存在冲突，请先保留其中一个后重试。"
+    return "无法生成修改后内容，请刷新问题处理状态后重试。"
 
 
 def dispatch_process_document_version(version_id: str) -> None:

@@ -94,22 +94,24 @@ def put_decisions(
         raise
 
     outcomes = [
-        DecisionOutcome(
-            issue_id=item.command.issue_id,
-            status="applied",
-            decision=(
-                None
-                if item.after is None
-                else {
-                    "issue_id": item.command.issue_id,
-                    "issue_version": item.after["issue_version"],
-                    "revision": item.after["revision"],
-                    "action": item.after["action"],
-                    "replacement": item.after["final_replacement"],
-                    "suggestion_id": item.after["suggestion_id"],
-                    "updated_at": item.updated_at,
-                }
-            ),
+        DecisionOutcome.model_validate(
+            {
+                "issue_id": item.command.issue_id,
+                "status": "applied",
+                "decision": (
+                    None
+                    if item.after is None
+                    else {
+                        "issue_id": item.command.issue_id,
+                        "issue_version": item.after["issue_version"],
+                        "revision": item.after["revision"],
+                        "action": item.after["action"],
+                        "replacement": item.after["final_replacement"],
+                        "suggestion_id": item.after["suggestion_id"],
+                        "updated_at": item.updated_at,
+                    }
+                ),
+            }
         )
         for item in result.items
     ]

@@ -160,6 +160,60 @@ describe('review shell containers', () => {
     expect(wrapper.get('[data-testid="operation-history"]').text()).toContain('2 项')
   })
 
+  it('emits the selected historical batch when undoing from the history list', async () => {
+    const wrapper = mount(OperationHistory, {
+      props: {
+        historyPage: {
+          job_id: 'job-1',
+          version_id: 'version-1',
+          total: 3,
+          items: [
+            {
+              batch_id: 'undo-batch-2',
+              job_id: 'job-1',
+              version_id: 'version-1',
+              operation_type: 'undo',
+              affected_count: 1,
+              undoes_batch_id: 'batch-2',
+              created_at: '2026-08-23T12:03:00Z'
+            },
+            {
+              batch_id: 'batch-2',
+              job_id: 'job-1',
+              version_id: 'version-1',
+              operation_type: 'decision',
+              affected_count: 1,
+              undoes_batch_id: null,
+              created_at: '2026-08-23T12:02:00Z'
+            },
+            {
+              batch_id: 'batch-1',
+              job_id: 'job-1',
+              version_id: 'version-1',
+              operation_type: 'decision',
+              affected_count: 1,
+              undoes_batch_id: null,
+              created_at: '2026-08-23T12:01:00Z'
+            }
+          ],
+          next_cursor: null
+        },
+        latestBatch: null,
+        canUndoLatestBatch: false,
+        undoConflict: null,
+        busy: false
+      }
+    })
+
+    const buttons = wrapper.findAll('button[name="undo-batch"]')
+    expect(buttons).toHaveLength(2)
+    expect(buttons[0].attributes('disabled')).toBeDefined()
+
+    await buttons[1].trigger('click')
+
+    expect(wrapper.emitted('undoBatch')).toEqual([['batch-1']])
+  })
+
   it('implements arrow, Home, and End tab navigation', async () => {
     const wrapper = mount(ContextInspector, {
       attachTo: document.body,

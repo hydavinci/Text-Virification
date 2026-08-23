@@ -290,6 +290,15 @@ async function undoLatestOperation(): Promise<void> {
   }
 }
 
+async function undoHistoryBatch(batchId: string): Promise<void> {
+  undoPending.value = true
+  try {
+    await history.undoBatch(batchId)
+  } finally {
+    undoPending.value = false
+  }
+}
+
 function selectIssueAndShowDetails(
   issueId: string,
   trigger: HTMLElement | null = null
@@ -696,6 +705,7 @@ onBeforeUnmount(() => {
               :undo-conflict="history.undoConflict.value"
               :busy="undoPending"
               @undo-latest="undoLatestOperation"
+              @undo-batch="undoHistoryBatch"
             />
           </div>
         </section>
@@ -779,6 +789,7 @@ onBeforeUnmount(() => {
             :undo-conflict="history.undoConflict.value"
             :busy="undoPending"
             @undo-latest="undoLatestOperation"
+            @undo-batch="undoHistoryBatch"
           />
         </div>
       </WorkspaceSidePanel>
@@ -867,6 +878,7 @@ onBeforeUnmount(() => {
       class="review-workspace__export-panel"
       :job-id="jobId"
       :file-type="fileType"
+      :version-id="selectedVersionId"
       :open="isExportOpen"
       @close="closeExport"
     />

@@ -25,6 +25,7 @@ describe('createExportsApi', () => {
 
     const result = await createExportsApi({ fetch: fetchMock }).create('job-1', {
       type: 'html_report',
+      version_id: 'version-1',
       confirm_warnings: true
     })
 
@@ -35,6 +36,7 @@ describe('createExportsApi', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           type: 'html_report',
+          version_id: 'version-1',
           confirm_warnings: true
         })
       })

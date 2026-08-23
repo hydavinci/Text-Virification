@@ -5,6 +5,7 @@ import { exportsApiKey } from '../../api/exports'
 import { ApiError } from '../../types/api'
 import type {
   ExportDispatchStatus,
+  ExportCreateRequest,
   ExportResponse,
   ExportType,
   ExportWarning
@@ -17,6 +18,7 @@ const props = defineProps<{
   jobId: string
   fileType: FileType
   open: boolean
+  versionId: string | null
 }>()
 
 const emit = defineEmits<{
@@ -80,7 +82,7 @@ watch(
   { immediate: true }
 )
 
-watch(selectedType, () => {
+function resetExportState(): void {
   stopPolling()
   clearExpiryTimer()
   currentExport.value = null
@@ -88,7 +90,19 @@ watch(selectedType, () => {
   requestError.value = null
   confirmationMessage.value = null
   confirmationWarnings.value = []
-})
+}
+
+watch(selectedType, resetExportState)
+
+watch(() => props.versionId, resetExportState)
+
+function buildCreateRequest(confirmWarnings: boolean): ExportCreateRequest {
+  return {
+    type: selectedType.value,
+    ...(props.versionId ? { version_id: props.versionId } : {}),
+    confirm_warnings: confirmWarnings
+  }
+}
 
 const panelWarnings = computed(() =>
   confirmationWarnings.value.length
@@ -285,10 +299,10 @@ async function createExport(confirmWarnings: boolean) {
   confirmationWarnings.value = []
 
   try {
-    const exportState = await exportsApi.create(props.jobId, {
-      type: selectedType.value,
-      confirm_warnings: confirmWarnings
-    })
+    const exportState = await exportsApi.create(
+      props.jobId,
+      buildCreateRequest(confirmWarnings)
+    )
     if (!active) {
       return
     }

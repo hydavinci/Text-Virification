@@ -33,7 +33,10 @@ from text_verification.api.routes.analysis import (
 )
 from text_verification.api.routes.jobs import JOB_NOT_FOUND_CODE, _http_error
 from text_verification.checkers.models import CheckCategory, CheckScenario
-from text_verification.domain.derived_content import derive_document
+from text_verification.domain.derived_content import (
+    DerivedContentValidationError,
+    derive_document,
+)
 from text_verification.domain.documents import FileType
 from text_verification.domain.exports import (
     MAX_EXPORT_SNAPSHOT_BYTES,
@@ -273,6 +276,9 @@ def create_export(
             EXPORT_SNAPSHOT_TOO_LARGE_CODE,
             "导出快照过大，无法创建导出；请缩小文档或问题数量后重试。",
         ) from error
+    except DerivedContentValidationError as error:
+        session.rollback()
+        raise _derived_content_conflict(error) from error
     except Exception as error:
         session.rollback()
         logger.exception(
@@ -478,6 +484,23 @@ def _confirmation_required(warnings: list[ExportWarning]) -> HTTPException:
             "warnings": [warning.model_dump(mode="json") for warning in warnings],
         },
     )
+
+
+def _derived_content_conflict(error: DerivedContentValidationError) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "code": error.code,
+            "message": _derived_content_error_message(error.code),
+            "issue_ids": [str(issue_id) for issue_id in error.issue_ids],
+        },
+    )
+
+
+def _derived_content_error_message(code: str) -> str:
+    if code == "overlapping_replacements":
+        return "已接受的修改范围存在冲突，请先保留其中一个后重试。"
+    return "无法生成修改后内容，请刷新问题处理状态后重试。"
 
 
 def _sha256_file(path: Path) -> str:

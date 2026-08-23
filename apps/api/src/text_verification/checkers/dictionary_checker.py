@@ -68,7 +68,9 @@ class DictionaryChecker:
                 matches,
                 key=lambda item: (item.start, item.end, item.rule_id),
             ):
-                issues.append(self._build_issue(document.document_id, block, match))
+                issues.append(
+                    self._build_issue(document.document_id, document.version, block, match)
+                )
         return issues
 
     def _literal_matches(
@@ -122,6 +124,7 @@ class DictionaryChecker:
     def _build_issue(
         self,
         document_id: UUID,
+        document_version: int,
         block: TextBlock,
         match: _DictionaryMatch,
     ) -> Issue:
@@ -129,7 +132,7 @@ class DictionaryChecker:
             issue_id=uuid5(
                 NAMESPACE_URL,
                 (
-                    f"{document_id}:{match.rule_id}:{block.block_id}:"
+                    f"{document_id}:v{document_version}:{match.rule_id}:{block.block_id}:"
                     f"{match.start}:{match.end}"
                 ),
             ),

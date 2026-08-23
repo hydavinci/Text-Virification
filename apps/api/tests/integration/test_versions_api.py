@@ -18,6 +18,7 @@ from text_verification.domain.issues import (
 from text_verification.domain.jobs import JobStatus
 from text_verification.domain.revisions import DocumentVersionRead
 from text_verification.infrastructure.decision_repository import DecisionRepository
+from text_verification.infrastructure.orm import IssueDecisionRow
 from text_verification.infrastructure.repositories import JobRepository
 from text_verification.infrastructure.revision_repository import RevisionRepository
 
@@ -373,6 +374,37 @@ def test_derived_endpoint_returns_modified_blocks_and_diff_segments(
     ]
 
 
+def test_derived_endpoint_returns_conflict_for_overlapping_accepted_replacements(
+    client,
+    db_session: Session,
+) -> None:
+    job_id = _seed_job(db_session, status=JobStatus.COMPLETED)
+    document = _build_document([("原始正文", 1)], version=1)
+    first = _build_issue(document, block_index=0, start=0, end=2, suggestion="首次")
+    second = _build_issue(document, block_index=0, start=1, end=3, suggestion="重叠")
+    version = _create_succeeded_version(
+        RevisionRepository(db_session),
+        job_id,
+        document,
+        issues=[first, second],
+    )
+    _force_accepted_decision(db_session, job_id, version.version_id, first)
+    _force_accepted_decision(db_session, job_id, version.version_id, second)
+    db_session.commit()
+
+    response = client.get(
+        f"/api/v1/jobs/{job_id}/versions/{version.version_id}/derived",
+        params={"view": "modified"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "overlapping_replacements",
+        "message": "已接受的修改范围存在冲突，请先保留其中一个后重试。",
+        "issue_ids": sorted([str(first.issue_id), str(second.issue_id)]),
+    }
+
+
 @pytest.mark.parametrize(
     ("method", "path", "payload"),
     [
@@ -559,3 +591,26 @@ def _apply_decision(
         ),
     )
     assert outcome.decision is not None
+
+
+def _force_accepted_decision(
+    session: Session,
+    job_id: UUID,
+    version_id: UUID,
+    issue: Issue,
+) -> None:
+    session.add(
+        IssueDecisionRow(
+            issue_id=issue.issue_id,
+            version_id=version_id,
+            job_id=job_id,
+            issue_version=issue.document_version or 1,
+            revision=1,
+            action=DecisionAction.ACCEPTED.value,
+            replacement=issue.suggestion,
+            final_replacement=issue.suggestion,
+            suggestion_id=None,
+            operation_batch_id=None,
+            updated_at=datetime.now(UTC),
+        )
+    )

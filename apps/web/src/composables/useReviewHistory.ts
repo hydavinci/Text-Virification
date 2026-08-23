@@ -20,6 +20,7 @@ export interface ReviewHistoryState {
   setVersionScope(versionId: string | null): void
   loadHistory(versionId: string): Promise<void>
   undoLatestBatch(): Promise<void>
+  undoBatch(batchId: string): Promise<void>
 }
 
 export function useReviewHistory(
@@ -111,6 +112,15 @@ export function useReviewHistory(
       return
     }
 
+    await undoBatch(batch.batch_id)
+  }
+
+  async function undoBatch(batchId: string): Promise<void> {
+    const batch = findScopedUndoableBatch(batchId)
+    if (!batch) {
+      return
+    }
+
     try {
       const undoBatch = await revisionsApi.undoBatch(jobId, batch.batch_id)
       historyGeneration += 1
@@ -161,6 +171,25 @@ export function useReviewHistory(
     }
   }
 
+  function findScopedUndoableBatch(batchId: string): OperationBatch | null {
+    const candidates = [
+      ...(historyPage.value?.items ?? []),
+      ...(latestBatch.value ? [latestBatch.value] : [])
+    ]
+    const batch =
+      candidates.find(
+        (item) => item.batch_id === batchId && item.version_id === scopedVersionId.value
+      ) ?? null
+    if (
+      !batch ||
+      batch.operation_type !== 'decision' ||
+      isBatchUndone(batch, candidates)
+    ) {
+      return null
+    }
+    return batch
+  }
+
   function setVersionScope(versionId: string | null): void {
     if (scopedVersionId.value === versionId) {
       return
@@ -199,16 +228,12 @@ export function useReviewHistory(
     recordDecisionBatch,
     setVersionScope,
     loadHistory,
-    undoLatestBatch
+    undoLatestBatch,
+    undoBatch
   }
 }
 
 function latestUndoableBatch(items: OperationBatch[]): OperationBatch | null {
-  const undoneBatchIds = new Set(
-    items
-      .filter((item) => item.operation_type === 'undo' && item.undoes_batch_id)
-      .map((item) => item.undoes_batch_id as string)
-  )
   const newestFirst = [...items].sort(
     (left, right) =>
       new Date(right.created_at).getTime() - new Date(left.created_at).getTime()
@@ -216,7 +241,18 @@ function latestUndoableBatch(items: OperationBatch[]): OperationBatch | null {
 
   return (
     newestFirst.find(
-      (item) => item.operation_type === 'decision' && !undoneBatchIds.has(item.batch_id)
+      (item) => item.operation_type === 'decision' && !isBatchUndone(item, items)
     ) ?? null
   )
+}
+
+function isBatchUndone(batch: OperationBatch, items: OperationBatch[]): boolean {
+  const batchTime = Date.parse(batch.created_at)
+  return items.some((item) => {
+    if (item.operation_type !== 'undo' || item.undoes_batch_id !== batch.batch_id) {
+      return false
+    }
+    const undoTime = Date.parse(item.created_at)
+    return Number.isNaN(batchTime) || Number.isNaN(undoTime) || undoTime > batchTime
+  })
 }

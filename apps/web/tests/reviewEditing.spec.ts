@@ -9,6 +9,7 @@ import { useDerivedPreview } from '../src/composables/useDerivedPreview'
 import { useEditDraft } from '../src/composables/useEditDraft'
 import { useReviewHistory } from '../src/composables/useReviewHistory'
 import { useReviewWorkspace, type ReviewWorkspaceState } from '../src/composables/useReviewWorkspace'
+import ExportPanel from '../src/components/review/ExportPanel.vue'
 import { ApiError } from '../src/types/api'
 import type {
   AnalysisSummaryResponse,
@@ -1060,6 +1061,57 @@ describe('review editing state', () => {
     expect(history.canUndoLatestBatch.value).toBe(true)
   })
 
+  it('undoes a selected historical batch in the current version scope', async () => {
+    const undoBatch = vi.fn().mockResolvedValue(
+      buildBatch({
+        batch_id: 'undo-batch-1',
+        version_id: 'version-1',
+        operation_type: 'undo',
+        undoes_batch_id: 'batch-1',
+        created_at: '2026-08-23T12:04:00Z'
+      })
+    )
+    const revisionsApi = createRevisionsApiMock({
+      listHistory: vi.fn().mockResolvedValue({
+        job_id: jobId,
+        version_id: 'version-1',
+        total: 2,
+        items: [
+          buildBatch({
+            batch_id: 'batch-2',
+            version_id: 'version-1',
+            operation_type: 'decision',
+            created_at: '2026-08-23T12:02:00Z'
+          }),
+          buildBatch({
+            batch_id: 'batch-1',
+            version_id: 'version-1',
+            operation_type: 'decision',
+            created_at: '2026-08-23T12:01:00Z'
+          })
+        ],
+        next_cursor: null
+      }),
+      undoBatch
+    })
+    let history!: ReturnType<typeof useReviewHistory>
+    const Harness = defineComponent({
+      setup() {
+        history = useReviewHistory(jobId, revisionsApi)
+        return {}
+      },
+      template: '<div />'
+    })
+    mount(Harness)
+
+    await history.loadHistory('version-1')
+    await history.undoBatch('batch-1')
+
+    expect(undoBatch).toHaveBeenCalledWith(jobId, 'batch-1')
+    expect(history.historyPage.value?.items[0]?.batch_id).toBe('undo-batch-1')
+    expect(history.latestBatch.value?.batch_id).toBe('batch-2')
+  })
+
   it('keeps a locally recorded decision when an older history load resolves later', async () => {
     const historyResponse = createDeferred<OperationBatchPage>()
     const revisionsApi = createRevisionsApiMock({
@@ -1647,6 +1699,45 @@ describe('review editing state', () => {
     expect(wrapper.get('[data-testid="undo-toast"]').text()).toContain('历史已变化，请刷新后重试')
     await wrapper.get('[data-tool="history"]').trigger('click')
     expect(wrapper.get('[data-testid="operation-history"]').text()).toContain('历史已变化，请刷新后重试')
+  })
+
+  it('creates exports for the selected document version', async () => {
+    const create = vi.fn().mockResolvedValue({
+      export_id: 'export-1',
+      job_id: jobId,
+      export_type: 'modified_document',
+      status: 'completed',
+      file_name: 'sample.txt',
+      warnings: [],
+      error_code: null,
+      error_message: null,
+      created_at: '2026-08-23T12:00:00Z',
+      updated_at: '2026-08-23T12:00:00Z',
+      expires_at: '2026-08-23T13:00:00Z',
+      dispatch_status: 'dispatched'
+    })
+    const wrapper = mount(ExportPanel, {
+      props: {
+        jobId,
+        fileType: 'txt',
+        open: true,
+        versionId: 'version-1'
+      },
+      global: {
+        provide: {
+          [exportsApiKey as symbol]: createExportsApiMock({ create })
+        }
+      }
+    })
+
+    await wrapper.get('button[name="create-export"]').trigger('click')
+    await flushPromises()
+
+    expect(create).toHaveBeenCalledWith(jobId, {
+      type: 'modified_document',
+      version_id: 'version-1',
+      confirm_warnings: false
+    })
   })
 
 })

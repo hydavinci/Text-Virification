@@ -19,6 +19,7 @@ export interface ExportWarning {
 
 export interface ExportCreateRequest {
   type: ExportType
+  version_id?: string
   confirm_warnings?: boolean
 }
 
