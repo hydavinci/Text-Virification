@@ -69,6 +69,7 @@ let active = true
 let pollTimerId: ReturnType<typeof setTimeout> | null = null
 let expiryTimerId: ReturnType<typeof setTimeout> | null = null
 let pollGeneration = 0
+let createGeneration = 0
 
 const busy = computed(() => submitting.value || polling.value)
 
@@ -83,8 +84,10 @@ watch(
 )
 
 function resetExportState(): void {
+  createGeneration += 1
   stopPolling()
   clearExpiryTimer()
+  submitting.value = false
   currentExport.value = null
   dispatchStatus.value = null
   requestError.value = null
@@ -96,10 +99,13 @@ watch(selectedType, resetExportState)
 
 watch(() => props.versionId, resetExportState)
 
-function buildCreateRequest(confirmWarnings: boolean): ExportCreateRequest {
+function buildCreateRequest(
+  confirmWarnings: boolean,
+  versionId: string | null
+): ExportCreateRequest {
   return {
     type: selectedType.value,
-    ...(props.versionId ? { version_id: props.versionId } : {}),
+    ...(versionId ? { version_id: versionId } : {}),
     confirm_warnings: confirmWarnings
   }
 }
@@ -293,6 +299,8 @@ async function pollExport(exportId: string, generation: number) {
 
 async function createExport(confirmWarnings: boolean) {
   stopPolling()
+  const generation = ++createGeneration
+  const versionId = props.versionId
   submitting.value = true
   requestError.value = null
   confirmationMessage.value = null
@@ -301,15 +309,15 @@ async function createExport(confirmWarnings: boolean) {
   try {
     const exportState = await exportsApi.create(
       props.jobId,
-      buildCreateRequest(confirmWarnings)
+      buildCreateRequest(confirmWarnings, versionId)
     )
-    if (!active) {
+    if (!isCurrentCreateRequest(generation, versionId)) {
       return
     }
 
     applyExportState(exportState, exportState.dispatch_status)
   } catch (error) {
-    if (!active) {
+    if (!isCurrentCreateRequest(generation, versionId)) {
       return
     }
 
@@ -330,10 +338,14 @@ async function createExport(confirmWarnings: boolean) {
 
     requestError.value = errorMessage(error, '创建导出任务失败，请稍后重试。')
   } finally {
-    if (active) {
+    if (isCurrentCreateRequest(generation, versionId)) {
       submitting.value = false
     }
   }
+}
+
+function isCurrentCreateRequest(generation: number, versionId: string | null): boolean {
+  return active && generation === createGeneration && props.versionId === versionId
 }
 
 function retry() {

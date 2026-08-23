@@ -1112,6 +1112,89 @@ describe('review editing state', () => {
     expect(history.latestBatch.value?.batch_id).toBe('batch-2')
   })
 
+  it('ignores stale undo results after switching version scopes', async () => {
+    const undoResponse = createDeferred<OperationBatch>()
+    const revisionsApi = createRevisionsApiMock({
+      listHistory: vi.fn().mockResolvedValue({
+        job_id: jobId,
+        version_id: 'version-1',
+        total: 1,
+        items: [
+          buildBatch({
+            batch_id: 'batch-1',
+            version_id: 'version-1',
+            operation_type: 'decision'
+          })
+        ],
+        next_cursor: null
+      }),
+      undoBatch: vi.fn().mockReturnValue(undoResponse.promise)
+    })
+    let history!: ReturnType<typeof useReviewHistory>
+    const Harness = defineComponent({
+      setup() {
+        history = useReviewHistory(jobId, revisionsApi)
+        return {}
+      },
+      template: '<div />'
+    })
+    mount(Harness)
+
+    await history.loadHistory('version-1')
+    const undo = history.undoBatch('batch-1')
+    history.setVersionScope('version-2')
+    undoResponse.resolve(
+      buildBatch({
+        batch_id: 'undo-batch-1',
+        version_id: 'version-1',
+        operation_type: 'undo',
+        undoes_batch_id: 'batch-1'
+      })
+    )
+    await undo
+
+    expect(history.historyPage.value).toBeNull()
+    expect(history.latestBatch.value).toBeNull()
+    expect(history.undoConflict.value).toBeNull()
+  })
+
+  it('ignores stale undo conflicts after switching version scopes', async () => {
+    const undoResponse = createDeferred<OperationBatch>()
+    const revisionsApi = createRevisionsApiMock({
+      listHistory: vi.fn().mockResolvedValue({
+        job_id: jobId,
+        version_id: 'version-1',
+        total: 1,
+        items: [
+          buildBatch({
+            batch_id: 'batch-1',
+            version_id: 'version-1',
+            operation_type: 'decision'
+          })
+        ],
+        next_cursor: null
+      }),
+      undoBatch: vi.fn().mockReturnValue(undoResponse.promise)
+    })
+    let history!: ReturnType<typeof useReviewHistory>
+    const Harness = defineComponent({
+      setup() {
+        history = useReviewHistory(jobId, revisionsApi)
+        return {}
+      },
+      template: '<div />'
+    })
+    mount(Harness)
+
+    await history.loadHistory('version-1')
+    const undo = history.undoBatch('batch-1')
+    history.setVersionScope('version-2')
+    undoResponse.reject(new Error('历史已变化，请刷新后重试'))
+    await undo
+
+    expect(history.undoConflict.value).toBeNull()
+  })
+
   it('keeps a locally recorded decision when an older history load resolves later', async () => {
     const historyResponse = createDeferred<OperationBatchPage>()
     const revisionsApi = createRevisionsApiMock({
@@ -1738,6 +1821,52 @@ describe('review editing state', () => {
       version_id: 'version-1',
       confirm_warnings: false
     })
+  })
+
+  it('ignores stale export create responses after the selected version changes', async () => {
+    const createResponse = createDeferred<Awaited<ReturnType<ExportsApi['create']>>>()
+    const create = vi.fn().mockReturnValue(createResponse.promise)
+    const wrapper = mount(ExportPanel, {
+      props: {
+        jobId,
+        fileType: 'txt',
+        open: true,
+        versionId: 'version-1'
+      },
+      global: {
+        provide: {
+          [exportsApiKey as symbol]: createExportsApiMock({ create })
+        }
+      }
+    })
+
+    await wrapper.get('button[name="create-export"]').trigger('click')
+    await wrapper.setProps({ versionId: 'version-2' })
+    createResponse.resolve({
+      export_id: 'export-old',
+      job_id: jobId,
+      export_type: 'modified_document',
+      status: 'completed',
+      file_name: 'old-version.txt',
+      warnings: [],
+      error_code: null,
+      error_message: null,
+      created_at: '2026-08-23T12:00:00Z',
+      updated_at: '2026-08-23T12:00:00Z',
+      expires_at: '2099-08-23T13:00:00Z',
+      dispatch_status: 'dispatched'
+    })
+    await flushPromises()
+
+    expect(create).toHaveBeenCalledWith(jobId, {
+      type: 'modified_document',
+      version_id: 'version-1',
+      confirm_warnings: false
+    })
+    expect(wrapper.find('[data-testid="export-download-link"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="export-status"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="export-error"]').exists()).toBe(false)
+    expect(wrapper.get('button[name="create-export"]').attributes('disabled')).toBeUndefined()
   })
 
 })

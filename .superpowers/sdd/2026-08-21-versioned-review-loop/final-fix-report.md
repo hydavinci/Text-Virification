@@ -32,3 +32,24 @@
 
 - Full backend `tests\unit tests\integration` on Windows with temporary PostgreSQL was rerun after implementation. Result: 398 passed, 3 skipped, 2 failed; both failures are the known WeasyPrint native dependency gap (`libgobject-2.0-0`) in PDF report unit tests.
 - Frontend `npm test` and `npm run build` were rerun after implementation. Result: 195 Vitest tests passed and production build succeeded.
+
+## Round 2 stale-response fix — 2026-08-24
+
+### Fixes
+
+- Scoped `ExportPanel` create requests to a request generation and captured `versionId`, ignoring stale create successes/errors after version or format changes and clearing stale busy state on reset.
+- Scoped per-batch history undo requests to the selected version and history generation, ignoring stale undo successes/conflicts after version-scope changes.
+
+### RED evidence
+
+- From `apps\web`: `npm test -- tests\reviewEditing.spec.ts -t "ignores stale undo|ignores stale export"` failed with stale undo success inserting `version-1` history, stale undo conflict appearing in the new scope, and stale export create showing an old-version download.
+
+### GREEN evidence
+
+- From `apps\web`: `npm test -- tests\reviewEditing.spec.ts -t "ignores stale undo|ignores stale export"` → 3 passed.
+- From `apps\web`: `npm test -- tests\reviewEditing.spec.ts tests\reviewShellComponents.spec.ts tests\ReviewWorkspace.spec.ts` → 130 passed.
+- From `apps\web`: `npm run build` → passed.
+
+### Backend verification
+
+- Backend code was untouched in round 2; no backend rerun was performed.

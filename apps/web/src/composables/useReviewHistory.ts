@@ -121,9 +121,14 @@ export function useReviewHistory(
       return
     }
 
+    const versionId = scopedVersionId.value
+    const generation = ++historyGeneration
     try {
       const undoBatch = await revisionsApi.undoBatch(jobId, batch.batch_id)
-      historyGeneration += 1
+      if (!isCurrentHistoryRequest(generation, versionId, undoBatch.version_id)) {
+        return
+      }
+
       applyUndoBatch(undoBatch)
       undoConflict.value = null
       undoToastVisible.value = false
@@ -133,8 +138,25 @@ export function useReviewHistory(
       }
       await onUndoApplied?.(undoBatch)
     } catch (error) {
+      if (!isCurrentHistoryRequest(generation, versionId)) {
+        return
+      }
+
       undoConflict.value = error instanceof Error ? error.message : '撤销失败。'
     }
+  }
+
+  function isCurrentHistoryRequest(
+    generation: number,
+    requestedVersionId: string | null,
+    responseVersionId: string | null = requestedVersionId
+  ): boolean {
+    return (
+      active &&
+      generation === historyGeneration &&
+      scopedVersionId.value === requestedVersionId &&
+      responseVersionId === requestedVersionId
+    )
   }
 
   function applyHistoryPage(page: OperationBatchPage): void {
