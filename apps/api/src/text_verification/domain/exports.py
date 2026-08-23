@@ -13,7 +13,12 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from text_verification.checkers.models import CheckCategory, CheckScenario
 from text_verification.domain.documents import DocumentModel, FileType
-from text_verification.domain.issues import Issue, IssueSeverity
+from text_verification.domain.issues import (
+    DecisionAction,
+    Issue,
+    IssueDecisionSummary,
+    IssueSeverity,
+)
 
 SUPPORTED_EXPORT_EXTENSIONS = frozenset({"txt", "docx", "html", "pdf"})
 MAX_EXPORT_SNAPSHOT_BYTES = 64 * 1024 * 1024
@@ -339,7 +344,72 @@ def serialize_export_snapshot(
 def deserialize_export_snapshot(value: object) -> ExportSnapshot | None:
     if value is None:
         return None
+    if isinstance(value, dict) and value.get("schema_version") == 1:
+        return _deserialize_schema_v1_export_snapshot(value)
     return ExportSnapshot.model_validate(value)
+
+
+def _deserialize_schema_v1_export_snapshot(value: dict[str, Any]) -> ExportSnapshot:
+    raw_issues = value.get("issues", [])
+    if not isinstance(raw_issues, list):
+        return ExportSnapshot.model_validate(value)
+
+    snapshot_payload = {**value, "issues": []}
+    snapshot = ExportSnapshot.model_validate(snapshot_payload)
+    issues = [_deserialize_schema_v1_issue(issue) for issue in raw_issues]
+    return snapshot.model_copy(update={"issues": issues})
+
+
+def _deserialize_schema_v1_issue(value: object) -> Issue:
+    if not isinstance(value, dict):
+        return Issue.model_validate(value)
+
+    raw_decision = value.get("decision")
+    issue = Issue.model_validate({**value, "decision": None})
+    decision = _deserialize_schema_v1_decision(raw_decision)
+    if decision is None:
+        return issue
+    return issue.model_copy(update={"decision": decision})
+
+
+def _deserialize_schema_v1_decision(value: object) -> IssueDecisionSummary | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        return IssueDecisionSummary.model_validate(value)
+
+    normalized = dict(value)
+    if normalized.get("action") == "custom":
+        normalized["action"] = DecisionAction.ACCEPTED.value
+
+    if (
+        normalized.get("action") == DecisionAction.ACCEPTED.value
+        and normalized.get("replacement") is None
+    ):
+        return IssueDecisionSummary.model_construct(
+            issue_version=int(normalized["issue_version"]),
+            revision=int(normalized.get("revision", 0)),
+            action=DecisionAction.ACCEPTED,
+            replacement=None,
+            suggestion_id=_optional_uuid(normalized.get("suggestion_id")),
+            updated_at=_parse_datetime(normalized["updated_at"]),
+        )
+
+    return IssueDecisionSummary.model_validate(normalized)
+
+
+def _optional_uuid(value: object) -> UUID | None:
+    if value is None or isinstance(value, UUID):
+        return value
+    return UUID(str(value))
+
+
+def _parse_datetime(value: object) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    raise ValueError("updated_at must be a datetime")
 
 
 def serialize_export_warnings(

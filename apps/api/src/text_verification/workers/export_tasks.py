@@ -342,10 +342,7 @@ def _write_export(
 
 
 def _plan_from_snapshot(snapshot: ExportSnapshot) -> ReplacementPlan:
-    if (
-        snapshot.document_version_id is None
-        or snapshot.decision_snapshot_sha256 is None
-    ):
+    if snapshot.schema_version == 1:
         return ReplacementPlanner().build_legacy(snapshot.document, snapshot.issues)
 
     derived = derive_document(

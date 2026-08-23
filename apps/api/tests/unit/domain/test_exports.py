@@ -201,6 +201,71 @@ def test_schema_v1_export_snapshot_uses_legacy_warning_plan() -> None:
     ]
 
 
+def test_deserialize_schema_v1_maps_legacy_custom_decisions_without_fallback() -> None:
+    issue_id = uuid4()
+    payload = _snapshot_payload(schema_version=1)
+    payload["document"] = _document_payload(text="正文")
+    payload["issues"] = [
+        _issue_payload(
+            issue_id=issue_id,
+            original="正文",
+            suggestion="不要回退到建议",
+            decision={
+                "issue_version": 1,
+                "revision": 0,
+                "action": "custom",
+                "replacement": None,
+                "suggestion_id": None,
+                "updated_at": "2026-08-22T04:00:00Z",
+            },
+        )
+    ]
+
+    snapshot = deserialize_export_snapshot(payload)
+    assert snapshot is not None
+
+    plan = _plan_from_snapshot(snapshot)
+
+    assert plan.applicable == []
+    assert [(warning.code, warning.issue_id) for warning in plan.warnings] == [
+        ("missing_replacement_value", issue_id)
+    ]
+
+
+def test_schema_v1_snapshot_with_optional_v2_metadata_still_uses_legacy_plan() -> None:
+    issue_id = uuid4()
+    payload = {
+        **_snapshot_payload(schema_version=1),
+        "document": _document_payload(text="正文"),
+        "document_version_id": str(uuid4()),
+        "decision_snapshot_sha256": "a" * 64,
+        "issues": [
+            _issue_payload(
+                issue_id=issue_id,
+                original="错文",
+                suggestion="替换",
+                decision={
+                    "issue_version": 1,
+                    "revision": 0,
+                    "action": "accepted",
+                    "replacement": "替换",
+                    "suggestion_id": None,
+                    "updated_at": "2026-08-22T04:00:00Z",
+                },
+            )
+        ],
+    }
+    snapshot = deserialize_export_snapshot(payload)
+    assert snapshot is not None
+
+    plan = _plan_from_snapshot(snapshot)
+
+    assert plan.applicable == []
+    assert [(warning.code, warning.issue_id) for warning in plan.warnings] == [
+        ("original_text_mismatch", issue_id)
+    ]
+
+
 def _export_symbols():
     try:
         module = import_module("text_verification.domain.exports")
@@ -241,4 +306,59 @@ def _snapshot_payload(*, schema_version: int) -> dict[str, object]:
         },
         "issues": [],
         "preflight_warnings": [],
+    }
+
+
+def _document_payload(*, text: str) -> dict[str, object]:
+    return {
+        "document_id": "00000000-0000-0000-0000-000000000001",
+        "file_type": "txt",
+        "source_name": "analysis.txt",
+        "version": 1,
+        "blocks": [
+            {
+                "block_id": "p-000001",
+                "kind": "paragraph",
+                "text": text,
+                "page": None,
+                "paragraph_index": 0,
+                "parent_id": None,
+                "style": {},
+                "source_locator": {"paragraph_index": 0},
+            }
+        ],
+        "metadata": {},
+    }
+
+
+def _issue_payload(
+    *,
+    issue_id: UUID,
+    original: str,
+    suggestion: str | None,
+    decision: dict[str, object],
+) -> dict[str, object]:
+    return {
+        "issue_id": str(issue_id),
+        "document_id": "00000000-0000-0000-0000-000000000001",
+        "document_version": 1,
+        "block_id": "p-000001",
+        "page": None,
+        "start": 0,
+        "end": 2,
+        "original": original,
+        "suggestion": suggestion,
+        "alternatives": [] if suggestion is None else [suggestion],
+        "suggestions": [],
+        "type": "literal",
+        "severity": "warning",
+        "layer": "character",
+        "message": "命中规则。",
+        "rule_id": "character-001",
+        "source": "test",
+        "source_version": "1",
+        "confidence": 1.0,
+        "auto_fixable": suggestion is not None,
+        "context": original,
+        "decision": decision,
     }
