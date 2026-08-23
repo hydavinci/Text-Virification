@@ -451,6 +451,48 @@ describe('review editing state', () => {
     expect(wrapper.find('textarea[aria-label="第 1 段"]').exists()).toBe(true)
   })
 
+  it('unlocks document controls after reanalysis succeeds', async () => {
+    let progressHandler!: (event: VersionEvent) => void
+    const revisionsApi = createRevisionsApiMock({
+      subscribeVersionEvents: vi.fn().mockImplementation(
+        (
+          _jobId: string,
+          _versionId: string,
+          onEvent: (event: VersionEvent) => void
+        ) => {
+          progressHandler = onEvent
+          return vi.fn()
+        }
+      )
+    })
+    const wrapper = mountReviewWorkspaceView(createAnalysisApiMock(), revisionsApi)
+    await flushPromises()
+
+    await wrapper.get('button[name="edit-version"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('button[name="save-reanalyze"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('select[aria-label="版本"]').attributes('disabled')).toBeDefined()
+
+    progressHandler({
+      sequence: 1,
+      status: 'succeeded',
+      progress: 100,
+      message: '重新检查完成',
+      created_at: '2026-08-23T12:01:00Z',
+      metadata: null
+    })
+    await flushPromises()
+
+    expect(wrapper.get('select[aria-label="版本"]').attributes('disabled')).toBeUndefined()
+    expect(
+      wrapper
+        .findAll('button[role="tab"][data-mode]')
+        .map((tab) => tab.attributes('disabled'))
+    ).toEqual([undefined, undefined, undefined])
+  })
+
   it('surfaces draft creation failures before the editor is mounted', async () => {
     const revisionsApi = createRevisionsApiMock({
       createDraft: vi.fn().mockRejectedValue(new Error('无法创建草稿'))

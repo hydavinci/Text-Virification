@@ -122,7 +122,6 @@ const reanalysisError = ref<string | null>(null)
 const modifiedBlocks = computed(() => derivedPreview.modified.value?.blocks ?? [])
 const diffBlocks = computed(() => derivedPreview.diff.value?.blocks ?? [])
 const draftBlocks = computed(() => draft.localBlocks.value)
-const draftActive = computed(() => draft.draft.value !== null)
 const derivedLoading = computed(() => derivedPreview.loading.value)
 const derivedError = computed(() => derivedPreview.error.value)
 const dismissedReanalysisFailureKey = ref<string | null>(null)
@@ -136,6 +135,14 @@ const visibleReanalysis = computed(() =>
   reanalysisFailureKey.value === dismissedReanalysisFailureKey.value
     ? null
     : reanalysis.value
+)
+const draftActive = computed(
+  () =>
+    draft.draft.value !== null &&
+    (documentMode.value === 'edit' ||
+      draftPending.value ||
+      reanalysisError.value !== null ||
+      (visibleReanalysis.value !== null && visibleReanalysis.value.status !== 'succeeded'))
 )
 const phoneBackLabel = computed(() =>
   phoneIssueDetailOrigin.value === 'document' ? '返回文档' : '返回问题列表'
