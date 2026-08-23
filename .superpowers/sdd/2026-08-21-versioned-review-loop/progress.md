@@ -172,3 +172,15 @@ Final fix wave complete (addressed 5/5):
 - Derived-content validation and overlap failures from preview and export creation now return structured HTTP 409 responses with conflict issue IDs.
 - Operation history exposes server-backed undo for each undoable batch in the selected version, while preserving the 10-second latest undo shortcut and conflict display.
 - Feature matrix and this ledger document the Windows/PDF and Docker/Linux verification gaps.
+
+## Final branch review
+
+Final review: fix wave opened — version-scoped issue IDs, historical export version_id propagation, derived/export conflict 409s, per-batch history undo, and verification-gap documentation.
+
+Final review: fix wave round 1 (3 addressed, 2 open — export stale response and per-batch undo stale response; commits f22ca61..0b57de7)
+
+Final review: fix wave round 2 opened — scope export create and per-batch undo responses by version/generation.
+
+Final review: fix wave round 2 (2 addressed, 0 open — historical export stale response and per-batch undo stale response; commits 0b57de7..3e4708b)
+
+Final review: complete (commits 22a5ca6..3e4708b, review clean)
