@@ -168,6 +168,16 @@ function buildIssue(overrides: Partial<Issue> = {}): Issue {
     original: '第一',
     suggestion: '首段',
     alternatives: [],
+    suggestions: [
+      {
+        suggestion_id: 'suggestion-1',
+        text: '首段',
+        source: 'rule',
+        explanation: null,
+        rank: 1,
+        preferred: true
+      }
+    ],
     type: 'character',
     severity: 'warning',
     layer: 'character',

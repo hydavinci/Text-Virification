@@ -9,6 +9,14 @@ import {
 } from 'vue'
 
 import { analysisApiKey } from '../api/analysis'
+import { revisionsApiKey, type RevisionsApi } from '../api/revisions'
+import {
+  useDocumentVersions,
+  type DocumentVersionsState
+} from './useDocumentVersions'
+import { useDerivedPreview, type DerivedPreviewState } from './useDerivedPreview'
+import { useEditDraft, type EditDraftState } from './useEditDraft'
+import { useReviewHistory, type ReviewHistoryState } from './useReviewHistory'
 import type {
   AnalysisSummaryResponse,
   CheckerFailureMap,
@@ -68,6 +76,15 @@ interface ReviewFindMatch {
 
 export interface ReviewWorkspaceState {
   summary: Ref<AnalysisSummaryResponse | null>
+  versions: DocumentVersionsState['versions']
+  activeVersionId: DocumentVersionsState['activeVersionId']
+  selectedVersionId: DocumentVersionsState['selectedVersionId']
+  selectedVersion: DocumentVersionsState['selectedVersion']
+  reanalysis: DocumentVersionsState['reanalysis']
+  canEditSelectedVersion: ComputedRef<boolean>
+  draft: EditDraftState
+  derivedPreview: DerivedPreviewState
+  history: ReviewHistoryState
   filters: Ref<ReviewIssueFilters>
   blocks: ComputedRef<DocumentBlock[]>
   issues: ComputedRef<Issue[]>
@@ -97,6 +114,7 @@ export interface ReviewWorkspaceState {
   selectIssue(issueId: string): void
   selectHighlight(issueId: string): void
   setFilters(filters: ReviewIssueFilters): Promise<void>
+  selectVersion(versionId: string): Promise<void>
   decide(action: ReviewDecisionAction, replacement?: string): Promise<void>
   decideVisible(action: Extract<DecisionAction, 'accepted' | 'ignored'>): Promise<void>
   retryDecision(): Promise<void>
@@ -114,12 +132,14 @@ export interface ReviewWorkspaceState {
 
 export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
   const injectedAnalysisApi = inject(analysisApiKey)
+  const injectedRevisionsApi = inject(revisionsApiKey, null)
 
   if (!injectedAnalysisApi) {
     throw new Error('AnalysisApi is not provided.')
   }
 
   const analysisApi = injectedAnalysisApi
+  const revisionsApi = injectedRevisionsApi ?? createUnavailableRevisionsApi()
 
   const summary = ref<AnalysisSummaryResponse | null>(null)
   const filters = ref<ReviewIssueFilters>({})
@@ -164,6 +184,14 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
   const decisionGenerations = new Map<string, number>()
   const failedDecisions = ref<Record<string, FailedDecision | undefined>>({})
   const currentFindMatchIndex = ref(-1)
+  const documentVersions = useDocumentVersions(jobId, revisionsApi)
+  const derivedPreview = useDerivedPreview(jobId, revisionsApi)
+  const history = useReviewHistory(jobId, revisionsApi)
+  const draft = useEditDraft(jobId, revisionsApi, (version) => {
+    documentVersions.trackReanalysis(version, async (versionId) => {
+      await selectVersion(versionId)
+    })
+  })
 
   const blocks = computed(() =>
     blockIds.value.flatMap((blockId) => {
@@ -246,9 +274,21 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
 
     return matches.every((match) => match.matchedIssueId !== null && match.autoFixable)
   })
+  const canEditSelectedVersion = computed(
+    () =>
+      documentVersions.selectedVersion.value?.version_id ===
+        documentVersions.activeVersionId.value &&
+      documentVersions.selectedVersion.value?.status === 'succeeded'
+  )
 
   function isCurrent(generation: number, currentGeneration: number): boolean {
     return active && generation === currentGeneration
+  }
+
+  function selectedVersionQuery(): { version_id: string } | undefined {
+    return documentVersions.selectedVersionId.value
+      ? { version_id: documentVersions.selectedVersionId.value }
+      : undefined
   }
 
   function loadSummary(): Promise<void> {
@@ -258,7 +298,10 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
 
     const request = (async () => {
       try {
-        const response = await analysisApi.getSummary(jobId)
+        const versionQuery = selectedVersionQuery()
+        const response = versionQuery
+          ? await analysisApi.getSummary(jobId, versionQuery)
+          : await analysisApi.getSummary(jobId)
         if (!isCurrent(generation, summaryGeneration)) {
           return
         }
@@ -293,6 +336,7 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     const request = (async () => {
       try {
         const response = await analysisApi.getDocumentPage(jobId, {
+          ...(selectedVersionQuery() ?? {}),
           cursor,
           limit: DOCUMENT_PAGE_LIMIT
         })
@@ -330,6 +374,7 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     const request = (async () => {
       try {
         const response = await analysisApi.getIssues(jobId, {
+          ...(selectedVersionQuery() ?? {}),
           ...filters.value,
           cursor,
           limit: ISSUE_PAGE_LIMIT
@@ -376,6 +421,7 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     const request = (async () => {
       try {
         const response = await analysisApi.getIssues(jobId, {
+          ...(selectedVersionQuery() ?? {}),
           ...filters.value,
           cursor: null,
           limit: ISSUE_PAGE_LIMIT
@@ -632,6 +678,32 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     await loadIssuePage(null, false)
   }
 
+  async function selectVersion(versionId: string): Promise<void> {
+    await documentVersions.selectVersion(versionId)
+    derivedPreview.clear()
+    localizationGeneration += 1
+    explicitlySelectedIssueId = null
+    selectedIssueId.value = null
+    blocksById.value = {}
+    blockIds.value = []
+    blockCursor.value = null
+    documentCheckerFailures.value = {}
+    issuesById.value = {}
+    issueIds.value = []
+    issueCursor.value = null
+    issueCheckerFailures.value = {}
+    authoritativeDecisions.clear()
+    failedDecisions.value = {}
+    lastDocumentRequest = { cursor: null, append: false }
+    lastIssueRequest = { cursor: null, append: false }
+    await Promise.allSettled([
+      loadSummary(),
+      loadDocumentPage(null, false),
+      loadIssuePage(null, false),
+      history.loadHistory(versionId)
+    ])
+  }
+
   function nextDecisionGeneration(issueId: string): number {
     const generation = (decisionGenerations.get(issueId) ?? 0) + 1
     decisionGenerations.set(issueId, generation)
@@ -715,7 +787,8 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
   function decisionCommand(
     issue: Issue,
     action: ReviewDecisionAction,
-    replacement?: string
+    replacement?: string,
+    options: { requirePreferredSuggestion?: boolean } = {}
   ): DecisionCommand | null {
     if (issue.document_version === null) {
       return null
@@ -740,13 +813,26 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     }
 
     if (action === 'accepted') {
+      const preferredSuggestion = findPreferredSuggestion(issue)
       const acceptedReplacement =
         replacement ??
         (issue.decision?.action === 'accepted' && issue.decision.replacement !== null
           ? issue.decision.replacement
-          : issue.suggestion ?? issue.original)
+          : preferredSuggestion?.text ?? issue.suggestion ?? issue.original)
       const suggestionId =
-        issue.decision?.action === 'accepted' ? issue.decision.suggestion_id ?? null : null
+        issue.decision?.action === 'accepted'
+          ? issue.decision.suggestion_id ?? null
+          : null
+      if (
+        options.requirePreferredSuggestion &&
+        !(
+          issue.decision?.action === 'accepted' &&
+          issue.decision.replacement !== null
+        ) &&
+        (!preferredSuggestion || !isValidFinalReplacement(acceptedReplacement))
+      ) {
+        return null
+      }
       return {
         ...fields,
         action: 'accepted',
@@ -766,6 +852,7 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
   async function submitDecision(command: DecisionCommand): Promise<void> {
     const generation = nextDecisionGeneration(command.issue_id)
     decisionAnnouncement.value = ''
+    derivedPreview.clear()
     clearFailedDecision(command.issue_id)
     setIssueDecision(command.issue_id, optimisticDecision(command))
 
@@ -785,6 +872,11 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
       if (outcome.status === 'applied') {
         authoritativeDecisions.set(command.issue_id, outcome.decision)
         setIssueDecision(command.issue_id, outcome.decision)
+        history.recordDecisionBatch(
+          response.batch_id,
+          documentVersions.selectedVersionId.value,
+          1
+        )
         await Promise.all([
           reloadAuthoritativeIssues({
             issueId: command.issue_id,
@@ -859,6 +951,7 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     failureTarget.value = null
     bulkActionPending.value = true
     decisionAnnouncement.value = ''
+    derivedPreview.clear()
 
     for (const command of commands) {
       const generation = nextDecisionGeneration(command.issue_id)
@@ -907,6 +1000,11 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
       }
 
       decisionAnnouncement.value = batchDecisionAnnouncement(appliedCount, needsReviewCount)
+      history.recordDecisionBatch(
+        response.batch_id,
+        documentVersions.selectedVersionId.value,
+        appliedCount
+      )
       await Promise.all([
         loadSummary(),
         authoritativeReloadGuards.length > 0
@@ -940,10 +1038,20 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
       return
     }
 
-    const commands = visibleBatchIssues.value.flatMap((issue) => {
-      const command = decisionCommand(issue, action)
-      return command ? [command] : []
-    })
+    const commands: DecisionCommand[] = []
+    for (const issue of visibleBatchIssues.value) {
+      const command = decisionCommand(issue, action, undefined, {
+        requirePreferredSuggestion: action === 'accepted'
+      })
+      if (!command) {
+        batchDecisionError.value =
+          action === 'accepted'
+            ? '当前页包含没有首选建议的问题，无法批量接受。'
+            : '批量保存处理结果失败。'
+        return
+      }
+      commands.push(command)
+    }
 
     await submitDecisionBatch(commands, batchDecisionError, '批量保存处理结果失败。')
   }
@@ -1074,6 +1182,11 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
   }
 
   void Promise.allSettled([
+    documentVersions.refreshVersions().then(async () => {
+      if (documentVersions.selectedVersionId.value) {
+        await history.loadHistory(documentVersions.selectedVersionId.value)
+      }
+    }),
     loadSummary(),
     loadDocumentPage(null, false),
     loadIssuePage(null, false)
@@ -1089,6 +1202,15 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
 
   return {
     summary,
+    versions: documentVersions.versions,
+    activeVersionId: documentVersions.activeVersionId,
+    selectedVersionId: documentVersions.selectedVersionId,
+    selectedVersion: documentVersions.selectedVersion,
+    reanalysis: documentVersions.reanalysis,
+    canEditSelectedVersion,
+    draft,
+    derivedPreview,
+    history,
     filters,
     blocks,
     issues,
@@ -1118,6 +1240,7 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     selectIssue,
     selectHighlight,
     setFilters,
+    selectVersion,
     decide,
     decideVisible,
     retryDecision,
@@ -1153,6 +1276,14 @@ function isValidCustomReplacement(
     !replacement.includes('\u0000') &&
     Array.from(replacement).length <= 10_000
   )
+}
+
+function isValidFinalReplacement(replacement: string | undefined): replacement is string {
+  return replacement !== undefined && replacement.length > 0 && !replacement.includes('\u0000')
+}
+
+function findPreferredSuggestion(issue: Issue): NonNullable<Issue['suggestions']>[number] | null {
+  return issue.suggestions?.find((suggestion) => suggestion.preferred) ?? null
 }
 
 function normalizeFindMatchIndex(index: number, length: number): number {
@@ -1251,4 +1382,33 @@ function batchDecisionAnnouncement(appliedCount: number, needsReviewCount: numbe
   }
 
   return ''
+}
+
+function createUnavailableRevisionsApi(): RevisionsApi {
+  const unavailable = () => Promise.reject(new Error('RevisionsApi is not provided.'))
+
+  return {
+    listVersions: () =>
+      Promise.resolve({
+        job_id: '',
+        active_version_id: null,
+        versions: []
+      }),
+    createDraft: unavailable as RevisionsApi['createDraft'],
+    getDraft: unavailable as RevisionsApi['getDraft'],
+    updateDraft: unavailable as RevisionsApi['updateDraft'],
+    deleteDraft: unavailable as RevisionsApi['deleteDraft'],
+    reanalyze: unavailable as RevisionsApi['reanalyze'],
+    getDerived: unavailable as RevisionsApi['getDerived'],
+    subscribeVersionEvents: () => () => undefined,
+    listHistory: () =>
+      Promise.resolve({
+        job_id: '',
+        version_id: '',
+        total: 0,
+        items: [],
+        next_cursor: null
+      }),
+    undoBatch: unavailable as RevisionsApi['undoBatch']
+  }
 }
