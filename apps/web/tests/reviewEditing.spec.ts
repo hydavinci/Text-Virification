@@ -1327,6 +1327,163 @@ describe('review editing state', () => {
     }])
   })
 
+
+  it('accepts a legacy single suggestion with an explicit null suggestion id', async () => {
+    const putDecisions = vi.fn().mockResolvedValue(buildAppliedResponse({
+      issue_id: 'issue-1',
+      issue_version: 1,
+      revision: 1,
+      action: 'accepted',
+      replacement: '旧建议',
+      suggestion_id: null,
+      updated_at: '2026-08-23T12:00:00Z'
+    }))
+    const wrapper = mountReviewWorkspaceView(
+      createAnalysisApiMock({
+        getIssues: vi.fn().mockResolvedValue(
+          buildIssuePage({
+            items: [buildIssue({ suggestion: '旧建议', suggestions: undefined })]
+          })
+        ),
+        putDecisions
+      })
+    )
+    await flushPromises()
+
+    await wrapper.get('button[name="accept"]').trigger('click')
+
+    expect(putDecisions).toHaveBeenCalledWith(jobId, [{
+      issue_id: 'issue-1',
+      issue_version: 1,
+      expected_revision: 0,
+      action: 'accepted',
+      replacement: '旧建议',
+      suggestion_id: null
+    }])
+  })
+
+  it('resubmits an accepted decision preserving its null suggestion id', async () => {
+    const putDecisions = vi.fn().mockResolvedValue(buildAppliedResponse({
+      issue_id: 'issue-1',
+      issue_version: 1,
+      revision: 5,
+      action: 'accepted',
+      replacement: '已存替换',
+      suggestion_id: null,
+      updated_at: '2026-08-23T12:00:00Z'
+    }))
+    const wrapper = mountReviewWorkspaceView(
+      createAnalysisApiMock({
+        getIssues: vi.fn().mockResolvedValue(
+          buildIssuePage({
+            items: [
+              buildIssue({
+                decision: {
+                  issue_version: 1,
+                  revision: 4,
+                  action: 'accepted',
+                  replacement: '已存替换',
+                  suggestion_id: null,
+                  updated_at: '2026-08-23T11:00:00Z'
+                }
+              })
+            ]
+          })
+        ),
+        putDecisions
+      })
+    )
+    await flushPromises()
+
+    await wrapper.get('button[name="accept"]').trigger('click')
+
+    expect(putDecisions).toHaveBeenCalledWith(jobId, [{
+      issue_id: 'issue-1',
+      issue_version: 1,
+      expected_revision: 4,
+      action: 'accepted',
+      replacement: '已存替换',
+      suggestion_id: null
+    }])
+  })
+
+  it('searches draft text only while the draft editor is visible', async () => {
+    const wrapper = mountReviewWorkspaceView(
+      createAnalysisApiMock({
+        getDocumentPage: vi.fn().mockResolvedValue(
+          buildDocumentPage({
+            blocks: [buildBlock({ text: '原文内容' })],
+            total_blocks: 1
+          })
+        )
+      }),
+      createRevisionsApiMock({
+        createDraft: vi.fn().mockResolvedValue(
+          buildDraft({ blocks: [{ block_id: 'block-1', text: '草稿专有词' }] })
+        ),
+        updateDraft: vi.fn().mockResolvedValue(
+          buildDraft({ revision: 2, blocks: [{ block_id: 'block-1', text: '草稿专有词' }] })
+        ),
+        reanalyze: vi.fn().mockResolvedValue({
+          version: buildVersion({ version_id: 'version-3', status: 'queued' }),
+          events_url: '/api/v1/jobs/job-1/versions/version-3/events'
+        })
+      })
+    )
+    await flushPromises()
+
+    await wrapper.get('button[name="edit-version"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-tool="search"]').trigger('click')
+    await wrapper.get('[aria-label="查找内容"]').setValue('草稿专有词')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="find-status"]').text()).toContain('第 1 / 1 处')
+
+    await wrapper.get('button[name="save-reanalyze"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[aria-label="替换为"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="find-status"]').text()).toContain('未找到匹配')
+  })
+
+  it('does not undo a previous version batch after switching versions before history reloads', async () => {
+    const historyResponse = createDeferred<OperationBatchPage>()
+    const undoBatch = vi.fn().mockResolvedValue(buildBatch({ operation_type: 'undo' }))
+    const workspace = mountWorkspace(
+      createAnalysisApiMock(),
+      createRevisionsApiMock({
+        listHistory: vi
+          .fn()
+          .mockResolvedValueOnce({
+            job_id: jobId,
+            version_id: 'version-2',
+            total: 0,
+            items: [],
+            next_cursor: null
+          })
+          .mockReturnValueOnce(historyResponse.promise),
+        undoBatch
+      })
+    )
+    await flushPromises()
+    await workspace.decideVisible('accepted')
+    await flushPromises()
+
+    const switching = workspace.selectVersion('version-1')
+    await flushPromises()
+    await workspace.history.undoLatestBatch()
+
+    expect(undoBatch).not.toHaveBeenCalled()
+    historyResponse.resolve({
+      job_id: jobId,
+      version_id: 'version-1',
+      total: 0,
+      items: [],
+      next_cursor: null
+    })
+    await switching
+  })
+
   it('shows find with flags and clear in review mode while hiding replacement controls', async () => {
     const wrapper = mountReviewWorkspaceView(
       createAnalysisApiMock({

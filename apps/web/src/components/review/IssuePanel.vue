@@ -7,6 +7,15 @@ import { categoryLabel, issueTypeLabel } from './presentation'
 import { describeSeverity } from './severity'
 
 type ReviewDecisionAction = DecisionAction | 'custom'
+type CandidateSuggestion = {
+  uiKey: string
+  suggestionId: string | null
+  text: string
+  source: 'rule' | 'dictionary' | 'llm' | 'manual'
+  explanation: string | null
+  rank: number
+  preferred: boolean
+}
 
 const props = defineProps<{
   issue: Issue | null
@@ -20,23 +29,28 @@ const emit = defineEmits<{
 }>()
 
 const finalReplacement = ref('')
-const selectedSuggestionId = ref<string | null>(null)
+const selectedSuggestionKey = ref<string | null>(null)
 const finalReplacementError = ref<string | null>(null)
-const suggestions = computed(() => {
+const suggestions = computed<CandidateSuggestion[]>(() => {
   if (!props.issue) {
     return []
   }
 
   if (props.issue.suggestions?.length) {
-    return [...props.issue.suggestions].sort(
-      (left, right) => left.rank - right.rank
-    )
+    return [...props.issue.suggestions]
+      .sort((left, right) => left.rank - right.rank)
+      .map((suggestion) => ({
+        ...suggestion,
+        uiKey: suggestion.suggestion_id,
+        suggestionId: suggestion.suggestion_id
+      }))
   }
 
   return props.issue.suggestion
     ? [
         {
-          suggestion_id: 'legacy-suggestion',
+          uiKey: 'legacy-suggestion',
+          suggestionId: null,
           text: props.issue.suggestion,
           source: 'rule' as const,
           explanation: null,
@@ -71,13 +85,13 @@ watch(
   () => props.issue,
   (issue) => {
     const preferredSuggestion =
-      issue?.suggestions?.find((suggestion) => suggestion.preferred) ??
+      suggestions.value.find((suggestion) => suggestion.preferred) ??
       suggestions.value[0] ??
       null
-    selectedSuggestionId.value =
+    selectedSuggestionKey.value =
       issue?.decision?.action === 'accepted'
-        ? issue.decision.suggestion_id ?? preferredSuggestion?.suggestion_id ?? null
-        : preferredSuggestion?.suggestion_id ?? null
+        ? suggestionKeyForAcceptedDecision(issue.decision.suggestion_id)
+        : preferredSuggestion?.uiKey ?? null
     finalReplacement.value =
       issue?.decision?.action === 'accepted' || issue?.decision?.action === 'custom'
         ? issue.decision.replacement ?? ''
@@ -95,7 +109,7 @@ function submitDecision(action: Extract<DecisionAction, 'accepted' | 'ignored'>)
     if (error) {
       return
     }
-    emit('decide', action, finalReplacement.value, selectedSuggestionId.value)
+    emit('decide', action, finalReplacement.value, selectedCandidateSuggestionId())
     return
   }
 
@@ -108,7 +122,7 @@ function submitCustomDecision(): void {
   if (error) {
     return
   }
-  emit('decide', 'accepted', finalReplacement.value, selectedSuggestionId.value)
+  emit('decide', 'accepted', finalReplacement.value, selectedCandidateSuggestionId())
 }
 
 function restoreUnreviewed(): void {
@@ -116,16 +130,39 @@ function restoreUnreviewed(): void {
   emit('decide', 'unreviewed')
 }
 
-function selectSuggestion(suggestionId: string): void {
+function selectSuggestion(uiKey: string): void {
   const suggestion = suggestions.value.find(
-    (candidate) => candidate.suggestion_id === suggestionId
+    (candidate) => candidate.uiKey === uiKey
   )
   if (!suggestion) {
     return
   }
-  selectedSuggestionId.value = suggestion.suggestion_id
+  selectedSuggestionKey.value = suggestion.uiKey
   finalReplacement.value = suggestion.text
   finalReplacementError.value = null
+}
+
+function selectedCandidateSuggestionId(): string | null {
+  return (
+    suggestions.value.find((suggestion) => suggestion.uiKey === selectedSuggestionKey.value)
+      ?.suggestionId ?? null
+  )
+}
+
+function suggestionKeyForAcceptedDecision(suggestionId: string | null | undefined): string | null {
+  if (suggestionId === undefined) {
+    return (
+      suggestions.value.find((suggestion) => suggestion.preferred)?.uiKey ??
+      suggestions.value[0]?.uiKey ??
+      null
+    )
+  }
+
+  if (suggestionId === null) {
+    return suggestions.value.find((suggestion) => suggestion.suggestionId === null)?.uiKey ?? null
+  }
+
+  return suggestions.value.find((suggestion) => suggestion.suggestionId === suggestionId)?.uiKey ?? null
 }
 
 function validateFinalReplacement(replacement: string): string | null {
@@ -207,15 +244,15 @@ function suggestionSourceLabel(source: string): string {
           <legend>候选建议</legend>
           <label
             v-for="suggestion in suggestions"
-            :key="suggestion.suggestion_id"
+            :key="suggestion.uiKey"
             class="issue-panel__suggestion"
           >
             <input
               type="radio"
               name="suggestion"
               :value="suggestion.text"
-              :checked="selectedSuggestionId === suggestion.suggestion_id"
-              @change="selectSuggestion(suggestion.suggestion_id)"
+              :checked="selectedSuggestionKey === suggestion.uiKey"
+              @change="selectSuggestion(suggestion.uiKey)"
             />
             <span>
               <strong>{{ suggestion.text }}</strong>

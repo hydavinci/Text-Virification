@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest'
 import ContextInspector from '../src/components/review/ContextInspector.vue'
 import DocumentHeader from '../src/components/review/DocumentHeader.vue'
 import WorkspaceSidePanel from '../src/components/review/WorkspaceSidePanel.vue'
+import OperationHistory from '../src/components/review/OperationHistory.vue'
 import ToolRail from '../src/components/review/ToolRail.vue'
 
 describe('ToolRail', () => {
@@ -133,6 +134,30 @@ describe('review shell containers', () => {
     await wrapper.get('button[aria-label="关闭问题面板"]').trigger('click')
 
     expect(wrapper.emitted('close')).toHaveLength(1)
+  })
+
+
+  it('renders a local latest batch even before history is loaded', () => {
+    const wrapper = mount(OperationHistory, {
+      props: {
+        historyPage: null,
+        latestBatch: {
+          batch_id: 'batch-1',
+          job_id: 'job-1',
+          version_id: 'version-2',
+          operation_type: 'decision',
+          affected_count: 2,
+          undoes_batch_id: null,
+          created_at: '2026-08-23T12:00:00Z'
+        },
+        canUndoLatestBatch: true,
+        undoConflict: null,
+        busy: false
+      }
+    })
+
+    expect(wrapper.get('[data-testid="operation-history"]').text()).toContain('处理决定')
+    expect(wrapper.get('[data-testid="operation-history"]').text()).toContain('2 项')
   })
 
   it('implements arrow, Home, and End tab navigation', async () => {

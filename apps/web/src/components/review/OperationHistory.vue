@@ -1,7 +1,9 @@
 <script setup lang="ts">
+import { computed } from 'vue'
+
 import type { OperationBatch, OperationBatchPage } from '../../types/revisions'
 
-defineProps<{
+const props = defineProps<{
   historyPage: OperationBatchPage | null
   latestBatch: OperationBatch | null
   canUndoLatestBatch: boolean
@@ -16,6 +18,15 @@ const emit = defineEmits<{
 function operationLabel(batch: OperationBatch): string {
   return batch.operation_type === 'undo' ? '撤销操作' : '处理决定'
 }
+
+const visibleBatches = computed(() =>
+  props.historyPage?.items.length
+    ? props.historyPage.items
+    : props.latestBatch
+      ? [props.latestBatch]
+      : []
+)
+const visibleTotal = computed(() => props.historyPage?.total ?? visibleBatches.value.length)
 </script>
 
 <template>
@@ -25,7 +36,7 @@ function operationLabel(batch: OperationBatch): string {
         <strong>操作历史</strong>
         <p>查看服务端记录的批处理，并可撤销最近一次处理。</p>
       </div>
-      <span>{{ historyPage?.total ?? 0 }} 项</span>
+      <span>{{ visibleTotal }} 项</span>
     </div>
 
     <button
@@ -42,8 +53,8 @@ function operationLabel(batch: OperationBatch): string {
       {{ undoConflict }}
     </p>
 
-    <ol v-if="historyPage?.items.length" class="operation-history__list">
-      <li v-for="batch in historyPage.items" :key="batch.batch_id">
+    <ol v-if="visibleBatches.length" class="operation-history__list">
+      <li v-for="batch in visibleBatches" :key="batch.batch_id">
         <span>{{ operationLabel(batch) }}</span>
         <small>{{ batch.affected_count }} 项 · {{ batch.created_at }}</small>
       </li>

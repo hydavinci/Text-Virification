@@ -17,6 +17,7 @@ export interface ReviewHistoryState {
     versionId: string | null,
     affectedCount: number
   ): void
+  setVersionScope(versionId: string | null): void
   loadHistory(versionId: string): Promise<void>
   undoLatestBatch(): Promise<void>
 }
@@ -31,13 +32,17 @@ export function useReviewHistory(
   const undoToastVisible = ref(false)
   const historyPage = ref<OperationBatchPage | null>(null)
   const undoConflict = ref<string | null>(null)
+  const scopedVersionId = ref<string | null>(null)
 
   let active = true
   let toastTimer: ReturnType<typeof setTimeout> | null = null
   let historyGeneration = 0
 
   const canUndoLatestBatch = computed(
-    () => latestBatch.value !== null && latestBatch.value.operation_type === 'decision'
+    () =>
+      latestBatch.value !== null &&
+      latestBatch.value.operation_type === 'decision' &&
+      latestBatch.value.version_id === scopedVersionId.value
   )
 
   function recordDecisionBatch(
@@ -46,6 +51,12 @@ export function useReviewHistory(
     affectedCount: number
   ): void {
     if (!batchId || !versionId || affectedCount < 1) {
+      return
+    }
+    if (scopedVersionId.value === null) {
+      scopedVersionId.value = versionId
+    }
+    if (scopedVersionId.value !== versionId) {
       return
     }
 
@@ -80,16 +91,23 @@ export function useReviewHistory(
   }
 
   async function loadHistory(versionId: string): Promise<void> {
+    if (scopedVersionId.value !== versionId) {
+      setVersionScope(versionId)
+    }
     const generation = ++historyGeneration
     const page = await revisionsApi.listHistory(jobId, versionId)
-    if (active && generation === historyGeneration) {
+    if (
+      active &&
+      generation === historyGeneration &&
+      scopedVersionId.value === page.version_id
+    ) {
       applyHistoryPage(page)
     }
   }
 
   async function undoLatestBatch(): Promise<void> {
     const batch = latestBatch.value
-    if (!batch) {
+    if (!batch || batch.version_id !== scopedVersionId.value) {
       return
     }
 
@@ -110,6 +128,9 @@ export function useReviewHistory(
   }
 
   function applyHistoryPage(page: OperationBatchPage): void {
+    if (page.version_id !== scopedVersionId.value) {
+      return
+    }
     historyPage.value = page
     latestBatch.value = latestUndoableBatch(page.items)
   }
@@ -140,6 +161,26 @@ export function useReviewHistory(
     }
   }
 
+  function setVersionScope(versionId: string | null): void {
+    if (scopedVersionId.value === versionId) {
+      return
+    }
+
+    scopedVersionId.value = versionId
+    historyGeneration += 1
+    latestBatch.value = null
+    undoToastDeadline.value = null
+    undoToastVisible.value = false
+    undoConflict.value = null
+    if (historyPage.value?.version_id !== versionId) {
+      historyPage.value = null
+    }
+    if (toastTimer) {
+      clearTimeout(toastTimer)
+      toastTimer = null
+    }
+  }
+
   onScopeDispose(() => {
     active = false
     historyGeneration += 1
@@ -156,6 +197,7 @@ export function useReviewHistory(
     undoConflict,
     canUndoLatestBatch,
     recordDecisionBatch,
+    setVersionScope,
     loadHistory,
     undoLatestBatch
   }

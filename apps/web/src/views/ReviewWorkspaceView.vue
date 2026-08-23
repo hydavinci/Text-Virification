@@ -85,6 +85,7 @@ const {
   setReplaceText,
   setFindRegex,
   setFindCaseSensitive,
+  setFindUsesDraft,
   clearFind,
   goToPreviousMatch,
   goToNextMatch,
@@ -217,6 +218,12 @@ if (typeof window !== 'undefined') {
 watch(
   () => draft.dirty.value,
   (dirty) => emit('dirtyChange', dirty),
+  { immediate: true }
+)
+
+watch(
+  [documentMode, () => draft.draft.value],
+  () => setFindUsesDraft(documentMode.value === 'edit' && draft.draft.value !== null),
   { immediate: true }
 )
 

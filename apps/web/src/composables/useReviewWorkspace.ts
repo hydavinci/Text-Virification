@@ -133,6 +133,7 @@ export interface ReviewWorkspaceState {
   setReplaceText(value: string): void
   setFindRegex(value: boolean): void
   setFindCaseSensitive(value: boolean): void
+  setFindUsesDraft(value: boolean): void
   clearFind(): void
   goToPreviousMatch(): void
   goToNextMatch(): void
@@ -170,6 +171,7 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
   const replaceText = ref('')
   const findRegex = ref(false)
   const findCaseSensitive = ref(false)
+  const findUsesDraft = ref(false)
   const replacementError = ref<string | null>(null)
   const documentCheckerFailures = ref<CheckerFailureMap>({})
   const issueCheckerFailures = ref<CheckerFailureMap>({})
@@ -230,7 +232,7 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     return issueId ? issuesById.value[issueId] ?? null : null
   })
   const searchableBlocks = computed(() =>
-    draft.draft.value
+    findUsesDraft.value && draft.draft.value
       ? draft.localBlocks.value.map((block) => ({
           block_id: block.block_id,
           text: block.text
@@ -314,10 +316,15 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
   })
   const canNavigateMatches = computed(() => findMatches.value.length > 0)
   const canReplaceCurrentMatch = computed(
-    () => draft.draft.value !== null && currentFindMatch.value !== null && !compiledSearch.value.error
+    () =>
+      findUsesDraft.value &&
+      draft.draft.value !== null &&
+      currentFindMatch.value !== null &&
+      !compiledSearch.value.error
   )
   const canReplaceAllMatches = computed(
     () =>
+      findUsesDraft.value &&
       draft.draft.value !== null &&
       findMatches.value.length > 0 &&
       !compiledSearch.value.error
@@ -729,6 +736,7 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
 
   async function selectVersion(versionId: string): Promise<void> {
     await documentVersions.selectVersion(versionId)
+    history.setVersionScope(versionId)
     explicitHistoricalVersionId =
       versionId === documentVersions.activeVersionId.value ? null : versionId
     decisionScopeGeneration += 1
@@ -882,10 +890,11 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
           ? issue.decision.replacement
           : preferredSuggestion?.text ?? issue.suggestion ?? issue.original)
       const selectedSuggestionIdForCommand =
-        candidateSuggestionId ??
-        (issue.decision?.action === 'accepted'
-          ? issue.decision.suggestion_id ?? null
-          : preferredSuggestion?.suggestion_id ?? null)
+        candidateSuggestionId !== undefined
+          ? candidateSuggestionId
+          : issue.decision?.action === 'accepted'
+            ? issue.decision.suggestion_id ?? null
+            : preferredSuggestion?.suggestion_id ?? null
       if (
         options.requirePreferredSuggestion &&
         !(
@@ -1154,6 +1163,13 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     syncCurrentFindMatchSelection()
   }
 
+  function setFindUsesDraft(value: boolean): void {
+    findUsesDraft.value = value
+    currentFindMatchIndex.value = findQuery.value ? 0 : -1
+    replacementError.value = null
+    syncCurrentFindMatchSelection()
+  }
+
   function clearFind(): void {
     findQuery.value = ''
     replaceText.value = ''
@@ -1205,7 +1221,7 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     replacementError.value = null
 
     const match = currentFindMatch.value
-    if (!draft.draft.value || !match) {
+    if (!findUsesDraft.value || !draft.draft.value || !match) {
       replacementError.value = '请先创建可编辑草稿。'
       return
     }
@@ -1246,7 +1262,7 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     batchDecisionError.value = null
     replacementError.value = null
 
-    if (!draft.draft.value) {
+    if (!findUsesDraft.value || !draft.draft.value) {
       replacementError.value = '请先创建可编辑草稿。'
       return
     }
@@ -1305,6 +1321,7 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
   void Promise.allSettled([
     documentVersions.refreshVersions().then(async () => {
       if (documentVersions.selectedVersionId.value) {
+        history.setVersionScope(documentVersions.selectedVersionId.value)
         await history.loadHistory(documentVersions.selectedVersionId.value)
       }
     }),
@@ -1375,6 +1392,7 @@ export function useReviewWorkspace(jobId: string): ReviewWorkspaceState {
     setReplaceText,
     setFindRegex,
     setFindCaseSensitive,
+    setFindUsesDraft,
     clearFind,
     goToPreviousMatch,
     goToNextMatch,
