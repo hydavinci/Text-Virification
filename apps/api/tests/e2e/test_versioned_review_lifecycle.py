@@ -158,7 +158,12 @@ def test_versioned_review_lifecycle_preserves_history_and_export_parity(
     )
     assert version_2_issues.status_code == 200
     version_2_items = version_2_issues.json()["items"]
-    before_decisions_hash = _derived_hash(client, job_id, version_2)
+    before_decisions = _derived_content(client, job_id, version_2)
+    before_decisions_hash = before_decisions["decision_snapshot_sha256"]
+    before_decisions_text = _preview_plain_text(before_decisions["blocks"])
+    assert "错误词" in before_decisions_text
+    assert "最终词" not in before_decisions_text
+    assert "保密" in before_decisions_text
     decision_batch = _put_decisions(
         client,
         job_id,
@@ -182,13 +187,15 @@ def test_versioned_review_lifecycle_preserves_history_and_export_parity(
         ],
     )
 
-    modified_preview = client.get(
-        f"/api/v1/jobs/{job_id}/versions/{version_2}/derived",
-        params={"view": "modified"},
+    modified_preview = _derived_content(client, job_id, version_2)
+    modified_preview_text = _normalize_plain_text(
+        _preview_plain_text(modified_preview["blocks"])
     )
-    assert modified_preview.status_code == 200
-    after_decisions_hash = modified_preview.json()["decision_snapshot_sha256"]
+    after_decisions_hash = modified_preview["decision_snapshot_sha256"]
     assert after_decisions_hash != before_decisions_hash
+    assert "最终词" in modified_preview_text
+    assert "错误词" not in modified_preview_text
+    assert "保密" in modified_preview_text
 
     exported = client.post(
         f"/api/v1/jobs/{job_id}/exports",
@@ -202,17 +209,25 @@ def test_versioned_review_lifecycle_preserves_history_and_export_parity(
     assert stored_export.status == "completed"
     downloaded = client.get(f"/api/v1/jobs/{job_id}/exports/{export_id}/download")
     assert downloaded.status_code == 200, downloaded.text
-    assert _normalize_plain_text(_preview_plain_text(modified_preview.json()["blocks"])) == (
-        _normalize_plain_text(downloaded.content.decode("utf-8"))
-    )
+    exported_text = _normalize_plain_text(downloaded.content.decode("utf-8"))
+    assert modified_preview_text == exported_text
+    assert "最终词" in exported_text
+    assert "错误词" not in exported_text
+    assert "保密" in exported_text
 
     undo = client.post(
         f"/api/v1/jobs/{job_id}/operation-batches/{decision_batch['batch_id']}/undo"
     )
     assert undo.status_code == 200, undo.text
-    undo_hash = _derived_hash(client, job_id, version_2)
+    undo_preview = _derived_content(client, job_id, version_2)
+    undo_hash = undo_preview["decision_snapshot_sha256"]
+    undo_text = _normalize_plain_text(_preview_plain_text(undo_preview["blocks"]))
     assert undo_hash == before_decisions_hash
     assert undo_hash != after_decisions_hash
+    assert undo_text == _normalize_plain_text(before_decisions_text)
+    assert "错误词" in undo_text
+    assert "最终词" not in undo_text
+    assert "保密" in undo_text
 
     revision_1_replayed = client.get(
         f"/api/v1/jobs/{job_id}/issues",
@@ -386,16 +401,31 @@ def _active_version_id(client: TestClient, job_id: str) -> str:
 
 
 def _derived_hash(client: TestClient, job_id: str, version_id: str) -> str:
+    return str(_derived_content(client, job_id, version_id)["decision_snapshot_sha256"])
+
+
+def _derived_content(
+    client: TestClient,
+    job_id: str,
+    version_id: str,
+) -> dict[str, object]:
     response = client.get(
         f"/api/v1/jobs/{job_id}/versions/{version_id}/derived",
         params={"view": "modified"},
     )
     assert response.status_code == 200
-    return str(response.json()["decision_snapshot_sha256"])
+    payload = response.json()
+    assert isinstance(payload, dict)
+    return payload
 
 
-def _preview_plain_text(blocks: list[dict[str, object]]) -> str:
-    return "\n\n".join(str(block["text"]) for block in blocks)
+def _preview_plain_text(blocks: object) -> str:
+    assert isinstance(blocks, list)
+    return "\n\n".join(
+        str(block["text"])
+        for block in blocks
+        if isinstance(block, dict)
+    )
 
 
 def _normalize_plain_text(text: str) -> str:

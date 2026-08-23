@@ -77,29 +77,16 @@ async function assertNoPageScroll(page: Page) {
   expect(metrics.scrollWidth).toBeLessThanOrEqual(metrics.innerWidth)
 }
 
-async function assertVisibleButtonsAreTouchSized(page: Page) {
+async function assertButtonsAreTouchSized(page: Page, selectors: string[]) {
   const buttons = page.locator(
-    [
-      'button[name="edit-version"]',
-      '.version-toolbar__tabs button',
-      '[data-tool="search"]',
-      '[data-tool="history"]',
-      '[data-tool="export"]',
-      '.document-editor__actions button',
-      'button[name="previous-match"]',
-      'button[name="next-match"]',
-      'button[name="clear-find"]',
-      'button[name="replace-all"]',
-      '[data-testid="history-undo-latest"]'
-    ].join(', ')
+    selectors.join(', ')
   )
   const count = await buttons.count()
+  expect(count).toBeGreaterThan(0)
 
   for (let index = 0; index < count; index += 1) {
     const button = buttons.nth(index)
-    if (!(await button.isVisible())) {
-      continue
-    }
+    await expect(button).toBeVisible()
     const box = await button.boundingBox()
     expectDefinedBox(box)
     expect(Math.round(box.width)).toBeGreaterThanOrEqual(44)
@@ -126,7 +113,13 @@ async function assertDocumentEditorIsContained(page: Page) {
   for (const box of [editorBox, saveBox, discardBox]) {
     expect(box.x).toBeGreaterThanOrEqual(viewerBox.x)
     expect(box.x + box.width).toBeLessThanOrEqual(viewerBox.x + viewerBox.width)
+    expect(box.y).toBeGreaterThanOrEqual(viewerBox.y)
+    expect(box.y + box.height).toBeLessThanOrEqual(viewerBox.y + viewerBox.height)
   }
+
+  await expect(saveButton).toBeInViewport()
+  await expect(discardButton).toBeInViewport()
+  await assertButtonsAreTouchSized(page, ['.document-editor__actions button'])
 }
 
 async function assertDesktopVersionToolbarDoesNotWrap(page: Page) {
@@ -164,10 +157,19 @@ for (const viewport of acceptanceViewports) {
     await clickWorkspaceTool(page, 'history')
     await expect(page.getByTestId('operation-history')).toBeInViewport()
     await expect(page.locator('[data-tool="export"]')).toBeInViewport()
+    await assertButtonsAreTouchSized(page, [
+      '[data-tool="history"]',
+      '[data-tool="export"]',
+      '[data-testid="history-undo-latest"]'
+    ])
 
     await openDocumentPanel(page, viewport.width)
     await page.getByRole('button', { name: /编辑当前版本|从此版本创建新版本/ }).click()
     await expect(page.locator('.document-editor')).toBeVisible()
+    await assertButtonsAreTouchSized(page, [
+      'button[name="edit-version"]',
+      '.version-toolbar__tabs button'
+    ])
     await assertDocumentEditorIsContained(page)
 
     await clickWorkspaceTool(page, 'search')
@@ -176,6 +178,15 @@ for (const viewport of acceptanceViewports) {
     await page.getByRole('button', { name: '下一处' }).click()
     await expect(searchInput).toBeInViewport()
     await expect(page.getByRole('button', { name: '下一处' })).toBeInViewport()
+    await expect(page.getByRole('button', { name: '替换当前' })).toBeInViewport()
+    await assertButtonsAreTouchSized(page, [
+      '[data-tool="search"]',
+      'button[name="previous-match"]',
+      'button[name="next-match"]',
+      'button[name="clear-find"]',
+      'button[name="replace-current"]',
+      'button[name="replace-all"]'
+    ])
 
     await clickWorkspaceTool(page, 'issues')
     await page.locator('.issue-card').first().click()
@@ -185,7 +196,6 @@ for (const viewport of acceptanceViewports) {
       await expect(page.locator('.issue-panel')).toBeInViewport()
     }
 
-    await assertVisibleButtonsAreTouchSized(page)
     await assertNoPageScroll(page)
   })
 }
@@ -258,6 +268,7 @@ for (const viewport of compactViewports) {
     const actionButtons = [
       page.getByRole('button', { name: '上一处' }),
       page.getByRole('button', { name: '下一处' }),
+      page.getByRole('button', { name: '替换当前' }),
       page.getByRole('button', { name: '全部替换' })
     ]
 

@@ -59,21 +59,23 @@ function updateBlock(blockId: string, event: Event): void {
 
 <template>
   <form class="document-editor" aria-label="编辑草稿" @submit.prevent="emit('saveReanalyze')">
-    <div
-      v-for="(block, index) in editorBlocks"
-      :key="block.block_id"
-      class="document-editor__block"
-      :data-block-id="block.block_id"
-    >
-      <label :for="`draft-${block.block_id}`">第 {{ paragraphNumber(block, index) }} 段</label>
-      <textarea
-        :id="`draft-${block.block_id}`"
-        :aria-label="`第 ${paragraphNumber(block, index)} 段`"
-        :value="draftText(block)"
-        :disabled="busy"
-        rows="4"
-        @input="updateBlock(block.block_id, $event)"
-      />
+    <div class="document-editor__blocks">
+      <div
+        v-for="(block, index) in editorBlocks"
+        :key="block.block_id"
+        class="document-editor__block"
+        :data-block-id="block.block_id"
+      >
+        <label :for="`draft-${block.block_id}`">第 {{ paragraphNumber(block, index) }} 段</label>
+        <textarea
+          :id="`draft-${block.block_id}`"
+          :aria-label="`第 ${paragraphNumber(block, index)} 段`"
+          :value="draftText(block)"
+          :disabled="busy"
+          rows="4"
+          @input="updateBlock(block.block_id, $event)"
+        />
+      </div>
     </div>
 
     <p v-if="error" class="document-editor__error" role="alert">{{ error }}</p>
@@ -103,7 +105,17 @@ function updateBlock(blockId: string, event: Event): void {
 <style scoped>
 .document-editor {
   display: grid;
+  max-height: clamp(220px, calc(100dvh - 360px), 360px);
   gap: var(--review-space-4);
+  grid-template-rows: minmax(0, 1fr) auto auto;
+}
+
+.document-editor__blocks {
+  display: grid;
+  min-height: 0;
+  gap: var(--review-space-4);
+  overflow: auto;
+  padding-right: var(--review-space-1);
 }
 
 .document-editor__block {
@@ -137,12 +149,11 @@ function updateBlock(blockId: string, event: Event): void {
 }
 
 .document-editor__actions {
-  position: sticky;
-  bottom: var(--review-space-3);
   display: flex;
   justify-content: end;
   gap: var(--review-space-2);
-  padding-top: var(--review-space-2);
+  padding-top: var(--review-space-3);
+  border-top: 1px solid var(--review-border);
 }
 
 .document-editor__actions button {
