@@ -90,7 +90,10 @@ export function useEditDraft(
         requestGeneration !== saveGeneration ||
         draft.value?.draft_id !== currentDraft.draft_id
       ) {
-        return savedDraft
+        throw new Error('Draft request is stale.')
+      }
+      if (savedDraft.revision !== currentDraft.revision) {
+        clearReanalysisKeysForDraft(currentDraft.draft_id)
       }
       draft.value = savedDraft
       if (blocksEqual(localBlocks.value, submittedBlocks)) {
@@ -133,20 +136,29 @@ export function useEditDraft(
   }
 
   async function reanalyze(): Promise<DocumentVersion> {
-    const savedDraft = dirty.value ? await save() : draft.value
-    if (!savedDraft) {
+    const startingDraft = draft.value
+    const requestLifecycleGeneration = lifecycleGeneration
+    if (!startingDraft) {
       throw new Error('No active edit draft.')
     }
 
+    const savedDraft = dirty.value ? await save() : draft.value
+    if (
+      !savedDraft ||
+      !isCurrentLifecycle(requestLifecycleGeneration) ||
+      draft.value?.draft_id !== savedDraft.draft_id ||
+      draft.value.revision !== savedDraft.revision
+    ) {
+      throw new Error('Draft request is stale.')
+    }
+
     const requestGeneration = ++reanalysisGeneration
-    const requestLifecycleGeneration = lifecycleGeneration
     const draftKey = `${savedDraft.draft_id}:${savedDraft.revision}`
     const idempotencyKey = getReanalysisKey(draftKey)
     const response = await revisionsApi.reanalyze(jobId, savedDraft.draft_id, {
       expected_draft_revision: savedDraft.revision,
       idempotency_key: idempotencyKey
     })
-    reanalysisKeys.delete(draftKey)
     if (
       isCurrentLifecycle(requestLifecycleGeneration) &&
       requestGeneration === reanalysisGeneration &&
@@ -167,6 +179,14 @@ export function useEditDraft(
     const nextKey = `reanalyze-${draftKey}-${Date.now()}`
     reanalysisKeys.set(draftKey, nextKey)
     return nextKey
+  }
+
+  function clearReanalysisKeysForDraft(draftId: string): void {
+    for (const key of reanalysisKeys.keys()) {
+      if (key.startsWith(`${draftId}:`)) {
+        reanalysisKeys.delete(key)
+      }
+    }
   }
 
   function isCurrentLifecycle(generation: number): boolean {

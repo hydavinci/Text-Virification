@@ -459,6 +459,65 @@ describe('review editing state', () => {
     expect(reanalyze.mock.calls[2]?.[2].idempotency_key).not.toBe(firstKey)
   })
 
+  it('keeps a reanalysis idempotency key after enqueue so same draft revision resubmits reuse it', async () => {
+    vi.spyOn(Date, 'now').mockReturnValueOnce(1000).mockReturnValueOnce(2000)
+    const reanalyze = vi.fn().mockResolvedValue({
+      version: buildVersion({ version_id: 'version-3', status: 'queued' }),
+      events_url: '/api/v1/jobs/job-1/versions/version-3/events'
+    })
+    const revisionsApi = createRevisionsApiMock({ reanalyze })
+    let draftState!: ReturnType<typeof useEditDraft>
+    const Harness = defineComponent({
+      setup() {
+        draftState = useEditDraft(jobId, revisionsApi)
+        return {}
+      },
+      template: '<div />'
+    })
+    mount(Harness)
+
+    await draftState.begin('version-2')
+    await draftState.reanalyze()
+    await draftState.reanalyze()
+
+    expect(reanalyze.mock.calls[1]?.[2].idempotency_key).toBe(
+      reanalyze.mock.calls[0]?.[2].idempotency_key
+    )
+  })
+
+  it('does not reanalyze a stale draft when discard and begin happen while save is pending', async () => {
+    const saveResponse = createDeferred<EditDraft>()
+    const reanalyze = vi.fn()
+    const revisionsApi = createRevisionsApiMock({
+      updateDraft: vi.fn().mockReturnValue(saveResponse.promise),
+      createDraft: vi
+        .fn()
+        .mockResolvedValueOnce(buildDraft({ draft_id: 'draft-1' }))
+        .mockResolvedValueOnce(buildDraft({ draft_id: 'draft-2' })),
+      reanalyze
+    })
+    let draftState!: ReturnType<typeof useEditDraft>
+    const Harness = defineComponent({
+      setup() {
+        draftState = useEditDraft(jobId, revisionsApi)
+        return {}
+      },
+      template: '<div />'
+    })
+    mount(Harness)
+
+    await draftState.begin('version-2')
+    draftState.updateBlock('block-1', '保存后重分析')
+    const reanalysis = draftState.reanalyze()
+    await draftState.discard()
+    await draftState.begin('version-2')
+    saveResponse.resolve(buildDraft({ draft_id: 'draft-1', revision: 2 }))
+
+    await expect(reanalysis).rejects.toThrow('Draft request is stale.')
+    expect(reanalyze).not.toHaveBeenCalled()
+    expect(draftState.draft.value?.draft_id).toBe('draft-2')
+  })
+
   it('does not let a late save response erase newer local draft edits', async () => {
     const saveResponse = createDeferred<EditDraft>()
     const revisionsApi = createRevisionsApiMock({
@@ -687,6 +746,74 @@ describe('review editing state', () => {
     expect(history.historyPage.value?.items[0]?.batch_id).toBe('undo-batch-2')
     expect(history.latestBatch.value?.batch_id).toBe('batch-1')
     expect(history.canUndoLatestBatch.value).toBe(true)
+  })
+
+  it('keeps a locally recorded decision when an older history load resolves later', async () => {
+    const historyResponse = createDeferred<OperationBatchPage>()
+    const revisionsApi = createRevisionsApiMock({
+      listHistory: vi.fn().mockReturnValue(historyResponse.promise)
+    })
+    let history!: ReturnType<typeof useReviewHistory>
+    const Harness = defineComponent({
+      setup() {
+        history = useReviewHistory(jobId, revisionsApi)
+        return {}
+      },
+      template: '<div />'
+    })
+    mount(Harness)
+
+    const load = history.loadHistory('version-2')
+    history.recordDecisionBatch('local-batch', 'version-2', 1)
+    historyResponse.resolve({
+      job_id: jobId,
+      version_id: 'version-2',
+      total: 0,
+      items: [],
+      next_cursor: null
+    })
+    await load
+
+    expect(history.latestBatch.value?.batch_id).toBe('local-batch')
+  })
+
+  it('keeps a local undo when an older history load resolves later', async () => {
+    const historyResponse = createDeferred<OperationBatchPage>()
+    const revisionsApi = createRevisionsApiMock({
+      listHistory: vi.fn().mockReturnValue(historyResponse.promise),
+      undoBatch: vi.fn().mockResolvedValue(
+        buildBatch({
+          batch_id: 'undo-local-batch',
+          operation_type: 'undo',
+          undoes_batch_id: 'local-batch',
+          created_at: '2026-08-23T12:01:00Z'
+        })
+      )
+    })
+    let history!: ReturnType<typeof useReviewHistory>
+    const Harness = defineComponent({
+      setup() {
+        history = useReviewHistory(jobId, revisionsApi)
+        return {}
+      },
+      template: '<div />'
+    })
+    mount(Harness)
+
+    history.recordDecisionBatch('local-batch', 'version-2', 1)
+    const load = history.loadHistory('version-2')
+    await history.undoLatestBatch()
+    historyResponse.resolve({
+      job_id: jobId,
+      version_id: 'version-2',
+      total: 1,
+      items: [buildBatch({ batch_id: 'local-batch' })],
+      next_cursor: null
+    })
+    await load
+
+    expect(history.latestBatch.value).toBeNull()
+    expect(history.historyPage.value?.items[0]?.batch_id).toBe('undo-local-batch')
   })
 
   it('starts a 10-second undo deadline after a successful decision batch', async () => {

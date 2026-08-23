@@ -49,6 +49,7 @@ export function useReviewHistory(
       return
     }
 
+    historyGeneration += 1
     latestBatch.value = {
       batch_id: batchId,
       job_id: jobId,
@@ -94,6 +95,7 @@ export function useReviewHistory(
 
     try {
       const undoBatch = await revisionsApi.undoBatch(jobId, batch.batch_id)
+      historyGeneration += 1
       applyUndoBatch(undoBatch)
       undoConflict.value = null
       undoToastVisible.value = false
@@ -121,6 +123,16 @@ export function useReviewHistory(
       }
       latestBatch.value = latestUndoableBatch(historyPage.value.items)
       return
+    }
+
+    if (!historyPage.value) {
+      historyPage.value = {
+        job_id: jobId,
+        version_id: undoBatch.version_id,
+        total: 1,
+        items: [undoBatch],
+        next_cursor: null
+      }
     }
 
     if (latestBatch.value?.batch_id === undoBatch.undoes_batch_id) {
