@@ -10,8 +10,12 @@ dependencies = [
   "alembic>=1.14,<2",
   "celery[redis]>=5.4,<6",
   "fastapi>=0.115,<1",
+  "openai>=1.60,<2",
+  "pdfplumber>=0.11,<1",
   "psycopg[binary]>=3.2,<4",
+  "pymupdf>=1.25,<2",
   "pydantic-settings>=2.7,<3",
+  "python-docx>=1.1,<2",
   "python-multipart>=0.0.20,<1",
   "sqlalchemy>=2.0.36,<3",
   "uvicorn[standard]>=0.34,<1",
@@ -28,6 +32,9 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"text_verification.compatibility" = ["data/*.json"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

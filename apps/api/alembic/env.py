@@ -22,7 +22,7 @@ configured_database_url = config.attributes.get("database_url")
 if configured_database_url is None:
     configured_database_url = get_settings().database_url
 
-config.set_main_option("sqlalchemy.url", configured_database_url)
+config.set_main_option("sqlalchemy.url", configured_database_url.replace("%", "%%"))
 target_metadata = Base.metadata
 
 

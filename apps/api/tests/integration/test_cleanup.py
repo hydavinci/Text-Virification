@@ -4,11 +4,14 @@ import logging
 import os
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from io import BytesIO
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
 
+from text_verification.compatibility.storage import CompatibilityStorage
 from text_verification.domain.documents import FileType
 from text_verification.domain.jobs import JobEvent, JobRead, JobStatus
 from text_verification.infrastructure.storage import JobStorage
@@ -113,11 +116,17 @@ def storage(tmp_path) -> JobStorage:
     return JobStorage(root, max_upload_bytes=25 * 1024 * 1024)
 
 
+@pytest.fixture
+def compatibility_storage(tmp_path: Path) -> CompatibilityStorage:
+    return CompatibilityStorage(tmp_path / "jobs", max_upload_bytes=25 * 1024 * 1024)
+
+
 @pytest.fixture(autouse=True)
 def cleanup_dependencies(
     monkeypatch: pytest.MonkeyPatch,
     repository: InMemoryCleanupRepository,
     storage: JobStorage,
+    compatibility_storage: CompatibilityStorage,
 ) -> SessionFactorySpy:
     from text_verification.workers import tasks as worker_tasks
 
@@ -125,6 +134,11 @@ def cleanup_dependencies(
     monkeypatch.setattr(worker_tasks, "SESSION_FACTORY_PROVIDER", lambda: session_factory)
     monkeypatch.setattr(worker_tasks, "REPOSITORY_FACTORY", lambda session: repository)
     monkeypatch.setattr(worker_tasks, "STORAGE_FACTORY", lambda: storage)
+    monkeypatch.setattr(
+        worker_tasks,
+        "COMPATIBILITY_STORAGE_FACTORY",
+        lambda: compatibility_storage,
+    )
     monkeypatch.setattr(
         worker_tasks,
         "get_settings",
@@ -229,6 +243,64 @@ def test_cleanup_sweeps_only_stale_unpersisted_directories(
     assert not storage.job_directory(stale_orphan).exists()
     assert storage.job_directory(fresh_orphan).exists()
     assert storage.job_directory(persisted.job_id).exists()
+
+
+def test_compatibility_cleanup_deletes_only_stale_canonical_uuid_directories(
+    compatibility_storage: CompatibilityStorage,
+    tmp_path: Path,
+) -> None:
+    stale_id = UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    fresh_id = UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+    symlink_id = UUID("cccccccc-cccc-4ccc-8ccc-cccccccccccc")
+    compatibility_storage.save_stream(stale_id, "stale.txt", BytesIO(b"stale"))
+    compatibility_storage.save_stream(fresh_id, "fresh.txt", BytesIO(b"fresh"))
+
+    compatibility_root = tmp_path / "jobs" / "compatibility"
+    noncanonical = compatibility_root / stale_id.hex
+    noncanonical.mkdir()
+    (noncanonical / "source.txt").write_bytes(b"noncanonical")
+    non_uuid = compatibility_root / "not-a-uuid"
+    non_uuid.mkdir()
+    canonical_file = compatibility_root / "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+    canonical_file.write_bytes(b"not a directory")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    symlink = compatibility_root / str(symlink_id)
+    symlink.symlink_to(outside, target_is_directory=True)
+
+    stale_timestamp = (datetime.now(UTC) - timedelta(hours=25)).timestamp()
+    os.utime(compatibility_root / str(stale_id), (stale_timestamp, stale_timestamp))
+    os.utime(noncanonical, (stale_timestamp, stale_timestamp))
+    os.utime(non_uuid, (stale_timestamp, stale_timestamp))
+
+    deleted_ids = compatibility_storage.delete_stale_directories(
+        datetime.now(UTC) - timedelta(hours=24)
+    )
+
+    assert deleted_ids == [stale_id]
+    assert not (compatibility_root / str(stale_id)).exists()
+    assert (compatibility_root / str(fresh_id)).exists()
+    assert noncanonical.exists()
+    assert non_uuid.exists()
+    assert canonical_file.exists()
+    assert symlink.is_symlink()
+    assert outside.exists()
+
+
+def test_hourly_cleanup_removes_stale_compatibility_upload_without_changing_result(
+    compatibility_storage: CompatibilityStorage,
+) -> None:
+    from text_verification.workers.tasks import cleanup_expired_jobs
+
+    file_id = uuid4()
+    stored = compatibility_storage.save_stream(file_id, "source.txt", BytesIO(b"content"))
+    stale_timestamp = (datetime.now(UTC) - timedelta(hours=25)).timestamp()
+    os.utime(stored.path.parent, (stale_timestamp, stale_timestamp))
+
+    deleted_job_ids = cleanup_expired_jobs()
+
+    assert deleted_job_ids == []
+    assert not stored.path.parent.exists()
 
 
 def test_cleanup_is_scheduled_hourly() -> None:

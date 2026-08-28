@@ -49,8 +49,10 @@ def test_database_schema_name() -> str:
 
 
 def _schema_database_url(database_url: str, schema_name: str) -> str:
-    return str(
-        make_url(database_url).update_query_dict({"options": f"-csearch_path={schema_name}"})
+    return make_url(database_url).update_query_dict(
+        {"options": f"-csearch_path={schema_name}"}
+    ).render_as_string(
+        hide_password=False,
     )
 
 

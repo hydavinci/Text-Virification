@@ -9,6 +9,7 @@ from uuid import UUID
 from celery import Task  # type: ignore[import-untyped]
 from sqlalchemy.orm import Session, sessionmaker
 
+from text_verification.compatibility.storage import CompatibilityStorage
 from text_verification.config import get_settings
 from text_verification.domain.jobs import (
     TERMINAL_STATUSES,
@@ -29,6 +30,7 @@ UNEXPECTED_FAILURE_MESSAGE = "Processing failed."
 
 SessionFactoryProvider = Callable[[], sessionmaker[Session]]
 StorageFactory = Callable[[], JobStorage]
+CompatibilityStorageFactory = Callable[[], CompatibilityStorage]
 RepositoryFactory = Callable[[Session], JobRepository]
 RunnerFactory = Callable[[JobRepository, JobStorage], PipelineRunner]
 PROCESS_JOB_MAX_RETRIES = 2
@@ -40,8 +42,14 @@ def _get_job_storage() -> JobStorage:
     return JobStorage(settings.storage_root, settings.max_upload_bytes)
 
 
+def _get_compatibility_storage() -> CompatibilityStorage:
+    settings = get_settings()
+    return CompatibilityStorage(settings.storage_root, settings.max_upload_bytes)
+
+
 SESSION_FACTORY_PROVIDER: SessionFactoryProvider = get_session_factory
 STORAGE_FACTORY: StorageFactory = _get_job_storage
+COMPATIBILITY_STORAGE_FACTORY: CompatibilityStorageFactory = _get_compatibility_storage
 REPOSITORY_FACTORY: RepositoryFactory = JobRepository
 RUNNER_FACTORY: RunnerFactory = PipelineRunner
 
@@ -142,6 +150,13 @@ def _cleanup_expired_jobs() -> list[str]:
         str(job_id)
         for job_id in storage.delete_orphaned_directories(persisted_job_ids, orphan_cutoff)
     )
+    try:
+        COMPATIBILITY_STORAGE_FACTORY().delete_stale_directories(orphan_cutoff)
+    except Exception as error:
+        logger.warning(
+            "compatibility_cleanup_failed",
+            extra={"error_type": type(error).__name__},
+        )
     return deleted_job_ids
 
 

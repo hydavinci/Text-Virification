@@ -2,28 +2,36 @@
 
 面向企业内网的中英文文档预检平台，目标是统一提供错别字检查、格式检查、行业敏感词检测与替换、文件上传、在线审阅和结果导出。
 
-> 当前状态：平台基础版本。已经实现 DOCX/PDF/TXT 安全上传、PostgreSQL 任务持久化、Redis/Celery 异步调度、SSE 进度推送、24 小时清理和 Vue 上传界面。Worker 目前仍是 Stub 流水线，尚未实现正文解析、校对引擎、问题审阅和文件导出。
+> 当前状态：可用的文档预检版本。已经实现七种文档格式和直接文本检查、六层规则引擎、
+> 自定义术语与禁用词、合规扫描、在线审阅、查找替换、修订导出、HTML 报告和可选的大模型
+> 语义复核。PostgreSQL、Redis/Celery、SSE 与 24 小时清理基础仍保留；原异步 Worker 流水线
+> 继续作为后续任务化处理入口。
 
 ## 已实现与未实现
 
 ### 已实现
 
-- DOCX、PDF、TXT 文件上传。
+- DOCX、DOC、PDF、TXT、RTF、Markdown、CSV 文件上传，以及直接粘贴文本。
 - FastAPI API、PostgreSQL 任务与事件持久化。
 - Redis + Celery 异步任务调度。
 - SSE 进度事件推送。
 - 每个任务使用独立 UUID 目录存储上传文件。
 - 24 小时过期清理。
-- Vue 3 上传与任务状态界面。
+- Vue 3 响应式审阅界面、亮/暗主题和会话恢复。
+- 中文错别字、英文拼写、异形词、全半角、标点、语法、表达、数字格式和术语一致性检查。
+- 身份证、手机号、邮箱、银行卡、密钥、敏感表述及广告法极限词检查。
+- 六种文档场景、自定义术语表、禁用词库及批量导入。
+- 问题接受、忽略、撤销、批量操作、修改预览、原文编辑和查找替换。
+- DOCX/DOC/PDF/TXT/RTF/Markdown/CSV 原格式导出及 HTML 检查报告。
+- DOCX 修订痕迹、PDF 高亮批注和文本格式修订标记。
+- 可选的 OpenAI 兼容语义复核；未配置密钥时自动使用纯本地规则。
 
-### 明确未实现
+### 后续演进
 
-- DOCX/TXT 正文解析与精确导出。
-- 错别字、语法、格式、敏感词实际校对引擎。
-- 在线问题审阅、逐条接受/忽略。
-- 修改版文档与问题报告导出。
-- 扫描型 PDF OCR 工作流。
-- 词库资源在运行时接线。
+- 将当前同步预检能力接入 Celery 分阶段任务流水线。
+- 扫描型 PDF OCR 与版式重建。
+- 共享词库数据库管理、版本及回滚。
+- 基于 `DocumentModel` 精确块定位的审阅决策持久化。
 
 ## 技术架构与请求数据流
 
@@ -33,10 +41,10 @@ Browser → nginx → FastAPI → PostgreSQL
                  Redis/Celery → Job Storage
 ```
 
-- `apps/web` 提供 Vue 3 前端和 nginx 静态站点/反向代理。
+- `apps/web` 提供 Vue 3 审阅前端和 nginx 静态站点/反向代理。
 - `apps/api` 提供 FastAPI API、Celery Worker、Alembic 迁移和后端测试。
 - PostgreSQL 是任务与事件的持久化来源；Redis 负责队列；Worker 当前执行 Stub 流水线。
-- 浏览器通过 REST 提交任务，通过 SSE 订阅任务进度。
+- 浏览器可通过同步预检 REST 接口完成完整检查和导出；原任务接口继续通过 SSE 推送进度。
 
 ## Monorepo 目录说明
 
@@ -93,10 +101,15 @@ Set-Location ..\..
 - `GET /api/v1/jobs/{job_id}`
 - `GET /api/v1/jobs/{job_id}/events`
 - `GET /api/v1/health`
+- `POST /api/v1/analyze`
+- `POST /api/v1/export`
+- `POST /api/v1/export-original`
+- `GET /api/v1/scenarios`
+- `GET /api/v1/formats`
 
 ## 文件限制、保留与安全边界
 
-- 支持文件类型：`.docx`、`.pdf`、`.txt`
+- 支持文件类型：`.docx`、`.doc`、`.pdf`、`.txt`、`.rtf`、`.md`、`.csv`
 - 上传大小上限：精确为 25 MiB
 - 保留策略：任务和上传文件保留 24 小时
 - 校验边界：内容类型与文件签名双重检查，MIME 一致性检查
@@ -127,7 +140,7 @@ $env:LIVE_API_URL='http://localhost:8080'
 - `advertising-extreme-terms.zh-cn.json`
 - `compliance-sensitive-rules.zh-cn.json`
 
-这些资源当前尚未接入 Stub 流水线；后续敏感词引擎应通过配置读取，而不是复制覆盖到应用源码目录。
+交互式检查接口已加载包内运行时词表。合规词表变更需同步更新运行时副本并执行规则测试。
 
 ## 环境限制与后续路线图
 
@@ -139,10 +152,10 @@ $env:LIVE_API_URL='http://localhost:8080'
 
 ### 后续路线图
 
-- DOCX/TXT 解析与精确导出
-- 校对引擎与问题模型
-- PDF/OCR 工作流
-- 词库管理能力
+- 异步流水线接入现有解析与规则引擎
+- 扫描型 PDF OCR 工作流
+- 共享词库管理能力
+- 精确块级替换与审阅决策持久化
 - 生产加固与可观测性完善
 
 ## 停止与重置

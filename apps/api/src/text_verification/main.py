@@ -14,6 +14,7 @@ def create_app() -> FastAPI:
         allow_credentials=False,
         allow_methods=["GET", "POST", "PUT"],
         allow_headers=["Content-Type", "Last-Event-ID"],
+        expose_headers=["Content-Disposition"],
     )
     app.include_router(api_router)
     return app
