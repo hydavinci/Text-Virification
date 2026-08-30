@@ -11,6 +11,7 @@ import pytest
 from text_verification.infrastructure.storage import (
     InvalidUpload,
     JobStorage,
+    UnsupportedFileType,
     UploadTooLarge,
 )
 
@@ -66,6 +67,14 @@ def test_accepts_pdf_signature(tmp_path):
 def test_accepts_supported_text_encodings(tmp_path, name, payload):
     storage = JobStorage(tmp_path, max_upload_bytes=1024)
     assert storage.save_bytes(uuid4(), name, payload).file_type.value == "txt"
+
+
+@pytest.mark.parametrize("name", ["legacy.doc", "legacy.rtf", "notes.md", "rows.csv"])
+def test_rejects_non_baseline_extensions_even_if_domain_enum_includes_them(tmp_path, name):
+    storage = JobStorage(tmp_path, max_upload_bytes=1024)
+
+    with pytest.raises(UnsupportedFileType):
+        storage.save_bytes(uuid4(), name, b"plain text")
 
 
 def test_source_path_returns_existing_expected_source_file(tmp_path):

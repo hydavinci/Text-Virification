@@ -19,6 +19,7 @@ UPLOAD_CHUNK_BYTES = 1024 * 1024
 MAX_ZIP_ENTRIES = 10_000
 MAX_ZIP_SINGLE_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
 MAX_ZIP_UNCOMPRESSED_BYTES = 200 * 1024 * 1024
+SUPPORTED_UPLOAD_FILE_TYPES = frozenset({FileType.DOCX, FileType.PDF, FileType.TXT})
 
 
 @dataclass(frozen=True)
@@ -162,9 +163,12 @@ class JobStorage:
         if not suffix:
             raise UnsupportedFileType("Upload file name must include a supported extension.")
         try:
-            return FileType(suffix.removeprefix("."))
+            file_type = FileType(suffix.removeprefix("."))
         except ValueError as exc:
             raise UnsupportedFileType(f"Unsupported upload extension: {suffix}") from exc
+        if file_type not in SUPPORTED_UPLOAD_FILE_TYPES:
+            raise UnsupportedFileType(f"Unsupported upload extension: {suffix}")
+        return file_type
 
     def _detect_content_type(self, path: Path) -> FileType:
         if self._looks_like_pdf(path):
