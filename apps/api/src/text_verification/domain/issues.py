@@ -15,10 +15,13 @@ class Issue(BaseModel):
 
     issue_id: UUID
     document_id: UUID
-    block_id: str
+    verification_run_id: UUID
+    block_id: str | None
     page: int | None
     start: int = Field(ge=0)
     end: int = Field(gt=0)
+    block_start: int | None = Field(default=None, ge=0)
+    block_end: int | None = Field(default=None, gt=0)
     original: str
     suggestion: str | None
     alternatives: list[str]
@@ -26,15 +29,27 @@ class Issue(BaseModel):
     severity: IssueSeverity
     layer: str
     message: str
+    description: str
     rule_id: str
+    rule_version: str
     source: str
     source_version: str
     confidence: float = Field(ge=0, le=1)
     auto_fixable: bool
     context: str
+    review: str | None = None
+    review_reason: str | None = None
 
     @model_validator(mode="after")
     def validate_range(self) -> "Issue":
         if self.end <= self.start:
             raise ValueError("end must be greater than start")
+        if (self.block_start is None) != (self.block_end is None):
+            raise ValueError("block_start and block_end must be provided together")
+        if (
+            self.block_start is not None
+            and self.block_end is not None
+            and self.block_end <= self.block_start
+        ):
+            raise ValueError("block_end must be greater than block_start")
         return self
