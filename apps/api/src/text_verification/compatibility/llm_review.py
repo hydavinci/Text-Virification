@@ -20,27 +20,16 @@
   LLM_JSON_MODE    — 是否强制 json_object 返回格式，默认 0（0/1）
 """
 
-import os
 import re
 import json
 from typing import List, Dict, Tuple, Optional, Any
+
+from text_verification.config import get_settings
 
 try:
     from openai import OpenAI
 except ImportError:  # 未安装 SDK 时优雅降级
     OpenAI = None
-
-
-# ---------------------------------------------------------------------------
-# 配置（来自环境变量）
-# ---------------------------------------------------------------------------
-LLM_API_KEY = os.environ.get('LLM_API_KEY', '').strip()
-LLM_API_BASE = os.environ.get('LLM_API_BASE', 'https://api.openai.com/v1').strip()
-LLM_MODEL = os.environ.get('LLM_MODEL', 'gpt-4o-mini').strip()
-LLM_MAX_REVIEW = int(os.environ.get('LLM_MAX_REVIEW', '40'))
-LLM_CONTEXT_RADIUS = int(os.environ.get('LLM_CONTEXT_RADIUS', '50'))
-LLM_TIMEOUT = float(os.environ.get('LLM_TIMEOUT', '60'))
-LLM_JSON_MODE = os.environ.get('LLM_JSON_MODE', '0') == '1'
 
 # 仅复核这两类严重度的候选（error 级硬性错误直接保留，避免误删真实错别字）
 REVIEW_SEVERITIES = {'warning', 'info'}
@@ -50,13 +39,14 @@ NEVER_REVIEW_TYPES = {'banned_word', 'custom_term', 'typo', 'variant_char'}
 
 def is_llm_review_enabled() -> bool:
     """是否已配置并启用云端复核"""
-    return bool(LLM_API_KEY) and OpenAI is not None
+    return bool(get_settings().llm_api_key.strip()) and OpenAI is not None
 
 
-def _excerpt(text: str, start: int, end: int, radius: int = LLM_CONTEXT_RADIUS) -> str:
+def _excerpt(text: str, start: int, end: int, radius: int | None = None) -> str:
     """截取命中点前后的局部上下文（用于发给模型，不泄漏全文）"""
-    a = max(0, start - radius)
-    b = min(len(text), end + radius)
+    resolved_radius = radius if radius is not None else get_settings().llm_context_radius
+    a = max(0, start - resolved_radius)
+    b = min(len(text), end + resolved_radius)
     pre = '…' if a > 0 else ''
     suf = '…' if b < len(text) else ''
     return f"{pre}{text[a:b]}{suf}"
@@ -156,6 +146,8 @@ def review_issues(text: str, issues: List[Any]) -> Tuple[List[Any], Dict[str, An
         stats['reason'] = '未配置 LLM_API_KEY，已跳过云端复核'
         return issues, stats
 
+    settings = get_settings()
+
     # 挑选送复核的候选（低严重度 + 非强约束类型）
     candidates = [
         (idx, issue) for idx, issue in enumerate(issues)
@@ -170,8 +162,8 @@ def review_issues(text: str, issues: List[Any]) -> Tuple[List[Any], Dict[str, An
 
     # 超过上限则只复核前 N 条，其余保留
     truncated = False
-    if len(candidates) > LLM_MAX_REVIEW:
-        candidates = candidates[:LLM_MAX_REVIEW]
+    if len(candidates) > settings.llm_max_review:
+        candidates = candidates[:settings.llm_max_review]
         truncated = True
 
     payload = []
@@ -181,24 +173,28 @@ def review_issues(text: str, issues: List[Any]) -> Tuple[List[Any], Dict[str, An
             'type': issue.type,
             'severity': issue.severity,
             'original': issue.original,
-            'context': _excerpt(text, issue.position, issue.end_position),
+            'context': _excerpt(text, issue.position, issue.end_position, settings.llm_context_radius),
             'description': issue.description,
             'suggestion': issue.suggestion,
         })
 
     # 调用大模型（任何异常都回退到原样返回）
     try:
-        client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_API_BASE, timeout=LLM_TIMEOUT)
+        client = OpenAI(
+            api_key=settings.llm_api_key.strip(),
+            base_url=settings.llm_api_base.strip(),
+            timeout=settings.llm_timeout,
+        )
         system, user = _build_prompt(payload)
         create_kwargs = {
-            'model': LLM_MODEL,
+            'model': settings.llm_model.strip(),
             'messages': [
                 {'role': 'system', 'content': system},
                 {'role': 'user', 'content': user},
             ],
             'temperature': 0,
         }
-        if LLM_JSON_MODE:
+        if settings.llm_json_mode:
             create_kwargs['response_format'] = {'type': 'json_object'}
         resp = client.chat.completions.create(**create_kwargs)
         content = resp.choices[0].message.content or ''
@@ -237,7 +233,7 @@ def review_issues(text: str, issues: List[Any]) -> Tuple[List[Any], Dict[str, An
             stats['kept'] += 1
 
     if truncated:
-        stats['reason'] = f'候选数超上限，仅复核前 {LLM_MAX_REVIEW} 条'
+        stats['reason'] = f'候选数超上限，仅复核前 {settings.llm_max_review} 条'
 
     # 重建结果：剔除被判定为误报的项
     final = [issue for idx, issue in enumerate(issues) if idx not in removed_idx]
