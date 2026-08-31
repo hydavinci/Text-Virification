@@ -90,6 +90,7 @@ def test_verification_result_carries_canonical_ids_and_degradation_metadata() ->
     assert result.verification_run_id == verification_run_id
     assert result.document_id == document_id
     assert result.issues[0].issue_id == issue.issue_id
+    assert result.dictionary_versions == {}
     assert result.degradation.is_degraded is True
     assert result.degradation.reasons == ("llm_review_disabled",)
 

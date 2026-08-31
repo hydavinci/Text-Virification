@@ -6,11 +6,15 @@
 """
 
 import re
-import json
 import datetime
-from pathlib import Path
 from dataclasses import dataclass, asdict
 from typing import List, Dict, Optional, Tuple
+
+from text_verification.domain.dictionaries import (
+    AdExtremeWordsEntries,
+    SensitiveRulesEntries,
+)
+from text_verification.infrastructure.dictionary_loader import DictionaryLoader
 
 
 @dataclass
@@ -81,46 +85,6 @@ LAYER_NAMES = {
     'discourse': '语篇/语体层',
     'security': '合规/安全层',
 }
-
-# ============================================================
-# 敏感内容（涉政 / 民族宗教 / 领土规范表述）词典：服务端加载
-# 词表内容由合规/法务团队审定维护，工程仅做引擎，前端不暴露。
-# 按文件修改时间热加载，合规修改词表后无需重启即生效。
-# ============================================================
-_SENSITIVE_RULES_CACHE = {'path': None, 'mtime': 0, 'data': {}}
-
-def _load_sensitive_rules() -> Dict:
-    """加载服务端敏感内容词典；带 mtime 缓存，词表更新后自动热加载。"""
-    path = Path(__file__).with_name('data') / 'sensitive_rules.json'
-    try:
-        mtime = path.stat().st_mtime
-        if _SENSITIVE_RULES_CACHE['path'] == path and _SENSITIVE_RULES_CACHE['mtime'] == mtime:
-            return _SENSITIVE_RULES_CACHE['data']
-        with path.open('r', encoding='utf-8') as f:
-            data = json.load(f)
-        _SENSITIVE_RULES_CACHE.update({'path': path, 'mtime': mtime, 'data': data})
-        return data
-    except Exception:
-        # 词典缺失或解析失败：降级为空规则，不影响其它检查
-        return {}
-
-_AD_EXTREME_CACHE = {'path': None, 'mtime': 0, 'data': {}}
-
-def _load_ad_extreme_words() -> List[str]:
-    """加载服务端广告法极限词词典；带 mtime 缓存，词表更新后自动热加载。"""
-    path = Path(__file__).with_name('data') / 'ad_extreme_words.json'
-    try:
-        mtime = path.stat().st_mtime
-        if _AD_EXTREME_CACHE['path'] == path and _AD_EXTREME_CACHE['mtime'] == mtime:
-            return _AD_EXTREME_CACHE['data']
-        with open(path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        words = [w for w in (data.get('extreme_words') or []) if w and w.strip()]
-        _AD_EXTREME_CACHE.update({'path': path, 'mtime': mtime, 'data': words})
-        return words
-    except Exception:
-        # 词典缺失或解析失败：降级为空词表，不影响其它检查
-        return []
 
 # ============================================================
 # 敏感信息（PII）合规扫描：校验辅助函数
@@ -895,8 +859,14 @@ COLLOQUIAL_EXPRESSIONS = [
 class TextAnalyzer:
     """文本分析器主类"""
 
-    def __init__(self):
+    def __init__(self, dictionary_loader: DictionaryLoader | None = None):
         self._build_typo_patterns()
+        self._dictionary_loader = dictionary_loader or DictionaryLoader()
+        self._dictionary_versions: dict[str, str] = {}
+
+    @property
+    def dictionary_versions(self) -> dict[str, str]:
+        return dict(self._dictionary_versions)
 
     def _build_typo_patterns(self):
         """预编译错别字正则"""
@@ -941,6 +911,7 @@ class TextAnalyzer:
         downgrade_types = cfg['downgrade_types']
 
         issues: List[Issue] = []
+        self._dictionary_versions = {}
 
         # === 字符层 ===
         issues.extend(self._check_chinese_typos(text))
@@ -976,10 +947,14 @@ class TextAnalyzer:
             issues.extend(self._check_pii(text))
         # 敏感内容（涉政/民族宗教/领土规范表述）独立于 PII，由各自开关控制
         if enable_sensitive:
-            issues.extend(self._check_sensitive(text, _load_sensitive_rules()))
+            sensitive_rules = self._dictionary_loader.load('sensitive_rules')
+            self._dictionary_versions[sensitive_rules.name] = sensitive_rules.version
+            issues.extend(self._check_sensitive(text, sensitive_rules.entries))
         # 广告法极限词（营销材料）检查，独立于 PII 与敏感词，由各自开关控制
         if enable_ad_extreme:
-            issues.extend(self._check_ad_extreme(text, _load_ad_extreme_words()))
+            ad_extreme_words = self._dictionary_loader.load('ad_extreme_words')
+            self._dictionary_versions[ad_extreme_words.name] = ad_extreme_words.version
+            issues.extend(self._check_ad_extreme(text, ad_extreme_words.entries))
 
         # 为每个 issue 赋予 layer
         for issue in issues:
@@ -2273,11 +2248,11 @@ class TextAnalyzer:
                 ))
         return issues
 
-    def _check_sensitive(self, text: str, rules: Dict) -> List[Issue]:
+    def _check_sensitive(self, text: str, rules: SensitiveRulesEntries) -> List[Issue]:
         """敏感内容（涉政 / 民族宗教 / 领土规范表述）检查。
         红线词（politics / ethnic_religion）：出现即 error，禁止自动改写，须人工复核。
         领土规范表述（territory_standard）：非标准 -> 标准，warning + 建议替换。
-        rules 来自 data/sensitive_rules.json。
+        rules 来自打包词典 sensitive_rules.json。
         """
         issues = []
 
@@ -2287,8 +2262,8 @@ class TextAnalyzer:
             ('sensitive_ethnic_religion', 'ethnic_religion'),
         ]
         for issue_type, key in hard_categories:
-            for word in (rules.get(key) or []):
-                word = (word or '').strip()
+            for word in getattr(rules, key):
+                word = word.strip()
                 if not word:
                     continue
                 try:
@@ -2309,11 +2284,9 @@ class TextAnalyzer:
                     ))
 
         # --- 领土 / 称谓规范表述：非标准 -> 标准（warning + 建议替换） ---
-        for item in (rules.get('territory_standard') or []):
-            if not isinstance(item, dict):
-                continue
-            bad = (item.get('bad') or '').strip()
-            good = (item.get('good') or '').strip()
+        for item in rules.territory_standard:
+            bad = item.bad.strip()
+            good = item.good.strip()
             if not bad or bad == good:
                 continue
             # territory_standard 的 bad 支持正则表达式（如负向后行断言 (?<!中国)），
@@ -2340,14 +2313,14 @@ class TextAnalyzer:
 
         return issues
 
-    def _check_ad_extreme(self, text: str, words: List[str]) -> List[Issue]:
+    def _check_ad_extreme(self, text: str, dictionary: AdExtremeWordsEntries) -> List[Issue]:
         """广告法极限词（绝对化用语）检查，主要面向营销材料。
         命中即 error（违反《广告法》第九条关于绝对化用语的禁止性规定），不自动改写，
-        须人工复核并替换为合规表述。words 来自 data/ad_extreme_words.json。
+        须人工复核并替换为合规表述。词条来自打包词典 ad_extreme_words.json。
         """
         issues = []
-        for word in (words or []):
-            word = (word or '').strip()
+        for word in dictionary.extreme_words:
+            word = word.strip()
             if not word:
                 continue
             try:

@@ -212,6 +212,7 @@ def test_legacy_response_keeps_existing_fields_and_adds_canonical_metadata() -> 
     )
     assert payload["source_version"] == expected_source_version
     assert payload["execution_mode"] == result.execution_mode.value
+    assert payload["dictionary_versions"] == result.dictionary_versions
     assert payload["degradation"] == {
         "is_degraded": True,
         "reasons": ["llm_review_disabled"],
@@ -308,6 +309,10 @@ def _result() -> VerificationResult:
             by_layer={"character": 1},
         ),
         execution_mode=VerificationExecutionMode.RULES_WITH_OPTIONAL_LLM,
+        dictionary_versions={
+            "sensitive_rules": "sha256-sensitive",
+            "ad_extreme_words": "sha256-ad-extreme",
+        },
         degradation=VerificationDegradation(
             is_degraded=True,
             reasons=("llm_review_disabled",),

@@ -85,4 +85,5 @@ class VerificationResult(BaseModel):
     issues: tuple[Issue, ...]
     summary: VerificationSummary
     execution_mode: VerificationExecutionMode
+    dictionary_versions: dict[str, str] = Field(default_factory=dict)
     degradation: VerificationDegradation = Field(default_factory=VerificationDegradation)

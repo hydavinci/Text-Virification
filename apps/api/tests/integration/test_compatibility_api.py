@@ -59,6 +59,7 @@ def test_analyze_direct_text_supports_legacy_options(
         "verification_run_id",
         "source_version",
         "execution_mode",
+        "dictionary_versions",
         "degradation",
     }
     assert payload["success"] is True
@@ -68,6 +69,7 @@ def test_analyze_direct_text_supports_legacy_options(
     assert UUID(payload["verification_run_id"])
     assert payload["source_version"].startswith("sha256:")
     assert payload["execution_mode"] == "rules_with_optional_llm"
+    assert set(payload["dictionary_versions"]) == {"sensitive_rules", "ad_extreme_words"}
     assert payload["degradation"] == {
         "is_degraded": True,
         "reasons": ["llm_review_disabled"],

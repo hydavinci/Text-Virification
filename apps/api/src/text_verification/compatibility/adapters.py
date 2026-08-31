@@ -147,6 +147,7 @@ def verification_result_to_legacy_response(result: VerificationResult) -> dict[s
         "verification_run_id": str(result.verification_run_id),
         "source_version": source_version_for_text(result.text),
         "execution_mode": result.execution_mode.value,
+        "dictionary_versions": dict(result.dictionary_versions),
         "degradation": result.degradation.model_dump(mode="json"),
     }
 

@@ -29,8 +29,9 @@ from text_verification.domain.verification import (
     VerificationStatistics,
     VerificationSummary,
 )
+from text_verification.infrastructure.dictionary_loader import DictionaryLoader
 
-_ANALYZER = TextAnalyzer()  # type: ignore[no-untyped-call]
+_DICTIONARY_LOADER = DictionaryLoader()
 _GLOSSARY_ADAPTER = TypeAdapter(list[GlossaryTerm])
 _BANNED_WORDS_ADAPTER = TypeAdapter(list[str])
 
@@ -76,6 +77,7 @@ def analyze(
     enable_ad_extreme: bool,
     document: DocumentModel | None = None,
 ) -> VerificationResult:
+    analyzer = TextAnalyzer(dictionary_loader=_DICTIONARY_LOADER)
     document = document or text_to_document_model(
         text=text,
         source_name=filename,
@@ -83,7 +85,7 @@ def analyze(
         document_id=file_id,
     )
     verification_run_id = uuid4()
-    issues = _ANALYZER.analyze(
+    issues = analyzer.analyze(
         text,
         scenario=scenario.value,
         custom_glossary=custom_glossary,
@@ -102,7 +104,7 @@ def analyze(
     else:
         degradation_reasons.append("llm_review_disabled")
 
-    summary_data: dict[str, Any] = _ANALYZER.get_summary(issues)
+    summary_data: dict[str, Any] = analyzer.get_summary(issues)
 
     return VerificationResult(
         verification_run_id=verification_run_id,
@@ -122,6 +124,7 @@ def analyze(
             llm_review=review_stats,
         ),
         execution_mode=VerificationExecutionMode.RULES_WITH_OPTIONAL_LLM,
+        dictionary_versions=analyzer.dictionary_versions,
         degradation=VerificationDegradation(
             is_degraded=bool(degradation_reasons),
             reasons=tuple(degradation_reasons),

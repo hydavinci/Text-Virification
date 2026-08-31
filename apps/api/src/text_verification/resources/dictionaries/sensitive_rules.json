@@ -1,6 +1,4 @@
 {
-  "version": "2026-08-13",
-  "description": "合规/敏感内容检查词典。由合规/法务团队审定维护，工程仅做引擎，不碰词表内容。territory_standard 已预置港澳台规范称谓（非标准写法 -> 中国香港/中国台湾/中国澳门），采用负向后行断言避免误报正确形式「中国香港」等；politics、ethnic_religion 留空，请合规/法务按红线词补充后即时生效（引擎按文件修改时间热加载）。",
   "politics": [],
   "ethnic_religion": [],
   "territory_standard": [

@@ -1,12 +1,14 @@
 # 合规词库资源
 
-本目录保存由合规或法务团队审定的中文检查资源：
+词库的唯一运行时来源现已迁移到：
 
-- `advertising-extreme-terms.zh-cn.json`：广告法绝对化用语词表。
-- `compliance-sensitive-rules.zh-cn.json`：敏感内容分类和规范表述替换规则。
+- `apps/api/src/text_verification/resources/dictionaries/sensitive_rules.json`
+- `apps/api/src/text_verification/resources/dictionaries/ad_extreme_words.json`
 
-当前交互式检查接口已加载与这些资源同步的包内词表，用于敏感表述和广告法极限词
-检查。修改词表时应同步更新 `apps/api/src/text_verification/compatibility/data/` 中的
-运行时副本，并通过测试确认规则变化。
+修改词表时只更新以上包内文件；不要再维护额外的 JSON 副本。运行时版本号由词表源文
+件字节的 SHA-256 摘要确定，因此任何内容变化都会反映到 `DictionarySnapshot.version`
+和校验结果元数据中的 `dictionary_versions`。
+
+修改后请至少运行后端的词库 / 兼容性相关测试，并确认打包产物中仍包含这两个 JSON。
 
 词库内容由合规或法务团队维护。工程变更不得擅自扩充、删除或重新解释词条。
