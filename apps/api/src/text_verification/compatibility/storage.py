@@ -18,9 +18,11 @@ from text_verification.infrastructure.document_storage import (
     UnsupportedFileType,
     UploadCleanupFailed,
     UploadTooLarge,
+    safe_original_name,
 )
 
 logger = logging.getLogger(__name__)
+COMPATIBILITY_TEXT_FILE_ENCODINGS = ("utf-8", "utf-16", "gbk", "big5")
 
 
 class CompatibilityUploadError(ValueError):
@@ -48,6 +50,8 @@ class CompatibilityStorage:
             root.expanduser().resolve(strict=False) / "compatibility",
             max_upload_bytes,
             profile=CapabilityProfile.SYNCHRONOUS_COMPATIBILITY,
+            text_file_encodings=COMPATIBILITY_TEXT_FILE_ENCODINGS,
+            original_name_normalizer=safe_original_name,
             cleanup_logger_name=logger.name,
             cleanup_failure_log_message="compatibility_cleanup_delete_failed",
             cleanup_failure_id_field="file_id",

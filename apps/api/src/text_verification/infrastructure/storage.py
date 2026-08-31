@@ -9,6 +9,8 @@ from text_verification.infrastructure import document_storage
 
 logger = logging.getLogger(__name__)
 
+JOB_TEXT_FILE_ENCODINGS = ("utf-8", "utf-16", "gbk")
+
 DocumentStorage = document_storage.DocumentStorage
 InvalidUpload = document_storage.InvalidUpload
 StoredUpload = document_storage.StoredDocument
@@ -23,6 +25,8 @@ class JobStorage(DocumentStorage):
             root,
             max_upload_bytes,
             profile=CapabilityProfile.ASYNCHRONOUS_JOB,
+            text_file_encodings=JOB_TEXT_FILE_ENCODINGS,
+            original_name_normalizer=document_storage.preserve_original_name,
             cleanup_logger_name=logger.name,
             cleanup_failure_log_message="cleanup_orphaned_job_delete_failed",
             cleanup_failure_id_field="job_id",

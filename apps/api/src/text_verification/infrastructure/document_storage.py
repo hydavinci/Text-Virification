@@ -4,6 +4,7 @@ import logging
 import os
 import stat
 import zipfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from io import BytesIO
@@ -22,6 +23,7 @@ MAX_ZIP_ENTRIES = 10_000
 MAX_ZIP_SINGLE_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
 MAX_ZIP_UNCOMPRESSED_BYTES = 200 * 1024 * 1024
 TEXT_FILE_ENCODINGS = ("utf-8", "utf-16", "gbk", "big5")
+OriginalNameNormalizer = Callable[[str], str]
 
 
 @dataclass(frozen=True)
@@ -48,6 +50,14 @@ class UploadCleanupFailed(RuntimeError):
     pass
 
 
+def preserve_original_name(original_name: str) -> str:
+    return original_name
+
+
+def safe_original_name(original_name: str) -> str:
+    return _safe_name(original_name)
+
+
 class DocumentStorage:
     def __init__(
         self,
@@ -55,6 +65,8 @@ class DocumentStorage:
         max_upload_bytes: int,
         *,
         profile: CapabilityProfile,
+        text_file_encodings: tuple[str, ...] = TEXT_FILE_ENCODINGS,
+        original_name_normalizer: OriginalNameNormalizer = safe_original_name,
         cleanup_logger_name: str = __name__,
         cleanup_failure_log_message: str = "document_cleanup_delete_failed",
         cleanup_failure_id_field: str = "document_id",
@@ -69,6 +81,8 @@ class DocumentStorage:
         self._cleanup_logger_name = cleanup_logger_name
         self._cleanup_failure_log_message = cleanup_failure_log_message
         self._cleanup_failure_id_field = cleanup_failure_id_field
+        self._text_file_encodings = tuple(text_file_encodings)
+        self._original_name_normalizer = original_name_normalizer
         self._supported_file_types = frozenset(
             default_capability_manifest().file_types_for_profile(profile)
         )
@@ -86,7 +100,8 @@ class DocumentStorage:
         original_name: str,
         source: BinaryIO,
     ) -> StoredDocument:
-        safe_name = self._safe_name(original_name)
+        safe_name = _safe_name(original_name)
+        stored_original_name = self._original_name_normalizer(original_name)
         file_type = self._file_type_from_name(safe_name)
         document_directory = self.document_directory(document_id)
         self._ensure_safe_storage_path(document_directory)
@@ -115,7 +130,7 @@ class DocumentStorage:
             raise
 
         return StoredDocument(
-            original_name=safe_name,
+            original_name=stored_original_name,
             path=final_path,
             file_type=file_type,
             size_bytes=size_bytes,
@@ -219,12 +234,6 @@ class DocumentStorage:
                 target.write(chunk)
                 size_bytes = next_size
 
-    def _safe_name(self, original_name: str) -> str:
-        name = original_name.replace("\\", "/").rsplit("/", 1)[-1].strip()
-        if not name or name in {".", ".."} or "\x00" in name:
-            raise InvalidUpload("Upload file name is invalid.")
-        return name
-
     def _file_type_from_name(self, original_name: str) -> FileType:
         suffix = Path(original_name).suffix.lower()
         if not suffix:
@@ -271,7 +280,7 @@ class DocumentStorage:
 
     def _looks_like_text(self, path: Path) -> bool:
         data = path.read_bytes()
-        for encoding in TEXT_FILE_ENCODINGS:
+        for encoding in self._text_file_encodings:
             try:
                 text = data.decode(encoding)
             except UnicodeDecodeError:
@@ -406,3 +415,10 @@ class DocumentStorage:
         return bool(
             getattr(stat_result, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
         )
+
+
+def _safe_name(original_name: str) -> str:
+    name = original_name.replace("\\", "/").rsplit("/", 1)[-1].strip()
+    if not name or name in {".", ".."} or "\x00" in name:
+        raise InvalidUpload("Upload file name is invalid.")
+    return name

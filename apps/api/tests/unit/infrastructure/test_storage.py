@@ -37,10 +37,12 @@ def test_save_upload_uses_job_directory_and_server_filename(tmp_path):
     storage = JobStorage(tmp_path, max_upload_bytes=25 * 1024 * 1024)
     job_id = uuid4()
     expected_docx_bytes = make_docx_bytes()
+    original_name = "../../客户文档.docx"
 
-    stored = storage.save_bytes(job_id, "../../客户文档.docx", expected_docx_bytes)
+    stored = storage.save_bytes(job_id, original_name, expected_docx_bytes)
 
     assert stored.file_type.value == "docx"
+    assert stored.original_name == original_name
     assert stored.path == tmp_path / str(job_id) / "source.docx"
     assert stored.path.read_bytes() == expected_docx_bytes
 
@@ -76,6 +78,13 @@ def test_accepts_pdf_signature(tmp_path):
 def test_accepts_supported_text_encodings(tmp_path, name, payload):
     storage = JobStorage(tmp_path, max_upload_bytes=1024)
     assert storage.save_bytes(uuid4(), name, payload).file_type.value == "txt"
+
+
+def test_rejects_big5_text_to_preserve_async_job_contract(tmp_path):
+    storage = JobStorage(tmp_path, max_upload_bytes=1024)
+
+    with pytest.raises(InvalidUpload, match="valid text"):
+        storage.save_bytes(uuid4(), "legacy-big5.txt", "體入".encode("big5"))
 
 
 @pytest.mark.parametrize("name", ["legacy.doc", "legacy.rtf", "notes.md", "rows.csv"])

@@ -93,6 +93,23 @@ def test_save_stream_rejects_invalid_content_for_extension(
         sync_storage.save_bytes(uuid4(), name, content)
 
 
+def test_document_storage_accepts_big5_text_for_sync_profile(
+    sync_storage: DocumentStorage,
+) -> None:
+    stored = sync_storage.save_bytes(uuid4(), "sample.txt", "體入".encode("big5"))
+
+    assert stored.file_type is FileType.TXT
+
+
+def test_document_storage_returns_safe_basename_for_path_like_name(
+    sync_storage: DocumentStorage,
+) -> None:
+    stored = sync_storage.save_bytes(uuid4(), "../../繁體文件.txt", "體入".encode("big5"))
+
+    assert stored.original_name == "繁體文件.txt"
+    assert stored.path.name == "source.txt"
+
+
 def test_document_storage_respects_async_profile_membership(tmp_path) -> None:
     storage = DocumentStorage(
         tmp_path,
