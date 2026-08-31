@@ -29,16 +29,17 @@ class JobRepository:
         *,
         job_id: UUID,
         source_name: str,
-        file_type: str,
+        file_type: FileType | str,
         size_bytes: int,
         storage_key: str,
         created_at: datetime,
         expires_at: datetime,
     ) -> JobRead:
+        normalized_file_type = FileType(file_type).value
         row = JobRow(
             job_id=job_id,
             source_name=source_name,
-            file_type=file_type,
+            file_type=normalized_file_type,
             size_bytes=size_bytes,
             storage_key=storage_key,
             status=JobStatus.QUEUED.value,

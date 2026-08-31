@@ -10,6 +10,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     String,
@@ -29,13 +30,13 @@ class JobRow(Base):
     __tablename__ = "jobs"
 
     job_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
-    source_name: Mapped[str] = mapped_column(String(255))
+    source_name: Mapped[str] = mapped_column(Text)
     file_type: Mapped[str] = mapped_column(String(16))
     size_bytes: Mapped[int] = mapped_column(Integer)
     storage_key: Mapped[str] = mapped_column(String(64), unique=True)
     status: Mapped[str] = mapped_column(String(32), index=True)
     progress: Mapped[int] = mapped_column(Integer, default=0)
-    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -45,18 +46,6 @@ class JobRow(Base):
         cascade="all, delete-orphan",
         order_by="JobEventRow.sequence",
         passive_deletes=True,
-    )
-    document: Mapped[DocumentRow | None] = relationship(
-        back_populates="job",
-        cascade="all, delete-orphan",
-        passive_deletes=True,
-        uselist=False,
-    )
-    verification_run: Mapped[VerificationRunRow | None] = relationship(
-        back_populates="job",
-        cascade="all, delete-orphan",
-        passive_deletes=True,
-        uselist=False,
     )
 
 
@@ -72,7 +61,7 @@ class JobEventRow(Base):
     sequence: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(32))
     progress: Mapped[int] = mapped_column(Integer)
-    message: Mapped[str] = mapped_column(String(255))
+    message: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     job: Mapped[JobRow] = relationship(back_populates="events")
 
@@ -86,6 +75,11 @@ class DocumentRow(Base):
             "source_version",
             name="uq_documents_identity",
         ),
+        UniqueConstraint(
+            "document_id",
+            "job_id",
+            name="uq_documents_document_job",
+        ),
     )
 
     document_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
@@ -93,12 +87,11 @@ class DocumentRow(Base):
         PGUUID(as_uuid=True),
         ForeignKey("jobs.job_id", ondelete="CASCADE"),
     )
-    source_version: Mapped[str] = mapped_column(String(255))
-    source_name: Mapped[str] = mapped_column(String(255))
+    source_version: Mapped[str] = mapped_column(Text)
+    source_name: Mapped[str] = mapped_column(Text)
     file_type: Mapped[str] = mapped_column(String(16))
     text: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    job: Mapped[JobRow] = relationship(back_populates="document")
     runs: Mapped[list[VerificationRunRow]] = relationship(
         back_populates="document",
         passive_deletes=True,
@@ -108,7 +101,18 @@ class DocumentRow(Base):
 class VerificationRunRow(Base):
     __tablename__ = "verification_runs"
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["document_id", "job_id"],
+            ["documents.document_id", "documents.job_id"],
+            name="fk_verification_runs_document_job",
+            ondelete="CASCADE",
+        ),
         UniqueConstraint("job_id", name="uq_verification_runs_job"),
+        UniqueConstraint(
+            "verification_run_id",
+            "document_id",
+            name="uq_verification_runs_run_document",
+        ),
         CheckConstraint("stats_char_count >= 0", name="ck_runs_stats_char_count"),
         CheckConstraint(
             "stats_char_count_no_space >= 0",
@@ -131,10 +135,7 @@ class VerificationRunRow(Base):
         PGUUID(as_uuid=True),
         ForeignKey("jobs.job_id", ondelete="CASCADE"),
     )
-    document_id: Mapped[UUID] = mapped_column(
-        PGUUID(as_uuid=True),
-        ForeignKey("documents.document_id", ondelete="CASCADE"),
-    )
+    document_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True))
     scenario: Mapped[str] = mapped_column(String(32))
     execution_mode: Mapped[str] = mapped_column(String(32))
     analysis_mode: Mapped[str] = mapped_column(String(32))
@@ -144,7 +145,7 @@ class VerificationRunRow(Base):
     stats_paragraph_count: Mapped[int] = mapped_column(Integer)
     stats_language: Mapped[str] = mapped_column(String(8))
     stats_primary_count: Mapped[int] = mapped_column(Integer)
-    stats_primary_label: Mapped[str] = mapped_column(String(64))
+    stats_primary_label: Mapped[str] = mapped_column(Text)
     summary_total: Mapped[int] = mapped_column(Integer)
     summary_by_type: Mapped[dict[str, int]] = mapped_column(JSONB)
     summary_by_severity: Mapped[dict[str, int]] = mapped_column(JSONB)
@@ -158,7 +159,6 @@ class VerificationRunRow(Base):
     degradation_is_degraded: Mapped[bool] = mapped_column(Boolean)
     degradation_reasons: Mapped[list[str]] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    job: Mapped[JobRow] = relationship(back_populates="verification_run")
     document: Mapped[DocumentRow] = relationship(back_populates="runs")
     issues: Mapped[list[VerificationIssueRow]] = relationship(
         back_populates="run",
@@ -182,6 +182,15 @@ class VerificationRunRow(Base):
 class VerificationIssueRow(Base):
     __tablename__ = "verification_issues"
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["verification_run_id", "document_id"],
+            [
+                "verification_runs.verification_run_id",
+                "verification_runs.document_id",
+            ],
+            name="fk_verification_issues_run_document",
+            ondelete="CASCADE",
+        ),
         UniqueConstraint(
             "verification_run_id",
             "issue_id",
@@ -211,17 +220,11 @@ class VerificationIssueRow(Base):
         primary_key=True,
         autoincrement=True,
     )
-    verification_run_id: Mapped[UUID] = mapped_column(
-        PGUUID(as_uuid=True),
-        ForeignKey("verification_runs.verification_run_id", ondelete="CASCADE"),
-    )
-    document_id: Mapped[UUID] = mapped_column(
-        PGUUID(as_uuid=True),
-        ForeignKey("documents.document_id", ondelete="CASCADE"),
-    )
+    verification_run_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True))
+    document_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True))
     issue_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True))
     issue_index: Mapped[int] = mapped_column(Integer)
-    block_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    block_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     page: Mapped[int | None] = mapped_column(Integer, nullable=True)
     start: Mapped[int] = mapped_column(Integer)
     end: Mapped[int] = mapped_column(Integer)
@@ -230,19 +233,19 @@ class VerificationIssueRow(Base):
     original: Mapped[str] = mapped_column(Text)
     suggestion: Mapped[str | None] = mapped_column(Text, nullable=True)
     alternatives: Mapped[list[str]] = mapped_column(JSONB)
-    type: Mapped[str] = mapped_column(String(64))
+    type: Mapped[str] = mapped_column(Text)
     severity: Mapped[str] = mapped_column(String(16))
-    layer: Mapped[str] = mapped_column(String(64))
+    layer: Mapped[str] = mapped_column(Text)
     message: Mapped[str] = mapped_column(Text)
     description: Mapped[str] = mapped_column(Text)
-    rule_id: Mapped[str] = mapped_column(String(255))
-    rule_version: Mapped[str] = mapped_column(String(255))
-    source: Mapped[str] = mapped_column(String(255))
-    source_version: Mapped[str] = mapped_column(String(255))
+    rule_id: Mapped[str] = mapped_column(Text)
+    rule_version: Mapped[str] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(Text)
+    source_version: Mapped[str] = mapped_column(Text)
     confidence: Mapped[float] = mapped_column(Float)
     auto_fixable: Mapped[bool] = mapped_column(Boolean)
     context: Mapped[str] = mapped_column(Text)
-    review: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    review: Mapped[str | None] = mapped_column(Text, nullable=True)
     review_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     run: Mapped[VerificationRunRow] = relationship(back_populates="issues")
 
@@ -250,10 +253,30 @@ class VerificationIssueRow(Base):
 class ReviewRevisionRow(Base):
     __tablename__ = "review_revisions"
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["verification_run_id", "document_id"],
+            [
+                "verification_runs.verification_run_id",
+                "verification_runs.document_id",
+            ],
+            name="fk_review_revisions_run_document",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["document_id", "source_version"],
+            ["documents.document_id", "documents.source_version"],
+            name="fk_review_revisions_document_source",
+            ondelete="CASCADE",
+        ),
         UniqueConstraint(
             "verification_run_id",
             "revision_number",
             name="uq_review_revisions_run_number",
+        ),
+        UniqueConstraint(
+            "review_revision_id",
+            "verification_run_id",
+            name="uq_review_revisions_revision_run",
         ),
         CheckConstraint("revision_number > 0", name="ck_review_revisions_number"),
     )
@@ -262,28 +285,33 @@ class ReviewRevisionRow(Base):
         PGUUID(as_uuid=True),
         primary_key=True,
     )
-    verification_run_id: Mapped[UUID] = mapped_column(
-        PGUUID(as_uuid=True),
-        ForeignKey("verification_runs.verification_run_id", ondelete="CASCADE"),
-    )
-    document_id: Mapped[UUID] = mapped_column(
-        PGUUID(as_uuid=True),
-        ForeignKey("documents.document_id", ondelete="CASCADE"),
-    )
-    source_version: Mapped[str] = mapped_column(String(255))
+    verification_run_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True))
+    document_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True))
+    source_version: Mapped[str] = mapped_column(Text)
     revision_number: Mapped[int] = mapped_column(Integer)
     text: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     run: Mapped[VerificationRunRow] = relationship(back_populates="review_revisions")
-    export_artifacts: Mapped[list[ExportArtifactRow]] = relationship(
-        back_populates="review_revision",
-        passive_deletes=True,
-    )
 
 
 class ExportArtifactRow(Base):
     __tablename__ = "export_artifacts"
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["verification_run_id"],
+            ["verification_runs.verification_run_id"],
+            name="fk_export_artifacts_run",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["review_revision_id", "verification_run_id"],
+            [
+                "review_revisions.review_revision_id",
+                "review_revisions.verification_run_id",
+            ],
+            name="fk_export_artifacts_revision_run",
+            ondelete="CASCADE",
+        ),
         UniqueConstraint("storage_key", name="uq_export_artifacts_storage_key"),
         CheckConstraint("size_bytes >= 0", name="ck_export_artifacts_size"),
     )
@@ -292,23 +320,16 @@ class ExportArtifactRow(Base):
         PGUUID(as_uuid=True),
         primary_key=True,
     )
-    verification_run_id: Mapped[UUID] = mapped_column(
-        PGUUID(as_uuid=True),
-        ForeignKey("verification_runs.verification_run_id", ondelete="CASCADE"),
-    )
+    verification_run_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True))
     review_revision_id: Mapped[UUID | None] = mapped_column(
         PGUUID(as_uuid=True),
-        ForeignKey("review_revisions.review_revision_id", ondelete="CASCADE"),
         nullable=True,
     )
-    source_version: Mapped[str] = mapped_column(String(255))
+    source_version: Mapped[str] = mapped_column(Text)
     file_type: Mapped[str] = mapped_column(String(16))
-    file_name: Mapped[str] = mapped_column(String(255))
-    media_type: Mapped[str] = mapped_column(String(255))
-    storage_key: Mapped[str] = mapped_column(String(512))
+    file_name: Mapped[str] = mapped_column(Text)
+    media_type: Mapped[str] = mapped_column(Text)
+    storage_key: Mapped[str] = mapped_column(Text)
     size_bytes: Mapped[int] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     run: Mapped[VerificationRunRow] = relationship(back_populates="export_artifacts")
-    review_revision: Mapped[ReviewRevisionRow | None] = relationship(
-        back_populates="export_artifacts"
-    )

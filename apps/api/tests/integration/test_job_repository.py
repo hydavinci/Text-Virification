@@ -12,6 +12,7 @@ from sqlalchemy.orm.session import sessionmaker
 
 from text_verification.domain.documents import FileType
 from text_verification.domain.jobs import JobStatus, TerminalJobStateError
+from text_verification.infrastructure.orm import JobRow
 from text_verification.infrastructure.repositories import JobRepository
 
 
@@ -125,6 +126,27 @@ def test_repository_lists_all_persisted_job_ids(db_session: Session) -> None:
     repository.commit()
 
     assert repository.list_job_ids() == set(job_ids)
+
+
+def test_create_job_rejects_noncanonical_file_type_before_persistence(
+    db_session: Session,
+) -> None:
+    repository = JobRepository(db_session)
+    job_id = uuid4()
+    now = datetime.now(UTC)
+
+    with pytest.raises(ValueError):
+        repository.create_job(
+            job_id=job_id,
+            source_name="invalid.bin",
+            file_type="binary",
+            size_bytes=32,
+            storage_key=str(job_id),
+            created_at=now,
+            expires_at=now + timedelta(hours=1),
+        )
+
+    assert db_session.get(JobRow, job_id) is None
 
 
 def test_transition_rejects_stale_non_terminal_update_after_competing_expiry(

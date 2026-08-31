@@ -1,4 +1,5 @@
 from collections import Counter
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
@@ -317,6 +318,45 @@ def test_verification_result_accepts_explicit_legacy_localized_summary_labels() 
 def test_verification_summary_rejects_negative_bucket_counts() -> None:
     with pytest.raises(ValidationError, match="greater than or equal to 0"):
         VerificationSummary(total=0, by_type={"typo": -1})
+
+
+def test_verification_summary_canonicalizes_nested_tuples_to_json_lists() -> None:
+    summary = VerificationSummary.model_validate(
+        {
+            "total": 0,
+            "llm_review": {
+                "batches": (
+                    {"issue_ids": ("first", "second")},
+                    ("complete",),
+                )
+            },
+        }
+    )
+
+    assert summary.llm_review == {
+        "batches": [
+            {"issue_ids": ["first", "second"]},
+            ["complete"],
+        ]
+    }
+
+
+@pytest.mark.parametrize(
+    "invalid_value",
+    [
+        uuid4(),
+        datetime(2026, 8, 31, tzinfo=UTC),
+        object(),
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+    ],
+)
+def test_verification_summary_rejects_non_json_review_metadata(
+    invalid_value: object,
+) -> None:
+    with pytest.raises(ValidationError, match="JSON"):
+        VerificationSummary(total=0, llm_review={"invalid": invalid_value})
 
 
 def test_verification_options_forbid_unknown_fields() -> None:

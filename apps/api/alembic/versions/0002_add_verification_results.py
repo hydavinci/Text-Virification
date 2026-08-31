@@ -20,6 +20,28 @@ depends_on = None
 
 
 def upgrade() -> None:
+    op.alter_column(
+        "jobs",
+        "source_name",
+        existing_type=sa.String(length=255),
+        type_=sa.Text(),
+        existing_nullable=False,
+    )
+    op.alter_column(
+        "jobs",
+        "error_code",
+        existing_type=sa.String(length=64),
+        type_=sa.Text(),
+        existing_nullable=True,
+    )
+    op.alter_column(
+        "job_events",
+        "message",
+        existing_type=sa.String(length=255),
+        type_=sa.Text(),
+        existing_nullable=False,
+    )
+
     op.create_table(
         "documents",
         sa.Column(
@@ -29,8 +51,8 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column("job_id", postgresql.UUID(as_uuid=True), nullable=False),
-        sa.Column("source_version", sa.String(length=255), nullable=False),
-        sa.Column("source_name", sa.String(length=255), nullable=False),
+        sa.Column("source_version", sa.Text(), nullable=False),
+        sa.Column("source_name", sa.Text(), nullable=False),
         sa.Column("file_type", sa.String(length=16), nullable=False),
         sa.Column("text", sa.Text(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
@@ -40,6 +62,11 @@ def upgrade() -> None:
             "document_id",
             "source_version",
             name="uq_documents_identity",
+        ),
+        sa.UniqueConstraint(
+            "document_id",
+            "job_id",
+            name="uq_documents_document_job",
         ),
     )
 
@@ -62,7 +89,7 @@ def upgrade() -> None:
         sa.Column("stats_paragraph_count", sa.Integer(), nullable=False),
         sa.Column("stats_language", sa.String(length=8), nullable=False),
         sa.Column("stats_primary_count", sa.Integer(), nullable=False),
-        sa.Column("stats_primary_label", sa.String(length=64), nullable=False),
+        sa.Column("stats_primary_label", sa.Text(), nullable=False),
         sa.Column("summary_total", sa.Integer(), nullable=False),
         sa.Column("summary_by_type", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
         sa.Column(
@@ -90,12 +117,18 @@ def upgrade() -> None:
         ),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(
-            ["document_id"],
-            ["documents.document_id"],
+            ["document_id", "job_id"],
+            ["documents.document_id", "documents.job_id"],
+            name="fk_verification_runs_document_job",
             ondelete="CASCADE",
         ),
         sa.ForeignKeyConstraint(["job_id"], ["jobs.job_id"], ondelete="CASCADE"),
         sa.UniqueConstraint("job_id", name="uq_verification_runs_job"),
+        sa.UniqueConstraint(
+            "verification_run_id",
+            "document_id",
+            name="uq_verification_runs_run_document",
+        ),
         sa.CheckConstraint("stats_char_count >= 0", name="ck_runs_stats_char_count"),
         sa.CheckConstraint(
             "stats_char_count_no_space >= 0",
@@ -117,7 +150,7 @@ def upgrade() -> None:
         sa.Column("document_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("issue_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("issue_index", sa.Integer(), nullable=False),
-        sa.Column("block_id", sa.String(length=255), nullable=True),
+        sa.Column("block_id", sa.Text(), nullable=True),
         sa.Column("page", sa.Integer(), nullable=True),
         sa.Column("start", sa.Integer(), nullable=False),
         sa.Column("end", sa.Integer(), nullable=False),
@@ -130,28 +163,27 @@ def upgrade() -> None:
             postgresql.JSONB(astext_type=sa.Text()),
             nullable=False,
         ),
-        sa.Column("type", sa.String(length=64), nullable=False),
+        sa.Column("type", sa.Text(), nullable=False),
         sa.Column("severity", sa.String(length=16), nullable=False),
-        sa.Column("layer", sa.String(length=64), nullable=False),
+        sa.Column("layer", sa.Text(), nullable=False),
         sa.Column("message", sa.Text(), nullable=False),
         sa.Column("description", sa.Text(), nullable=False),
-        sa.Column("rule_id", sa.String(length=255), nullable=False),
-        sa.Column("rule_version", sa.String(length=255), nullable=False),
-        sa.Column("source", sa.String(length=255), nullable=False),
-        sa.Column("source_version", sa.String(length=255), nullable=False),
+        sa.Column("rule_id", sa.Text(), nullable=False),
+        sa.Column("rule_version", sa.Text(), nullable=False),
+        sa.Column("source", sa.Text(), nullable=False),
+        sa.Column("source_version", sa.Text(), nullable=False),
         sa.Column("confidence", sa.Float(), nullable=False),
         sa.Column("auto_fixable", sa.Boolean(), nullable=False),
         sa.Column("context", sa.Text(), nullable=False),
-        sa.Column("review", sa.String(length=64), nullable=True),
+        sa.Column("review", sa.Text(), nullable=True),
         sa.Column("review_reason", sa.Text(), nullable=True),
         sa.ForeignKeyConstraint(
-            ["document_id"],
-            ["documents.document_id"],
-            ondelete="CASCADE",
-        ),
-        sa.ForeignKeyConstraint(
-            ["verification_run_id"],
-            ["verification_runs.verification_run_id"],
+            ["verification_run_id", "document_id"],
+            [
+                "verification_runs.verification_run_id",
+                "verification_runs.document_id",
+            ],
+            name="fk_verification_issues_run_document",
             ondelete="CASCADE",
         ),
         sa.UniqueConstraint(
@@ -188,24 +220,34 @@ def upgrade() -> None:
         ),
         sa.Column("verification_run_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("document_id", postgresql.UUID(as_uuid=True), nullable=False),
-        sa.Column("source_version", sa.String(length=255), nullable=False),
+        sa.Column("source_version", sa.Text(), nullable=False),
         sa.Column("revision_number", sa.Integer(), nullable=False),
         sa.Column("text", sa.Text(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(
-            ["document_id"],
-            ["documents.document_id"],
+            ["verification_run_id", "document_id"],
+            [
+                "verification_runs.verification_run_id",
+                "verification_runs.document_id",
+            ],
+            name="fk_review_revisions_run_document",
             ondelete="CASCADE",
         ),
         sa.ForeignKeyConstraint(
-            ["verification_run_id"],
-            ["verification_runs.verification_run_id"],
+            ["document_id", "source_version"],
+            ["documents.document_id", "documents.source_version"],
+            name="fk_review_revisions_document_source",
             ondelete="CASCADE",
         ),
         sa.UniqueConstraint(
             "verification_run_id",
             "revision_number",
             name="uq_review_revisions_run_number",
+        ),
+        sa.UniqueConstraint(
+            "review_revision_id",
+            "verification_run_id",
+            name="uq_review_revisions_revision_run",
         ),
         sa.CheckConstraint("revision_number > 0", name="ck_review_revisions_number"),
     )
@@ -220,21 +262,26 @@ def upgrade() -> None:
         ),
         sa.Column("verification_run_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("review_revision_id", postgresql.UUID(as_uuid=True), nullable=True),
-        sa.Column("source_version", sa.String(length=255), nullable=False),
+        sa.Column("source_version", sa.Text(), nullable=False),
         sa.Column("file_type", sa.String(length=16), nullable=False),
-        sa.Column("file_name", sa.String(length=255), nullable=False),
-        sa.Column("media_type", sa.String(length=255), nullable=False),
-        sa.Column("storage_key", sa.String(length=512), nullable=False),
+        sa.Column("file_name", sa.Text(), nullable=False),
+        sa.Column("media_type", sa.Text(), nullable=False),
+        sa.Column("storage_key", sa.Text(), nullable=False),
         sa.Column("size_bytes", sa.BigInteger(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(
-            ["review_revision_id"],
-            ["review_revisions.review_revision_id"],
+            ["review_revision_id", "verification_run_id"],
+            [
+                "review_revisions.review_revision_id",
+                "review_revisions.verification_run_id",
+            ],
+            name="fk_export_artifacts_revision_run",
             ondelete="CASCADE",
         ),
         sa.ForeignKeyConstraint(
             ["verification_run_id"],
             ["verification_runs.verification_run_id"],
+            name="fk_export_artifacts_run",
             ondelete="CASCADE",
         ),
         sa.UniqueConstraint("storage_key", name="uq_export_artifacts_storage_key"),
@@ -248,3 +295,24 @@ def downgrade() -> None:
     op.drop_table("verification_issues")
     op.drop_table("verification_runs")
     op.drop_table("documents")
+    op.alter_column(
+        "job_events",
+        "message",
+        existing_type=sa.Text(),
+        type_=sa.String(length=255),
+        existing_nullable=False,
+    )
+    op.alter_column(
+        "jobs",
+        "error_code",
+        existing_type=sa.Text(),
+        type_=sa.String(length=64),
+        existing_nullable=True,
+    )
+    op.alter_column(
+        "jobs",
+        "source_name",
+        existing_type=sa.Text(),
+        type_=sa.String(length=255),
+        existing_nullable=False,
+    )

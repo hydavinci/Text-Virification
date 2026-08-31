@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from collections import Counter
 from enum import StrEnum
-from typing import Annotated, Any, Literal
+from math import isfinite
+from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
 from text_verification.domain.documents import FileType
 from text_verification.domain.issues import Issue
@@ -101,7 +102,12 @@ class VerificationSummary(BaseModel):
     by_severity: dict[str, SummaryCount] = Field(default_factory=dict)
     by_rule: dict[str, SummaryCount] = Field(default_factory=dict)
     by_layer: dict[str, SummaryCount] = Field(default_factory=dict)
-    llm_review: dict[str, Any] | None = None
+    llm_review: dict[str, JsonValue] | None = None
+
+    @field_validator("llm_review", mode="before")
+    @classmethod
+    def canonicalize_review_metadata(cls, value: object) -> object:
+        return _canonicalize_json_containers(value)
 
 
 class VerificationExecutionMode(StrEnum):
@@ -173,3 +179,16 @@ class VerificationResult(BaseModel):
             if actual not in allowed_counts:
                 raise ValueError(f"summary {field_name} counts must match issues")
         return self
+
+
+def _canonicalize_json_containers(value: object) -> object:
+    if isinstance(value, dict):
+        return {
+            key: _canonicalize_json_containers(nested_value)
+            for key, nested_value in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_canonicalize_json_containers(item) for item in value]
+    if isinstance(value, float) and not isfinite(value):
+        raise ValueError("JSON numbers must be finite")
+    return value

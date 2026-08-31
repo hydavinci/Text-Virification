@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from text_verification.domain.documents import FileType
@@ -33,8 +34,8 @@ class VerificationRepository:
         self._session = session
 
     def save_result(self, job_id: UUID, result: VerificationResult) -> None:
-        if self._session.get(JobRow, job_id) is None:
-            raise LookupError(f"Job {job_id} does not exist.")
+        job = self._lock_job(job_id)
+        self._validate_job_source(job, result)
 
         existing = self._get_run_row_for_job(job_id)
         if existing is not None:
@@ -51,8 +52,14 @@ class VerificationRepository:
             return
 
         document_row, run_row = _map_result_to_rows(job_id, result)
-        self._session.add_all([document_row, run_row])
-        self._session.flush()
+        try:
+            with self._session.begin_nested():
+                self._session.add_all([document_row, run_row])
+                self._session.flush()
+        except IntegrityError as error:
+            raise ValueError(
+                f"Verification result for job {job_id} conflicts with existing data."
+            ) from error
 
     def get_result_for_job(self, job_id: UUID) -> VerificationResult | None:
         row = self._get_run_row_for_job(job_id)
@@ -72,7 +79,12 @@ class VerificationRepository:
     ) -> None:
         if revision_number < 1:
             raise ValueError("revision_number must be greater than zero.")
-        run = self._get_run_row(verification_run_id)
+        run = self._lock_run(verification_run_id)
+        if source_version != run.document.source_version:
+            raise ValueError(
+                f"Review source version {source_version!r} does not match "
+                f"{run.document.source_version!r}."
+            )
         existing = self._session.get(ReviewRevisionRow, review_revision_id)
         values = (
             verification_run_id,
@@ -110,18 +122,24 @@ class VerificationRepository:
                 f"number {revision_number}."
             )
 
-        self._session.add(
-            ReviewRevisionRow(
-                review_revision_id=review_revision_id,
-                verification_run_id=verification_run_id,
-                document_id=run.document_id,
-                source_version=source_version,
-                revision_number=revision_number,
-                text=text,
-                created_at=created_at,
-            )
-        )
-        self._session.flush()
+        try:
+            with self._session.begin_nested():
+                self._session.add(
+                    ReviewRevisionRow(
+                        review_revision_id=review_revision_id,
+                        verification_run_id=verification_run_id,
+                        document_id=run.document_id,
+                        source_version=source_version,
+                        revision_number=revision_number,
+                        text=text,
+                        created_at=created_at,
+                    )
+                )
+                self._session.flush()
+        except IntegrityError as error:
+            raise ValueError(
+                f"Review revision {review_revision_id} conflicts with existing data."
+            ) from error
 
     def save_export_artifact(
         self,
@@ -139,7 +157,7 @@ class VerificationRepository:
     ) -> None:
         if size_bytes < 0:
             raise ValueError("size_bytes must be greater than or equal to zero.")
-        run = self._get_run_row(verification_run_id)
+        run = self._lock_run(verification_run_id)
         review_revision = self._review_revision_for_run(
             verification_run_id,
             review_revision_id,
@@ -195,21 +213,27 @@ class VerificationRepository:
         if conflicting_storage_key is not None:
             raise ValueError(f"Export storage key {storage_key!r} is already persisted.")
 
-        self._session.add(
-            ExportArtifactRow(
-                export_artifact_id=export_artifact_id,
-                verification_run_id=verification_run_id,
-                review_revision_id=review_revision_id,
-                source_version=source_version,
-                file_type=normalized_file_type,
-                file_name=file_name,
-                media_type=media_type,
-                storage_key=storage_key,
-                size_bytes=size_bytes,
-                created_at=created_at,
-            )
-        )
-        self._session.flush()
+        try:
+            with self._session.begin_nested():
+                self._session.add(
+                    ExportArtifactRow(
+                        export_artifact_id=export_artifact_id,
+                        verification_run_id=verification_run_id,
+                        review_revision_id=review_revision_id,
+                        source_version=source_version,
+                        file_type=normalized_file_type,
+                        file_name=file_name,
+                        media_type=media_type,
+                        storage_key=storage_key,
+                        size_bytes=size_bytes,
+                        created_at=created_at,
+                    )
+                )
+                self._session.flush()
+        except IntegrityError as error:
+            raise ValueError(
+                f"Export artifact {export_artifact_id} conflicts with existing data."
+            ) from error
 
     def commit(self) -> None:
         self._session.commit()
@@ -225,17 +249,53 @@ class VerificationRepository:
                 selectinload(VerificationRunRow.issues),
             )
             .where(VerificationRunRow.job_id == job_id)
+            .execution_options(populate_existing=True)
         )
 
-    def _get_run_row(self, verification_run_id: UUID) -> VerificationRunRow:
+    def _lock_job(self, job_id: UUID) -> JobRow:
+        row = self._session.execute(
+            select(JobRow)
+            .where(JobRow.job_id == job_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+        if row is None:
+            raise LookupError(f"Job {job_id} does not exist.")
+        return row
+
+    def _lock_run(self, verification_run_id: UUID) -> VerificationRunRow:
         row = self._session.scalar(
             select(VerificationRunRow)
             .options(selectinload(VerificationRunRow.document))
             .where(VerificationRunRow.verification_run_id == verification_run_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
         if row is None:
             raise LookupError(f"Verification run {verification_run_id} does not exist.")
         return row
+
+    def _validate_job_source(
+        self,
+        job: JobRow,
+        result: VerificationResult,
+    ) -> None:
+        if job.source_name != result.source_name:
+            raise ValueError(
+                f"Job {job.job_id} source name {job.source_name!r} does not match "
+                f"{result.source_name!r}."
+            )
+        try:
+            job_file_type = FileType(job.file_type)
+        except ValueError as error:
+            raise ValueError(
+                f"Job {job.job_id} file type {job.file_type!r} is not canonical."
+            ) from error
+        if job_file_type is not result.file_type:
+            raise ValueError(
+                f"Job {job.job_id} file type {job_file_type.value!r} does not match "
+                f"{result.file_type.value!r}."
+            )
 
     def _review_revision_for_run(
         self,
@@ -244,7 +304,11 @@ class VerificationRepository:
     ) -> ReviewRevisionRow | None:
         if review_revision_id is None:
             return None
-        revision = self._session.get(ReviewRevisionRow, review_revision_id)
+        revision = self._session.scalar(
+            select(ReviewRevisionRow)
+            .where(ReviewRevisionRow.review_revision_id == review_revision_id)
+            .execution_options(populate_existing=True)
+        )
         if revision is None:
             raise LookupError(f"Review revision {review_revision_id} does not exist.")
         if revision.verification_run_id != verification_run_id:
