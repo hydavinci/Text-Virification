@@ -10,7 +10,9 @@ from docx import Document
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from text_verification.api.routes import compatibility as compatibility_routes
 from text_verification.config import Settings, get_settings
+from text_verification.infrastructure.dictionary_loader import DictionaryLoadError
 
 
 def override_storage(app: FastAPI, storage_root: Path) -> None:
@@ -89,6 +91,28 @@ def test_analyze_direct_text_supports_legacy_options(
     } <= issue_types
 
 
+def test_analyze_direct_text_masks_dictionary_load_failures(
+    app: FastAPI,
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    override_storage(app, tmp_path)
+
+    def fail_dictionary_load(*args, **kwargs):
+        del args, kwargs
+        raise DictionaryLoadError("dictionary missing at /secret/dictionaries/sensitive_rules.json")
+
+    monkeypatch.setattr(compatibility_routes, "analyze", fail_dictionary_load)
+
+    response = client.post("/api/v1/analyze", data={"text": "待检测文本"})
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Verification dictionaries are unavailable."}
+    assert "secret" not in response.text.lower()
+    assert "dictionary missing" not in response.text.lower()
+
+
 def test_upload_and_export_txt_from_uuid_scoped_storage(
     app: FastAPI,
     client: TestClient,
@@ -129,6 +153,32 @@ def test_upload_and_export_txt_from_uuid_scoped_storage(
     assert exported.content.decode() == "账号测试"
     assert "unsafe_%E4%BF%AE%E6%94%B9%E7%89%88_" in exported.headers["content-disposition"]
     assert exported.headers["content-disposition"].endswith(".txt")
+
+
+def test_uploaded_file_is_deleted_when_dictionary_load_fails(
+    app: FastAPI,
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    override_storage(app, tmp_path)
+
+    def fail_dictionary_load(*args, **kwargs):
+        del args, kwargs
+        raise DictionaryLoadError("invalid dictionary at C:\\secret\\rules.json")
+
+    monkeypatch.setattr(compatibility_routes, "analyze", fail_dictionary_load)
+
+    response = client.post(
+        "/api/v1/analyze",
+        files={"file": ("source.txt", "帐号测试".encode(), "text/plain")},
+    )
+
+    compatibility_root = tmp_path / "compatibility"
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Verification dictionaries are unavailable."}
+    assert "secret" not in response.text.lower()
+    assert not compatibility_root.exists() or list(compatibility_root.iterdir()) == []
 
 
 def test_export_html_report_escapes_user_content(client: TestClient) -> None:

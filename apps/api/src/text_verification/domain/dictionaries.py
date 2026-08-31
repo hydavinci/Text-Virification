@@ -20,15 +20,15 @@ class TerritoryStandardEntry(BaseModel):
 class SensitiveRulesEntries(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    politics: tuple[_DictionaryText, ...] = ()
-    ethnic_religion: tuple[_DictionaryText, ...] = ()
-    territory_standard: tuple[TerritoryStandardEntry, ...] = ()
+    politics: tuple[_DictionaryText, ...]
+    ethnic_religion: tuple[_DictionaryText, ...]
+    territory_standard: tuple[TerritoryStandardEntry, ...]
 
 
 class AdExtremeWordsEntries(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    extreme_words: tuple[_DictionaryText, ...] = ()
+    extreme_words: tuple[_DictionaryText, ...]
 
 
 class DictionarySnapshot(BaseModel):

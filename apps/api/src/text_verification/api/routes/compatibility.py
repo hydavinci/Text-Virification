@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import logging
 import ntpath
 import posixpath
 from datetime import datetime
 from typing import Annotated
 from urllib.parse import quote
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import Response
@@ -34,8 +35,12 @@ from text_verification.compatibility.storage import (
     CompatibilityUploadTooLarge,
 )
 from text_verification.config import Settings, get_settings
+from text_verification.infrastructure.dictionary_loader import DictionaryLoadError
 
 router = APIRouter(tags=["compatibility"])
+
+logger = logging.getLogger(__name__)
+_DICTIONARY_UNAVAILABLE_DETAIL = "Verification dictionaries are unavailable."
 
 
 @router.get("/scenarios")
@@ -72,19 +77,25 @@ def analyze_content(
                 status.HTTP_413_CONTENT_TOO_LARGE,
                 detail="Text exceeds the configured maximum size.",
             )
-        result = analyze(
-            settings,
-            text=text,
-            filename="直接输入文本",
-            file_id=None,
-            file_extension=None,
-            scenario=scenario,
-            custom_glossary=glossary,
-            banned_words=banned,
-            enable_security=enable_security,
-            enable_sensitive=enable_sensitive,
-            enable_ad_extreme=enable_ad_extreme,
-        )
+        try:
+            result = analyze(
+                settings,
+                text=text,
+                filename="直接输入文本",
+                file_id=None,
+                file_extension=None,
+                scenario=scenario,
+                custom_glossary=glossary,
+                banned_words=banned,
+                enable_security=enable_security,
+                enable_sensitive=enable_sensitive,
+                enable_ad_extreme=enable_ad_extreme,
+            )
+        except DictionaryLoadError as error:
+            raise HTTPException(
+                status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=_DICTIONARY_UNAVAILABLE_DETAIL,
+            ) from error
         payload = verification_result_to_legacy_response(result)
         payload["file_id"] = None
         payload["file_ext"] = None
@@ -118,21 +129,32 @@ def analyze_content(
             detail=f"File parsing failed: {error}",
         ) from error
 
-    result = analyze(
-        settings,
-        text=document.text,
-        filename=stored.original_name,
-        file_id=file_id,
-        file_extension=stored.extension,
-        scenario=scenario,
-        custom_glossary=glossary,
-        banned_words=banned,
-        enable_security=enable_security,
-        enable_sensitive=enable_sensitive,
-        enable_ad_extreme=enable_ad_extreme,
-        document=document,
-    )
-    payload = verification_result_to_legacy_response(result)
+    try:
+        result = analyze(
+            settings,
+            text=document.text,
+            filename=stored.original_name,
+            file_id=file_id,
+            file_extension=stored.extension,
+            scenario=scenario,
+            custom_glossary=glossary,
+            banned_words=banned,
+            enable_security=enable_security,
+            enable_sensitive=enable_sensitive,
+            enable_ad_extreme=enable_ad_extreme,
+            document=document,
+        )
+        payload = verification_result_to_legacy_response(result)
+    except DictionaryLoadError as error:
+        _delete_failed_upload(storage, file_id)
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=_DICTIONARY_UNAVAILABLE_DETAIL,
+        ) from error
+    except Exception:
+        _delete_failed_upload(storage, file_id)
+        raise
+
     payload["file_id"] = str(file_id)
     payload["file_ext"] = f".{stored.extension}"
     return payload
@@ -201,3 +223,14 @@ def _safe_download_name(filename: str) -> str:
 
 def _content_disposition(filename: str) -> str:
     return f"attachment; filename*=UTF-8''{quote(filename, safe='')}"
+
+
+def _delete_failed_upload(storage: CompatibilityStorage, file_id: UUID) -> None:
+    try:
+        storage.delete(file_id)
+    except Exception:
+        logger.warning(
+            "compatibility_upload_cleanup_failed",
+            extra={"file_id": str(file_id)},
+            exc_info=True,
+        )

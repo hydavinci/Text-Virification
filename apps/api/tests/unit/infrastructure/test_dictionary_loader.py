@@ -37,6 +37,7 @@ def test_dictionary_loader_returns_validated_immutable_entries() -> None:
 @pytest.mark.parametrize(
     ("name", "payload"),
     [
+        ("ad_extreme_words", '{"other":[]}'),
         ("sensitive_rules", "[]"),
         ("ad_extreme_words", "[]"),
         (
@@ -68,6 +69,57 @@ def test_dictionary_loader_rejects_malformed_dictionary_shapes(
 
     with pytest.raises(DictionaryLoadError, match=name):
         DictionaryLoader(root=tmp_path).load(name)
+
+
+@pytest.mark.parametrize("name", ["sensitive_rules", "ad_extreme_words"])
+def test_dictionary_loader_rejects_empty_dictionary_object(
+    tmp_path: Path,
+    name: str,
+) -> None:
+    from text_verification.infrastructure.dictionary_loader import (
+        DictionaryLoader,
+        DictionaryLoadError,
+    )
+
+    (tmp_path / f"{name}.json").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(DictionaryLoadError, match=name):
+        DictionaryLoader(root=tmp_path).load(name)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '{"ethnic_religion":[],"territory_standard":[]}',
+        '{"politics":[],"territory_standard":[]}',
+        '{"politics":[],"ethnic_religion":[]}',
+    ],
+)
+def test_sensitive_dictionary_requires_every_top_level_category(
+    tmp_path: Path,
+    payload: str,
+) -> None:
+    from text_verification.infrastructure.dictionary_loader import (
+        DictionaryLoader,
+        DictionaryLoadError,
+    )
+
+    (tmp_path / "sensitive_rules.json").write_text(payload, encoding="utf-8")
+
+    with pytest.raises(DictionaryLoadError, match="sensitive_rules"):
+        DictionaryLoader(root=tmp_path).load("sensitive_rules")
+
+
+def test_ad_dictionary_requires_extreme_words_category(tmp_path: Path) -> None:
+    from text_verification.infrastructure.dictionary_loader import (
+        DictionaryLoader,
+        DictionaryLoadError,
+    )
+
+    (tmp_path / "ad_extreme_words.json").write_text('{"other":[]}', encoding="utf-8")
+
+    with pytest.raises(DictionaryLoadError, match="ad_extreme_words"):
+        DictionaryLoader(root=tmp_path).load("ad_extreme_words")
 
 
 def test_dictionary_loader_reloads_when_content_changes_without_metadata_change(

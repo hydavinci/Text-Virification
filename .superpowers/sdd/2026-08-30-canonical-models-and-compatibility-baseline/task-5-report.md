@@ -182,3 +182,59 @@ Warnings were the same pre-existing FastAPI/TestClient and PyMuPDF SWIG deprecat
 1. Full backend verification still skips the existing environment-gated live-stack and PostgreSQL integration tests when `LIVE_API_URL` or `TEST_DATABASE_URL` are unset.
 2. The task-required wheel verification used `uv build --wheel` instead of `python -m pip wheel` because the managed project environment lacked the `pip` module; the produced wheel was inspected successfully.
 3. The compatibility package still contains an empty `data/__init__.py`; it is inert, but it may be worth removing in a later cleanup if the team wants the old package path gone entirely.
+
+## Round 1/5 — required dictionary fields and controlled failures
+
+### Scope
+- Made `SensitiveRulesEntries` require `politics`, `ethnic_religion`, and `territory_standard`.
+- Made `AdExtremeWordsEntries` require `extreme_words` while keeping extra fields forbidden.
+- Added loader tests for `{}`, each missing required top-level field, and malformed entries.
+- Mapped `DictionaryLoadError` in `/api/v1/analyze` to HTTP 500 with stable safe detail `Verification dictionaries are unavailable.`
+- Ensured uploaded compatibility files are deleted if analysis fails after save/parse and before a successful response.
+- Added API tests that monkeypatch the compatibility route `analyze` callable to prove direct-text masking and uploaded-file cleanup.
+
+### Files changed
+- `apps/api/src/text_verification/domain/dictionaries.py`
+- `apps/api/src/text_verification/api/routes/compatibility.py`
+- `apps/api/tests/unit/infrastructure/test_dictionary_loader.py`
+- `apps/api/tests/integration/test_compatibility_api.py`
+
+### Focused verification
+
+```bash
+cd /Users/yhe/Work/Text-Virification/apps/api
+uv run --extra dev pytest tests/unit/infrastructure/test_dictionary_loader.py tests/integration/test_compatibility_api.py tests/contract/test_source_rule_contracts.py -q
+```
+
+Result:
+- `34 passed, 6 warnings in 0.31s`
+- Warnings were the existing FastAPI `TestClient` deprecation warning and PyMuPDF SWIG deprecation warnings from PDF tests.
+
+```bash
+cd /Users/yhe/Work/Text-Virification/apps/api
+uv run --extra dev ruff check src/text_verification/domain/dictionaries.py src/text_verification/api/routes/compatibility.py tests/unit/infrastructure/test_dictionary_loader.py tests/integration/test_compatibility_api.py
+```
+
+Result:
+- `All checks passed!`
+
+```bash
+cd /Users/yhe/Work/Text-Virification/apps/api
+uv run --extra dev mypy src/text_verification/domain/dictionaries.py src/text_verification/api/routes/compatibility.py
+```
+
+Result:
+- `Success: no issues found in 2 source files`
+
+```bash
+cd /Users/yhe/Work/Text-Virification
+git --no-pager diff --check
+```
+
+Result:
+- clean
+
+### Self-review
+- Verified malformed or incomplete dictionary payloads now fail validation instead of silently becoming empty tuples.
+- Verified the safe 500 detail does not echo injected path strings from `DictionaryLoadError` in either direct-text or upload flows.
+- Verified successful upload analysis still preserves stored files for later export; cleanup only happens on failure after save/parse.
