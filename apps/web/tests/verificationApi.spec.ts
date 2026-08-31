@@ -16,7 +16,38 @@ const resultPayload: VerificationResult = {
     primary_count: 5,
     primary_label: '总字数'
   },
-  issues: [],
+  issues: [
+    {
+      issue_id: '33333333-3333-3333-3333-333333333333',
+      document_id: '11111111-1111-1111-1111-111111111111',
+      verification_run_id: '22222222-2222-2222-2222-222222222222',
+      block_id: 'p-0',
+      page: null,
+      start: 0,
+      end: 2,
+      block_start: 0,
+      block_end: 2,
+      position: 0,
+      end_position: 2,
+      original: '帐号',
+      suggestion: '账号',
+      alternatives: ['账号'],
+      type: 'typo',
+      severity: 'warning',
+      layer: 'character',
+      message: '疑似错别字',
+      description: '疑似错别字',
+      rule_id: 'cn_typo',
+      rule_version: '1',
+      source: 'compatibility.analyzer',
+      source_version: '1',
+      confidence: 0.8,
+      auto_fixable: true,
+      context: '这是帐号测试。',
+      review: '',
+      review_reason: ''
+    }
+  ],
   summary: {
     total: 0,
     by_type: {},
@@ -26,6 +57,15 @@ const resultPayload: VerificationResult = {
   },
   file_id: null,
   file_ext: null,
+  document_id: '11111111-1111-1111-1111-111111111111',
+  verification_run_id: '22222222-2222-2222-2222-222222222222',
+  source_version: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+  execution_mode: 'rules_with_optional_llm',
+  dictionary_versions: {},
+  degradation: {
+    is_degraded: false,
+    reasons: []
+  },
   scenario: 'technical'
 }
 
@@ -47,6 +87,15 @@ describe('createVerificationApi', () => {
     })
 
     expect(result.scenario).toBe('technical')
+    expect(result.document_id).toBe('11111111-1111-1111-1111-111111111111')
+    expect(result.verification_run_id).toBe('22222222-2222-2222-2222-222222222222')
+    expect(result.source_version).toBe(
+      'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    )
+    expect(result.execution_mode).toBe('rules_with_optional_llm')
+    expect(result.degradation).toEqual({ is_degraded: false, reasons: [] })
+    expect(result.issues[0].issue_id).toBe('33333333-3333-3333-3333-333333333333')
+    expect(result.issues[0].block_start).toBe(0)
     expect(fetchMock).toHaveBeenCalledWith('/api/v1/analyze', expect.objectContaining({
       method: 'POST'
     }))

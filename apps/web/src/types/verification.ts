@@ -1,6 +1,7 @@
 export type Scenario = 'general' | 'academic' | 'business' | 'legal' | 'news' | 'technical'
 export type IssueSeverity = 'error' | 'warning' | 'info'
 export type IssueState = 'pending' | 'accepted' | 'rejected'
+export type VerificationExecutionMode = 'rules_only' | 'rules_with_optional_llm'
 
 export interface GlossaryTerm {
   original: string
@@ -8,19 +9,39 @@ export interface GlossaryTerm {
 }
 
 export interface VerificationIssue {
+  issue_id: string
+  document_id: string
+  verification_run_id: string
+  block_id: string | null
+  page: number | null
+  start: number
+  end: number
+  block_start: number | null
+  block_end: number | null
   type: string
   severity: IssueSeverity
   original: string
   suggestion: string
-  position: number
-  end_position: number
-  context: string
-  description: string
-  rule_id: string
   alternatives?: string[] | null
   layer: string
+  message: string
+  description: string
+  rule_id: string
+  rule_version: string
+  source: string
+  source_version: string
+  confidence: number
+  auto_fixable: boolean
+  context: string
+  position: number
+  end_position: number
   review?: string
   review_reason?: string
+}
+
+export interface VerificationDegradation {
+  is_degraded: boolean
+  reasons: string[]
 }
 
 export interface VerificationStats {
@@ -51,6 +72,12 @@ export interface VerificationResult {
   summary: VerificationSummary
   file_id: string | null
   file_ext: string | null
+  document_id: string
+  verification_run_id: string
+  source_version: string
+  execution_mode: VerificationExecutionMode
+  dictionary_versions: Record<string, string>
+  degradation: VerificationDegradation
   scenario: Scenario
 }
 
