@@ -48,15 +48,15 @@ class CompatibilityParser:
                 parser_name=f"compatibility-{parsed_format}",
                 page_map=page_map,
             )
-        except _LEGACY_DETAIL_EXCEPTIONS as error:
-            raise ParserError(
-                _GENERIC_PARSE_ERROR,
-                compatibility_detail=str(error),
-                compatibility_detail_format="direct",
-            ) from error
         except _LEGACY_PREFIXED_EXCEPTIONS as error:
             raise ParserError(
                 _GENERIC_PARSE_ERROR,
                 compatibility_detail=str(error),
                 compatibility_detail_format="prefixed",
+            ) from error
+        except _LEGACY_DETAIL_EXCEPTIONS as error:
+            raise ParserError(
+                _GENERIC_PARSE_ERROR,
+                compatibility_detail=str(error),
+                compatibility_detail_format="direct",
             ) from error

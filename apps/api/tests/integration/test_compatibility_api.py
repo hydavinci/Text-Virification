@@ -10,6 +10,7 @@ from zipfile import BadZipFile, ZipFile
 from docx import Document
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pydantic import BaseModel
 
 from text_verification.api.dependencies import get_verification_pipeline
 from text_verification.application.errors import VerificationError
@@ -394,6 +395,37 @@ def test_uploaded_library_parse_failure_keeps_legacy_prefix_and_cleans_up(
     compatibility_root = tmp_path / "compatibility"
     assert response.status_code == 400
     assert response.json() == {"detail": "File parsing failed: File is not a zip file"}
+    assert not compatibility_root.exists() or list(compatibility_root.iterdir()) == []
+
+
+def test_uploaded_validation_error_uses_prefixed_legacy_detail_and_cleans_up(
+    app: FastAPI,
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    override_storage(app, tmp_path)
+
+    class ParseProbe(BaseModel):
+        count: int
+
+    def fail_parse(*args: object) -> tuple[str, str, list[tuple[int, int, str]]]:
+        del args
+        ParseProbe.model_validate({"count": "bad"})
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(compatibility_parser_module, "parse_file", fail_parse)
+
+    response = client.post(
+        "/api/v1/analyze",
+        files={"file": ("source.txt", "帐号测试".encode(), "text/plain")},
+    )
+
+    compatibility_root = tmp_path / "compatibility"
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert detail.startswith("File parsing failed: 1 validation error for ParseProbe")
+    assert not detail.startswith("1 validation error for ParseProbe")
     assert not compatibility_root.exists() or list(compatibility_root.iterdir()) == []
 
 
