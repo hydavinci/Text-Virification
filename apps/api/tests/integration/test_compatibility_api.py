@@ -4,20 +4,29 @@ import hashlib
 import json
 from io import BytesIO
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 from zipfile import ZipFile
 
 from docx import Document
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from text_verification.api.routes import compatibility as compatibility_routes
-from text_verification.compatibility import service as compatibility_service
+from text_verification.api.dependencies import get_verification_pipeline
+from text_verification.application.errors import VerificationError
+from text_verification.application.verification_pipeline import VerificationCommand
 from text_verification.config import Settings, get_settings
-from text_verification.infrastructure.dictionary_loader import (
-    DictionaryLoader,
-    DictionaryLoadError,
+from text_verification.domain.documents import FileType
+from text_verification.domain.verification import (
+    Scenario,
+    VerificationAnalysisMode,
+    VerificationDegradation,
+    VerificationExecutionMode,
+    VerificationOptions,
+    VerificationResult,
+    VerificationStatistics,
+    VerificationSummary,
 )
+from text_verification.infrastructure.dictionary_loader import DictionaryLoadError
 
 
 def override_storage(app: FastAPI, storage_root: Path) -> None:
@@ -25,6 +34,69 @@ def override_storage(app: FastAPI, storage_root: Path) -> None:
         storage_root=storage_root,
         max_upload_bytes=1024 * 1024,
     )
+
+
+class RecordingPipeline:
+    def __init__(self, result: VerificationResult) -> None:
+        self._result = result
+        self.commands: list[VerificationCommand] = []
+
+    def run(self, command: VerificationCommand) -> VerificationResult:
+        self.commands.append(command)
+        return self._result
+
+
+class FailingPipeline:
+    def __init__(self, error: VerificationError) -> None:
+        self._error = error
+        self.commands: list[VerificationCommand] = []
+
+    def run(self, command: VerificationCommand) -> VerificationResult:
+        self.commands.append(command)
+        cause = self._error.__cause__
+        if cause is not None:
+            raise self._error from cause
+        raise self._error
+
+
+def _verification_result(*, text: str = "检查文本") -> VerificationResult:
+    document_id = uuid4()
+    verification_run_id = uuid4()
+    return VerificationResult(
+        verification_run_id=verification_run_id,
+        document_id=document_id,
+        source_version="sha256:test-source-version",
+        source_name="直接输入文本",
+        file_type=FileType.TXT,
+        scenario=Scenario.GENERAL,
+        text=text,
+        stats=VerificationStatistics(
+            char_count=len(text),
+            char_count_no_space=len(text),
+            line_count=1,
+            paragraph_count=1,
+            language="zh",
+            primary_count=len(text),
+            primary_label="总字数",
+        ),
+        issues=(),
+        summary=VerificationSummary(total=0),
+        execution_mode=VerificationExecutionMode.SYNCHRONOUS,
+        analysis_mode=VerificationAnalysisMode.LOCAL_ONLY,
+        dictionary_versions={},
+        degradation=VerificationDegradation(),
+    )
+
+
+def _dictionary_load_failure(detail: str) -> VerificationError:
+    error = VerificationError(
+        code="dictionary_load_failed",
+        stage="checking",
+        message="A verification dictionary could not be loaded.",
+        retryable=False,
+    )
+    error.__cause__ = DictionaryLoadError(detail)
+    return error
 
 
 def test_analyze_direct_text_supports_legacy_options(
@@ -95,19 +167,34 @@ def test_analyze_direct_text_supports_legacy_options(
     } <= issue_types
 
 
+def test_analyze_route_uses_injected_pipeline(
+    app: FastAPI,
+    client: TestClient,
+) -> None:
+    pipeline = RecordingPipeline(_verification_result())
+    app.dependency_overrides[get_verification_pipeline] = lambda: pipeline
+
+    response = client.post("/api/v1/analyze", data={"text": "检查文本"})
+
+    assert response.status_code == 200
+    assert len(pipeline.commands) == 1
+    assert pipeline.commands[0].direct_text == "检查文本"
+    assert pipeline.commands[0].source_path is None
+    assert pipeline.commands[0].source_name == "直接输入文本"
+    assert pipeline.commands[0].file_type is FileType.TXT
+    assert pipeline.commands[0].options == VerificationOptions()
+    assert pipeline.commands[0].execution_mode is VerificationExecutionMode.SYNCHRONOUS
+
+
 def test_analyze_direct_text_masks_dictionary_load_failures(
     app: FastAPI,
     client: TestClient,
     tmp_path: Path,
-    monkeypatch,
 ) -> None:
     override_storage(app, tmp_path)
-
-    def fail_dictionary_load(*args, **kwargs):
-        del args, kwargs
-        raise DictionaryLoadError("dictionary missing at /secret/dictionaries/sensitive_rules.json")
-
-    monkeypatch.setattr(compatibility_routes, "analyze", fail_dictionary_load)
+    app.dependency_overrides[get_verification_pipeline] = lambda: FailingPipeline(
+        _dictionary_load_failure("dictionary missing at /secret/dictionaries/sensitive_rules.json")
+    )
 
     response = client.post("/api/v1/analyze", data={"text": "待检测文本"})
 
@@ -121,16 +208,10 @@ def test_analyze_direct_text_normalizes_dictionary_encoding_failure(
     app: FastAPI,
     client: TestClient,
     tmp_path: Path,
-    monkeypatch,
 ) -> None:
     override_storage(app, tmp_path)
-    dictionary_root = tmp_path / "invalid-dictionaries"
-    dictionary_root.mkdir()
-    (dictionary_root / "sensitive_rules.json").write_bytes(b"\xff\xfe\xff")
-    monkeypatch.setattr(
-        compatibility_service,
-        "_DICTIONARY_LOADER",
-        DictionaryLoader(root=dictionary_root),
+    app.dependency_overrides[get_verification_pipeline] = lambda: FailingPipeline(
+        _dictionary_load_failure("dictionary decoding failed in invalid-dictionaries")
     )
 
     response = client.post("/api/v1/analyze", data={"text": "待检测文本"})
@@ -216,15 +297,11 @@ def test_uploaded_file_is_deleted_when_dictionary_load_fails(
     app: FastAPI,
     client: TestClient,
     tmp_path: Path,
-    monkeypatch,
 ) -> None:
     override_storage(app, tmp_path)
-
-    def fail_dictionary_load(*args, **kwargs):
-        del args, kwargs
-        raise DictionaryLoadError("invalid dictionary at C:\\secret\\rules.json")
-
-    monkeypatch.setattr(compatibility_routes, "analyze", fail_dictionary_load)
+    app.dependency_overrides[get_verification_pipeline] = lambda: FailingPipeline(
+        _dictionary_load_failure("invalid dictionary at C:\\secret\\rules.json")
+    )
 
     response = client.post(
         "/api/v1/analyze",
@@ -242,16 +319,10 @@ def test_uploaded_file_is_deleted_when_dictionary_encoding_is_invalid(
     app: FastAPI,
     client: TestClient,
     tmp_path: Path,
-    monkeypatch,
 ) -> None:
     override_storage(app, tmp_path)
-    dictionary_root = tmp_path / "invalid-dictionaries"
-    dictionary_root.mkdir()
-    (dictionary_root / "sensitive_rules.json").write_bytes(b"\xff\xfe\xff")
-    monkeypatch.setattr(
-        compatibility_service,
-        "_DICTIONARY_LOADER",
-        DictionaryLoader(root=dictionary_root),
+    app.dependency_overrides[get_verification_pipeline] = lambda: FailingPipeline(
+        _dictionary_load_failure("dictionary decoding failed in invalid-dictionaries")
     )
 
     response = client.post(

@@ -31,6 +31,7 @@ from text_verification.domain.verification import (
     VerificationAnalysisMode,
     VerificationDegradation,
     VerificationExecutionMode,
+    VerificationOptions,
     VerificationResult,
     VerificationStatistics,
     VerificationSummary,
@@ -66,6 +67,33 @@ def parse_banned_words(value: str) -> list[str]:
     except (json.JSONDecodeError, ValidationError) as error:
         raise AnalysisInputError("banned_words must be a JSON array of strings.") from error
     return list(dict.fromkeys(word.strip() for word in words if word.strip()))
+
+
+def build_verification_options(
+    *,
+    scenario: Scenario,
+    custom_glossary: list[dict[str, str]],
+    banned_words: list[str],
+    enable_security: bool,
+    enable_sensitive: bool,
+    enable_ad_extreme: bool,
+) -> VerificationOptions:
+    return VerificationOptions(
+        scenario=scenario,
+        custom_glossary=custom_glossary,
+        banned_words=banned_words,
+        enable_security=enable_security,
+        enable_sensitive=enable_sensitive,
+        enable_ad_extreme=enable_ad_extreme,
+    )
+
+
+def direct_text_document_id(text: str, *, source_name: str = "直接输入文本") -> UUID:
+    return text_to_document_model(
+        text=text,
+        source_name=source_name,
+        file_type=FileType.TXT,
+    ).document_id
 
 
 def analyze(

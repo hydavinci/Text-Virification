@@ -1,9 +1,10 @@
 from collections.abc import Iterator
-from typing import Annotated
+from typing import Annotated, cast
 
-from fastapi import Depends
+from fastapi import Depends, Request
 from sqlalchemy.orm import Session
 
+from text_verification.application.verification_pipeline import VerificationPipeline
 from text_verification.config import Settings, get_settings
 from text_verification.infrastructure.database import get_session_factory
 from text_verification.infrastructure.repositories import JobRepository
@@ -32,3 +33,7 @@ def get_job_storage(
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> JobStorage:
     return JobStorage(settings.storage_root, settings.max_upload_bytes)
+
+
+def get_verification_pipeline(request: Request) -> VerificationPipeline:
+    return cast(VerificationPipeline, request.app.state.verification_pipeline)

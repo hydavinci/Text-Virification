@@ -11,6 +11,12 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import Response
 
+from text_verification.api.dependencies import get_verification_pipeline
+from text_verification.application import (
+    VerificationCommand,
+    VerificationError,
+    VerificationPipeline,
+)
 from text_verification.compatibility.adapters import verification_result_to_legacy_response
 from text_verification.compatibility.exporters import ExportError, export_original
 from text_verification.compatibility.models import (
@@ -21,11 +27,11 @@ from text_verification.compatibility.models import (
 from text_verification.compatibility.reports import generate_report_html
 from text_verification.compatibility.service import (
     AnalysisInputError,
-    analyze,
+    build_verification_options,
+    direct_text_document_id,
     formats,
     parse_banned_words,
     parse_glossary,
-    parse_uploaded_document,
     parse_uploaded_file,
     scenarios,
 )
@@ -35,7 +41,8 @@ from text_verification.compatibility.storage import (
     CompatibilityUploadTooLarge,
 )
 from text_verification.config import Settings, get_settings
-from text_verification.infrastructure.dictionary_loader import DictionaryLoadError
+from text_verification.domain.documents import FileType
+from text_verification.domain.verification import VerificationExecutionMode, VerificationResult
 
 router = APIRouter(tags=["compatibility"])
 
@@ -56,6 +63,7 @@ def list_formats() -> dict[str, object]:
 @router.post("/analyze")
 def analyze_content(
     settings: Annotated[Settings, Depends(get_settings)],
+    pipeline: Annotated[VerificationPipeline, Depends(get_verification_pipeline)],
     text: Annotated[str | None, Form()] = None,
     file: Annotated[UploadFile | None, File()] = None,
     scenario: Annotated[Scenario, Form()] = Scenario.GENERAL,
@@ -68,6 +76,14 @@ def analyze_content(
     try:
         glossary = parse_glossary(custom_glossary)
         banned = parse_banned_words(banned_words)
+        options = build_verification_options(
+            scenario=scenario,
+            custom_glossary=glossary,
+            banned_words=banned,
+            enable_security=enable_security,
+            enable_sensitive=enable_sensitive,
+            enable_ad_extreme=enable_ad_extreme,
+        )
     except AnalysisInputError as error:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
 
@@ -77,25 +93,16 @@ def analyze_content(
                 status.HTTP_413_CONTENT_TOO_LARGE,
                 detail="Text exceeds the configured maximum size.",
             )
-        try:
-            result = analyze(
-                settings,
-                text=text,
-                filename="直接输入文本",
-                file_id=None,
-                file_extension=None,
-                scenario=scenario,
-                custom_glossary=glossary,
-                banned_words=banned,
-                enable_security=enable_security,
-                enable_sensitive=enable_sensitive,
-                enable_ad_extreme=enable_ad_extreme,
-            )
-        except DictionaryLoadError as error:
-            raise HTTPException(
-                status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=_DICTIONARY_UNAVAILABLE_DETAIL,
-            ) from error
+        command = VerificationCommand(
+            document_id=direct_text_document_id(text),
+            source_path=None,
+            direct_text=text,
+            source_name="直接输入文本",
+            file_type=FileType.TXT,
+            options=options,
+            execution_mode=VerificationExecutionMode.SYNCHRONOUS,
+        )
+        result = _run_pipeline(pipeline, command)
         payload = verification_result_to_legacy_response(result)
         payload["file_id"] = None
         payload["file_ext"] = None
@@ -111,46 +118,27 @@ def analyze_content(
     file_id = uuid4()
     try:
         stored = storage.save_stream(file_id, file.filename, file.file)
-        document = parse_uploaded_document(
-            stored.path,
-            stored.extension,
-            source_name=stored.original_name,
-            document_id=file_id,
-        )
     except CompatibilityUploadTooLarge as error:
         raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, detail=str(error)) from error
-    except (CompatibilityUploadError, AnalysisInputError, ValueError) as error:
+    except CompatibilityUploadError as error:
         storage.delete(file_id)
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
-    except Exception as error:
-        storage.delete(file_id)
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            detail=f"File parsing failed: {error}",
-        ) from error
 
     try:
-        result = analyze(
-            settings,
-            text=document.text,
-            filename=stored.original_name,
-            file_id=file_id,
-            file_extension=stored.extension,
-            scenario=scenario,
-            custom_glossary=glossary,
-            banned_words=banned,
-            enable_security=enable_security,
-            enable_sensitive=enable_sensitive,
-            enable_ad_extreme=enable_ad_extreme,
-            document=document,
+        command = VerificationCommand(
+            document_id=file_id,
+            source_path=stored.path,
+            direct_text=None,
+            source_name=stored.original_name,
+            file_type=FileType(stored.extension),
+            options=options,
+            execution_mode=VerificationExecutionMode.SYNCHRONOUS,
         )
+        result = _run_pipeline(pipeline, command)
         payload = verification_result_to_legacy_response(result)
-    except DictionaryLoadError as error:
+    except HTTPException:
         _delete_failed_upload(storage, file_id)
-        raise HTTPException(
-            status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=_DICTIONARY_UNAVAILABLE_DETAIL,
-        ) from error
+        raise
     except Exception:
         _delete_failed_upload(storage, file_id)
         raise
@@ -234,3 +222,30 @@ def _delete_failed_upload(storage: CompatibilityStorage, file_id: UUID) -> None:
             extra={"file_id": str(file_id)},
             exc_info=True,
         )
+
+
+def _run_pipeline(
+    pipeline: VerificationPipeline,
+    command: VerificationCommand,
+) -> VerificationResult:
+    try:
+        return pipeline.run(command)
+    except VerificationError as error:
+        raise _compatibility_http_error(error) from error
+
+
+def _compatibility_http_error(error: VerificationError) -> HTTPException:
+    if error.code == "dictionary_load_failed":
+        return HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=_DICTIONARY_UNAVAILABLE_DETAIL,
+        )
+    if error.code == "parser_failed":
+        detail = str(error.__cause__ or error)
+        return HTTPException(status.HTTP_400_BAD_REQUEST, detail=detail)
+    if error.stage == "parsing":
+        return HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail=f"File parsing failed: {error}",
+        )
+    raise error
