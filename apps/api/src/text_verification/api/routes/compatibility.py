@@ -10,6 +10,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import Response
 
+from text_verification.compatibility.adapters import verification_result_to_legacy_response
 from text_verification.compatibility.exporters import ExportError, export_original
 from text_verification.compatibility.models import (
     ExportOriginalRequest,
@@ -70,7 +71,8 @@ def analyze_content(
                 status.HTTP_413_CONTENT_TOO_LARGE,
                 detail="Text exceeds the configured maximum size.",
             )
-        return analyze(
+        result = analyze(
+            settings,
             text=text,
             filename="直接输入文本",
             file_id=None,
@@ -82,6 +84,10 @@ def analyze_content(
             enable_sensitive=enable_sensitive,
             enable_ad_extreme=enable_ad_extreme,
         )
+        payload = verification_result_to_legacy_response(result)
+        payload["file_id"] = None
+        payload["file_ext"] = None
+        return payload
 
     if file is None or not file.filename:
         raise HTTPException(
@@ -106,7 +112,8 @@ def analyze_content(
             detail=f"File parsing failed: {error}",
         ) from error
 
-    return analyze(
+    result = analyze(
+        settings,
         text=extracted_text,
         filename=stored.original_name,
         file_id=file_id,
@@ -118,6 +125,10 @@ def analyze_content(
         enable_sensitive=enable_sensitive,
         enable_ad_extreme=enable_ad_extreme,
     )
+    payload = verification_result_to_legacy_response(result)
+    payload["file_id"] = str(file_id)
+    payload["file_ext"] = f".{stored.extension}"
+    return payload
 
 
 @router.post("/export")

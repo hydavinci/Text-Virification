@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from io import BytesIO
 from pathlib import Path
+from uuid import UUID
 from zipfile import ZipFile
 
 from docx import Document
@@ -54,11 +55,27 @@ def test_analyze_direct_text_supports_legacy_options(
         "file_id",
         "file_ext",
         "scenario",
+        "document_id",
+        "verification_run_id",
+        "source_version",
+        "execution_mode",
+        "degradation",
     }
     assert payload["success"] is True
     assert payload["scenario"] == "business"
     assert payload["file_id"] is None
+    assert UUID(payload["document_id"])
+    assert UUID(payload["verification_run_id"])
+    assert payload["source_version"].startswith("sha256:")
+    assert payload["execution_mode"] == "rules_with_optional_llm"
+    assert payload["degradation"] == {
+        "is_degraded": True,
+        "reasons": ["llm_review_disabled"],
+    }
     assert payload["stats"]["char_count"] == len(payload["text"])
+    assert payload["issues"]
+    assert UUID(payload["issues"][0]["issue_id"])
+    assert payload["issues"][0]["position"] < payload["issues"][0]["end_position"]
     issue_types = {issue["type"] for issue in payload["issues"]}
     assert {
         "typo",

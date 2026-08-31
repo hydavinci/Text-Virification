@@ -1,19 +1,22 @@
 from __future__ import annotations
 
-from enum import StrEnum
 from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from text_verification.domain import verification as domain_verification
 
-class Scenario(StrEnum):
-    GENERAL = "general"
-    ACADEMIC = "academic"
-    BUSINESS = "business"
-    LEGAL = "legal"
-    NEWS = "news"
-    TECHNICAL = "technical"
+Scenario = domain_verification.Scenario
+
+# Temporary compatibility re-export while callers migrate to the canonical domain model.
+__all__ = [
+    "Scenario",
+    "GlossaryTerm",
+    "ExportReplacement",
+    "ExportOriginalRequest",
+    "ReportRequest",
+]
 
 
 class GlossaryTerm(BaseModel):

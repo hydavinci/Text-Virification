@@ -3,10 +3,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from pydantic import TypeAdapter, ValidationError
 
+from text_verification.compatibility.adapters import (
+    legacy_issues_to_domain,
+    text_to_document_model,
+)
 from text_verification.compatibility.analyzer import SCENARIO_CONFIG, TextAnalyzer
 from text_verification.compatibility.llm_review import (
     is_llm_review_enabled,
@@ -15,6 +19,15 @@ from text_verification.compatibility.llm_review import (
 from text_verification.compatibility.models import GlossaryTerm, Scenario
 from text_verification.compatibility.parser import get_supported_formats, parse_file
 from text_verification.compatibility.statistics import text_statistics
+from text_verification.config import Settings
+from text_verification.domain.documents import FileType
+from text_verification.domain.verification import (
+    VerificationDegradation,
+    VerificationExecutionMode,
+    VerificationResult,
+    VerificationStatistics,
+    VerificationSummary,
+)
 
 _ANALYZER = TextAnalyzer()  # type: ignore[no-untyped-call]
 _GLOSSARY_ADAPTER = TypeAdapter(list[GlossaryTerm])
@@ -48,6 +61,7 @@ def parse_banned_words(value: str) -> list[str]:
 
 
 def analyze(
+    settings: Settings,
     *,
     text: str,
     filename: str,
@@ -59,7 +73,14 @@ def analyze(
     enable_security: bool,
     enable_sensitive: bool,
     enable_ad_extreme: bool,
-) -> dict[str, Any]:
+) -> VerificationResult:
+    document = text_to_document_model(
+        text=text,
+        source_name=filename,
+        file_type=_file_type_for(file_extension),
+        document_id=file_id,
+    )
+    verification_run_id = uuid4()
     issues = _ANALYZER.analyze(
         text,
         scenario=scenario.value,
@@ -70,25 +91,40 @@ def analyze(
         enable_ad_extreme=enable_ad_extreme,
     )
 
+    degradation_reasons: list[str] = []
     review_stats: dict[str, Any] | None = None
-    if is_llm_review_enabled():
-        issues, review_stats = review_issues(text, issues)
+    if is_llm_review_enabled(settings):
+        issues, review_stats = review_issues(settings, text, issues)
+        if review_stats.get("failed"):
+            degradation_reasons.append("llm_review_failed")
+    else:
+        degradation_reasons.append("llm_review_disabled")
 
-    summary: dict[str, Any] = _ANALYZER.get_summary(issues)
-    if review_stats is not None:
-        summary["llm_review"] = review_stats
+    summary_data: dict[str, Any] = _ANALYZER.get_summary(issues)
 
-    return {
-        "success": True,
-        "filename": filename,
-        "text": text,
-        "stats": text_statistics(text),
-        "issues": [issue.to_dict() for issue in issues],
-        "summary": summary,
-        "file_id": str(file_id) if file_id is not None else None,
-        "file_ext": f".{file_extension}" if file_extension else None,
-        "scenario": scenario.value,
-    }
+    return VerificationResult(
+        verification_run_id=verification_run_id,
+        document_id=document.document_id,
+        source_name=filename,
+        file_type=document.file_type,
+        scenario=scenario,
+        text=text,
+        stats=VerificationStatistics.model_validate(text_statistics(text)),
+        issues=legacy_issues_to_domain(issues, document, verification_run_id),
+        summary=VerificationSummary(
+            total=int(summary_data["total"]),
+            by_type=dict(summary_data["by_type"]),
+            by_severity=dict(summary_data["by_severity"]),
+            by_rule=dict(summary_data["by_rule"]),
+            by_layer=dict(summary_data["by_layer"]),
+            llm_review=review_stats,
+        ),
+        execution_mode=VerificationExecutionMode.RULES_WITH_OPTIONAL_LLM,
+        degradation=VerificationDegradation(
+            is_degraded=bool(degradation_reasons),
+            reasons=tuple(degradation_reasons),
+        ),
+    )
 
 
 def parse_uploaded_file(path: Path, extension: str) -> str:
@@ -111,3 +147,9 @@ def scenarios() -> list[dict[str, str]]:
 
 def formats() -> list[dict[str, str]]:
     return list(get_supported_formats())
+
+
+def _file_type_for(file_extension: str | None) -> FileType:
+    if not file_extension:
+        return FileType.TXT
+    return FileType(file_extension)

@@ -24,7 +24,7 @@ import re
 import json
 from typing import List, Dict, Tuple, Optional, Any
 
-from text_verification.config import get_settings
+from text_verification.config import Settings
 
 try:
     from openai import OpenAI
@@ -37,14 +37,14 @@ REVIEW_SEVERITIES = {'warning', 'info'}
 NEVER_REVIEW_TYPES = {'banned_word', 'custom_term', 'typo', 'variant_char'}
 
 
-def is_llm_review_enabled() -> bool:
+def is_llm_review_enabled(settings: Settings) -> bool:
     """是否已配置并启用云端复核"""
-    return bool(get_settings().llm_api_key.strip()) and OpenAI is not None
+    return bool(settings.llm_api_key.strip()) and OpenAI is not None
 
 
 def _excerpt(text: str, start: int, end: int, radius: int | None = None) -> str:
     """截取命中点前后的局部上下文（用于发给模型，不泄漏全文）"""
-    resolved_radius = radius if radius is not None else get_settings().llm_context_radius
+    resolved_radius = radius if radius is not None else 50
     a = max(0, start - resolved_radius)
     b = min(len(text), end + resolved_radius)
     pre = '…' if a > 0 else ''
@@ -122,7 +122,7 @@ def _parse_response(content: str, n_expected: int) -> Optional[Dict[int, Tuple[s
     return verdicts
 
 
-def review_issues(text: str, issues: List[Any]) -> Tuple[List[Any], Dict[str, Any]]:
+def review_issues(settings: Settings, text: str, issues: List[Any]) -> Tuple[List[Any], Dict[str, Any]]:
     """
     对规则引擎产出的 issues 做云端语义复核。
 
@@ -133,7 +133,7 @@ def review_issues(text: str, issues: List[Any]) -> Tuple[List[Any], Dict[str, An
     - real           → 保留。
     """
     stats = {
-        'enabled': is_llm_review_enabled(),
+        'enabled': is_llm_review_enabled(settings),
         'candidates': 0,
         'removed': 0,
         'downgraded': 0,
@@ -145,8 +145,6 @@ def review_issues(text: str, issues: List[Any]) -> Tuple[List[Any], Dict[str, An
     if not stats['enabled']:
         stats['reason'] = '未配置 LLM_API_KEY，已跳过云端复核'
         return issues, stats
-
-    settings = get_settings()
 
     # 挑选送复核的候选（低严重度 + 非强约束类型）
     candidates = [
