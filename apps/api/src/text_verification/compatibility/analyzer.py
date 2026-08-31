@@ -156,8 +156,8 @@ def _valid_id_card(s: str) -> bool:
     return check_codes[su % 11] == s[17].upper()
 
 
-# 纯数字串（11-19 位），用于分类身份证/银行卡/手机号
-_PI_DIGIT_RUN = re.compile(r'(?<!\d)(\d{11,19})(?!\d)')
+# 纯数字串（11-19 位）及末位为 X/x 的 18 位身份证候选，用于分类身份证/银行卡/手机号
+_PI_DIGIT_RUN = re.compile(r'(?<!\d)(\d{17}[0-9Xx]|\d{11,19})(?!\d)')
 # 邮箱
 _PI_EMAIL_PAT = re.compile(r'[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}')
 # 密钥/凭证：高精确度签名，尽量降低误报
@@ -2656,7 +2656,7 @@ class TextAnalyzer:
             if len(val) == 18 and _valid_id_card(val):
                 used.append((s, e))
                 _add(s, e, 'pii_id', '身份证号属于个人敏感信息，建议脱敏或删除后再外发')
-            elif 15 <= len(val) <= 19 and _luhn_valid(val):
+            elif val.isdigit() and 15 <= len(val) <= 19 and _luhn_valid(val):
                 used.append((s, e))
                 _add(s, e, 'pii_bank', '银行卡号属于个人金融敏感信息，建议脱敏或删除后再外发')
             elif len(val) == 11 and re.fullmatch(r'1[3-9]\d{9}', val):

@@ -1,0 +1,44 @@
+{
+  "pii_id": [
+    {
+      "name": "identity number ending in X",
+      "text": "身份证号：11010519491231002X",
+      "options": {
+        "enable_security": true
+      },
+      "expected": [
+        {
+          "type": "pii_id",
+          "original": "11010519491231002X",
+          "position": 5,
+          "end_position": 23
+        }
+      ]
+    }
+  ],
+  "ad_extreme_words": [
+    {
+      "name": "advertising disabled by default",
+      "text": "这是全球领先产品",
+      "options": {},
+      "expected": []
+    }
+  ],
+  "sensitive_rules": [
+    {
+      "name": "territory naming",
+      "text": "台湾产品",
+      "options": {
+        "enable_sensitive": true
+      },
+      "expected": [
+        {
+          "type": "sensitive_territory",
+          "original": "台湾",
+          "position": 0,
+          "end_position": 2
+        }
+      ]
+    }
+  ]
+}
