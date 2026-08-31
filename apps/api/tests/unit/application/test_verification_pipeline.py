@@ -16,6 +16,7 @@ from text_verification.application.verification_pipeline import (
     VerificationPipeline,
 )
 from text_verification.checkers.registry import CheckerRegistry
+from text_verification.compatibility import llm_review
 from text_verification.config import Settings
 from text_verification.domain.documents import DocumentModel, FileType, TextBlock
 from text_verification.domain.issues import Issue, IssueSeverity
@@ -418,6 +419,41 @@ def test_successful_canonical_llm_review_preserves_issue_ownership(
     assert result.summary.total == 1
     assert result.summary.by_severity == {"info": 1}
     assert removed_issue_id not in {issue.issue_id for issue in result.issues}
+
+
+def test_default_reviewer_prompt_programming_value_error_remains_visible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checker = CanonicalReviewChecker(
+        removed_issue_id=uuid4(),
+        retained_issue_id=uuid4(),
+        verification_run_ids=[],
+    )
+
+    def fail_prompt(candidates: list[dict[str, object]]) -> tuple[str, str]:
+        del candidates
+        raise ValueError("prompt programming defect")
+
+    monkeypatch.setattr(llm_review, "_build_prompt", fail_prompt)
+    pipeline = VerificationPipeline(
+        parsers=ParserRegistry(),
+        checkers=CheckerRegistry([checker]),
+        reviewer=application_factory.CompatibilityIssueReviewer(
+            Settings(llm_api_key="configured")
+        ),
+    )
+    command = VerificationCommand(
+        document_id=uuid4(),
+        source_path=None,
+        direct_text="甲乙丙丁",
+        source_name="直接输入文本",
+        file_type=FileType.TXT,
+        options=VerificationOptions(),
+        execution_mode=VerificationExecutionMode.SYNCHRONOUS,
+    )
+
+    with pytest.raises(ValueError, match="prompt programming defect"):
+        pipeline.run(command)
 
 
 def test_default_factory_runs_direct_text_through_compatibility_checker() -> None:

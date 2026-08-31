@@ -23,23 +23,37 @@
 import json
 import logging
 import re
-from typing import List, Dict, Tuple, Optional, Any
+from typing import List, Dict, Tuple, Any
 
 from text_verification.config import Settings
 
 logger = logging.getLogger(__name__)
 
 try:
-    from openai import APIConnectionError, APITimeoutError, OpenAI, RateLimitError
+    from openai import (
+        APIConnectionError,
+        APIResponseValidationError,
+        APIStatusError,
+        APITimeoutError,
+        OpenAI,
+        RateLimitError,
+    )
+    PROVIDER_ERRORS = (APIConnectionError, APIStatusError)
     RETRYABLE_PROVIDER_ERRORS = (APIConnectionError, APITimeoutError, RateLimitError)
 except ImportError:  # 未安装 SDK 时优雅降级
     OpenAI = None
+    APIResponseValidationError = ()
+    PROVIDER_ERRORS = ()
     RETRYABLE_PROVIDER_ERRORS = ()
 
 # 仅复核这两类严重度的候选（error 级硬性错误直接保留，避免误删真实错别字）
 REVIEW_SEVERITIES = {'warning', 'info'}
 # 这些类型确定性高 / 属用户强约束，永远不送复核
 NEVER_REVIEW_TYPES = {'banned_word', 'custom_term', 'typo', 'variant_char'}
+
+
+class InvalidReviewResponseError(ValueError):
+    pass
 
 
 def is_llm_review_configured(settings: Settings) -> bool:
@@ -90,10 +104,10 @@ def _build_prompt(candidates: List[Dict]) -> Tuple[str, str]:
     return system, user
 
 
-def _parse_response(content: str, n_expected: int) -> Optional[Dict[int, Tuple[str, str]]]:
+def _parse_response(content: str, n_expected: int) -> Dict[int, Tuple[str, str]]:
     """解析模型返回的 JSON 数组，容错处理。返回 {序号: (verdict, reason)}"""
     if not content:
-        return None
+        raise InvalidReviewResponseError("LLM review response is empty.")
     content = content.strip()
     # 去掉可能的 ```json ... ``` 包裹
     if content.startswith('```'):
@@ -113,7 +127,7 @@ def _parse_response(content: str, n_expected: int) -> Optional[Dict[int, Tuple[s
                 data = None
 
     if not isinstance(data, list):
-        return None
+        raise InvalidReviewResponseError("LLM review response is not a JSON array.")
 
     verdicts: Dict[int, Tuple[str, str]] = {}
     for item in data:
@@ -123,8 +137,30 @@ def _parse_response(content: str, n_expected: int) -> Optional[Dict[int, Tuple[s
         v = item.get('verdict')
         if idx is None or v not in ('false_positive', 'real', 'uncertain'):
             continue
-        verdicts[int(idx)] = (v, str(item.get('reason', '')))
+        try:
+            resolved_idx = int(idx)
+        except (TypeError, ValueError) as error:
+            raise InvalidReviewResponseError(
+                "LLM review response contains an invalid issue index."
+            ) from error
+        if not 0 <= resolved_idx < n_expected:
+            raise InvalidReviewResponseError(
+                "LLM review response contains an out-of-range issue index."
+            )
+        verdicts[resolved_idx] = (v, str(item.get('reason', '')))
     return verdicts
+
+
+def _response_content(response: Any) -> str:
+    try:
+        content = response.choices[0].message.content
+    except (AttributeError, IndexError, TypeError) as error:
+        raise InvalidReviewResponseError(
+            "LLM review response does not contain message content."
+        ) from error
+    if not isinstance(content, str):
+        raise InvalidReviewResponseError("LLM review response content is not text.")
+    return content
 
 
 def review_issues(settings: Settings, text: str, issues: List[Any]) -> Tuple[List[Any], Dict[str, Any]]:
@@ -191,36 +227,41 @@ def review_issues(settings: Settings, text: str, issues: List[Any]) -> Tuple[Lis
             'suggestion': issue.suggestion,
         })
 
-    # 调用大模型（任何异常都回退到原样返回）
+    client = OpenAI(
+        api_key=settings.llm_api_key.strip(),
+        base_url=settings.llm_api_base.strip(),
+        timeout=settings.llm_timeout,
+    )
+    system, user = _build_prompt(payload)
+    create_kwargs = {
+        'model': settings.llm_model.strip(),
+        'messages': [
+            {'role': 'system', 'content': system},
+            {'role': 'user', 'content': user},
+        ],
+        'temperature': 0,
+    }
+    if settings.llm_json_mode:
+        create_kwargs['response_format'] = {'type': 'json_object'}
+
     try:
-        client = OpenAI(
-            api_key=settings.llm_api_key.strip(),
-            base_url=settings.llm_api_base.strip(),
-            timeout=settings.llm_timeout,
-        )
-        system, user = _build_prompt(payload)
-        create_kwargs = {
-            'model': settings.llm_model.strip(),
-            'messages': [
-                {'role': 'system', 'content': system},
-                {'role': 'user', 'content': user},
-            ],
-            'temperature': 0,
-        }
-        if settings.llm_json_mode:
-            create_kwargs['response_format'] = {'type': 'json_object'}
         resp = client.chat.completions.create(**create_kwargs)
-        content = resp.choices[0].message.content or ''
-        verdicts = _parse_response(content, len(payload))
-    except Exception as error:
+    except PROVIDER_ERRORS as error:
         logger.exception("llm_review_provider_failed")
         stats['failed'] = True
         stats['failure_code'] = 'llm_provider_error'
         stats['retryable'] = _is_retryable_provider_failure(error)
         stats['reason'] = '大模型调用失败，已回退纯规则结果'
         return issues, stats
+    except APIResponseValidationError:
+        stats['failed'] = True
+        stats['failure_code'] = 'llm_invalid_response'
+        stats['reason'] = '大模型返回无法解析，已回退纯规则结果'
+        return issues, stats
 
-    if verdicts is None:
+    try:
+        verdicts = _parse_response(_response_content(resp), len(payload))
+    except InvalidReviewResponseError:
         stats['failed'] = True
         stats['failure_code'] = 'llm_invalid_response'
         stats['reason'] = '大模型返回无法解析，已回退纯规则结果'
