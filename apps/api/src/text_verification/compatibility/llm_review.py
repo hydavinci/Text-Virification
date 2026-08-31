@@ -30,9 +30,11 @@ from text_verification.config import Settings
 logger = logging.getLogger(__name__)
 
 try:
-    from openai import OpenAI
+    from openai import APIConnectionError, APITimeoutError, OpenAI, RateLimitError
+    RETRYABLE_PROVIDER_ERRORS = (APIConnectionError, APITimeoutError, RateLimitError)
 except ImportError:  # 未安装 SDK 时优雅降级
     OpenAI = None
+    RETRYABLE_PROVIDER_ERRORS = ()
 
 # 仅复核这两类严重度的候选（error 级硬性错误直接保留，避免误删真实错别字）
 REVIEW_SEVERITIES = {'warning', 'info'}
@@ -144,6 +146,7 @@ def review_issues(settings: Settings, text: str, issues: List[Any]) -> Tuple[Lis
         'kept': 0,
         'failed': False,
         'failure_code': None,
+        'retryable': False,
         'reason': '',
     }
 
@@ -209,10 +212,11 @@ def review_issues(settings: Settings, text: str, issues: List[Any]) -> Tuple[Lis
         resp = client.chat.completions.create(**create_kwargs)
         content = resp.choices[0].message.content or ''
         verdicts = _parse_response(content, len(payload))
-    except Exception:
+    except Exception as error:
         logger.exception("llm_review_provider_failed")
         stats['failed'] = True
         stats['failure_code'] = 'llm_provider_error'
+        stats['retryable'] = _is_retryable_provider_failure(error)
         stats['reason'] = '大模型调用失败，已回退纯规则结果'
         return issues, stats
 
@@ -253,3 +257,12 @@ def review_issues(settings: Settings, text: str, issues: List[Any]) -> Tuple[Lis
     # 重建结果：剔除被判定为误报的项
     final = [issue for idx, issue in enumerate(issues) if idx not in removed_idx]
     return final, stats
+
+
+def _is_retryable_provider_failure(error: Exception) -> bool:
+    if isinstance(error, (TimeoutError, ConnectionError, *RETRYABLE_PROVIDER_ERRORS)):
+        return True
+    status_code = getattr(error, "status_code", None)
+    return isinstance(status_code, int) and (
+        status_code in {408, 409, 425, 429} or status_code >= 500
+    )

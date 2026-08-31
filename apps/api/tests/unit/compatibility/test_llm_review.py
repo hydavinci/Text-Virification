@@ -48,7 +48,35 @@ def test_provider_exception_is_logged_but_not_exposed_in_review_metadata(
     assert len(issues) == 1
     assert stats["failed"] is True
     assert stats["failure_code"] == "llm_provider_error"
+    assert stats["retryable"] is False
     assert stats["reason"] == "大模型调用失败，已回退纯规则结果"
     assert "provider secret" not in repr(stats)
     assert caplog.records[-1].getMessage() == "llm_review_provider_failed"
     assert caplog.records[-1].exc_info is not None
+
+
+def test_transient_provider_failure_is_classified_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingCompletions:
+        def create(self, **kwargs: object) -> object:
+            del kwargs
+            raise TimeoutError("provider timed out")
+
+    class FailingOpenAI:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+            self.chat = type("Chat", (), {"completions": FailingCompletions()})()
+
+    monkeypatch.setattr(llm_review, "OpenAI", FailingOpenAI)
+
+    issues, stats = llm_review.review_issues(
+        Settings(llm_api_key="configured"),
+        "中文，，文本",
+        [_review_candidate()],
+    )
+
+    assert len(issues) == 1
+    assert stats["failed"] is True
+    assert stats["failure_code"] == "llm_provider_error"
+    assert stats["retryable"] is True

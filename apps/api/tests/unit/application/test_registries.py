@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import Barrier
 from uuid import uuid4
 
 import pytest
@@ -16,6 +18,7 @@ from text_verification.domain.ports import CheckContext, CheckResult
 from text_verification.domain.verification import GlossaryTerm, Scenario, VerificationOptions
 from text_verification.exporters.compatibility_exporter import CompatibilityExporter
 from text_verification.exporters.registry import ExporterRegistry
+from text_verification.parsers import compatibility_parser as compatibility_parser_module
 from text_verification.parsers.compatibility_parser import CompatibilityParser
 from text_verification.parsers.registry import ParserRegistry
 from text_verification.registry_errors import DuplicateCapabilityError, MissingCapabilityError
@@ -257,6 +260,31 @@ def test_compatibility_parser_uses_existing_page_map_adapter(
     assert [block.text for block in document.blocks] == ["Alpha", "Beta"]
 
 
+def test_compatibility_parser_normalizes_expected_legacy_parse_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_path = tmp_path / "sample.txt"
+    source_path.write_text("content", encoding="utf-8")
+
+    monkeypatch.setattr(
+        compatibility_parser_module,
+        "source_version_for_file",
+        lambda path: f"sha256:{path.name}",
+    )
+
+    def fail_parse(*args: object) -> tuple[str, str, list[tuple[int, int, str]]]:
+        del args
+        raise ValueError("expected legacy parse failure")
+
+    monkeypatch.setattr(compatibility_parser_module, "parse_file", fail_parse)
+
+    with pytest.raises(compatibility_parser_module.ParserError) as raised:
+        CompatibilityParser(FileType.TXT).parse(source_path)
+
+    assert isinstance(raised.value.__cause__, ValueError)
+
+
 def test_compatibility_checker_uses_text_analyzer_and_domain_issue_adapter() -> None:
     analyzer = RecordingAnalyzer(
         issues=[
@@ -370,6 +398,41 @@ def test_compatibility_checker_does_not_leak_dictionary_versions_between_runs() 
     assert dict(first.dictionary_versions) == {"first_dict": "v1"}
     assert dict(second.dictionary_versions) == {"second_dict": "v2"}
     assert dict(first.dictionary_versions) == {"first_dict": "v1"}
+
+
+def test_default_compatibility_checker_isolates_concurrent_analyzer_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    barrier = Barrier(2)
+    analyzers: list[InterleavingAnalyzer] = []
+
+    def build_analyzer(*, dictionary_loader: object) -> InterleavingAnalyzer:
+        del dictionary_loader
+        analyzer = InterleavingAnalyzer(barrier)
+        analyzers.append(analyzer)
+        return analyzer
+
+    monkeypatch.setattr(
+        "text_verification.checkers.compatibility_checker.TextAnalyzer",
+        build_analyzer,
+    )
+    checker = CompatibilityChecker()
+
+    def run(text: str) -> CheckResult:
+        return checker.check(
+            _document(text=text),
+            CheckContext.from_options(VerificationOptions()),
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first_future = executor.submit(run, "first")
+        second_future = executor.submit(run, "second")
+        first = first_future.result(timeout=2)
+        second = second_future.result(timeout=2)
+
+    assert len(analyzers) == 2
+    assert dict(first.dictionary_versions) == {"first_dict": "version:first"}
+    assert dict(second.dictionary_versions) == {"second_dict": "version:second"}
 
 
 def test_compatibility_exporter_uses_injected_source_path_resolver(
@@ -523,6 +586,18 @@ class SequentialAnalyzer:
         current_run = self.runs.pop(0)
         self.dictionary_versions = dict(current_run.dictionary_versions)
         return list(current_run.issues)
+
+
+@dataclass
+class InterleavingAnalyzer:
+    barrier: Barrier
+    dictionary_versions: dict[str, str] = field(default_factory=dict)
+
+    def analyze(self, text: str, **kwargs: object) -> list[LegacyIssue]:
+        del kwargs
+        self.dictionary_versions = {f"{text}_dict": f"version:{text}"}
+        self.barrier.wait(timeout=2)
+        return []
 
 
 @dataclass(frozen=True)

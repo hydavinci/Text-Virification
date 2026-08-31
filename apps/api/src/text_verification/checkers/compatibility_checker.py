@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Protocol, cast
 
 from text_verification.compatibility.adapters import legacy_issues_to_domain
@@ -37,13 +38,19 @@ class CompatibilityChecker:
         *,
         dictionary_loader: DictionaryLoader | None = None,
     ) -> None:
-        self._analyzer = analyzer or cast(
+        if analyzer is not None:
+            self._analyzer_factory: Callable[[], LegacyAnalyzer] = lambda: analyzer
+            return
+
+        shared_dictionary_loader = dictionary_loader or DictionaryLoader()
+        self._analyzer_factory = lambda: cast(
             LegacyAnalyzer,
-            TextAnalyzer(dictionary_loader=dictionary_loader or DictionaryLoader()),
+            TextAnalyzer(dictionary_loader=shared_dictionary_loader),
         )
 
     def check(self, document: DocumentModel, context: CheckContext) -> CheckResult:
-        issues = self._analyzer.analyze(
+        analyzer = self._analyzer_factory()
+        issues = analyzer.analyze(
             document.text,
             scenario=context.scenario.value,
             custom_glossary=list(context.custom_glossary),
@@ -54,5 +61,5 @@ class CompatibilityChecker:
         )
         return CheckResult(
             issues=legacy_issues_to_domain(issues, document, context.verification_run_id),
-            dictionary_versions=self._analyzer.dictionary_versions,
+            dictionary_versions=analyzer.dictionary_versions,
         )

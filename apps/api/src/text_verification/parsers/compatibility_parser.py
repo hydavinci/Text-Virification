@@ -9,6 +9,7 @@ from text_verification.compatibility.adapters import (
 )
 from text_verification.compatibility.parser import parse_file
 from text_verification.domain.documents import DocumentModel, FileType
+from text_verification.parsers.errors import ParserError
 
 _EMPTY_FILE_ERROR = "File content is empty or no text could be extracted."
 
@@ -19,13 +20,16 @@ class CompatibilityParser:
 
     def parse(self, source_path: Path) -> DocumentModel:
         source_version = source_version_for_file(source_path)
-        text, parsed_format, page_map = parse_file(
-            str(source_path),
-            self.supported_type.value,
-            str(source_path.parent),
-        )
+        try:
+            text, parsed_format, page_map = parse_file(
+                str(source_path),
+                self.supported_type.value,
+                str(source_path.parent),
+            )
+        except ValueError as error:
+            raise ParserError("The compatibility parser could not parse the source.") from error
         if not text.strip():
-            raise ValueError(_EMPTY_FILE_ERROR)
+            raise ParserError(_EMPTY_FILE_ERROR)
         return parsed_file_to_document_model(
             text=text,
             source_version=source_version,

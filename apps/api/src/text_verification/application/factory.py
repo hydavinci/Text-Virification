@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, cast
 
+from text_verification.application.errors import ReviewerError
 from text_verification.application.verification_pipeline import (
     ReviewMetadata,
     VerificationPipeline,
@@ -40,6 +41,17 @@ class CompatibilityIssueReviewer:
             for legacy_issue, issue in zip(legacy_issues, issues, strict=True)
         }
         reviewed, metadata = review_issues(self.settings, document.text, legacy_issues)
+        if metadata.get("failed"):
+            failure_code = str(metadata.get("failure_code") or "llm_review_failed")
+            retryable = metadata.get("retryable")
+            if not isinstance(retryable, bool):
+                retryable = failure_code in {"llm_provider_error", "llm_timeout"}
+            raise ReviewerError(
+                code=failure_code,
+                message=str(metadata.get("reason") or "LLM review failed."),
+                retryable=retryable,
+                metadata=dict(metadata),
+            )
         return (
             tuple(
                 _apply_legacy_review(source_by_legacy_id[id(legacy_issue)], legacy_issue)

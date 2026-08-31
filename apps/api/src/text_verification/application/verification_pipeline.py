@@ -6,9 +6,7 @@ from pathlib import Path
 from typing import Any, Protocol
 from uuid import UUID
 
-from pydantic import ValidationError
-
-from text_verification.application.errors import VerificationError
+from text_verification.application.errors import ReviewerError, VerificationError
 from text_verification.checkers.registry import CheckerRegistry
 from text_verification.compatibility.adapters import text_to_document_model
 from text_verification.compatibility.statistics import text_statistics
@@ -25,6 +23,7 @@ from text_verification.domain.verification import (
     VerificationSummary,
 )
 from text_verification.infrastructure.dictionary_loader import DictionaryLoadError
+from text_verification.parsers.errors import ParserError
 from text_verification.parsers.registry import ParserRegistry
 from text_verification.registry_errors import MissingCapabilityError
 
@@ -76,7 +75,7 @@ class VerificationPipeline:
                 review_metadata = {
                     **review_metadata,
                     "stage": "reviewing",
-                    "retryable": True,
+                    "retryable": bool(review_metadata.get("retryable", False)),
                 }
                 degradation_reasons = ("llm_review_failed",)
             elif review_metadata.get("performed"):
@@ -148,7 +147,7 @@ class VerificationPipeline:
                 "The stored source document could not be read.",
                 True,
             ) from error
-        except (ValidationError, ValueError) as error:
+        except ParserError as error:
             raise VerificationError(
                 "parser_failed",
                 "parsing",
@@ -192,20 +191,6 @@ class VerificationPipeline:
                 "A verification dictionary could not be loaded.",
                 False,
             ) from error
-        except (ValidationError, ValueError) as error:
-            raise VerificationError(
-                "checker_failed",
-                "checking",
-                "A checker returned an invalid result.",
-                False,
-            ) from error
-        except OSError as error:
-            raise VerificationError(
-                "checker_failed",
-                "checking",
-                "A checker could not complete verification.",
-                True,
-            ) from error
 
     def _review(
         self,
@@ -216,23 +201,20 @@ class VerificationPipeline:
             return issues, None
         try:
             return self._reviewer.review(document, issues)
-        except TimeoutError:
-            return issues, _failed_review_metadata("llm_timeout")
-        except ConnectionError:
-            return issues, _failed_review_metadata("llm_provider_error")
-        except (ValidationError, ValueError):
-            return issues, _failed_review_metadata("llm_invalid_response")
+        except ReviewerError as error:
+            return issues, _failed_review_metadata(error)
 
 
-def _failed_review_metadata(failure_code: str) -> ReviewMetadata:
+def _failed_review_metadata(error: ReviewerError) -> ReviewMetadata:
     return {
+        **error.metadata,
         "enabled": True,
         "performed": False,
         "failed": True,
-        "failure_code": failure_code,
+        "failure_code": error.code,
         "stage": "reviewing",
-        "retryable": True,
-        "reason": "大模型复核失败，已回退纯规则结果",
+        "retryable": error.retryable,
+        "reason": str(error),
     }
 
 
