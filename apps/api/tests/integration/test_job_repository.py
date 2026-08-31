@@ -6,10 +6,11 @@ from uuid import uuid4
 import pytest
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from sqlalchemy import Engine, inspect, text
+from sqlalchemy import Engine, String, Text, inspect, text
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.session import sessionmaker
 
+from alembic import command
 from text_verification.domain.documents import FileType
 from text_verification.domain.jobs import JobStatus, TerminalJobStateError
 from text_verification.infrastructure.orm import JobRow
@@ -36,6 +37,19 @@ def test_database_schema_matches_head_migration(
     assert {"ix_job_events_job_sequence"} <= {
         index["name"] for index in inspector.get_indexes("job_events")
     }
+
+
+def test_migration_0002_cycle_preserves_0001_job_column_types(
+    db_engine: Engine,
+    alembic_config: Config,
+) -> None:
+    _assert_0001_job_column_types(db_engine)
+    try:
+        command.downgrade(alembic_config, "0001_create_jobs_and_events")
+        _assert_0001_job_column_types(db_engine)
+    finally:
+        command.upgrade(alembic_config, "head")
+    _assert_0001_job_column_types(db_engine)
 
 
 def test_repository_persists_job_and_ordered_events(db_session: Session) -> None:
@@ -295,3 +309,21 @@ def test_transition_serializes_concurrent_updates_without_sequence_gaps(
         JobStatus.UPLOAD_VALIDATED,
         JobStatus.PARSING,
     ]
+
+
+def _assert_0001_job_column_types(db_engine: Engine) -> None:
+    inspector = inspect(db_engine)
+    job_columns = {
+        column["name"]: column["type"] for column in inspector.get_columns("jobs")
+    }
+    event_columns = {
+        column["name"]: column["type"] for column in inspector.get_columns("job_events")
+    }
+
+    assert isinstance(job_columns["source_name"], String)
+    assert job_columns["source_name"].length == 255
+    assert isinstance(job_columns["error_code"], String)
+    assert job_columns["error_code"].length == 64
+    assert isinstance(job_columns["error_message"], Text)
+    assert isinstance(event_columns["message"], String)
+    assert event_columns["message"].length == 255

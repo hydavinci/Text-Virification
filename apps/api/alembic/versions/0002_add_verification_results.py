@@ -20,28 +20,6 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.alter_column(
-        "jobs",
-        "source_name",
-        existing_type=sa.String(length=255),
-        type_=sa.Text(),
-        existing_nullable=False,
-    )
-    op.alter_column(
-        "jobs",
-        "error_code",
-        existing_type=sa.String(length=64),
-        type_=sa.Text(),
-        existing_nullable=True,
-    )
-    op.alter_column(
-        "job_events",
-        "message",
-        existing_type=sa.String(length=255),
-        type_=sa.Text(),
-        existing_nullable=False,
-    )
-
     op.create_table(
         "documents",
         sa.Column(
@@ -295,24 +273,3 @@ def downgrade() -> None:
     op.drop_table("verification_issues")
     op.drop_table("verification_runs")
     op.drop_table("documents")
-    op.alter_column(
-        "job_events",
-        "message",
-        existing_type=sa.Text(),
-        type_=sa.String(length=255),
-        existing_nullable=False,
-    )
-    op.alter_column(
-        "jobs",
-        "error_code",
-        existing_type=sa.Text(),
-        type_=sa.String(length=64),
-        existing_nullable=True,
-    )
-    op.alter_column(
-        "jobs",
-        "source_name",
-        existing_type=sa.Text(),
-        type_=sa.String(length=255),
-        existing_nullable=False,
-    )

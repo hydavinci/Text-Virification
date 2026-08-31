@@ -24,8 +24,6 @@ from text_verification.domain.verification import (
 from text_verification.infrastructure.orm import (
     DocumentRow,
     ExportArtifactRow,
-    JobEventRow,
-    JobRow,
     ReviewRevisionRow,
     VerificationIssueRow,
     VerificationRunRow,
@@ -90,9 +88,6 @@ def test_result_row_mapping_uses_canonical_json_review_metadata() -> None:
 @pytest.mark.parametrize(
     "column",
     [
-        JobRow.__table__.c.source_name,
-        JobRow.__table__.c.error_code,
-        JobEventRow.__table__.c.message,
         DocumentRow.__table__.c.source_version,
         DocumentRow.__table__.c.source_name,
         VerificationRunRow.__table__.c.stats_primary_label,

@@ -18,6 +18,9 @@ from text_verification.infrastructure.orm import JobEventRow, JobRow
 
 INITIAL_EVENT_MESSAGE = "作业已创建"
 EXPIRED_EVENT_MESSAGE = "作业已过期"
+MAX_SOURCE_NAME_LENGTH = 255
+MAX_ERROR_CODE_LENGTH = 64
+MAX_EVENT_MESSAGE_LENGTH = 255
 
 
 class JobRepository:
@@ -35,6 +38,7 @@ class JobRepository:
         created_at: datetime,
         expires_at: datetime,
     ) -> JobRead:
+        _validate_max_length("source_name", source_name, MAX_SOURCE_NAME_LENGTH)
         normalized_file_type = FileType(file_type).value
         row = JobRow(
             job_id=job_id,
@@ -83,6 +87,8 @@ class JobRepository:
         error_code: str | None = None,
         error_message: str | None = None,
     ) -> None:
+        _validate_max_length("message", message, MAX_EVENT_MESSAGE_LENGTH)
+        _validate_max_length("error_code", error_code, MAX_ERROR_CODE_LENGTH)
         job = self._lock_job(job_id)
         current_status = JobStatus(job.status)
         if current_status in TERMINAL_STATUSES:
@@ -196,3 +202,12 @@ class JobRepository:
             message=row.message,
             created_at=row.created_at,
         )
+
+
+def _validate_max_length(
+    field_name: str,
+    value: str | None,
+    max_length: int,
+) -> None:
+    if value is not None and len(value) > max_length:
+        raise ValueError(f"{field_name} must be at most {max_length} characters.")

@@ -30,13 +30,13 @@ class JobRow(Base):
     __tablename__ = "jobs"
 
     job_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
-    source_name: Mapped[str] = mapped_column(Text)
+    source_name: Mapped[str] = mapped_column(String(255))
     file_type: Mapped[str] = mapped_column(String(16))
     size_bytes: Mapped[int] = mapped_column(Integer)
     storage_key: Mapped[str] = mapped_column(String(64), unique=True)
     status: Mapped[str] = mapped_column(String(32), index=True)
     progress: Mapped[int] = mapped_column(Integer, default=0)
-    error_code: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -61,7 +61,7 @@ class JobEventRow(Base):
     sequence: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(32))
     progress: Mapped[int] = mapped_column(Integer)
-    message: Mapped[str] = mapped_column(Text)
+    message: Mapped[str] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     job: Mapped[JobRow] = relationship(back_populates="events")
 
