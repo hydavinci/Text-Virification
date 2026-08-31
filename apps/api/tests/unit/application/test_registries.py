@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Barrier
 from uuid import uuid4
+from zipfile import BadZipFile
 
 import pytest
 
@@ -282,7 +283,36 @@ def test_compatibility_parser_normalizes_expected_legacy_parse_failure(
     with pytest.raises(compatibility_parser_module.ParserError) as raised:
         CompatibilityParser(FileType.TXT).parse(source_path)
 
+    assert raised.value.compatibility_detail == "expected legacy parse failure"
+    assert raised.value.compatibility_detail_format == "direct"
     assert isinstance(raised.value.__cause__, ValueError)
+
+
+def test_compatibility_parser_wraps_expected_library_failure_with_prefixed_detail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_path = tmp_path / "sample.docx"
+    source_path.write_bytes(b"docx")
+
+    monkeypatch.setattr(
+        compatibility_parser_module,
+        "source_version_for_file",
+        lambda path: f"sha256:{path.name}",
+    )
+
+    def fail_parse(*args: object) -> tuple[str, str, list[tuple[int, int, str]]]:
+        del args
+        raise BadZipFile("File is not a zip file")
+
+    monkeypatch.setattr(compatibility_parser_module, "parse_file", fail_parse)
+
+    with pytest.raises(compatibility_parser_module.ParserError) as raised:
+        CompatibilityParser(FileType.DOCX).parse(source_path)
+
+    assert raised.value.compatibility_detail == "File is not a zip file"
+    assert raised.value.compatibility_detail_format == "prefixed"
+    assert isinstance(raised.value.__cause__, BadZipFile)
 
 
 def test_compatibility_checker_uses_text_analyzer_and_domain_issue_adapter() -> None:

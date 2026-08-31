@@ -5,7 +5,7 @@ import json
 from io import BytesIO
 from pathlib import Path
 from uuid import UUID, uuid4
-from zipfile import ZipFile
+from zipfile import BadZipFile, ZipFile
 
 from docx import Document
 from fastapi import FastAPI
@@ -27,6 +27,7 @@ from text_verification.domain.verification import (
     VerificationSummary,
 )
 from text_verification.infrastructure.dictionary_loader import DictionaryLoadError
+from text_verification.parsers import compatibility_parser as compatibility_parser_module
 
 
 def override_storage(app: FastAPI, storage_root: Path) -> None:
@@ -333,6 +334,66 @@ def test_uploaded_file_is_deleted_when_dictionary_encoding_is_invalid(
     compatibility_root = tmp_path / "compatibility"
     assert response.status_code == 500
     assert response.json() == {"detail": "Verification dictionaries are unavailable."}
+    assert not compatibility_root.exists() or list(compatibility_root.iterdir()) == []
+
+
+def test_uploaded_value_error_preserves_legacy_400_detail_and_cleans_up(
+    app: FastAPI,
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    override_storage(app, tmp_path)
+
+    def fail_parse(*args: object) -> tuple[str, str, list[tuple[int, int, str]]]:
+        del args
+        raise ValueError("expected legacy parse failure")
+
+    monkeypatch.setattr(compatibility_parser_module, "parse_file", fail_parse)
+
+    response = client.post(
+        "/api/v1/analyze",
+        files={"file": ("source.txt", "帐号测试".encode(), "text/plain")},
+    )
+
+    compatibility_root = tmp_path / "compatibility"
+    assert response.status_code == 400
+    assert response.json() == {"detail": "expected legacy parse failure"}
+    assert not compatibility_root.exists() or list(compatibility_root.iterdir()) == []
+
+
+def test_uploaded_library_parse_failure_keeps_legacy_prefix_and_cleans_up(
+    app: FastAPI,
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    override_storage(app, tmp_path)
+
+    def fail_parse(*args: object) -> tuple[str, str, list[tuple[int, int, str]]]:
+        del args
+        raise BadZipFile("File is not a zip file")
+
+    monkeypatch.setattr(compatibility_parser_module, "parse_file", fail_parse)
+    source = BytesIO()
+    document = Document()
+    document.add_paragraph("帐号测试")
+    document.save(source)
+
+    response = client.post(
+        "/api/v1/analyze",
+        files={
+            "file": (
+                "source.docx",
+                source.getvalue(),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+
+    compatibility_root = tmp_path / "compatibility"
+    assert response.status_code == 400
+    assert response.json() == {"detail": "File parsing failed: File is not a zip file"}
     assert not compatibility_root.exists() or list(compatibility_root.iterdir()) == []
 
 

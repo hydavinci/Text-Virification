@@ -43,6 +43,7 @@ from text_verification.compatibility.storage import (
 from text_verification.config import Settings, get_settings
 from text_verification.domain.documents import FileType
 from text_verification.domain.verification import VerificationExecutionMode, VerificationResult
+from text_verification.parsers.errors import ParserError
 
 router = APIRouter(tags=["compatibility"])
 
@@ -241,8 +242,15 @@ def _compatibility_http_error(error: VerificationError) -> HTTPException:
             detail=_DICTIONARY_UNAVAILABLE_DETAIL,
         )
     if error.code == "parser_failed":
-        detail = str(error.__cause__ or error)
-        return HTTPException(status.HTTP_400_BAD_REQUEST, detail=detail)
+        parser_error = error.__cause__
+        if isinstance(parser_error, ParserError):
+            detail = parser_error.compatibility_detail or str(parser_error)
+            if parser_error.compatibility_detail_format == "direct":
+                return HTTPException(status.HTTP_400_BAD_REQUEST, detail=detail)
+            return HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                detail=f"File parsing failed: {detail}",
+            )
     if error.stage == "parsing":
         return HTTPException(
             status.HTTP_400_BAD_REQUEST,
