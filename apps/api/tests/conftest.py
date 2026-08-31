@@ -106,4 +106,11 @@ def db_session(db_session_factory: sessionmaker[Session], db_engine: Engine) -> 
     finally:
         session.close()
         with db_engine.begin() as connection:
-            connection.execute(text("TRUNCATE TABLE job_events, jobs RESTART IDENTITY CASCADE"))
+            connection.execute(
+                text(
+                    "TRUNCATE TABLE "
+                    "export_artifacts, review_revisions, verification_issues, "
+                    "verification_runs, documents, job_events, jobs "
+                    "RESTART IDENTITY CASCADE"
+                )
+            )
