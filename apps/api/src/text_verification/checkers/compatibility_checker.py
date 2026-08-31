@@ -6,8 +6,7 @@ from text_verification.compatibility.adapters import legacy_issues_to_domain
 from text_verification.compatibility.analyzer import Issue as LegacyIssue
 from text_verification.compatibility.analyzer import TextAnalyzer
 from text_verification.domain.documents import DocumentModel
-from text_verification.domain.issues import Issue
-from text_verification.domain.ports import CheckContext
+from text_verification.domain.ports import CheckContext, CheckResult
 from text_verification.infrastructure.dictionary_loader import DictionaryLoader
 
 
@@ -42,13 +41,8 @@ class CompatibilityChecker:
             LegacyAnalyzer,
             TextAnalyzer(dictionary_loader=dictionary_loader or DictionaryLoader()),
         )
-        self._dictionary_versions: dict[str, str] = {}
 
-    @property
-    def dictionary_versions(self) -> dict[str, str]:
-        return dict(self._dictionary_versions)
-
-    def check(self, document: DocumentModel, context: CheckContext) -> list[Issue]:
+    def check(self, document: DocumentModel, context: CheckContext) -> CheckResult:
         issues = self._analyzer.analyze(
             document.text,
             scenario=context.scenario.value,
@@ -58,5 +52,7 @@ class CompatibilityChecker:
             enable_sensitive=context.enable_sensitive,
             enable_ad_extreme=context.enable_ad_extreme,
         )
-        self._dictionary_versions = self._analyzer.dictionary_versions
-        return list(legacy_issues_to_domain(issues, document, context.verification_run_id))
+        return CheckResult(
+            issues=legacy_issues_to_domain(issues, document, context.verification_run_id),
+            dictionary_versions=self._analyzer.dictionary_versions,
+        )

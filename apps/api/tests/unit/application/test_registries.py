@@ -9,9 +9,10 @@ import pytest
 from text_verification.checkers.compatibility_checker import CompatibilityChecker
 from text_verification.checkers.registry import CheckerRegistry
 from text_verification.compatibility.analyzer import Issue as LegacyIssue
+from text_verification.compatibility.exporters import ExportedDocument, ExportError
 from text_verification.domain.documents import DocumentModel, FileType, TextBlock
 from text_verification.domain.issues import Issue, IssueSeverity
-from text_verification.domain.ports import CheckContext
+from text_verification.domain.ports import CheckContext, CheckResult
 from text_verification.domain.verification import GlossaryTerm, Scenario, VerificationOptions
 from text_verification.exporters.compatibility_exporter import CompatibilityExporter
 from text_verification.exporters.registry import ExporterRegistry
@@ -43,12 +44,16 @@ class FakeChecker:
     name: str
     layer: str
     issues: tuple[Issue, ...]
+    dictionary_versions: dict[str, str] = field(default_factory=dict)
     version: str = "1"
     supported_languages: set[str] = field(default_factory=lambda: {"zh"})
 
-    def check(self, document: DocumentModel, context: CheckContext) -> list[Issue]:
+    def check(self, document: DocumentModel, context: CheckContext) -> CheckResult:
         del document, context
-        return list(self.issues)
+        return CheckResult(
+            issues=self.issues,
+            dictionary_versions=self.dictionary_versions,
+        )
 
 
 def test_parser_registry_returns_registered_parser_for_file_type() -> None:
@@ -157,17 +162,45 @@ def test_checker_registry_runs_in_layer_then_registration_order() -> None:
         ]
     )
 
-    issues = registry.run(
+    result = registry.run(
         _document(text="帐号测试"),
         CheckContext.from_options(VerificationOptions()),
     )
 
-    assert [item.layer for item in issues] == ["character", "character", "sentence"]
-    assert [item.rule_id for item in issues] == [
+    assert [item.layer for item in result.issues] == ["character", "character", "sentence"]
+    assert [item.rule_id for item in result.issues] == [
         "character-first",
         "character-second",
         "sentence-checker",
     ]
+
+
+def test_checker_registry_collects_immutable_dictionary_versions() -> None:
+    registry = CheckerRegistry(
+        [
+            FakeChecker(
+                name="character-checker",
+                layer="character",
+                issues=(_issue(layer="character", rule_id="character"),),
+                dictionary_versions={"character_dict": "v1"},
+            ),
+            FakeChecker(
+                name="security-checker",
+                layer="security",
+                issues=(_issue(layer="security", rule_id="security"),),
+                dictionary_versions={"security_dict": "v2"},
+            ),
+        ]
+    )
+
+    result = registry.run(_document(), CheckContext.from_options(VerificationOptions()))
+
+    assert dict(result.dictionary_versions) == {
+        "character_dict": "v1",
+        "security_dict": "v2",
+    }
+    with pytest.raises(TypeError):
+        result.dictionary_versions["new_dict"] = "v3"  # type: ignore[index]
 
 
 def test_check_context_from_options_normalizes_checker_inputs() -> None:
@@ -254,7 +287,7 @@ def test_compatibility_checker_uses_text_analyzer_and_domain_issue_adapter() -> 
         )
     )
 
-    issues = checker.check(document, context)
+    result = checker.check(document, context)
 
     assert analyzer.calls == [
         {
@@ -267,14 +300,199 @@ def test_compatibility_checker_uses_text_analyzer_and_domain_issue_adapter() -> 
             "enable_ad_extreme": False,
         }
     ]
-    assert len(issues) == 1
-    assert issues[0].document_id == document.document_id
-    assert issues[0].verification_run_id == context.verification_run_id
-    assert checker.dictionary_versions == {"sensitive_rules": "sha256:rules"}
+    assert len(result.issues) == 1
+    assert result.issues[0].document_id == document.document_id
+    assert result.issues[0].verification_run_id == context.verification_run_id
+    assert dict(result.dictionary_versions) == {"sensitive_rules": "sha256:rules"}
 
 
 def test_compatibility_exporter_exposes_registered_file_type() -> None:
-    assert CompatibilityExporter(FileType.PDF).file_type is FileType.PDF
+    exporter = CompatibilityExporter(
+        FileType.PDF,
+        source_path_resolver=StaticSourcePathResolver(Path("source.pdf")),
+    )
+
+    assert exporter.file_type is FileType.PDF
+
+
+def test_compatibility_checker_does_not_leak_dictionary_versions_between_runs() -> None:
+    analyzer = SequentialAnalyzer(
+        runs=[
+            AnalyzerRun(
+                issues=[
+                    LegacyIssue(
+                        type="typo",
+                        severity="warning",
+                        original="帐号",
+                        suggestion="账号",
+                        position=0,
+                        end_position=2,
+                        context="帐号测试",
+                        description="疑似错别字",
+                        rule_id="cn_typo",
+                        alternatives=["账号"],
+                        layer="character",
+                    )
+                ],
+                dictionary_versions={"first_dict": "v1"},
+            ),
+            AnalyzerRun(
+                issues=[
+                    LegacyIssue(
+                        type="typo",
+                        severity="warning",
+                        original="测试",
+                        suggestion="校验",
+                        position=2,
+                        end_position=4,
+                        context="帐号测试",
+                        description="疑似错别字",
+                        rule_id="cn_typo_2",
+                        alternatives=["校验"],
+                        layer="character",
+                    )
+                ],
+                dictionary_versions={"second_dict": "v2"},
+            ),
+        ]
+    )
+    checker = CompatibilityChecker(analyzer=analyzer)
+
+    first = checker.check(
+        _document(text="帐号测试"),
+        CheckContext.from_options(VerificationOptions()),
+    )
+    second = checker.check(
+        _document(text="帐号测试"),
+        CheckContext.from_options(VerificationOptions()),
+    )
+
+    assert dict(first.dictionary_versions) == {"first_dict": "v1"}
+    assert dict(second.dictionary_versions) == {"second_dict": "v2"}
+    assert dict(first.dictionary_versions) == {"first_dict": "v1"}
+
+
+def test_compatibility_exporter_uses_injected_source_path_resolver(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolved_source = tmp_path / "stored" / "source.pdf"
+    target = tmp_path / "exported.pdf"
+    calls: list[dict[str, object]] = []
+
+    def fake_export_original(
+        source_path: Path,
+        extension: str,
+        replacements: list[tuple[str, str, int | None, int | None]],
+        track_changes: bool,
+        *,
+        original_text: str | None = None,
+        modified_text: str | None = None,
+    ) -> ExportedDocument:
+        calls.append(
+            {
+                "source_path": source_path,
+                "extension": extension,
+                "replacements": replacements,
+                "track_changes": track_changes,
+                "original_text": original_text,
+                "modified_text": modified_text,
+            }
+        )
+        return ExportedDocument(
+            content=b"%PDF-1.7",
+            extension="pdf",
+            media_type="application/pdf",
+        )
+
+    monkeypatch.setattr(
+        "text_verification.exporters.compatibility_exporter.export_original",
+        fake_export_original,
+    )
+
+    exporter = CompatibilityExporter(
+        FileType.PDF,
+        source_path_resolver=StaticSourcePathResolver(resolved_source),
+    )
+    output_path = exporter.export(
+        _document(text="帐号测试", source_name="用户显示名称.pdf"),
+        [_issue()],
+        target,
+    )
+
+    assert output_path == target
+    assert target.read_bytes() == b"%PDF-1.7"
+    assert calls[0]["source_path"] == resolved_source
+
+
+def test_compatibility_exporter_rejects_nullable_suggestion(
+    tmp_path: Path,
+) -> None:
+    exporter = CompatibilityExporter(
+        FileType.TXT,
+        source_path_resolver=StaticSourcePathResolver(tmp_path / "source.txt"),
+    )
+
+    with pytest.raises(ExportError, match="non-null suggestion"):
+        exporter.export(
+            _document(text="帐号测试"),
+            [_issue(suggestion=None, auto_fixable=False)],
+            tmp_path / "exported.txt",
+        )
+
+
+def test_compatibility_exporter_rejects_non_auto_fixable_issue(
+    tmp_path: Path,
+) -> None:
+    exporter = CompatibilityExporter(
+        FileType.TXT,
+        source_path_resolver=StaticSourcePathResolver(tmp_path / "source.txt"),
+    )
+
+    with pytest.raises(ExportError, match="auto-fixable"):
+        exporter.export(
+            _document(text="帐号测试"),
+            [_issue(auto_fixable=False)],
+            tmp_path / "exported.txt",
+        )
+
+
+def test_compatibility_exporter_allows_explicit_deletion_suggestion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_export_original(
+        source_path: Path,
+        extension: str,
+        replacements: list[tuple[str, str, int | None, int | None]],
+        track_changes: bool,
+        *,
+        original_text: str | None = None,
+        modified_text: str | None = None,
+    ) -> ExportedDocument:
+        del source_path, extension, track_changes, original_text, modified_text
+        assert replacements == [("帐号", "", 0, 2)]
+        return ExportedDocument(
+            content=b"",
+            extension="txt",
+            media_type="text/plain",
+        )
+
+    monkeypatch.setattr(
+        "text_verification.exporters.compatibility_exporter.export_original",
+        fake_export_original,
+    )
+
+    exporter = CompatibilityExporter(
+        FileType.TXT,
+        source_path_resolver=StaticSourcePathResolver(tmp_path / "source.txt"),
+    )
+
+    exporter.export(
+        _document(text="帐号测试"),
+        [_issue(suggestion="", auto_fixable=True)],
+        tmp_path / "exported.txt",
+    )
 
 
 @dataclass
@@ -288,12 +506,40 @@ class RecordingAnalyzer:
         return list(self.issues)
 
 
-def _document(text: str = "帐号") -> DocumentModel:
+@dataclass(frozen=True)
+class AnalyzerRun:
+    issues: list[LegacyIssue]
+    dictionary_versions: dict[str, str]
+
+
+@dataclass
+class SequentialAnalyzer:
+    runs: list[AnalyzerRun]
+    dictionary_versions: dict[str, str] = field(default_factory=dict)
+    calls: list[dict[str, object]] = field(default_factory=list)
+
+    def analyze(self, text: str, **kwargs: object) -> list[LegacyIssue]:
+        self.calls.append({"text": text, **kwargs})
+        current_run = self.runs.pop(0)
+        self.dictionary_versions = dict(current_run.dictionary_versions)
+        return list(current_run.issues)
+
+
+@dataclass(frozen=True)
+class StaticSourcePathResolver:
+    path: Path
+
+    def resolve(self, document: DocumentModel, *, source_path: Path | None = None) -> Path:
+        del document
+        return source_path or self.path
+
+
+def _document(text: str = "帐号", *, source_name: str = "sample.txt") -> DocumentModel:
     return DocumentModel(
         document_id=uuid4(),
         source_version="sha256:sample",
         file_type=FileType.TXT,
-        source_name="sample.txt",
+        source_name=source_name,
         text=text,
         blocks=[
             TextBlock(
@@ -322,11 +568,13 @@ def _document(text: str = "帐号") -> DocumentModel:
 
 def _issue(
     *,
-    layer: str,
+    layer: str = "character",
     start: int = 0,
     end: int = 2,
     original: str = "帐号",
     rule_id: str | None = None,
+    suggestion: str | None = "账号",
+    auto_fixable: bool = True,
 ) -> Issue:
     resolved_rule_id = rule_id or f"{layer}-rule"
     return Issue(
@@ -340,7 +588,7 @@ def _issue(
         block_start=start,
         block_end=end,
         original=original,
-        suggestion="账号",
+        suggestion=suggestion,
         alternatives=[],
         type="typo",
         severity=IssueSeverity.WARNING,
@@ -352,6 +600,6 @@ def _issue(
         source="test",
         source_version="1",
         confidence=0.8,
-        auto_fixable=True,
+        auto_fixable=auto_fixable,
         context="帐号测试",
     )

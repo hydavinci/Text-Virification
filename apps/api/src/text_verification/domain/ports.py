@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Protocol
 from uuid import UUID, uuid4
 
@@ -43,6 +45,23 @@ class CheckContext:
         )
 
 
+@dataclass(frozen=True)
+class CheckResult:
+    issues: tuple[Issue, ...]
+    dictionary_versions: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "issues", tuple(self.issues))
+        object.__setattr__(
+            self,
+            "dictionary_versions",
+            MappingProxyType(dict(self.dictionary_versions)),
+        )
+
+    def issue_list(self) -> list[Issue]:
+        return list(self.issues)
+
+
 class Parser(Protocol):
     supported_type: FileType
 
@@ -54,7 +73,7 @@ class Checker(Protocol):
     version: str
     supported_languages: set[str]
 
-    def check(self, document: DocumentModel, context: CheckContext) -> list[Issue]: ...
+    def check(self, document: DocumentModel, context: CheckContext) -> CheckResult: ...
 
 
 class Exporter(Protocol):

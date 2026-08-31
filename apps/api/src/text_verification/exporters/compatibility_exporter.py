@@ -2,15 +2,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
-from text_verification.compatibility.exporters import export_original
+from text_verification.compatibility.exporters import ExportError, export_original
 from text_verification.domain.documents import DocumentModel, FileType
 from text_verification.domain.issues import Issue
+
+
+class SourcePathResolver(Protocol):
+    def resolve(self, document: DocumentModel, *, source_path: Path | None = None) -> Path: ...
 
 
 @dataclass(frozen=True)
 class CompatibilityExporter:
     file_type: FileType
+    source_path_resolver: SourcePathResolver
 
     def export(
         self,
@@ -22,22 +28,30 @@ class CompatibilityExporter:
         track_changes: bool = False,
         modified_text: str | None = None,
     ) -> Path:
-        resolved_source_path = source_path or Path(document.source_name)
+        resolved_source_path = self.source_path_resolver.resolve(
+            document,
+            source_path=source_path,
+        )
         exported = export_original(
             resolved_source_path,
             self.file_type.value,
-            [
-                (
-                    issue.original,
-                    issue.suggestion or "",
-                    issue.start,
-                    issue.end,
-                )
-                for issue in issues
-            ],
+            [_replacement_for_issue(issue) for issue in issues],
             track_changes,
             original_text=document.text,
             modified_text=modified_text,
         )
         target.write_bytes(exported.content)
         return target
+
+
+def _replacement_for_issue(issue: Issue) -> tuple[str, str, int, int]:
+    if issue.suggestion is None:
+        raise ExportError("Export requires a non-null suggestion for every issue.")
+    if not issue.auto_fixable:
+        raise ExportError("Export requires every issue to be auto-fixable.")
+    return (
+        issue.original,
+        issue.suggestion,
+        issue.start,
+        issue.end,
+    )
