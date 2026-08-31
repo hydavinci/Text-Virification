@@ -12,6 +12,47 @@ from text_verification.domain.issues import Issue
 
 SummaryCount = Annotated[int, Field(ge=0)]
 
+_LEGACY_TYPE_LABELS = {
+    "typo": "错别字",
+    "variant_char": "异形词",
+    "width_mixed": "全半角混用",
+    "missing_char": "漏字/缺字",
+    "idiom_misuse": "成语误用",
+    "expression": "语病/表达",
+    "grammar": "语法",
+    "logic": "逻辑",
+    "punctuation": "标点符号",
+    "spacing": "多余空格",
+    "number_format": "数字/格式",
+    "repetition": "重复词语",
+    "style": "文风/格式",
+    "colloquial": "口语化",
+    "term_consistency": "术语不一致",
+    "pii_id": "身份证号",
+    "pii_phone": "手机号",
+    "pii_email": "邮箱地址",
+    "pii_bank": "银行卡号",
+    "pii_key": "密钥/凭证",
+}
+_LEGACY_SEVERITY_LABELS = {
+    "error": "错误",
+    "warning": "警告",
+    "info": "建议",
+}
+_LEGACY_LAYER_LABELS = {
+    "character": "字符层",
+    "vocabulary": "词汇层",
+    "sentence": "句子层",
+    "format": "标点/格式层",
+    "discourse": "语篇/语体层",
+    "security": "合规/安全层",
+}
+_LEGACY_SUMMARY_LABELS = {
+    "by_type": _LEGACY_TYPE_LABELS,
+    "by_severity": _LEGACY_SEVERITY_LABELS,
+    "by_layer": _LEGACY_LAYER_LABELS,
+}
+
 
 class Scenario(StrEnum):
     GENERAL = "general"
@@ -123,8 +164,12 @@ class VerificationResult(BaseModel):
             actual = getattr(self.summary, field_name)
             if sum(actual.values()) != len(self.issues):
                 raise ValueError(f"summary {field_name} total must match the issue count")
-            if field_name == "by_rule" and actual != dict(expected):
-                raise ValueError("summary by_rule counts must match issues")
-            if set(actual).issubset(expected) and actual != dict(expected):
+            allowed_counts = [dict(expected)]
+            if labels := _LEGACY_SUMMARY_LABELS.get(field_name):
+                localized: Counter[str] = Counter()
+                for key, count in expected.items():
+                    localized[labels.get(key, key)] += count
+                allowed_counts.append(dict(localized))
+            if actual not in allowed_counts:
                 raise ValueError(f"summary {field_name} counts must match issues")
         return self

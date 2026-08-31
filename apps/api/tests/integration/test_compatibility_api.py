@@ -690,7 +690,7 @@ def test_scenarios_and_formats_are_discoverable(client: TestClient) -> None:
         "news",
         "technical",
     }
-    assert {item["ext"] for item in formats_response.json()["formats"]} == {
+    assert [item["ext"] for item in formats_response.json()["formats"]] == [
         "txt",
         "docx",
         "doc",
@@ -698,9 +698,9 @@ def test_scenarios_and_formats_are_discoverable(client: TestClient) -> None:
         "rtf",
         "md",
         "csv",
-    }
+    ]
     assert formats_response.json()["formats"][0] == {
-        "ext": "docx",
-        "name": "Word 文档",
-        "accept": ".docx",
+        "ext": "txt",
+        "name": "纯文本文件",
+        "accept": ".txt",
     }

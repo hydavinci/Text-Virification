@@ -510,3 +510,129 @@ vite build succeeded
    are pre-existing and unrelated to this final-fix wave.
 4. The frontend still owns its current seven-format upload literal until the
    approved Stage 4 workspace migration consumes `/formats`.
+
+## Authorized corrective wave — 2026-08-31
+
+### Scope and fixes
+
+- Canonical verification summaries now accept only exact canonical counts or
+  the explicitly supported localized legacy counts. Mixed canonical and
+  unknown keys are rejected for type, severity, and layer buckets.
+- Source-rule contracts now record and assert issue severity. Representative
+  cases also assert summary totals and selected buckets, and a representative
+  rule case asserts its complete text statistics. Rule assertions remain
+  filtered by rule ID so unrelated hits are not constrained.
+- The synchronous compatibility capability profile now encodes the established
+  TXT-first order. `/api/v1/formats` continues to derive its response from the
+  manifest and has an exact-order regression test.
+
+### TDD evidence
+
+Summary validation RED:
+
+```text
+3 failed, 1 passed
+```
+
+Summary validation GREEN:
+
+```text
+4 passed
+```
+
+Source-rule contract RED:
+
+```text
+15 failed, 9 passed
+```
+
+Source-rule contract GREEN:
+
+```text
+23 passed
+```
+
+Format-order RED:
+
+```text
+3 failed
+```
+
+Format-order GREEN:
+
+```text
+3 passed
+```
+
+### Corrected validation counts
+
+The earlier `108 passed` focused-verification count is superseded by rerunning
+the identical command on the corrective-wave tree:
+
+```bash
+cd /Users/yhe/Work/Text-Virification/apps/api
+.venv/bin/python -m pytest \
+  tests/unit/domain \
+  tests/unit/compatibility/test_adapters.py \
+  tests/unit/compatibility/test_service.py \
+  tests/unit/compatibility/test_llm_review.py \
+  tests/unit/compatibility/test_source_versions.py \
+  tests/unit/infrastructure/test_dictionary_loader.py \
+  tests/contract \
+  tests/integration/test_compatibility_api.py \
+  -q --tb=short
+```
+
+Result:
+
+```text
+114 passed, 6 warnings
+```
+
+The narrower corrective-wave domain/contract/API command passed:
+
+```text
+61 passed, 6 warnings
+```
+
+The earlier `185 passed, 8 skipped` full-backend count is superseded for the
+corrective-wave tree by:
+
+```bash
+cd /Users/yhe/Work/Text-Virification/apps/api
+.venv/bin/python -m pytest -q
+```
+
+Result:
+
+```text
+189 passed, 8 skipped, 6 warnings
+```
+
+Static validation:
+
+```text
+Ruff: All checks passed!
+mypy: Success: no issues found in 41 source files
+```
+
+Frontend files were untouched, so the frontend suite and build were not
+repeated in this backend-only corrective wave.
+
+### Corrective-wave concerns
+
+1. Six PostgreSQL tests remain skipped because `TEST_DATABASE_URL` is not set.
+2. Two live Compose tests remain skipped because `LIVE_API_URL` is not set.
+3. The six existing Starlette/httpx and PyMuPDF/SWIG warnings remain unrelated
+   to these fixes.
+
+### Corrective-wave self-review
+
+- Reviewed every changed production, test, contract-data, ledger, and report
+  file and ran `git diff --check`.
+- Confirmed the format order is profile-owned and no route-local order was
+  introduced.
+- Confirmed summary validation still accepts the legacy localized/canonical
+  fallback mix produced for unmapped legacy issue types.
+- Confirmed no pipeline, persistence, exporter, or frontend redesign work was
+  included.

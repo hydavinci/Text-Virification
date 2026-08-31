@@ -9,6 +9,7 @@
       "expected": [
         {
           "type": "pii_id",
+          "severity": "error",
           "original": "11010519491231002X",
           "position": 5,
           "end_position": 23
@@ -24,6 +25,7 @@
       "expected": [
         {
           "type": "pii_id",
+          "severity": "error",
           "original": "11010519491231002x",
           "position": 5,
           "end_position": 23
@@ -39,6 +41,7 @@
       "expected": [
         {
           "type": "punctuation",
+          "severity": "warning",
           "original": ",",
           "position": 2,
           "end_position": 3
@@ -67,11 +70,27 @@
       "expected": [
         {
           "type": "colloquial",
+          "severity": "info",
           "original": "咱们",
           "position": 0,
           "end_position": 2
         }
-      ]
+      ],
+      "expected_summary": {
+        "total": 1,
+        "by_type": {
+          "口语化": 1
+        },
+        "by_severity": {
+          "建议": 1
+        },
+        "by_rule": {
+          "colloquial_expr": 1
+        },
+        "by_layer": {
+          "语篇/语体层": 1
+        }
+      }
     }
   ],
   "pii_email": [
@@ -99,11 +118,27 @@
       "expected": [
         {
           "type": "pii_email",
+          "severity": "error",
           "original": "test@example.com",
           "position": 3,
           "end_position": 19
         }
-      ]
+      ],
+      "expected_summary": {
+        "total": 1,
+        "by_type": {
+          "邮箱地址": 1
+        },
+        "by_severity": {
+          "错误": 1
+        },
+        "by_rule": {
+          "pii_email": 1
+        },
+        "by_layer": {
+          "合规/安全层": 1
+        }
+      }
     }
   ],
   "sensitive_rules": [
@@ -116,6 +151,7 @@
       "expected": [
         {
           "type": "sensitive_territory",
+          "severity": "warning",
           "original": "台湾",
           "position": 0,
           "end_position": 2
@@ -167,6 +203,7 @@
       "expected": [
         {
           "type": "ad_extreme",
+          "severity": "error",
           "original": "全球领先",
           "position": 2,
           "end_position": 6
@@ -189,6 +226,7 @@
       "expected": [
         {
           "type": "custom_term",
+          "severity": "warning",
           "original": "AI",
           "position": 2,
           "end_position": 4
@@ -208,6 +246,7 @@
       "expected": [
         {
           "type": "banned_word",
+          "severity": "error",
           "original": "禁用词",
           "position": 2,
           "end_position": 5
@@ -223,11 +262,36 @@
       "expected": [
         {
           "type": "typo",
+          "severity": "error",
           "original": "帐号",
           "position": 0,
           "end_position": 2
         }
-      ]
+      ],
+      "expected_summary": {
+        "total": 1,
+        "by_type": {
+          "错别字": 1
+        },
+        "by_severity": {
+          "错误": 1
+        },
+        "by_rule": {
+          "cn_typo": 1
+        },
+        "by_layer": {
+          "字符层": 1
+        }
+      },
+      "expected_statistics": {
+        "char_count": 2,
+        "char_count_no_space": 2,
+        "line_count": 1,
+        "paragraph_count": 1,
+        "language": "zh",
+        "primary_count": 2,
+        "primary_label": "总字数"
+      }
     }
   ],
   "incomplete_phrase": [
@@ -238,11 +302,27 @@
       "expected": [
         {
           "type": "missing_char",
+          "severity": "error",
           "original": "迫不及",
           "position": 0,
           "end_position": 3
         }
-      ]
+      ],
+      "expected_summary": {
+        "total": 1,
+        "by_type": {
+          "漏字/缺字": 1
+        },
+        "by_severity": {
+          "错误": 1
+        },
+        "by_rule": {
+          "incomplete_phrase": 1
+        },
+        "by_layer": {
+          "词汇层": 1
+        }
+      }
     }
   ],
   "sentence_mixing": [
@@ -253,11 +333,27 @@
       "expected": [
         {
           "type": "expression",
+          "severity": "warning",
           "original": "原因是管理不善造成的",
           "position": 0,
           "end_position": 10
         }
-      ]
+      ],
+      "expected_summary": {
+        "total": 1,
+        "by_type": {
+          "语病/表达": 1
+        },
+        "by_severity": {
+          "警告": 1
+        },
+        "by_rule": {
+          "sentence_mixing": 1
+        },
+        "by_layer": {
+          "句子层": 1
+        }
+      }
     }
   ],
   "repeat_punct": [
@@ -268,11 +364,27 @@
       "expected": [
         {
           "type": "punctuation",
+          "severity": "warning",
           "original": "，，",
           "position": 2,
           "end_position": 4
         }
-      ]
+      ],
+      "expected_summary": {
+        "total": 1,
+        "by_type": {
+          "标点符号": 1
+        },
+        "by_severity": {
+          "警告": 1
+        },
+        "by_rule": {
+          "repeat_punct": 1
+        },
+        "by_layer": {
+          "标点/格式层": 1
+        }
+      }
     }
   ]
 }

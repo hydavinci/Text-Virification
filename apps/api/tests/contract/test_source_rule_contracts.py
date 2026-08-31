@@ -32,6 +32,9 @@ _REQUIRED_CASE_NAMES = {
     "representative discourse rule",
     "representative compliance rule",
 }
+_REPRESENTATIVE_CASE_NAMES = {
+    name for name in _REQUIRED_CASE_NAMES if name.startswith("representative ")
+}
 
 
 def _contract_cases() -> list[Any]:
@@ -59,13 +62,20 @@ def _llm_fallback_cases() -> list[Any]:
 
 def test_source_rule_contract_inventory_covers_preserved_families_and_interactions() -> None:
     raw_cases = json.loads(_CASES_PATH.read_text(encoding="utf-8"))
-    case_names = {
-        case["name"]
-        for cases in raw_cases.values()
-        for case in cases
-    }
+    cases = [case for rule_cases in raw_cases.values() for case in rule_cases]
+    case_names = {case["name"] for case in cases}
 
     assert _REQUIRED_CASE_NAMES <= case_names
+    representative_cases = [
+        case for case in cases if case["name"] in _REPRESENTATIVE_CASE_NAMES
+    ]
+    assert all(
+        "severity" in expected
+        for case in representative_cases
+        for expected in case["expected"]
+    )
+    assert any("expected_summary" in case for case in representative_cases)
+    assert any("expected_statistics" in case for case in representative_cases)
 
 
 @pytest.mark.parametrize(("rule_id", "case"), _contract_cases())
@@ -89,6 +99,7 @@ def test_source_rule_contract(rule_id: str, case: dict[str, Any]) -> None:
     actual = [
         {
             "type": issue.type,
+            "severity": issue.severity,
             "original": issue.original,
             "position": issue.position,
             "end_position": issue.end_position,
@@ -101,6 +112,18 @@ def test_source_rule_contract(rule_id: str, case: dict[str, Any]) -> None:
     actual_rule_ids = {issue.rule_id for issue in issues}
     assert set(case.get("required_rule_ids", ())) <= actual_rule_ids
     assert not set(case.get("absent_rule_ids", ())) & actual_rule_ids
+
+    summary = analyzer.get_summary(issues)
+    assert summary["total"] == len(issues)
+    for bucket_name, expected_counts in case.get("expected_summary", {}).items():
+        if bucket_name == "total":
+            assert summary["total"] == expected_counts
+            continue
+        for key, count in expected_counts.items():
+            assert summary[bucket_name][key] == count
+
+    if expected_statistics := case.get("expected_statistics"):
+        assert text_statistics(text) == expected_statistics
 
 
 @pytest.mark.parametrize("case", _statistics_cases())

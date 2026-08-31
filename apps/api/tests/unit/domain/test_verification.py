@@ -1,3 +1,4 @@
+from collections import Counter
 from uuid import uuid4
 
 import pytest
@@ -103,8 +104,26 @@ def _verification_result(
     text: str = "帐号测试",
     summary: VerificationSummary | None = None,
 ) -> VerificationResult:
-    resolved_document_id = document_id or issue.document_id
-    resolved_run_id = verification_run_id or issue.verification_run_id
+    return _verification_result_with_issues(
+        (issue,),
+        document_id=document_id,
+        verification_run_id=verification_run_id,
+        text=text,
+        summary=summary,
+    )
+
+
+def _verification_result_with_issues(
+    issues: tuple[Issue, ...],
+    *,
+    document_id=None,
+    verification_run_id=None,
+    text: str,
+    summary: VerificationSummary | None = None,
+) -> VerificationResult:
+    first_issue = issues[0]
+    resolved_document_id = document_id or first_issue.document_id
+    resolved_run_id = verification_run_id or first_issue.verification_run_id
     return VerificationResult(
         verification_run_id=resolved_run_id,
         document_id=resolved_document_id,
@@ -122,14 +141,14 @@ def _verification_result(
             primary_count=len(text),
             primary_label="总字数",
         ),
-        issues=(issue,),
+        issues=issues,
         summary=summary
         or VerificationSummary(
-            total=1,
-            by_type={issue.type: 1},
-            by_severity={issue.severity.value: 1},
-            by_rule={issue.rule_id: 1},
-            by_layer={issue.layer: 1},
+            total=len(issues),
+            by_type=dict(Counter(issue.type for issue in issues)),
+            by_severity=dict(Counter(issue.severity.value for issue in issues)),
+            by_rule=dict(Counter(issue.rule_id for issue in issues)),
+            by_layer=dict(Counter(issue.layer for issue in issues)),
         ),
         execution_mode=VerificationExecutionMode.SYNCHRONOUS,
         analysis_mode=VerificationAnalysisMode.LOCAL_ONLY,
@@ -164,6 +183,35 @@ def _canonical_issue() -> Issue:
         confidence=0.8,
         auto_fixable=True,
         context="帐号测试",
+    )
+
+
+def _ad_extreme_issue(issue: Issue) -> Issue:
+    return Issue(
+        issue_id=uuid4(),
+        document_id=issue.document_id,
+        verification_run_id=issue.verification_run_id,
+        block_id="p-0",
+        page=None,
+        start=2,
+        end=4,
+        block_start=2,
+        block_end=4,
+        original="领先",
+        suggestion="较为领先",
+        alternatives=[],
+        type="ad_extreme",
+        severity=IssueSeverity.ERROR,
+        layer="security",
+        message="广告法极限词",
+        description="建议改为客观表述",
+        rule_id="ad_extreme_words",
+        rule_version="1",
+        source="compatibility.analyzer",
+        source_version="1",
+        confidence=1.0,
+        auto_fixable=True,
+        context="帐号领先",
     )
 
 
@@ -213,6 +261,57 @@ def test_verification_result_rejects_summary_inconsistent_with_issues(
 ) -> None:
     with pytest.raises(ValidationError, match="summary"):
         _verification_result(_canonical_issue(), summary=summary)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_counts"),
+    [
+        ("by_type", {"typo": 1, "bogus": 1}),
+        ("by_severity", {"warning": 1, "bogus": 1}),
+        ("by_layer", {"character": 1, "bogus": 1}),
+    ],
+)
+def test_verification_result_rejects_unknown_key_mixed_into_canonical_summary_bucket(
+    field_name: str,
+    invalid_counts: dict[str, int],
+) -> None:
+    first_issue = _canonical_issue()
+    second_issue = _ad_extreme_issue(first_issue)
+    summary_data = {
+        "total": 2,
+        "by_type": {"typo": 1, "ad_extreme": 1},
+        "by_severity": {"warning": 1, "error": 1},
+        "by_rule": {"cn_typo": 1, "ad_extreme_words": 1},
+        "by_layer": {"character": 1, "security": 1},
+    }
+    summary_data[field_name] = invalid_counts
+
+    with pytest.raises(ValidationError, match=f"summary {field_name} counts"):
+        _verification_result_with_issues(
+            (first_issue, second_issue),
+            text="帐号领先",
+            summary=VerificationSummary(**summary_data),
+        )
+
+
+def test_verification_result_accepts_explicit_legacy_localized_summary_labels() -> None:
+    first_issue = _canonical_issue()
+    second_issue = _ad_extreme_issue(first_issue)
+    summary = VerificationSummary(
+        total=2,
+        by_type={"错别字": 1, "ad_extreme": 1},
+        by_severity={"警告": 1, "错误": 1},
+        by_rule={"cn_typo": 1, "ad_extreme_words": 1},
+        by_layer={"字符层": 1, "合规/安全层": 1},
+    )
+
+    result = _verification_result_with_issues(
+        (first_issue, second_issue),
+        text="帐号领先",
+        summary=summary,
+    )
+
+    assert result.summary == summary
 
 
 def test_verification_summary_rejects_negative_bucket_counts() -> None:

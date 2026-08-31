@@ -32,4 +32,12 @@ Task 5: Ruling: `DictionarySnapshot` exposes only `name`, `version`, and validat
 Task 5: fix round 1/5 (2 addressed, 0 open — required dictionary fields and controlled failure cleanup; commits 1861c86..a4fa1c2)
 Task 5: complete (commits 8799396..a4fa1c2, review clean)
 Task 6: complete (commits a4fa1c2..459ca64, review clean)
+Final review: fix wave complete (commit 688c054; backend 185 passed/8 skipped, frontend 31 passed).
+Final re-review: open load-bearing finding — mixed canonical and unknown summary buckets can bypass exact count validation.
+Final re-review: open load-bearing finding — source-rule contracts do not assert required severity and summary behavior.
+Final re-review: open compatibility finding — `/formats` order changed from the established TXT-first order to DOCX-first.
+Final re-review: evidence-note — reported focused test counts differ from fresh collection counts; commands passed but report counts need correction.
+Ruling: Do not begin the unified-pipeline plan while canonical summary validation and contract expectations remain ambiguous — downstream persistence and equivalence tests depend on these contracts — if wrong, this pauses work that could have proceeded independently.
+Ruling: Treat `/formats` ordering as a compatibility contract and restore the prior TXT-first order unless the user explicitly approves a behavior change — if wrong, clients may not rely on ordering and the fix is unnecessary.
 Final fix: Ruling: production backend format declarations, MIME checks, and upload allowlists now derive from typed capability profiles; `UploadWorkspace.vue` keeps its existing hard-coded seven-format behavior in this compatibility stage, and consuming `/formats` remains explicit Stage 4 workspace scope — if wrong, the frontend can drift from the manifest before that migration.
+Authorized corrective wave: complete — mixed unknown summary keys rejected, source severity/summary/statistics contracts extended, TXT-first profile order restored, and report counts corrected to 114 focused and 189 passed/8 skipped full backend.

@@ -31,6 +31,7 @@ class CapabilityManifest(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     formats: tuple[FormatCapability, ...]
+    format_order_by_profile: dict[CapabilityProfile, tuple[FileType, ...]]
 
     def for_type(self, file_type: FileType) -> FormatCapability:
         for capability in self.formats:
@@ -42,7 +43,10 @@ class CapabilityManifest(BaseModel):
         self,
         profile: CapabilityProfile,
     ) -> tuple[FormatCapability, ...]:
-        return tuple(capability for capability in self.formats if profile in capability.profiles)
+        return tuple(
+            self.for_type(file_type)
+            for file_type in self.format_order_by_profile[profile]
+        )
 
     def file_types_for_profile(self, profile: CapabilityProfile) -> tuple[FileType, ...]:
         return tuple(
@@ -159,5 +163,21 @@ def default_capability_manifest() -> CapabilityManifest:
                 supports_original_export=True,
                 supports_track_changes=True,
             ),
-        )
+        ),
+        format_order_by_profile={
+            CapabilityProfile.SYNCHRONOUS_COMPATIBILITY: (
+                FileType.TXT,
+                FileType.DOCX,
+                FileType.DOC,
+                FileType.PDF,
+                FileType.RTF,
+                FileType.MARKDOWN,
+                FileType.CSV,
+            ),
+            CapabilityProfile.ASYNCHRONOUS_JOB: (
+                FileType.DOCX,
+                FileType.PDF,
+                FileType.TXT,
+            ),
+        },
     )
