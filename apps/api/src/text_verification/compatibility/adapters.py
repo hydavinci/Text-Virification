@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterable
+import re
+from collections.abc import Iterable, Sequence
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from text_verification.compatibility.analyzer import Issue as LegacyIssue
@@ -12,6 +13,8 @@ from text_verification.domain.verification import VerificationResult
 _LEGACY_SOURCE = "compatibility.analyzer"
 _LEGACY_SOURCE_VERSION = "1"
 _LEGACY_RULE_VERSION = "1"
+_PARAGRAPH_LABEL_PATTERN = re.compile(r"^第(\d+)段$")
+_PAGE_LABEL_PATTERN = re.compile(r"^第(\d+)页$")
 _CONFIDENCE_BY_SEVERITY = {
     IssueSeverity.ERROR: 1.0,
     IssueSeverity.WARNING: 0.8,
@@ -42,27 +45,34 @@ def text_to_document_model(
         file_type=file_type,
         source_name=source_name,
         text=text,
-        blocks=[
-            TextBlock(
-                block_id="p-0",
-                kind="paragraph",
-                text=text,
-                global_start=0,
-                global_end=len(text),
-                block_start=0,
-                block_end=len(text),
-                page=None,
-                paragraph_index=0,
-                table_index=None,
-                row_index=None,
-                cell_index=None,
-                bbox=None,
-                parent_id=None,
-                style={},
-                source_locator={"paragraph_index": 0},
-            )
-        ],
+        blocks=[_direct_text_block(text)],
         parser_name="compatibility-flat-text",
+        parser_version="1",
+    )
+
+
+def parsed_file_to_document_model(
+    *,
+    text: str,
+    source_name: str,
+    file_type: FileType,
+    parser_name: str,
+    page_map: Sequence[tuple[int, int, str]],
+    document_id: UUID | None = None,
+) -> DocumentModel:
+    source_version = source_version_for_text(text)
+    resolved_document_id = document_id or uuid5(
+        NAMESPACE_URL,
+        f"document:{file_type.value}:{source_name}:{source_version}",
+    )
+    return DocumentModel(
+        document_id=resolved_document_id,
+        source_version=source_version,
+        file_type=file_type,
+        source_name=source_name,
+        text=text,
+        blocks=_uploaded_blocks(text, page_map),
+        parser_name=parser_name,
         parser_version="1",
     )
 
@@ -177,3 +187,121 @@ def _find_block(document: DocumentModel, start: int, end: int) -> TextBlock | No
         if block.global_start <= start and end <= block.global_end:
             return block
     return None
+
+
+def _direct_text_block(text: str) -> TextBlock:
+    return TextBlock(
+        block_id="p-0",
+        kind="paragraph",
+        text=text,
+        global_start=0,
+        global_end=len(text),
+        block_start=0,
+        block_end=len(text),
+        page=None,
+        paragraph_index=0,
+        table_index=None,
+        row_index=None,
+        cell_index=None,
+        bbox=None,
+        parent_id=None,
+        style={},
+        source_locator={"paragraph_index": 0},
+    )
+
+
+def _uploaded_blocks(
+    text: str,
+    page_map: Sequence[tuple[int, int, str]],
+) -> list[TextBlock]:
+    blocks = [
+        _uploaded_block(text, start, end, label, ordinal)
+        for ordinal, (start, end, label) in enumerate(page_map)
+        if text[start:end]
+    ]
+    return blocks or [_file_level_block(text)]
+
+
+def _uploaded_block(
+    text: str,
+    start: int,
+    end: int,
+    label: str,
+    ordinal: int,
+) -> TextBlock:
+    block_text = text[start:end]
+    source_locator = _source_locator(label)
+    paragraph_index = source_locator.get("paragraph_index")
+    page = source_locator.get("page")
+    return TextBlock(
+        block_id=_block_id(source_locator, ordinal),
+        kind="paragraph",
+        text=block_text,
+        global_start=start,
+        global_end=end,
+        block_start=0,
+        block_end=len(block_text),
+        page=page if isinstance(page, int) else None,
+        paragraph_index=paragraph_index if isinstance(paragraph_index, int) else None,
+        table_index=None,
+        row_index=None,
+        cell_index=None,
+        bbox=None,
+        parent_id=None,
+        style={},
+        source_locator=source_locator,
+    )
+
+
+def _file_level_block(text: str) -> TextBlock:
+    return TextBlock(
+        block_id="file-0",
+        kind="paragraph",
+        text=text,
+        global_start=0,
+        global_end=len(text),
+        block_start=0,
+        block_end=len(text),
+        page=None,
+        paragraph_index=None,
+        table_index=None,
+        row_index=None,
+        cell_index=None,
+        bbox=None,
+        parent_id=None,
+        style={},
+        source_locator={
+            "locator_kind": "file",
+            "note": "parser returned no structural location map",
+        },
+    )
+
+
+def _block_id(source_locator: dict[str, object], ordinal: int) -> str:
+    if source_locator.get("locator_kind") == "paragraph":
+        paragraph_index = source_locator.get("paragraph_index")
+        if isinstance(paragraph_index, int):
+            return f"paragraph-{paragraph_index}"
+    if source_locator.get("locator_kind") == "page":
+        page = source_locator.get("page")
+        if isinstance(page, int):
+            return f"page-{page}"
+    return f"block-{ordinal}"
+
+
+def _source_locator(label: str) -> dict[str, object]:
+    if paragraph_match := _PARAGRAPH_LABEL_PATTERN.match(label):
+        paragraph_number = int(paragraph_match.group(1))
+        return {
+            "label": label,
+            "paragraph_index": paragraph_number - 1,
+            "paragraph_number": paragraph_number,
+            "locator_kind": "paragraph",
+        }
+    if page_match := _PAGE_LABEL_PATTERN.match(label):
+        return {
+            "label": label,
+            "page": int(page_match.group(1)),
+            "locator_kind": "page",
+        }
+    return {"label": label, "locator_kind": "unknown"}

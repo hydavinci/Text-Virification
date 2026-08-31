@@ -208,6 +208,40 @@ def test_docx_export_can_emit_word_track_changes(
     assert "账" in document_xml
 
 
+def test_docx_analysis_maps_uploaded_issue_to_paragraph_block_offsets(
+    app: FastAPI,
+    client: TestClient,
+    tmp_path: Path,
+) -> None:
+    override_storage(app, tmp_path)
+    source = BytesIO()
+    document = Document()
+    document.add_paragraph("第一段正常")
+    document.add_paragraph("第二段帐号待修正")
+    document.save(source)
+
+    analysis = client.post(
+        "/api/v1/analyze",
+        files={
+            "file": (
+                "source.docx",
+                source.getvalue(),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+
+    assert analysis.status_code == 200
+    issue = next(
+        item for item in analysis.json()["issues"] if item["original"] == "帐号"
+    )
+
+    assert issue["page"] is None
+    assert issue["block_id"] == "paragraph-1"
+    assert issue["block_start"] == 3
+    assert issue["block_end"] == 5
+
+
 def test_export_changes_only_the_selected_duplicate(
     app: FastAPI,
     client: TestClient,
@@ -444,6 +478,39 @@ def test_pdf_export_resolves_duplicates_and_rejects_unsafe_insertions(
     assert replaced.status_code == 200
     assert inserted.status_code == 400
     assert "does not support insertion-only edits" in inserted.json()["detail"]
+
+
+def test_pdf_analysis_maps_uploaded_issue_to_page_block_offsets(
+    app: FastAPI,
+    client: TestClient,
+    tmp_path: Path,
+) -> None:
+    import fitz
+
+    override_storage(app, tmp_path)
+    document = fitz.open()
+    first_page = document.new_page()
+    first_page.insert_text((72, 72), "Clean page")
+    second_page = document.new_page()
+    second_page.insert_text((72, 72), "forbidden")
+    source = document.tobytes()
+    document.close()
+
+    analysis = client.post(
+        "/api/v1/analyze",
+        data={"banned_words": json.dumps(["forbidden"])},
+        files={"file": ("source.pdf", source, "application/pdf")},
+    )
+
+    assert analysis.status_code == 200
+    issue = next(
+        item for item in analysis.json()["issues"] if item["original"] == "forbidden"
+    )
+
+    assert issue["page"] == 2
+    assert issue["block_id"] == "page-2"
+    assert issue["block_start"] == 0
+    assert issue["block_end"] == 9
 
 
 def test_scenarios_and_formats_are_discoverable(client: TestClient) -> None:

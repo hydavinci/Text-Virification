@@ -9,6 +9,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from text_verification.compatibility.adapters import (
     legacy_issues_to_domain,
+    parsed_file_to_document_model,
     text_to_document_model,
 )
 from text_verification.compatibility.analyzer import SCENARIO_CONFIG, TextAnalyzer
@@ -20,7 +21,7 @@ from text_verification.compatibility.models import GlossaryTerm, Scenario
 from text_verification.compatibility.parser import get_supported_formats, parse_file
 from text_verification.compatibility.statistics import text_statistics
 from text_verification.config import Settings
-from text_verification.domain.documents import FileType
+from text_verification.domain.documents import DocumentModel, FileType
 from text_verification.domain.verification import (
     VerificationDegradation,
     VerificationExecutionMode,
@@ -73,8 +74,9 @@ def analyze(
     enable_security: bool,
     enable_sensitive: bool,
     enable_ad_extreme: bool,
+    document: DocumentModel | None = None,
 ) -> VerificationResult:
-    document = text_to_document_model(
+    document = document or text_to_document_model(
         text=text,
         source_name=filename,
         file_type=_file_type_for(file_extension),
@@ -124,6 +126,26 @@ def analyze(
             is_degraded=bool(degradation_reasons),
             reasons=tuple(degradation_reasons),
         ),
+    )
+
+
+def parse_uploaded_document(
+    path: Path,
+    extension: str,
+    *,
+    source_name: str,
+    document_id: UUID | None = None,
+) -> DocumentModel:
+    text, parsed_format, page_map = parse_file(str(path), extension, str(path.parent))
+    if not text.strip():
+        raise AnalysisInputError("File content is empty or no text could be extracted.")
+    return parsed_file_to_document_model(
+        text=text,
+        source_name=source_name,
+        file_type=_file_type_for(extension),
+        parser_name=f"compatibility-{parsed_format}",
+        page_map=page_map,
+        document_id=document_id,
     )
 
 

@@ -24,6 +24,7 @@ from text_verification.compatibility.service import (
     formats,
     parse_banned_words,
     parse_glossary,
+    parse_uploaded_document,
     parse_uploaded_file,
     scenarios,
 )
@@ -99,7 +100,12 @@ def analyze_content(
     file_id = uuid4()
     try:
         stored = storage.save_stream(file_id, file.filename, file.file)
-        extracted_text = parse_uploaded_file(stored.path, stored.extension)
+        document = parse_uploaded_document(
+            stored.path,
+            stored.extension,
+            source_name=stored.original_name,
+            document_id=file_id,
+        )
     except CompatibilityUploadTooLarge as error:
         raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, detail=str(error)) from error
     except (CompatibilityUploadError, AnalysisInputError, ValueError) as error:
@@ -114,7 +120,7 @@ def analyze_content(
 
     result = analyze(
         settings,
-        text=extracted_text,
+        text=document.text,
         filename=stored.original_name,
         file_id=file_id,
         file_extension=stored.extension,
@@ -124,6 +130,7 @@ def analyze_content(
         enable_security=enable_security,
         enable_sensitive=enable_sensitive,
         enable_ad_extreme=enable_ad_extreme,
+        document=document,
     )
     payload = verification_result_to_legacy_response(result)
     payload["file_id"] = str(file_id)
