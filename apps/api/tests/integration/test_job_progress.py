@@ -9,6 +9,15 @@ from fastapi import FastAPI
 
 from text_verification.domain.documents import FileType
 from text_verification.domain.jobs import JobEvent, JobRead, JobStatus
+from text_verification.domain.verification import (
+    Scenario,
+    VerificationAnalysisMode,
+    VerificationDegradation,
+    VerificationExecutionMode,
+    VerificationResult,
+    VerificationStatistics,
+    VerificationSummary,
+)
 
 
 class RecordingJobRepository:
@@ -16,7 +25,7 @@ class RecordingJobRepository:
         self._jobs: dict[UUID, JobRead] = {}
         self._events: dict[UUID, list[JobEvent]] = {}
 
-    def create_completed_job(self) -> JobRead:
+    def create_job(self, status: JobStatus = JobStatus.COMPLETED) -> JobRead:
         job_id = uuid4()
         created_at = datetime.now(UTC)
         expires_at = created_at + timedelta(hours=24)
@@ -26,13 +35,13 @@ class RecordingJobRepository:
             source_name=source_name,
             file_type=FileType.TXT,
             size_bytes=12,
-            status=JobStatus.COMPLETED,
-            progress=100,
+            status=status,
+            progress=100 if status is JobStatus.COMPLETED else 25,
             created_at=created_at,
             expires_at=expires_at,
         )
         self._jobs[job_id] = job
-        self._events[job_id] = [
+        completed_events = [
             JobEvent(
                 sequence=1,
                 status=JobStatus.QUEUED,
@@ -56,12 +65,53 @@ class RecordingJobRepository:
             ),
             JobEvent(
                 sequence=4,
+                status=JobStatus.CHECKING_FORMAT,
+                progress=50,
+                message="正在检查格式",
+                created_at=created_at,
+            ),
+            JobEvent(
+                sequence=5,
+                status=JobStatus.CHECKING_SENSITIVE,
+                progress=65,
+                message="正在检查敏感词",
+                created_at=created_at,
+            ),
+            JobEvent(
+                sequence=6,
+                status=JobStatus.CHECKING_CHINESE,
+                progress=80,
+                message="正在检查中文",
+                created_at=created_at,
+            ),
+            JobEvent(
+                sequence=7,
+                status=JobStatus.CHECKING_ENGLISH,
+                progress=90,
+                message="正在检查英文",
+                created_at=created_at,
+            ),
+            JobEvent(
+                sequence=8,
                 status=JobStatus.COMPLETED,
                 progress=100,
                 message="处理完成",
                 created_at=created_at,
             ),
         ]
+        if status is JobStatus.COMPLETED:
+            self._events[job_id] = completed_events
+        else:
+            self._events[job_id] = [
+                completed_events[0],
+                JobEvent(
+                    sequence=2,
+                    status=status,
+                    progress=job.progress,
+                    message=f"作业状态：{status.value}",
+                    created_at=created_at,
+                ),
+            ]
         return job
 
     def get_job(self, job_id: UUID) -> JobRead | None:
@@ -71,6 +121,17 @@ class RecordingJobRepository:
         return [
             event for event in self._events.get(job_id, []) if event.sequence > after_sequence
         ]
+
+
+class RecordingVerificationRepository:
+    def __init__(self) -> None:
+        self._results: dict[UUID, VerificationResult] = {}
+
+    def set_result(self, job_id: UUID, result: VerificationResult) -> None:
+        self._results[job_id] = result
+
+    def get_result_for_job(self, job_id: UUID) -> VerificationResult | None:
+        return self._results.get(job_id)
 
 
 @dataclass
@@ -98,7 +159,12 @@ def repository() -> RecordingJobRepository:
 
 @pytest.fixture
 def completed_job(repository: RecordingJobRepository) -> JobRead:
-    return repository.create_completed_job()
+    return repository.create_job()
+
+
+@pytest.fixture
+def result_repository() -> RecordingVerificationRepository:
+    return RecordingVerificationRepository()
 
 
 @pytest.fixture(autouse=True)
@@ -106,14 +172,22 @@ def override_dependencies(
     app: FastAPI,
     monkeypatch: pytest.MonkeyPatch,
     repository: RecordingJobRepository,
+    result_repository: RecordingVerificationRepository,
 ) -> SessionFactorySpy:
-    from text_verification.api.dependencies import get_job_repository
+    from text_verification.api.dependencies import get_db_session, get_job_repository
     from text_verification.api.routes import jobs as job_routes
 
     session_factory = SessionFactorySpy([])
     app.dependency_overrides[get_job_repository] = lambda: repository
+    app.dependency_overrides[get_db_session] = lambda: FakeSession()
     monkeypatch.setattr(job_routes, "SESSION_FACTORY_PROVIDER", lambda: session_factory)
     monkeypatch.setattr(job_routes, "REPOSITORY_FACTORY", lambda session: repository)
+    monkeypatch.setattr(
+        job_routes,
+        "VERIFICATION_REPOSITORY_FACTORY",
+        lambda session: result_repository,
+        raising=False,
+    )
     return session_factory
 
 
@@ -130,6 +204,112 @@ def test_get_job_returns_404_for_unknown_job(client) -> None:
 
     assert response.status_code == 404
     assert response.json()["detail"]["code"] == "job_not_found"
+
+
+def test_get_job_result_returns_canonical_result(
+    client,
+    completed_job: JobRead,
+    result_repository: RecordingVerificationRepository,
+) -> None:
+    result = _result_for_job(completed_job)
+    result_repository.set_result(completed_job.job_id, result)
+
+    response = client.get(f"/api/v1/jobs/{completed_job.job_id}/result")
+
+    assert response.status_code == 200
+    assert response.json() == result.model_dump(mode="json")
+    assert response.json()["execution_mode"] == "asynchronous"
+    assert "success" not in response.json()
+    assert "filename" not in response.json()
+
+
+def test_get_job_result_returns_404_for_unknown_job(client) -> None:
+    response = client.get(
+        "/api/v1/jobs/00000000-0000-0000-0000-000000000000/result"
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == {
+        "code": "job_not_found",
+        "message": "Job was not found.",
+    }
+
+
+def test_get_job_result_returns_409_while_job_is_non_terminal(
+    client,
+    repository: RecordingJobRepository,
+) -> None:
+    job = repository.create_job(JobStatus.PARSING)
+
+    response = client.get(f"/api/v1/jobs/{job.job_id}/result")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "job_result_pending",
+        "message": "Job result is not available yet.",
+    }
+
+
+def test_get_job_result_returns_409_when_failed_job_has_no_result(
+    client,
+    repository: RecordingJobRepository,
+) -> None:
+    job = repository.create_job(JobStatus.FAILED)
+
+    response = client.get(f"/api/v1/jobs/{job.job_id}/result")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "job_result_unavailable",
+        "message": "Job did not produce a result.",
+    }
+
+
+def test_get_job_result_does_not_expose_result_for_failed_job(
+    client,
+    repository: RecordingJobRepository,
+    result_repository: RecordingVerificationRepository,
+) -> None:
+    job = repository.create_job(JobStatus.FAILED)
+    result_repository.set_result(job.job_id, _result_for_job(job))
+
+    response = client.get(f"/api/v1/jobs/{job.job_id}/result")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "job_result_unavailable"
+
+
+@pytest.mark.parametrize("persist_result", [False, True])
+def test_get_job_result_returns_410_when_job_is_expired(
+    client,
+    repository: RecordingJobRepository,
+    result_repository: RecordingVerificationRepository,
+    persist_result: bool,
+) -> None:
+    job = repository.create_job(JobStatus.EXPIRED)
+    if persist_result:
+        result_repository.set_result(job.job_id, _result_for_job(job))
+
+    response = client.get(f"/api/v1/jobs/{job.job_id}/result")
+
+    assert response.status_code == 410
+    assert response.json()["detail"] == {
+        "code": "job_result_expired",
+        "message": "Job result has expired.",
+    }
+
+
+def test_get_job_result_returns_409_when_completed_job_has_no_result(
+    client,
+    completed_job: JobRead,
+) -> None:
+    response = client.get(f"/api/v1/jobs/{completed_job.job_id}/result")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "job_result_unavailable",
+        "message": "Job did not produce a result.",
+    }
 
 
 def test_sse_replays_events_after_last_event_id(client, completed_job: JobRead) -> None:
@@ -168,3 +348,30 @@ def test_sse_rejects_negative_last_event_id(client, completed_job: JobRead) -> N
 
     assert response.status_code == 400
     assert response.json()["detail"]["code"] == "invalid_last_event_id"
+
+
+def _result_for_job(job: JobRead) -> VerificationResult:
+    return VerificationResult(
+        verification_run_id=uuid4(),
+        document_id=job.job_id,
+        source_version="sha256:test-source",
+        source_name=job.source_name,
+        file_type=job.file_type,
+        scenario=Scenario.GENERAL,
+        text="需要检查",
+        stats=VerificationStatistics(
+            char_count=4,
+            char_count_no_space=4,
+            line_count=1,
+            paragraph_count=1,
+            language="zh",
+            primary_count=4,
+            primary_label="中文字符",
+        ),
+        issues=(),
+        summary=VerificationSummary(total=0),
+        execution_mode=VerificationExecutionMode.ASYNCHRONOUS,
+        analysis_mode=VerificationAnalysisMode.LOCAL_ONLY,
+        dictionary_versions={},
+        degradation=VerificationDegradation(),
+    )

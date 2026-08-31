@@ -29,6 +29,11 @@ TERMINAL_STATUSES = {
     JobStatus.EXPIRED,
 }
 
+RESULT_READY_STATUSES = {
+    JobStatus.COMPLETED,
+    JobStatus.PARTIAL,
+}
+
 
 class TerminalJobStateError(RuntimeError):
     def __init__(

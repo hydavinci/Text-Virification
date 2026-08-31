@@ -16,11 +16,18 @@ from fastapi import APIRouter, Depends, File, Header, HTTPException, Request, Up
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session, sessionmaker
 
-from text_verification.api.dependencies import get_job_repository, get_job_storage
+from text_verification.api.dependencies import get_db_session, get_job_repository, get_job_storage
 from text_verification.config import Settings, get_settings
 from text_verification.domain.capabilities import default_capability_manifest
 from text_verification.domain.documents import FileType
-from text_verification.domain.jobs import TERMINAL_STATUSES, JobEvent, JobRead, JobStatus
+from text_verification.domain.jobs import (
+    RESULT_READY_STATUSES,
+    TERMINAL_STATUSES,
+    JobEvent,
+    JobRead,
+    JobStatus,
+)
+from text_verification.domain.verification import VerificationResult
 from text_verification.infrastructure.database import get_session_factory
 from text_verification.infrastructure.repositories import JobRepository
 from text_verification.infrastructure.storage import (
@@ -30,6 +37,7 @@ from text_verification.infrastructure.storage import (
     UploadCleanupFailed,
     UploadTooLarge,
 )
+from text_verification.infrastructure.verification_repository import VerificationRepository
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +49,9 @@ JOB_CREATE_FAILURE_CODE = "job_create_failed"
 INVALID_UPLOAD_CODE = "invalid_upload"
 INVALID_LAST_EVENT_ID_CODE = "invalid_last_event_id"
 JOB_NOT_FOUND_CODE = "job_not_found"
+JOB_RESULT_EXPIRED_CODE = "job_result_expired"
+JOB_RESULT_PENDING_CODE = "job_result_pending"
+JOB_RESULT_UNAVAILABLE_CODE = "job_result_unavailable"
 UNSUPPORTED_FILE_TYPE_CODE = "unsupported_file_type"
 UPLOAD_TOO_LARGE_CODE = "upload_too_large"
 SSE_KEEPALIVE_SECONDS = 15.0
@@ -51,9 +62,11 @@ router = APIRouter(tags=["jobs"])
 
 SessionFactoryProvider = Callable[[], sessionmaker[Session]]
 RepositoryFactory = Callable[[Session], JobRepository]
+VerificationRepositoryFactory = Callable[[Session], VerificationRepository]
 
 SESSION_FACTORY_PROVIDER: SessionFactoryProvider = get_session_factory
 REPOSITORY_FACTORY: RepositoryFactory = JobRepository
+VERIFICATION_REPOSITORY_FACTORY: VerificationRepositoryFactory = VerificationRepository
 
 
 class JobCleanupFailed(RuntimeError):
@@ -75,6 +88,44 @@ def get_job(
     if job is None:
         raise _http_error(status.HTTP_404_NOT_FOUND, JOB_NOT_FOUND_CODE, "Job was not found.")
     return job
+
+
+@router.get("/jobs/{job_id}/result", response_model=VerificationResult)
+def get_job_result(
+    job_id: UUID,
+    session: Annotated[Session, Depends(get_db_session)],
+) -> VerificationResult:
+    repository = REPOSITORY_FACTORY(session)
+    job = repository.get_job(job_id)
+    if job is None:
+        raise _http_error(status.HTTP_404_NOT_FOUND, JOB_NOT_FOUND_CODE, "Job was not found.")
+    if job.status == JobStatus.EXPIRED:
+        raise _http_error(
+            status.HTTP_410_GONE,
+            JOB_RESULT_EXPIRED_CODE,
+            "Job result has expired.",
+        )
+    if job.status not in RESULT_READY_STATUSES:
+        if job.status in TERMINAL_STATUSES:
+            raise _http_error(
+                status.HTTP_409_CONFLICT,
+                JOB_RESULT_UNAVAILABLE_CODE,
+                "Job did not produce a result.",
+            )
+        raise _http_error(
+            status.HTTP_409_CONFLICT,
+            JOB_RESULT_PENDING_CODE,
+            "Job result is not available yet.",
+        )
+
+    result = VERIFICATION_REPOSITORY_FACTORY(session).get_result_for_job(job_id)
+    if result is None:
+        raise _http_error(
+            status.HTTP_409_CONFLICT,
+            JOB_RESULT_UNAVAILABLE_CODE,
+            "Job did not produce a result.",
+        )
+    return result
 
 
 @router.get("/jobs/{job_id}/events")

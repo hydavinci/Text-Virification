@@ -9,6 +9,11 @@ from uuid import UUID
 from celery import Task  # type: ignore[import-untyped]
 from sqlalchemy.orm import Session, sessionmaker
 
+from text_verification.application import (
+    VerificationError,
+    VerificationPipeline,
+    build_default_verification_pipeline,
+)
 from text_verification.compatibility.storage import CompatibilityStorage
 from text_verification.config import get_settings
 from text_verification.domain.jobs import (
@@ -19,6 +24,7 @@ from text_verification.domain.jobs import (
 from text_verification.infrastructure.database import get_session_factory
 from text_verification.infrastructure.repositories import JobRepository
 from text_verification.infrastructure.storage import InvalidUpload, JobStorage
+from text_verification.infrastructure.verification_repository import VerificationRepository
 from text_verification.workers.celery_app import celery_app
 from text_verification.workers.pipeline import MISSING_UPLOAD_MESSAGE, PipelineRunner
 
@@ -32,7 +38,12 @@ SessionFactoryProvider = Callable[[], sessionmaker[Session]]
 StorageFactory = Callable[[], JobStorage]
 CompatibilityStorageFactory = Callable[[], CompatibilityStorage]
 RepositoryFactory = Callable[[Session], JobRepository]
-RunnerFactory = Callable[[JobRepository, JobStorage], PipelineRunner]
+VerificationRepositoryFactory = Callable[[Session], VerificationRepository]
+PipelineFactory = Callable[[], VerificationPipeline]
+RunnerFactory = Callable[
+    [JobRepository, VerificationRepository, JobStorage, VerificationPipeline],
+    PipelineRunner,
+]
 PROCESS_JOB_MAX_RETRIES = 2
 PROCESS_JOB_RETRY_BACKOFF_CAP_SECONDS = 4
 
@@ -47,10 +58,16 @@ def _get_compatibility_storage() -> CompatibilityStorage:
     return CompatibilityStorage(settings.storage_root, settings.max_upload_bytes)
 
 
+def _get_verification_pipeline() -> VerificationPipeline:
+    return build_default_verification_pipeline(get_settings())
+
+
 SESSION_FACTORY_PROVIDER: SessionFactoryProvider = get_session_factory
 STORAGE_FACTORY: StorageFactory = _get_job_storage
 COMPATIBILITY_STORAGE_FACTORY: CompatibilityStorageFactory = _get_compatibility_storage
 REPOSITORY_FACTORY: RepositoryFactory = JobRepository
+VERIFICATION_REPOSITORY_FACTORY: VerificationRepositoryFactory = VerificationRepository
+PIPELINE_FACTORY: PipelineFactory = _get_verification_pipeline
 RUNNER_FACTORY: RunnerFactory = PipelineRunner
 
 
@@ -81,8 +98,10 @@ def _run_process_job_attempt(job_id: UUID) -> None:
         if job is None or job.status in TERMINAL_STATUSES:
             return
 
+        verification_repository = VERIFICATION_REPOSITORY_FACTORY(session)
         storage = STORAGE_FACTORY()
-        runner = RUNNER_FACTORY(repository, storage)
+        pipeline = PIPELINE_FACTORY()
+        runner = RUNNER_FACTORY(repository, verification_repository, storage, pipeline)
         runner.run(job_id)
     except TerminalJobStateError:
         if repository is not None:
@@ -90,7 +109,19 @@ def _run_process_job_attempt(job_id: UUID) -> None:
     except InvalidUpload as error:
         if repository is None:
             raise
-        _persist_expected_failure(repository, job_id, error)
+        _persist_expected_failure(
+            repository,
+            job_id,
+            error,
+            MISSING_UPLOAD_MESSAGE,
+        )
+    except VerificationError as error:
+        if repository is None:
+            raise
+        if error.retryable:
+            repository.rollback()
+            raise
+        _persist_expected_failure(repository, job_id, error, error.message)
     except Exception:
         if repository is not None:
             repository.rollback()
@@ -173,10 +204,11 @@ def dispatch_process_job(job_id: str) -> None:
 def _persist_expected_failure(
     repository: JobRepository,
     job_id: UUID,
-    error: InvalidUpload,
+    error: Exception,
+    error_message: str,
 ) -> None:
     try:
-        _mark_failed_job(repository, job_id, MISSING_UPLOAD_MESSAGE)
+        _mark_failed_job(repository, job_id, error_message)
     except TerminalJobStateError:
         repository.rollback()
         return
