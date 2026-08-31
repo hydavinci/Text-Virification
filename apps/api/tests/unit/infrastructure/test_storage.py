@@ -217,7 +217,7 @@ def test_rejects_docx_encrypted_entry(monkeypatch, tmp_path):
 
 
 def test_rejects_docx_with_too_many_entries(tmp_path, monkeypatch):
-    monkeypatch.setattr("text_verification.infrastructure.storage.MAX_ZIP_ENTRIES", 2)
+    monkeypatch.setattr("text_verification.infrastructure.document_storage.MAX_ZIP_ENTRIES", 2)
     data = io.BytesIO()
     with zipfile.ZipFile(data, "w") as archive:
         archive.writestr("[Content_Types].xml", "<Types/>")
@@ -230,7 +230,7 @@ def test_rejects_docx_with_too_many_entries(tmp_path, monkeypatch):
 
 def test_rejects_docx_declaring_excessive_uncompressed_size(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        "text_verification.infrastructure.storage.MAX_ZIP_UNCOMPRESSED_BYTES", 4
+        "text_verification.infrastructure.document_storage.MAX_ZIP_UNCOMPRESSED_BYTES", 4
     )
     with pytest.raises(InvalidUpload, match="uncompressed size"):
         JobStorage(tmp_path, 4096).save_bytes(
