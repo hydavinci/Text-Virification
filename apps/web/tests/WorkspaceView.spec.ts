@@ -2,7 +2,9 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { describe, expect, it, vi } from 'vitest'
 
 import { jobsApiKey, type JobsApi } from '../src/api/jobs'
+import { verificationApiKey } from '../src/api/verification'
 import UploadWorkspace from '../src/components/UploadWorkspace.vue'
+import type { VerificationResult } from '../src/types/verification'
 import WorkspaceView from '../src/views/WorkspaceView.vue'
 
 function buildJobRead(overrides: Partial<Awaited<ReturnType<JobsApi['createJob']>>> = {}) {
@@ -316,5 +318,101 @@ describe('WorkspaceView', () => {
     expect(wrapper.get('[role="alert"]').text()).toContain(
       'Upload exceeds the configured maximum size.'
     )
+  })
+
+  it('treats a nullable suggestion as a safe deletion in the current workspace', async () => {
+    const payload = {
+      success: true,
+      filename: 'direct.txt',
+      text: '禁用词',
+      stats: {
+        char_count: 3,
+        char_count_no_space: 3,
+        line_count: 1,
+        paragraph_count: 1,
+        language: 'zh',
+        primary_count: 3,
+        primary_label: '总字数'
+      },
+      issues: [
+        {
+          issue_id: '33333333-3333-3333-3333-333333333333',
+          document_id: '11111111-1111-1111-1111-111111111111',
+          verification_run_id: '22222222-2222-2222-2222-222222222222',
+          block_id: 'p-0',
+          page: null,
+          start: 0,
+          end: 3,
+          block_start: 0,
+          block_end: 3,
+          type: 'banned_word',
+          severity: 'error',
+          original: '禁用词',
+          suggestion: null,
+          alternatives: null,
+          layer: 'discourse',
+          message: '禁用词',
+          description: '请人工处理',
+          rule_id: 'banned_word',
+          rule_version: '1',
+          source: 'compatibility.analyzer',
+          source_version: '1',
+          confidence: 1,
+          auto_fixable: false,
+          context: '禁用词',
+          position: 0,
+          end_position: 3,
+          review: '',
+          review_reason: ''
+        }
+      ],
+      summary: {
+        total: 1,
+        by_type: { banned_word: 1 },
+        by_severity: { error: 1 },
+        by_rule: { banned_word: 1 },
+        by_layer: { discourse: 1 }
+      },
+      file_id: null,
+      file_ext: null,
+      document_id: '11111111-1111-1111-1111-111111111111',
+      verification_run_id: '22222222-2222-2222-2222-222222222222',
+      source_version: 'sha256:source',
+      execution_mode: 'synchronous',
+      analysis_mode: 'local_only',
+      dictionary_versions: {},
+      degradation: { is_degraded: false, reasons: [] },
+      scenario: 'general'
+    } as unknown as VerificationResult
+    const analyzeText = vi.fn().mockResolvedValue(payload)
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const wrapper = mount(WorkspaceView, {
+      global: {
+        provide: {
+          [jobsApiKey as symbol]: {
+            createJob: vi.fn(),
+            subscribe: vi.fn(() => vi.fn())
+          },
+          [verificationApiKey as symbol]: {
+            analyzeFile: vi.fn(),
+            analyzeText,
+            exportReport: vi.fn(),
+            exportOriginal: vi.fn()
+          }
+        }
+      }
+    })
+
+    await wrapper.get('.mode-tabs button:nth-child(2)').trigger('click')
+    await wrapper.get('.text-mode textarea').setValue('禁用词')
+    await wrapper.get('.text-mode button').trigger('click')
+    await flushPromises()
+    await wrapper.get('.issue-actions .accept').trigger('click')
+    await wrapper.get('.review-toolbar button:nth-child(3)').trigger('click')
+
+    expect(wrapper.get('.document-content.preview').text()).toBe('')
+    expect(wrapper.text()).toContain('（删除）')
+    expect(wrapper.text()).not.toContain('null')
+    confirm.mockRestore()
   })
 })

@@ -169,7 +169,7 @@ const modifiedText = computed(() => {
     .filter(({ index }) => issueStates[index] === 'accepted')
     .sort((a, b) => b.issue.position - a.issue.position)
   for (const { issue, index } of accepted) {
-    const suggestion = selectedSuggestions[index] ?? issue.suggestion
+    const suggestion = selectedSuggestions[index] ?? issue.suggestion ?? ''
     if (
       issue.position >= 0 &&
       issue.end_position <= text.length &&
@@ -358,7 +358,7 @@ function resetIssueStates(issues: VerificationIssue[]) {
   }
   issues.forEach((issue, index) => {
     issueStates[index] = 'pending'
-    selectedSuggestions[index] = issue.suggestion
+    selectedSuggestions[index] = issue.suggestion ?? ''
   })
 }
 
@@ -589,7 +589,7 @@ async function exportModified() {
       .filter(({ index }) => issueStates[index] === 'accepted')
       .sort((a, b) => b.issue.position - a.issue.position)
     for (const { issue, index } of accepted) {
-      const suggestion = selectedSuggestions[index] ?? issue.suggestion
+      const suggestion = selectedSuggestions[index] ?? issue.suggestion ?? ''
       if (text.slice(issue.position, issue.end_position) === issue.original) {
         const tracked = `【删除：${issue.original}】【替换为：${suggestion || '（空）'}】`
         text = `${text.slice(0, issue.position)}${tracked}${text.slice(issue.end_position)}`
@@ -602,7 +602,7 @@ async function exportModified() {
     .filter(({ index }) => issueStates[index] === 'accepted')
     .map(({ issue, index }) => ({
       original: issue.original,
-      suggestion: selectedSuggestions[index] ?? issue.suggestion,
+      suggestion: selectedSuggestions[index] ?? issue.suggestion ?? '',
       position: issue.position,
       end_position: issue.end_position
     }))
@@ -1011,7 +1011,7 @@ onBeforeUnmount(() => {
                     v-model="selectedSuggestions[index]"
                     aria-label="选择修改建议"
                   >
-                    <option :value="issue.suggestion">{{ issue.suggestion }}</option>
+                    <option :value="issue.suggestion ?? ''">{{ issue.suggestion || '（删除）' }}</option>
                     <option v-for="alternative in issue.alternatives" :key="alternative" :value="alternative">
                       {{ alternative }}
                     </option>

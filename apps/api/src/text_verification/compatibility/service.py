@@ -10,19 +10,25 @@ from pydantic import TypeAdapter, ValidationError
 from text_verification.compatibility.adapters import (
     legacy_issues_to_domain,
     parsed_file_to_document_model,
+    source_version_for_file,
     text_to_document_model,
 )
 from text_verification.compatibility.analyzer import SCENARIO_CONFIG, TextAnalyzer
 from text_verification.compatibility.llm_review import (
-    is_llm_review_enabled,
+    is_llm_review_configured,
     review_issues,
 )
 from text_verification.compatibility.models import GlossaryTerm, Scenario
-from text_verification.compatibility.parser import get_supported_formats, parse_file
+from text_verification.compatibility.parser import parse_file
 from text_verification.compatibility.statistics import text_statistics
 from text_verification.config import Settings
+from text_verification.domain.capabilities import (
+    CapabilityProfile,
+    default_capability_manifest,
+)
 from text_verification.domain.documents import DocumentModel, FileType
 from text_verification.domain.verification import (
+    VerificationAnalysisMode,
     VerificationDegradation,
     VerificationExecutionMode,
     VerificationResult,
@@ -97,18 +103,20 @@ def analyze(
 
     degradation_reasons: list[str] = []
     review_stats: dict[str, Any] | None = None
-    if is_llm_review_enabled(settings):
+    analysis_mode = VerificationAnalysisMode.LOCAL_ONLY
+    if is_llm_review_configured(settings):
         issues, review_stats = review_issues(settings, text, issues)
         if review_stats.get("failed"):
             degradation_reasons.append("llm_review_failed")
-    else:
-        degradation_reasons.append("llm_review_disabled")
+        elif review_stats.get("performed"):
+            analysis_mode = VerificationAnalysisMode.LOCAL_PLUS_LLM
 
     summary_data: dict[str, Any] = analyzer.get_summary(issues)
 
     return VerificationResult(
         verification_run_id=verification_run_id,
         document_id=document.document_id,
+        source_version=document.source_version,
         source_name=filename,
         file_type=document.file_type,
         scenario=scenario,
@@ -123,7 +131,8 @@ def analyze(
             by_layer=dict(summary_data["by_layer"]),
             llm_review=review_stats,
         ),
-        execution_mode=VerificationExecutionMode.RULES_WITH_OPTIONAL_LLM,
+        execution_mode=VerificationExecutionMode.SYNCHRONOUS,
+        analysis_mode=analysis_mode,
         dictionary_versions=analyzer.dictionary_versions,
         degradation=VerificationDegradation(
             is_degraded=bool(degradation_reasons),
@@ -139,11 +148,13 @@ def parse_uploaded_document(
     source_name: str,
     document_id: UUID | None = None,
 ) -> DocumentModel:
+    source_version = source_version_for_file(path)
     text, parsed_format, page_map = parse_file(str(path), extension, str(path.parent))
     if not text.strip():
         raise AnalysisInputError("File content is empty or no text could be extracted.")
     return parsed_file_to_document_model(
         text=text,
+        source_version=source_version,
         source_name=source_name,
         file_type=_file_type_for(extension),
         parser_name=f"compatibility-{parsed_format}",
@@ -171,7 +182,9 @@ def scenarios() -> list[dict[str, str]]:
 
 
 def formats() -> list[dict[str, str]]:
-    return list(get_supported_formats())
+    return default_capability_manifest().api_formats(
+        CapabilityProfile.SYNCHRONOUS_COMPATIBILITY
+    )
 
 
 def _file_type_for(file_extension: str | None) -> FileType:

@@ -60,13 +60,25 @@ const resultPayload: VerificationResult = {
   document_id: '11111111-1111-1111-1111-111111111111',
   verification_run_id: '22222222-2222-2222-2222-222222222222',
   source_version: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-  execution_mode: 'rules_with_optional_llm',
+  execution_mode: 'synchronous',
+  analysis_mode: 'local_only',
   dictionary_versions: {},
   degradation: {
     is_degraded: false,
     reasons: []
   },
   scenario: 'technical'
+}
+
+const nullableSuggestionPayload: VerificationResult = {
+  ...resultPayload,
+  issues: [
+    {
+      ...resultPayload.issues[0],
+      suggestion: null,
+      auto_fixable: false
+    }
+  ]
 }
 
 describe('createVerificationApi', () => {
@@ -92,7 +104,8 @@ describe('createVerificationApi', () => {
     expect(result.source_version).toBe(
       'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
     )
-    expect(result.execution_mode).toBe('rules_with_optional_llm')
+    expect(result.execution_mode).toBe('synchronous')
+    expect(result.analysis_mode).toBe('local_only')
     expect(result.degradation).toEqual({ is_degraded: false, reasons: [] })
     expect(result.issues[0].issue_id).toBe('33333333-3333-3333-3333-333333333333')
     expect(result.issues[0].block_start).toBe(0)
@@ -129,6 +142,25 @@ describe('createVerificationApi', () => {
 
     const body = fetchMock.mock.calls[0]?.[1]?.body as FormData
     expect((body.get('file') as File).name).toBe('source.docx')
+  })
+
+  it('preserves nullable legacy suggestions', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => nullableSuggestionPayload
+    })
+    const api = createVerificationApi(fetchMock as typeof fetch)
+
+    const result = await api.analyzeText('这是测试。', {
+      scenario: 'general',
+      enableSecurity: true,
+      enableSensitive: true,
+      enableAdExtreme: false,
+      glossary: [],
+      bannedWords: []
+    })
+
+    expect(result.issues[0].suggestion).toBeNull()
   })
 
   it('exports the complete edited text with positioned replacements', async () => {

@@ -1,7 +1,8 @@
 export type Scenario = 'general' | 'academic' | 'business' | 'legal' | 'news' | 'technical'
 export type IssueSeverity = 'error' | 'warning' | 'info'
 export type IssueState = 'pending' | 'accepted' | 'rejected'
-export type VerificationExecutionMode = 'rules_only' | 'rules_with_optional_llm'
+export type VerificationExecutionMode = 'synchronous' | 'asynchronous'
+export type VerificationAnalysisMode = 'local_only' | 'local_plus_llm'
 
 export interface GlossaryTerm {
   original: string
@@ -21,7 +22,7 @@ export interface VerificationIssue {
   type: string
   severity: IssueSeverity
   original: string
-  suggestion: string
+  suggestion: string | null
   alternatives?: string[] | null
   layer: string
   message: string
@@ -76,6 +77,7 @@ export interface VerificationResult {
   verification_run_id: string
   source_version: string
   execution_mode: VerificationExecutionMode
+  analysis_mode: VerificationAnalysisMode
   dictionary_versions: Record<string, string>
   degradation: VerificationDegradation
   scenario: Scenario

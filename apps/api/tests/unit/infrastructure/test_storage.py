@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import pytest
 
+from text_verification.domain.documents import FileType
 from text_verification.infrastructure.storage import (
     InvalidUpload,
     JobStorage,
@@ -22,6 +23,14 @@ def make_docx_bytes() -> bytes:
         archive.writestr("[Content_Types].xml", "<Types/>")
         archive.writestr("word/document.xml", "<w:document/>")
     return data.getvalue()
+
+
+def test_job_storage_uses_manifest_async_profile(tmp_path):
+    storage = JobStorage(tmp_path, max_upload_bytes=1024)
+
+    assert storage.supported_file_types == frozenset(
+        {FileType.DOCX, FileType.PDF, FileType.TXT}
+    )
 
 
 def test_save_upload_uses_job_directory_and_server_filename(tmp_path):

@@ -25,7 +25,7 @@ class Issue:
                        # repetition, style, colloquial
     severity: str      # error, warning, info
     original: str      # 问题文本
-    suggestion: str    # 修改建议
+    suggestion: str | None  # 修改建议；None 表示须人工处理且无自动替换
     position: int      # 起始位置
     end_position: int  # 结束位置
     context: str       # 上下文

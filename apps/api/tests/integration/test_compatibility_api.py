@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from io import BytesIO
 from pathlib import Path
@@ -11,8 +12,12 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from text_verification.api.routes import compatibility as compatibility_routes
+from text_verification.compatibility import service as compatibility_service
 from text_verification.config import Settings, get_settings
-from text_verification.infrastructure.dictionary_loader import DictionaryLoadError
+from text_verification.infrastructure.dictionary_loader import (
+    DictionaryLoader,
+    DictionaryLoadError,
+)
 
 
 def override_storage(app: FastAPI, storage_root: Path) -> None:
@@ -61,6 +66,7 @@ def test_analyze_direct_text_supports_legacy_options(
         "verification_run_id",
         "source_version",
         "execution_mode",
+        "analysis_mode",
         "dictionary_versions",
         "degradation",
     }
@@ -70,12 +76,10 @@ def test_analyze_direct_text_supports_legacy_options(
     assert UUID(payload["document_id"])
     assert UUID(payload["verification_run_id"])
     assert payload["source_version"].startswith("sha256:")
-    assert payload["execution_mode"] == "rules_with_optional_llm"
+    assert payload["execution_mode"] == "synchronous"
+    assert payload["analysis_mode"] == "local_only"
     assert set(payload["dictionary_versions"]) == {"sensitive_rules", "ad_extreme_words"}
-    assert payload["degradation"] == {
-        "is_degraded": True,
-        "reasons": ["llm_review_disabled"],
-    }
+    assert payload["degradation"] == {"is_degraded": False, "reasons": []}
     assert payload["stats"]["char_count"] == len(payload["text"])
     assert payload["issues"]
     assert UUID(payload["issues"][0]["issue_id"])
@@ -111,6 +115,29 @@ def test_analyze_direct_text_masks_dictionary_load_failures(
     assert response.json() == {"detail": "Verification dictionaries are unavailable."}
     assert "secret" not in response.text.lower()
     assert "dictionary missing" not in response.text.lower()
+
+
+def test_analyze_direct_text_normalizes_dictionary_encoding_failure(
+    app: FastAPI,
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    override_storage(app, tmp_path)
+    dictionary_root = tmp_path / "invalid-dictionaries"
+    dictionary_root.mkdir()
+    (dictionary_root / "sensitive_rules.json").write_bytes(b"\xff\xfe\xff")
+    monkeypatch.setattr(
+        compatibility_service,
+        "_DICTIONARY_LOADER",
+        DictionaryLoader(root=dictionary_root),
+    )
+
+    response = client.post("/api/v1/analyze", data={"text": "待检测文本"})
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Verification dictionaries are unavailable."}
+    assert "invalid-dictionaries" not in response.text
 
 
 def test_upload_and_export_txt_from_uuid_scoped_storage(
@@ -155,6 +182,36 @@ def test_upload_and_export_txt_from_uuid_scoped_storage(
     assert exported.headers["content-disposition"].endswith(".txt")
 
 
+def test_uploaded_source_version_hashes_source_bytes_not_extracted_text(
+    app: FastAPI,
+    client: TestClient,
+    tmp_path: Path,
+) -> None:
+    override_storage(app, tmp_path)
+    utf8_bytes = "帐号测试".encode()
+    utf16_bytes = "帐号测试".encode("utf-16")
+
+    utf8 = client.post(
+        "/api/v1/analyze",
+        files={"file": ("utf8.txt", utf8_bytes, "text/plain")},
+    )
+    utf16 = client.post(
+        "/api/v1/analyze",
+        files={"file": ("utf16.txt", utf16_bytes, "text/plain")},
+    )
+
+    assert utf8.status_code == 200
+    assert utf16.status_code == 200
+    assert utf8.json()["text"] == utf16.json()["text"] == "帐号测试"
+    assert utf8.json()["source_version"] == (
+        f"sha256:{hashlib.sha256(utf8_bytes).hexdigest()}"
+    )
+    assert utf16.json()["source_version"] == (
+        f"sha256:{hashlib.sha256(utf16_bytes).hexdigest()}"
+    )
+    assert utf8.json()["source_version"] != utf16.json()["source_version"]
+
+
 def test_uploaded_file_is_deleted_when_dictionary_load_fails(
     app: FastAPI,
     client: TestClient,
@@ -178,6 +235,33 @@ def test_uploaded_file_is_deleted_when_dictionary_load_fails(
     assert response.status_code == 500
     assert response.json() == {"detail": "Verification dictionaries are unavailable."}
     assert "secret" not in response.text.lower()
+    assert not compatibility_root.exists() or list(compatibility_root.iterdir()) == []
+
+
+def test_uploaded_file_is_deleted_when_dictionary_encoding_is_invalid(
+    app: FastAPI,
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    override_storage(app, tmp_path)
+    dictionary_root = tmp_path / "invalid-dictionaries"
+    dictionary_root.mkdir()
+    (dictionary_root / "sensitive_rules.json").write_bytes(b"\xff\xfe\xff")
+    monkeypatch.setattr(
+        compatibility_service,
+        "_DICTIONARY_LOADER",
+        DictionaryLoader(root=dictionary_root),
+    )
+
+    response = client.post(
+        "/api/v1/analyze",
+        files={"file": ("source.txt", "帐号测试".encode(), "text/plain")},
+    )
+
+    compatibility_root = tmp_path / "compatibility"
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Verification dictionaries are unavailable."}
     assert not compatibility_root.exists() or list(compatibility_root.iterdir()) == []
 
 
@@ -208,6 +292,34 @@ def test_export_html_report_escapes_user_content(client: TestClient) -> None:
     assert "<script>" not in html
     assert "&lt;script&gt;" in html
     assert "&lt;b&gt;x&lt;/b&gt;" in html
+
+
+def test_export_html_report_keeps_nullable_suggestion_display_safe(
+    client: TestClient,
+) -> None:
+    response = client.post(
+        "/api/v1/export",
+        json={
+            "filename": "report.txt",
+            "stats": {},
+            "summary": {"total": 1},
+            "issues": [
+                {
+                    "layer": "security",
+                    "type": "sensitive_politics",
+                    "severity": "error",
+                    "original": "敏感词",
+                    "suggestion": None,
+                    "description": "请人工处理",
+                    "context": "敏感词",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert '<td class="suggestion"></td>' in response.text
+    assert ">None<" not in response.text
 
 
 def test_docx_export_can_emit_word_track_changes(
@@ -586,4 +698,9 @@ def test_scenarios_and_formats_are_discoverable(client: TestClient) -> None:
         "rtf",
         "md",
         "csv",
+    }
+    assert formats_response.json()["formats"][0] == {
+        "ext": "docx",
+        "name": "Word 文档",
+        "accept": ".docx",
     }

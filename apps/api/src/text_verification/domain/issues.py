@@ -52,4 +52,16 @@ class Issue(BaseModel):
             and self.block_end <= self.block_start
         ):
             raise ValueError("block_end must be greater than block_start")
+        if len(self.original) != self.end - self.start:
+            raise ValueError("original text length must match the global issue range")
+        if self.block_id is None and self.block_start is not None:
+            raise ValueError("block offsets require a block_id")
+        if self.block_id is not None and self.block_start is None:
+            raise ValueError("block_id requires block_start and block_end")
+        if (
+            self.block_start is not None
+            and self.block_end is not None
+            and self.block_end - self.block_start != self.end - self.start
+        ):
+            raise ValueError("block range length must match the global issue range")
         return self

@@ -1,4 +1,3 @@
-import hashlib
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from text_verification.compatibility.adapters import (
@@ -12,6 +11,7 @@ from text_verification.domain.documents import DocumentModel, FileType, TextBloc
 from text_verification.domain.issues import Issue, IssueSeverity
 from text_verification.domain.verification import (
     Scenario,
+    VerificationAnalysisMode,
     VerificationDegradation,
     VerificationExecutionMode,
     VerificationResult,
@@ -111,6 +111,7 @@ def test_issue_adapter_uses_original_width_when_legacy_range_is_empty() -> None:
 def test_uploaded_docx_page_map_becomes_structured_paragraph_blocks() -> None:
     document = parsed_file_to_document_model(
         text="Alpha\nBeta",
+        source_version="sha256:docx-source-bytes",
         source_name="source.docx",
         file_type=FileType.DOCX,
         parser_name="compatibility-docx",
@@ -144,6 +145,7 @@ def test_uploaded_docx_page_map_becomes_structured_paragraph_blocks() -> None:
 def test_uploaded_issue_maps_to_containing_block_and_local_offsets() -> None:
     document = parsed_file_to_document_model(
         text="Clean\n帐号",
+        source_version="sha256:pdf-source-bytes",
         source_name="source.pdf",
         file_type=FileType.PDF,
         parser_name="compatibility-pdf",
@@ -183,6 +185,7 @@ def test_uploaded_issue_maps_to_containing_block_and_local_offsets() -> None:
 def test_uploaded_without_location_map_uses_file_level_block_without_page_numbers() -> None:
     document = parsed_file_to_document_model(
         text="No structure here",
+        source_version="sha256:rtf-source-bytes",
         source_name="source.rtf",
         file_type=FileType.RTF,
         parser_name="compatibility-rtf",
@@ -207,20 +210,24 @@ def test_legacy_response_keeps_existing_fields_and_adds_canonical_metadata() -> 
     assert EXISTING_TOP_LEVEL_FIELDS <= set(payload)
     assert payload["document_id"] == str(result.document_id)
     assert payload["verification_run_id"] == str(result.verification_run_id)
-    expected_source_version = (
-        f"sha256:{hashlib.sha256(result.text.encode('utf-8')).hexdigest()}"
-    )
-    assert payload["source_version"] == expected_source_version
+    assert payload["source_version"] == result.source_version
     assert payload["execution_mode"] == result.execution_mode.value
+    assert payload["analysis_mode"] == result.analysis_mode.value
     assert payload["dictionary_versions"] == result.dictionary_versions
-    assert payload["degradation"] == {
-        "is_degraded": True,
-        "reasons": ["llm_review_disabled"],
-    }
+    assert payload["degradation"] == {"is_degraded": False, "reasons": []}
     assert EXISTING_ISSUE_FIELDS <= set(payload["issues"][0])
     assert payload["issues"][0]["issue_id"] == str(result.issues[0].issue_id)
     assert payload["issues"][0]["position"] == result.issues[0].start
     assert payload["issues"][0]["end_position"] == result.issues[0].end
+
+
+def test_legacy_response_preserves_nullable_suggestion_semantics() -> None:
+    result = _result(suggestion=None)
+
+    payload = verification_result_to_legacy_response(result)
+
+    assert payload["issues"][0]["suggestion"] is None
+    assert payload["issues"][0]["auto_fixable"] is False
 
 
 def _document(text: str = "帐号测试") -> DocumentModel:
@@ -255,7 +262,7 @@ def _document(text: str = "帐号测试") -> DocumentModel:
     )
 
 
-def _result() -> VerificationResult:
+def _result(*, suggestion: str | None = "账号") -> VerificationResult:
     document = _document()
     verification_run_id = uuid4()
     issue = Issue(
@@ -269,7 +276,7 @@ def _result() -> VerificationResult:
         block_start=0,
         block_end=2,
         original="帐号",
-        suggestion="账号",
+        suggestion=suggestion,
         alternatives=[],
         type="typo",
         severity=IssueSeverity.WARNING,
@@ -281,12 +288,13 @@ def _result() -> VerificationResult:
         source="compatibility.analyzer",
         source_version="1",
         confidence=0.8,
-        auto_fixable=True,
+        auto_fixable=bool(suggestion),
         context="帐号测试",
     )
     return VerificationResult(
         verification_run_id=verification_run_id,
         document_id=document.document_id,
+        source_version="source-revision:verbatim",
         source_name=document.source_name,
         file_type=document.file_type,
         scenario=Scenario.BUSINESS,
@@ -308,13 +316,11 @@ def _result() -> VerificationResult:
             by_rule={"cn_typo": 1},
             by_layer={"character": 1},
         ),
-        execution_mode=VerificationExecutionMode.RULES_WITH_OPTIONAL_LLM,
+        execution_mode=VerificationExecutionMode.SYNCHRONOUS,
+        analysis_mode=VerificationAnalysisMode.LOCAL_ONLY,
         dictionary_versions={
             "sensitive_rules": "sha256-sensitive",
             "ad_extreme_words": "sha256-ad-extreme",
         },
-        degradation=VerificationDegradation(
-            is_degraded=True,
-            reasons=("llm_review_disabled",),
-        ),
+        degradation=VerificationDegradation(),
     )

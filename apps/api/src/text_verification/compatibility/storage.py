@@ -11,8 +11,12 @@ from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 from uuid import UUID
 
+from text_verification.domain.capabilities import (
+    CapabilityProfile,
+    default_capability_manifest,
+)
+
 UPLOAD_CHUNK_BYTES = 1024 * 1024
-SUPPORTED_EXTENSIONS = {"csv", "doc", "docx", "md", "pdf", "rtf", "txt"}
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +44,13 @@ class CompatibilityStorage:
     def __init__(self, root: Path, max_upload_bytes: int) -> None:
         self._root = root.expanduser().resolve(strict=False) / "compatibility"
         self._max_upload_bytes = max_upload_bytes
+        self._supported_extensions = default_capability_manifest().extensions_for_profile(
+            CapabilityProfile.SYNCHRONOUS_COMPATIBILITY
+        )
+
+    @property
+    def supported_extensions(self) -> frozenset[str]:
+        return self._supported_extensions
 
     def save_stream(
         self,
@@ -49,7 +60,7 @@ class CompatibilityStorage:
     ) -> StoredCompatibilityUpload:
         safe_name = self._safe_name(original_name)
         extension = Path(safe_name).suffix.lower().removeprefix(".")
-        if extension not in SUPPORTED_EXTENSIONS:
+        if extension not in self._supported_extensions:
             raise CompatibilityUploadError(f"Unsupported upload extension: .{extension}")
 
         directory = self._directory(file_id)
@@ -94,7 +105,7 @@ class CompatibilityStorage:
         source_path = candidates[0].resolve(strict=True)
         self._ensure_within_root(source_path)
         extension = source_path.suffix.lower().removeprefix(".")
-        if extension not in SUPPORTED_EXTENSIONS:
+        if extension not in self._supported_extensions:
             raise CompatibilityUploadError("Stored upload has an unsupported file type.")
         return source_path, extension
 

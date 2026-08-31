@@ -18,6 +18,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from text_verification.api.dependencies import get_job_repository, get_job_storage
 from text_verification.config import Settings, get_settings
+from text_verification.domain.capabilities import default_capability_manifest
+from text_verification.domain.documents import FileType
 from text_verification.domain.jobs import TERMINAL_STATUSES, JobEvent, JobRead, JobStatus
 from text_verification.infrastructure.database import get_session_factory
 from text_verification.infrastructure.repositories import JobRepository
@@ -43,11 +45,7 @@ UNSUPPORTED_FILE_TYPE_CODE = "unsupported_file_type"
 UPLOAD_TOO_LARGE_CODE = "upload_too_large"
 SSE_KEEPALIVE_SECONDS = 15.0
 SSE_POLL_SECONDS = 0.5
-FILE_TYPE_MIME_TYPES = {
-    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    "pdf": "application/pdf",
-    "txt": "text/plain",
-}
+
 
 router = APIRouter(tags=["jobs"])
 
@@ -260,7 +258,8 @@ def _validate_declared_mime(content_type: str | None, file_type: str) -> None:
     normalized = (content_type or "").split(";", 1)[0].strip().lower()
     if not normalized or normalized == "application/octet-stream":
         return
-    if normalized != FILE_TYPE_MIME_TYPES[file_type]:
+    capability = default_capability_manifest().for_type(FileType(file_type))
+    if normalized not in capability.mime_types:
         raise UnsupportedFileType("Declared MIME type does not match upload content.")
 
 

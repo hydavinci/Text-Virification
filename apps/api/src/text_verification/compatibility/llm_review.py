@@ -20,11 +20,14 @@
   LLM_JSON_MODE    — 是否强制 json_object 返回格式，默认 0（0/1）
 """
 
-import re
 import json
+import logging
+import re
 from typing import List, Dict, Tuple, Optional, Any
 
 from text_verification.config import Settings
+
+logger = logging.getLogger(__name__)
 
 try:
     from openai import OpenAI
@@ -37,9 +40,9 @@ REVIEW_SEVERITIES = {'warning', 'info'}
 NEVER_REVIEW_TYPES = {'banned_word', 'custom_term', 'typo', 'variant_char'}
 
 
-def is_llm_review_enabled(settings: Settings) -> bool:
-    """是否已配置并启用云端复核"""
-    return bool(settings.llm_api_key.strip()) and OpenAI is not None
+def is_llm_review_configured(settings: Settings) -> bool:
+    """是否配置了云端复核。SDK/供应商故障由安全降级路径处理。"""
+    return bool(settings.llm_api_key.strip())
 
 
 def _excerpt(text: str, start: int, end: int, radius: int | None = None) -> str:
@@ -133,17 +136,26 @@ def review_issues(settings: Settings, text: str, issues: List[Any]) -> Tuple[Lis
     - real           → 保留。
     """
     stats = {
-        'enabled': is_llm_review_enabled(settings),
+        'enabled': is_llm_review_configured(settings),
+        'performed': False,
         'candidates': 0,
         'removed': 0,
         'downgraded': 0,
         'kept': 0,
         'failed': False,
+        'failure_code': None,
         'reason': '',
     }
 
     if not stats['enabled']:
         stats['reason'] = '未配置 LLM_API_KEY，已跳过云端复核'
+        return issues, stats
+
+    if OpenAI is None:
+        stats['failed'] = True
+        stats['failure_code'] = 'llm_client_unavailable'
+        stats['reason'] = '大模型客户端不可用，已回退纯规则结果'
+        logger.error("llm_review_client_unavailable")
         return issues, stats
 
     # 挑选送复核的候选（低严重度 + 非强约束类型）
@@ -197,15 +209,20 @@ def review_issues(settings: Settings, text: str, issues: List[Any]) -> Tuple[Lis
         resp = client.chat.completions.create(**create_kwargs)
         content = resp.choices[0].message.content or ''
         verdicts = _parse_response(content, len(payload))
-    except Exception as e:
+    except Exception:
+        logger.exception("llm_review_provider_failed")
         stats['failed'] = True
-        stats['reason'] = f'调用大模型失败，已回退纯规则结果: {str(e)[:80]}'
+        stats['failure_code'] = 'llm_provider_error'
+        stats['reason'] = '大模型调用失败，已回退纯规则结果'
         return issues, stats
 
     if verdicts is None:
         stats['failed'] = True
+        stats['failure_code'] = 'llm_invalid_response'
         stats['reason'] = '大模型返回无法解析，已回退纯规则结果'
         return issues, stats
+
+    stats['performed'] = True
 
     # 应用判定
     removed_idx = set()

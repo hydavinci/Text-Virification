@@ -11,6 +11,10 @@ from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 from uuid import UUID
 
+from text_verification.domain.capabilities import (
+    CapabilityProfile,
+    default_capability_manifest,
+)
 from text_verification.domain.documents import FileType
 
 logger = logging.getLogger(__name__)
@@ -19,7 +23,6 @@ UPLOAD_CHUNK_BYTES = 1024 * 1024
 MAX_ZIP_ENTRIES = 10_000
 MAX_ZIP_SINGLE_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
 MAX_ZIP_UNCOMPRESSED_BYTES = 200 * 1024 * 1024
-SUPPORTED_UPLOAD_FILE_TYPES = frozenset({FileType.DOCX, FileType.PDF, FileType.TXT})
 
 
 @dataclass(frozen=True)
@@ -50,6 +53,15 @@ class JobStorage:
     def __init__(self, root: Path, max_upload_bytes: int) -> None:
         self._root = root.expanduser().resolve(strict=False)
         self._max_upload_bytes = max_upload_bytes
+        self._supported_file_types = frozenset(
+            default_capability_manifest().file_types_for_profile(
+                CapabilityProfile.ASYNCHRONOUS_JOB
+            )
+        )
+
+    @property
+    def supported_file_types(self) -> frozenset[FileType]:
+        return self._supported_file_types
 
     def job_directory(self, job_id: UUID) -> Path:
         return self._root / str(job_id)
@@ -166,7 +178,7 @@ class JobStorage:
             file_type = FileType(suffix.removeprefix("."))
         except ValueError as exc:
             raise UnsupportedFileType(f"Unsupported upload extension: {suffix}") from exc
-        if file_type not in SUPPORTED_UPLOAD_FILE_TYPES:
+        if file_type not in self._supported_file_types:
             raise UnsupportedFileType(f"Unsupported upload extension: {suffix}")
         return file_type
 

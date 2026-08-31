@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Iterable, Sequence
+from pathlib import Path
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from text_verification.compatibility.analyzer import Issue as LegacyIssue
@@ -25,6 +26,14 @@ _CONFIDENCE_BY_SEVERITY = {
 def source_version_for_text(text: str) -> str:
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
+
+
+def source_version_for_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return f"sha256:{digest.hexdigest()}"
 
 
 def text_to_document_model(
@@ -54,13 +63,13 @@ def text_to_document_model(
 def parsed_file_to_document_model(
     *,
     text: str,
+    source_version: str,
     source_name: str,
     file_type: FileType,
     parser_name: str,
     page_map: Sequence[tuple[int, int, str]],
     document_id: UUID | None = None,
 ) -> DocumentModel:
-    source_version = source_version_for_text(text)
     resolved_document_id = document_id or uuid5(
         NAMESPACE_URL,
         f"document:{file_type.value}:{source_name}:{source_version}",
@@ -145,8 +154,9 @@ def verification_result_to_legacy_response(result: VerificationResult) -> dict[s
         "scenario": result.scenario.value,
         "document_id": str(result.document_id),
         "verification_run_id": str(result.verification_run_id),
-        "source_version": source_version_for_text(result.text),
+        "source_version": result.source_version,
         "execution_mode": result.execution_mode.value,
+        "analysis_mode": result.analysis_mode.value,
         "dictionary_versions": dict(result.dictionary_versions),
         "degradation": result.degradation.model_dump(mode="json"),
     }
@@ -157,7 +167,7 @@ def _domain_issue_to_legacy_payload(issue: Issue) -> dict[str, object]:
         "type": issue.type,
         "severity": issue.severity.value,
         "original": issue.original,
-        "suggestion": issue.suggestion or "",
+        "suggestion": issue.suggestion,
         "position": issue.start,
         "end_position": issue.end,
         "context": issue.context,

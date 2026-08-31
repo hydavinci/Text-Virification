@@ -14,14 +14,96 @@
           "end_position": 23
         }
       ]
+    },
+    {
+      "name": "identity number ending in lowercase x",
+      "text": "身份证号：11010519491231002x",
+      "options": {
+        "enable_security": true
+      },
+      "expected": [
+        {
+          "type": "pii_id",
+          "original": "11010519491231002x",
+          "position": 5,
+          "end_position": 23
+        }
+      ]
     }
   ],
-  "ad_extreme_words": [
+  "mixed_punct": [
     {
-      "name": "advertising disabled by default",
-      "text": "这是全球领先产品",
+      "name": "punctuation wins width conflict",
+      "text": "中文,内容",
       "options": {},
+      "expected": [
+        {
+          "type": "punctuation",
+          "original": ",",
+          "position": 2,
+          "end_position": 3
+        }
+      ],
+      "absent_rule_ids": [
+        "half_in_cn_context"
+      ]
+    }
+  ],
+  "colloquial_expr": [
+    {
+      "name": "business scenario filters colloquial wording",
+      "text": "咱们处理",
+      "options": {
+        "scenario": "business"
+      },
       "expected": []
+    },
+    {
+      "name": "representative discourse rule",
+      "text": "咱们处理",
+      "options": {
+        "scenario": "general"
+      },
+      "expected": [
+        {
+          "type": "colloquial",
+          "original": "咱们",
+          "position": 0,
+          "end_position": 2
+        }
+      ]
+    }
+  ],
+  "pii_email": [
+    {
+      "name": "security switch is independent",
+      "text": "联系 test@example.com，台湾产品全球领先。",
+      "options": {
+        "enable_security": false,
+        "enable_sensitive": true,
+        "enable_ad_extreme": true
+      },
+      "expected": [],
+      "required_rule_ids": [
+        "sensitive_rules",
+        "ad_extreme_words"
+      ]
+    },
+    {
+      "name": "representative compliance rule",
+      "text": "联系 test@example.com",
+      "options": {
+        "enable_security": true,
+        "enable_sensitive": false
+      },
+      "expected": [
+        {
+          "type": "pii_email",
+          "original": "test@example.com",
+          "position": 3,
+          "end_position": 19
+        }
+      ]
     }
   ],
   "sensitive_rules": [
@@ -37,6 +119,158 @@
           "original": "台湾",
           "position": 0,
           "end_position": 2
+        }
+      ]
+    },
+    {
+      "name": "sensitive switch is independent",
+      "text": "联系 test@example.com，台湾产品全球领先。",
+      "options": {
+        "enable_security": true,
+        "enable_sensitive": false,
+        "enable_ad_extreme": true
+      },
+      "expected": [],
+      "required_rule_ids": [
+        "pii_email",
+        "ad_extreme_words"
+      ]
+    }
+  ],
+  "ad_extreme_words": [
+    {
+      "name": "advertising disabled by default",
+      "text": "这是全球领先产品",
+      "options": {},
+      "expected": []
+    },
+    {
+      "name": "advertising switch is independent",
+      "text": "联系 test@example.com，台湾产品全球领先。",
+      "options": {
+        "enable_security": true,
+        "enable_sensitive": true,
+        "enable_ad_extreme": false
+      },
+      "expected": [],
+      "required_rule_ids": [
+        "pii_email",
+        "sensitive_rules"
+      ]
+    },
+    {
+      "name": "advertising enabled explicitly",
+      "text": "这是全球领先产品",
+      "options": {
+        "enable_ad_extreme": true
+      },
+      "expected": [
+        {
+          "type": "ad_extreme",
+          "original": "全球领先",
+          "position": 2,
+          "end_position": 6
+        }
+      ]
+    }
+  ],
+  "custom_glossary": [
+    {
+      "name": "custom glossary replacement",
+      "text": "使用AI工具",
+      "options": {
+        "custom_glossary": [
+          {
+            "original": "AI",
+            "standard": "人工智能"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "type": "custom_term",
+          "original": "AI",
+          "position": 2,
+          "end_position": 4
+        }
+      ]
+    }
+  ],
+  "banned_word": [
+    {
+      "name": "banned word detection",
+      "text": "禁止禁用词出现",
+      "options": {
+        "banned_words": [
+          "禁用词"
+        ]
+      },
+      "expected": [
+        {
+          "type": "banned_word",
+          "original": "禁用词",
+          "position": 2,
+          "end_position": 5
+        }
+      ]
+    }
+  ],
+  "cn_typo": [
+    {
+      "name": "representative character rule",
+      "text": "帐号",
+      "options": {},
+      "expected": [
+        {
+          "type": "typo",
+          "original": "帐号",
+          "position": 0,
+          "end_position": 2
+        }
+      ]
+    }
+  ],
+  "incomplete_phrase": [
+    {
+      "name": "representative vocabulary rule",
+      "text": "迫不及。",
+      "options": {},
+      "expected": [
+        {
+          "type": "missing_char",
+          "original": "迫不及",
+          "position": 0,
+          "end_position": 3
+        }
+      ]
+    }
+  ],
+  "sentence_mixing": [
+    {
+      "name": "representative sentence rule",
+      "text": "原因是管理不善造成的",
+      "options": {},
+      "expected": [
+        {
+          "type": "expression",
+          "original": "原因是管理不善造成的",
+          "position": 0,
+          "end_position": 10
+        }
+      ]
+    }
+  ],
+  "repeat_punct": [
+    {
+      "name": "representative format rule",
+      "text": "测试，，内容",
+      "options": {},
+      "expected": [
+        {
+          "type": "punctuation",
+          "original": "，，",
+          "position": 2,
+          "end_position": 4
         }
       ]
     }

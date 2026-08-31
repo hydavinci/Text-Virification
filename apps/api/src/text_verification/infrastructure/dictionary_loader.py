@@ -55,6 +55,8 @@ class DictionaryLoader:
                 return self._load_from_path(name, path)
         except FileNotFoundError as error:
             raise DictionaryLoadError(f"Dictionary '{name}' could not be found.") from error
+        except OSError as error:
+            raise DictionaryLoadError(f"Dictionary '{name}' could not be read.") from error
 
     def _load_from_path(self, name: DictionaryName, path: Path) -> DictionarySnapshot:
         try:
@@ -76,7 +78,9 @@ class DictionaryLoader:
             entries = _ENTRY_ADAPTERS[name].validate_python(raw_payload)
         except FileNotFoundError as error:
             raise DictionaryLoadError(f"Dictionary '{name}' could not be found.") from error
-        except (json.JSONDecodeError, ValidationError) as error:
+        except OSError as error:
+            raise DictionaryLoadError(f"Dictionary '{name}' could not be read.") from error
+        except (UnicodeDecodeError, json.JSONDecodeError, ValidationError) as error:
             raise DictionaryLoadError(f"Dictionary '{name}' is invalid.") from error
 
         snapshot = DictionarySnapshot(name=name, version=content_hash, entries=entries)

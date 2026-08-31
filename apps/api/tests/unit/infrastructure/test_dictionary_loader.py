@@ -144,3 +144,47 @@ def test_dictionary_loader_reloads_when_content_changes_without_metadata_change(
     assert initial.version != updated.version
     assert initial.entries.politics == ("甲",)
     assert updated.entries.politics == ("乙",)
+
+
+def test_dictionary_loader_normalizes_invalid_encoding(tmp_path: Path) -> None:
+    from text_verification.infrastructure.dictionary_loader import (
+        DictionaryLoader,
+        DictionaryLoadError,
+    )
+
+    (tmp_path / "sensitive_rules.json").write_bytes(b"\xff\xfe\xff")
+
+    with pytest.raises(DictionaryLoadError, match="sensitive_rules"):
+        DictionaryLoader(root=tmp_path).load("sensitive_rules")
+
+
+@pytest.mark.parametrize("error", [PermissionError("denied"), OSError("device error")])
+def test_dictionary_loader_normalizes_safe_os_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: OSError,
+) -> None:
+    from text_verification.infrastructure.dictionary_loader import (
+        DictionaryLoader,
+        DictionaryLoadError,
+    )
+
+    path = tmp_path / "sensitive_rules.json"
+    path.write_text(
+        '{"politics":[],"ethnic_religion":[],"territory_standard":[]}',
+        encoding="utf-8",
+    )
+    real_read_bytes = Path.read_bytes
+
+    def fail_target(target: Path) -> bytes:
+        if target == path:
+            raise error
+        return real_read_bytes(target)
+
+    monkeypatch.setattr(Path, "read_bytes", fail_target)
+
+    with pytest.raises(DictionaryLoadError, match="could not be read") as captured:
+        DictionaryLoader(root=tmp_path).load("sensitive_rules")
+
+    assert str(path) not in str(captured.value)
+    assert str(error) not in str(captured.value)

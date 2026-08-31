@@ -21,9 +21,9 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_api_base: str = "https://api.openai.com/v1"
     llm_model: str = "gpt-4o-mini"
-    llm_max_review: int = Field(default=40, ge=1)
-    llm_context_radius: int = Field(default=50, ge=0)
-    llm_timeout: float = Field(default=60.0, gt=0)
+    llm_max_review: int = Field(default=40, ge=1, le=200)
+    llm_context_radius: int = Field(default=50, ge=0, le=2_000)
+    llm_timeout: float = Field(default=60.0, gt=0, le=300)
     llm_json_mode: bool = False
 
 

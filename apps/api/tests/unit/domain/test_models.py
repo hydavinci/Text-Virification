@@ -8,6 +8,49 @@ from text_verification.domain.issues import Issue, IssueSeverity
 from text_verification.domain.jobs import JobRead, JobStatus
 
 
+def _block(
+    block_id: str,
+    text: str,
+    start: int,
+    end: int,
+    *,
+    parent_id: str | None = None,
+    block_start: int = 0,
+    block_end: int | None = None,
+) -> TextBlock:
+    return TextBlock(
+        block_id=block_id,
+        kind="paragraph",
+        text=text,
+        global_start=start,
+        global_end=end,
+        block_start=block_start,
+        block_end=len(text) if block_end is None else block_end,
+        page=None,
+        paragraph_index=None,
+        table_index=None,
+        row_index=None,
+        cell_index=None,
+        bbox=None,
+        parent_id=parent_id,
+        style={},
+        source_locator={},
+    )
+
+
+def _document_with_blocks(text: str, blocks: list[TextBlock]) -> DocumentModel:
+    return DocumentModel(
+        document_id=uuid4(),
+        source_version="sha256:sample",
+        file_type=FileType.TXT,
+        source_name="sample.txt",
+        text=text,
+        blocks=blocks,
+        parser_name="plain-text",
+        parser_version="1",
+    )
+
+
 def test_document_owns_block_local_offsets() -> None:
     block = TextBlock(
         block_id="p-1",
@@ -86,6 +129,64 @@ def test_document_model_rejects_block_outside_document_text() -> None:
         )
 
 
+def test_text_block_rejects_local_range_not_anchored_to_its_text() -> None:
+    with pytest.raises(ValidationError, match="local block range"):
+        _block("b1", "abc", 0, 3, block_start=1, block_end=4)
+
+
+def test_document_model_rejects_duplicate_block_ids() -> None:
+    with pytest.raises(ValidationError, match="block IDs must be unique"):
+        _document_with_blocks(
+            "abcdef",
+            [
+                _block("duplicate", "abc", 0, 3),
+                _block("duplicate", "def", 3, 6),
+            ],
+        )
+
+
+def test_document_model_rejects_overlap_between_unrelated_blocks() -> None:
+    with pytest.raises(ValidationError, match="overlap"):
+        _document_with_blocks(
+            "abcdef",
+            [
+                _block("first", "abcd", 0, 4),
+                _block("second", "cdef", 2, 6),
+            ],
+        )
+
+
+def test_document_model_allows_parent_child_containment() -> None:
+    document = _document_with_blocks(
+        "abcdef",
+        [
+            _block("parent", "abcdef", 0, 6),
+            _block("child", "bc", 1, 3, parent_id="parent"),
+        ],
+    )
+
+    assert document.blocks[1].parent_id == "parent"
+
+
+def test_document_model_rejects_parent_child_overlap_without_containment() -> None:
+    with pytest.raises(ValidationError, match="contain"):
+        _document_with_blocks(
+            "abcdef",
+            [
+                _block("parent", "abcd", 0, 4),
+                _block("child", "cdef", 2, 6, parent_id="parent"),
+            ],
+        )
+
+
+def test_document_model_rejects_unknown_parent_block() -> None:
+    with pytest.raises(ValidationError, match="parent block"):
+        _document_with_blocks(
+            "abcdef",
+            [_block("child", "abc", 0, 3, parent_id="missing")],
+        )
+
+
 def test_issue_rejects_range_beyond_original_block_contract() -> None:
     with pytest.raises(ValidationError):
         Issue(
@@ -150,6 +251,66 @@ def test_issue_supports_canonical_identity_and_review_metadata() -> None:
     assert issue.block_end == 2
     assert issue.review is None
     assert issue.review_reason is None
+
+
+def test_issue_rejects_original_width_that_differs_from_global_span() -> None:
+    with pytest.raises(ValidationError, match="original text length"):
+        Issue(
+            issue_id=uuid4(),
+            document_id=uuid4(),
+            verification_run_id=uuid4(),
+            block_id=None,
+            page=None,
+            start=0,
+            end=2,
+            block_start=None,
+            block_end=None,
+            original="错",
+            suggestion="正",
+            alternatives=[],
+            type="typo",
+            severity=IssueSeverity.WARNING,
+            layer="character",
+            message="错别字",
+            description="疑似错别字",
+            rule_id="legacy.typo",
+            rule_version="1",
+            source="legacy",
+            source_version="1",
+            confidence=0.9,
+            auto_fixable=True,
+            context="错字",
+        )
+
+
+def test_issue_rejects_block_span_that_differs_from_global_span() -> None:
+    with pytest.raises(ValidationError, match="block range length"):
+        Issue(
+            issue_id=uuid4(),
+            document_id=uuid4(),
+            verification_run_id=uuid4(),
+            block_id="p-1",
+            page=None,
+            start=0,
+            end=2,
+            block_start=0,
+            block_end=1,
+            original="错字",
+            suggestion="正字",
+            alternatives=[],
+            type="typo",
+            severity=IssueSeverity.WARNING,
+            layer="character",
+            message="错别字",
+            description="疑似错别字",
+            rule_id="legacy.typo",
+            rule_version="1",
+            source="legacy",
+            source_version="1",
+            confidence=0.9,
+            auto_fixable=True,
+            context="错字",
+        )
 
 
 def test_job_status_contains_all_pipeline_states() -> None:

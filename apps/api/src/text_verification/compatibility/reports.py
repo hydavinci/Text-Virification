@@ -67,7 +67,7 @@ def _issue_row(index: int, issue: dict[str, Any]) -> str:
         issue.get("type", ""),
         issue.get("severity", ""),
         issue.get("original", ""),
-        issue.get("suggestion", ""),
+        issue.get("suggestion") or "",
         issue.get("description", ""),
         issue.get("context", ""),
     ]

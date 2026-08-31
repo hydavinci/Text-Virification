@@ -1,0 +1,28 @@
+[
+  {
+    "name": "mixed Chinese and English statistics",
+    "text": "中文 test",
+    "expected": {
+      "char_count": 7,
+      "char_count_no_space": 6,
+      "line_count": 1,
+      "paragraph_count": 1,
+      "language": "zh",
+      "primary_count": 3,
+      "primary_label": "总字数"
+    }
+  },
+  {
+    "name": "English multiline statistics",
+    "text": "hello world\nnext",
+    "expected": {
+      "char_count": 16,
+      "char_count_no_space": 14,
+      "line_count": 2,
+      "paragraph_count": 2,
+      "language": "en",
+      "primary_count": 3,
+      "primary_label": "总单词数"
+    }
+  }
+]

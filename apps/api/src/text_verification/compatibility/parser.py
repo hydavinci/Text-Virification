@@ -387,12 +387,11 @@ strip_html = _strip_html
 
 def get_supported_formats() -> list:
     """返回支持的文件格式列表"""
-    return [
-        {'ext': 'txt', 'name': '纯文本文件', 'accept': '.txt'},
-        {'ext': 'docx', 'name': 'Word 文档', 'accept': '.docx'},
-        {'ext': 'doc', 'name': '旧版 Word 文档', 'accept': '.doc'},
-        {'ext': 'pdf', 'name': 'PDF 文档', 'accept': '.pdf'},
-        {'ext': 'rtf', 'name': 'RTF 文档', 'accept': '.rtf'},
-        {'ext': 'md', 'name': 'Markdown 文件', 'accept': '.md'},
-        {'ext': 'csv', 'name': 'CSV 文件', 'accept': '.csv'},
-    ]
+    from text_verification.domain.capabilities import (
+        CapabilityProfile,
+        default_capability_manifest,
+    )
+
+    return default_capability_manifest().api_formats(
+        CapabilityProfile.SYNCHRONOUS_COMPATIBILITY
+    )
