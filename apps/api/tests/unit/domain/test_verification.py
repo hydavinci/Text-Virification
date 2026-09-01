@@ -106,6 +106,7 @@ def _verification_result(
     document_id=None,
     verification_run_id=None,
     text: str = "帐号测试",
+    blocks: tuple[TextBlock, ...] | None = None,
     summary: VerificationSummary | None = None,
 ) -> VerificationResult:
     return _verification_result_with_issues(
@@ -113,6 +114,7 @@ def _verification_result(
         document_id=document_id,
         verification_run_id=verification_run_id,
         text=text,
+        blocks=blocks,
         summary=summary,
     )
 
@@ -137,7 +139,7 @@ def _verification_result_with_issues(
         file_type=FileType.TXT,
         scenario=Scenario.GENERAL,
         text=text,
-        blocks=blocks or (_text_block(text),),
+        blocks=blocks if blocks is not None else (_text_block(text),),
         parser_name="test-parser",
         parser_version="1",
         stats=VerificationStatistics(
@@ -316,6 +318,22 @@ def test_verification_result_accepts_issue_mapped_to_nonzero_global_block() -> N
         blocks=blocks,
     )
 
+    assert result.issues == (issue,)
+
+
+def test_verification_result_allows_direct_text_issue_without_blocks() -> None:
+    issue = Issue.model_validate(
+        _canonical_issue().model_dump()
+        | {
+            "block_id": None,
+            "block_start": None,
+            "block_end": None,
+        }
+    )
+
+    result = _verification_result(issue, blocks=())
+
+    assert result.blocks == ()
     assert result.issues == (issue,)
 
 

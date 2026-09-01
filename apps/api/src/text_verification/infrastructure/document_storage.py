@@ -72,9 +72,20 @@ def build_artifact_storage_key(
     job_id: UUID,
     artifact_id: UUID,
     file_type: FileType | str,
+    *,
+    subdirectories: tuple[str, ...] = (),
 ) -> str:
     resolved_file_type = file_type if isinstance(file_type, FileType) else FileType(file_type)
-    return f"{ARTIFACT_NAMESPACE}/{job_id}/{artifact_id}.{resolved_file_type.value}"
+    storage_key = "/".join(
+        (
+            ARTIFACT_NAMESPACE,
+            str(job_id),
+            *subdirectories,
+            f"{artifact_id}.{resolved_file_type.value}",
+        )
+    )
+    validate_artifact_storage_key(job_id, storage_key)
+    return storage_key
 
 
 def validate_artifact_storage_key(job_id: UUID, storage_key: str) -> PurePosixPath:

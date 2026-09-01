@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from threading import Event
 from uuid import UUID, uuid4
 
+import pytest
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.session import sessionmaker
@@ -31,14 +33,24 @@ from text_verification.infrastructure.orm import (
     VerificationRunRow,
 )
 from text_verification.infrastructure.repositories import JobRepository
+from text_verification.infrastructure.storage import (
+    JobStorage,
+    build_artifact_storage_key,
+)
 from text_verification.infrastructure.verification_repository import (
     JobResultState,
     VerificationRepository,
 )
 
 
+@pytest.fixture
+def artifact_storage(tmp_path: Path) -> JobStorage:
+    return JobStorage(tmp_path / "storage", max_upload_bytes=1024 * 1024)
+
+
 def test_expiry_deletes_canonical_aggregate_but_keeps_job_tombstone(
     db_session: Session,
+    artifact_storage: JobStorage,
 ) -> None:
     job_id = uuid4()
     run_id = uuid4()
@@ -50,6 +62,7 @@ def test_expiry_deletes_canonical_aggregate_but_keeps_job_tombstone(
         run_id=run_id,
         revision_id=revision_id,
         expires_at=now,
+        artifact_storage=artifact_storage,
     )
     jobs = JobRepository(db_session)
     results = VerificationRepository(db_session)
@@ -70,6 +83,7 @@ def test_expiry_deletes_canonical_aggregate_but_keeps_job_tombstone(
 
 def test_atomic_result_snapshot_blocks_expiry_until_result_is_materialized(
     db_session_factory: sessionmaker[Session],
+    artifact_storage: JobStorage,
 ) -> None:
     job_id = uuid4()
     run_id = uuid4()
@@ -83,6 +97,7 @@ def test_atomic_result_snapshot_blocks_expiry_until_result_is_materialized(
             run_id=run_id,
             revision_id=revision_id,
             expires_at=now,
+            artifact_storage=artifact_storage,
         )
     finally:
         seed_session.close()
@@ -252,6 +267,7 @@ def _seed_completed_aggregate(
     run_id: UUID,
     revision_id: UUID,
     expires_at: datetime,
+    artifact_storage: JobStorage,
 ) -> None:
     created_at = expires_at - timedelta(hours=1)
     jobs = JobRepository(session)
@@ -276,16 +292,22 @@ def _seed_completed_aggregate(
         text=result.text,
         created_at=created_at,
     )
+    artifact_id = uuid4()
+    storage_key = build_artifact_storage_key(job_id, artifact_id, FileType.TXT)
+    prepared_artifact = artifact_storage.write_artifact(
+        job_id,
+        storage_key,
+        FileType.TXT,
+        result.text.encode(),
+    )
     results.save_export_artifact(
-        export_artifact_id=uuid4(),
+        export_artifact_id=artifact_id,
         verification_run_id=run_id,
         review_revision_id=revision_id,
         source_version=result.source_version,
-        file_type=FileType.TXT,
         file_name="sample.txt",
         media_type="text/plain",
-        storage_key=f"exports/{job_id}.txt",
-        size_bytes=len(result.text.encode()),
+        artifact=prepared_artifact,
         created_at=created_at,
     )
     results.commit()

@@ -85,14 +85,18 @@ class DocumentModel(BaseModel):
                 ):
                     raise ValueError("parent block must contain its child block")
 
+        ancestors_by_id: dict[str, set[str]] = {}
         for block in self.blocks:
             visited = {block.block_id}
+            ancestors: set[str] = set()
             parent_id = block.parent_id
             while parent_id is not None:
                 if parent_id in visited:
                     raise ValueError("block parent relationships must not contain cycles")
                 visited.add(parent_id)
+                ancestors.add(parent_id)
                 parent_id = blocks_by_id[parent_id].parent_id
+            ancestors_by_id[block.block_id] = ancestors
 
         for index, first in enumerate(self.blocks):
             for second in self.blocks[index + 1 :]:
@@ -101,9 +105,12 @@ class DocumentModel(BaseModel):
                     and second.global_start < first.global_end
                 ):
                     continue
-                if first.parent_id == second.block_id or second.parent_id == first.block_id:
+                if (
+                    second.block_id in ancestors_by_id[first.block_id]
+                    or first.block_id in ancestors_by_id[second.block_id]
+                ):
                     continue
                 raise ValueError(
-                    "block ranges may overlap only through parent-child containment"
+                    "block ranges may overlap only through ancestor-descendant containment"
                 )
         return self

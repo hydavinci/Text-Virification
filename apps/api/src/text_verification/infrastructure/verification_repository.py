@@ -39,7 +39,7 @@ from text_verification.infrastructure.orm import (
     VerificationIssueRow,
     VerificationRunRow,
 )
-from text_verification.infrastructure.storage import validate_artifact_storage_key
+from text_verification.infrastructure.storage import PreparedArtifact
 
 
 class JobResultState(StrEnum):
@@ -261,20 +261,21 @@ class VerificationRepository:
         verification_run_id: UUID,
         review_revision_id: UUID | None,
         source_version: str,
-        file_type: FileType | str,
         file_name: str,
         media_type: str,
-        storage_key: str,
-        size_bytes: int,
+        artifact: PreparedArtifact,
         created_at: datetime,
     ) -> None:
-        if size_bytes < 0:
-            raise ValueError("size_bytes must be greater than or equal to zero.")
+        if not isinstance(artifact, PreparedArtifact):
+            raise TypeError("artifact must be a validated PreparedArtifact.")
         run = self._lock_run(verification_run_id)
         job = self._lock_job(run.job_id)
         if JobStatus(job.status) is JobStatus.EXPIRED:
             raise ValueError(f"Job {job.job_id} has expired.")
-        validate_artifact_storage_key(job.job_id, storage_key)
+        if artifact.job_id != job.job_id:
+            raise ValueError(
+                f"Artifact {artifact.storage_key!r} does not belong to job {job.job_id}."
+            )
         review_revision = self._review_revision_for_run(
             verification_run_id,
             review_revision_id,
@@ -290,7 +291,9 @@ class VerificationRepository:
                 f"{expected_source_version!r}."
             )
 
-        normalized_file_type = FileType(file_type).value
+        normalized_file_type = artifact.file_type.value
+        storage_key = artifact.storage_key
+        size_bytes = artifact.size_bytes
         values = (
             verification_run_id,
             review_revision_id,

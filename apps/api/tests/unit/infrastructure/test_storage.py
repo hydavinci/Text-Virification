@@ -290,17 +290,112 @@ def test_artifact_storage_key_builder_uses_job_owned_namespace() -> None:
     assert storage_key == f"artifacts/{job_id}/{artifact_id}.docx"
 
 
+def test_write_artifact_returns_owned_reference_for_nested_path(tmp_path) -> None:
+    storage = JobStorage(tmp_path, max_upload_bytes=1024)
+    job_id = uuid4()
+    artifact_id = uuid4()
+    storage_key = storage_module.build_artifact_storage_key(
+        job_id,
+        artifact_id,
+        FileType.TXT,
+        subdirectories=("reports", "reviewed"),
+    )
+
+    artifact = storage.write_artifact(
+        job_id,
+        storage_key,
+        FileType.TXT,
+        b"reviewed",
+    )
+
+    assert artifact.job_id == job_id
+    assert artifact.storage_key == (
+        f"artifacts/{job_id}/reports/reviewed/{artifact_id}.txt"
+    )
+    assert artifact.path == tmp_path / artifact.storage_key
+    assert artifact.path.read_bytes() == b"reviewed"
+    assert artifact.file_type is FileType.TXT
+    assert artifact.size_bytes == 8
+
+
+def test_write_artifact_rejects_nested_symlink_escape(tmp_path) -> None:
+    storage = JobStorage(tmp_path / "jobs", max_upload_bytes=1024)
+    job_id = uuid4()
+    artifact_id = uuid4()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = storage._root / "artifacts" / str(job_id) / "link"
+    link.parent.mkdir(parents=True)
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"symlink creation unavailable: {error}")
+    storage_key = storage_module.build_artifact_storage_key(
+        job_id,
+        artifact_id,
+        FileType.TXT,
+        subdirectories=("link",),
+    )
+
+    with pytest.raises(InvalidUpload, match="reparse point"):
+        storage.write_artifact(
+            job_id,
+            storage_key,
+            FileType.TXT,
+            b"must not escape",
+        )
+
+    assert list(outside.iterdir()) == []
+
+
+def test_write_artifact_rejects_nested_reparse_component(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    storage = JobStorage(tmp_path, max_upload_bytes=1024)
+    job_id = uuid4()
+    artifact_id = uuid4()
+    storage_key = storage_module.build_artifact_storage_key(
+        job_id,
+        artifact_id,
+        FileType.TXT,
+        subdirectories=("reports",),
+    )
+    reparse_path = storage._root / "artifacts" / str(job_id) / "reports"
+    monkeypatch.setattr(
+        JobStorage,
+        "_is_reparse_point",
+        lambda self, path: path == reparse_path,
+    )
+
+    with pytest.raises(InvalidUpload, match="reparse point"):
+        storage.write_artifact(
+            job_id,
+            storage_key,
+            FileType.TXT,
+            b"must not escape",
+        )
+
+
 def test_delete_artifact_removes_only_key_owned_by_job(tmp_path) -> None:
     storage = JobStorage(tmp_path, max_upload_bytes=1024)
     job_id = uuid4()
     artifact_id = uuid4()
-    storage_key = f"artifacts/{job_id}/{artifact_id}.txt"
-    artifact_path = tmp_path / storage_key
-    artifact_path.parent.mkdir(parents=True)
-    artifact_path.write_text("reviewed", encoding="utf-8")
+    storage_key = storage_module.build_artifact_storage_key(
+        job_id,
+        artifact_id,
+        FileType.TXT,
+        subdirectories=("reports", "reviewed"),
+    )
+    artifact = storage.write_artifact(
+        job_id,
+        storage_key,
+        FileType.TXT,
+        b"reviewed",
+    )
 
     assert storage.delete_artifact(job_id, storage_key) is True
-    assert not artifact_path.exists()
+    assert not artifact.path.exists()
     assert storage.delete_artifact(job_id, storage_key) is False
 
 

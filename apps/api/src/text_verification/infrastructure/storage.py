@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 from uuid import UUID
 
 from text_verification.domain.capabilities import CapabilityProfile
+from text_verification.domain.documents import FileType
 from text_verification.infrastructure import document_storage
 
 logger = logging.getLogger(__name__)
@@ -19,6 +22,35 @@ UploadCleanupFailed = document_storage.UploadCleanupFailed
 UploadTooLarge = document_storage.UploadTooLarge
 build_artifact_storage_key = document_storage.build_artifact_storage_key
 validate_artifact_storage_key = document_storage.validate_artifact_storage_key
+
+_PREPARED_ARTIFACT_TOKEN = object()
+
+
+@dataclass(frozen=True, init=False)
+class PreparedArtifact:
+    job_id: UUID
+    storage_key: str
+    path: Path
+    file_type: FileType
+    size_bytes: int
+
+    def __init__(
+        self,
+        *,
+        job_id: UUID,
+        storage_key: str,
+        path: Path,
+        file_type: FileType,
+        size_bytes: int,
+        _token: object,
+    ) -> None:
+        if _token is not _PREPARED_ARTIFACT_TOKEN:
+            raise TypeError("PreparedArtifact values must be created by JobStorage.")
+        object.__setattr__(self, "job_id", job_id)
+        object.__setattr__(self, "storage_key", storage_key)
+        object.__setattr__(self, "path", path)
+        object.__setattr__(self, "file_type", file_type)
+        object.__setattr__(self, "size_bytes", size_bytes)
 
 
 class JobStorage(DocumentStorage):
@@ -47,6 +79,47 @@ class JobStorage(DocumentStorage):
 
     def delete_job(self, job_id: UUID) -> None:
         self._delete_job_directory(self.job_directory(job_id))
+
+    def write_artifact(
+        self,
+        job_id: UUID,
+        storage_key: str,
+        file_type: FileType | str,
+        data: bytes,
+    ) -> PreparedArtifact:
+        resolved_file_type = file_type if isinstance(file_type, FileType) else FileType(file_type)
+        relative_path = validate_artifact_storage_key(job_id, storage_key)
+        if relative_path.suffix != f".{resolved_file_type.value}":
+            raise InvalidUpload("Artifact storage key extension does not match its file type.")
+
+        artifact_path = self._path_for_storage_key(storage_key)
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        artifact_path = self._path_for_storage_key(storage_key)
+        uploading_path = self._path_for_storage_key(f"{storage_key}.uploading")
+        try:
+            size_bytes = self._write_stream(uploading_path, BytesIO(data))
+            artifact_path = self._path_for_storage_key(storage_key)
+            uploading_path.replace(artifact_path)
+            artifact_path = self._path_for_storage_key(storage_key)
+            if not artifact_path.is_file():
+                raise InvalidUpload("Artifact storage key does not reference a regular file.")
+        except Exception:
+            if (
+                uploading_path.exists()
+                and uploading_path.is_file()
+                and not uploading_path.is_symlink()
+            ):
+                uploading_path.unlink()
+            raise
+
+        return PreparedArtifact(
+            job_id=job_id,
+            storage_key=storage_key,
+            path=artifact_path,
+            file_type=resolved_file_type,
+            size_bytes=size_bytes,
+            _token=_PREPARED_ARTIFACT_TOKEN,
+        )
 
     def delete_artifact(self, job_id: UUID, storage_key: str) -> bool:
         validate_artifact_storage_key(job_id, storage_key)

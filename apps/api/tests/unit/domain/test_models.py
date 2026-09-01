@@ -168,6 +168,23 @@ def test_document_model_allows_parent_child_containment() -> None:
     assert document.blocks[1].parent_id == "parent"
 
 
+def test_document_model_allows_grandparent_parent_child_containment() -> None:
+    document = _document_with_blocks(
+        "abcdefgh",
+        [
+            _block("grandparent", "abcdefgh", 0, 8),
+            _block("parent", "bcdefg", 1, 7, parent_id="grandparent"),
+            _block("child", "de", 3, 5, parent_id="parent"),
+        ],
+    )
+
+    assert [block.parent_id for block in document.blocks] == [
+        None,
+        "grandparent",
+        "parent",
+    ]
+
+
 def test_document_model_rejects_parent_child_overlap_without_containment() -> None:
     with pytest.raises(ValidationError, match="contain"):
         _document_with_blocks(
@@ -184,6 +201,17 @@ def test_document_model_rejects_unknown_parent_block() -> None:
         _document_with_blocks(
             "abcdef",
             [_block("child", "abc", 0, 3, parent_id="missing")],
+        )
+
+
+def test_document_model_rejects_parent_cycle() -> None:
+    with pytest.raises(ValidationError, match="cycles"):
+        _document_with_blocks(
+            "abcdef",
+            [
+                _block("first", "abcdef", 0, 6, parent_id="second"),
+                _block("second", "abcdef", 0, 6, parent_id="first"),
+            ],
         )
 
 

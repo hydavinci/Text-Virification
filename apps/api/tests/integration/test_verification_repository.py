@@ -1,10 +1,12 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from threading import Event
+from typing import cast
 from uuid import UUID
 
 import pytest
-from sqlalchemy import Engine, Text, inspect, select, text
+from sqlalchemy import Engine, Text, func, inspect, select, text
 from sqlalchemy.engine.reflection import Inspector
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -32,6 +34,8 @@ from text_verification.infrastructure.orm import (
 from text_verification.infrastructure.repositories import JobRepository
 from text_verification.infrastructure.storage import (
     InvalidUpload,
+    JobStorage,
+    PreparedArtifact,
     build_artifact_storage_key,
 )
 from text_verification.infrastructure.verification_repository import (
@@ -58,6 +62,11 @@ ARTIFACT_STORAGE_KEY = build_artifact_storage_key(
     ARTIFACT_ID,
     FileType.DOCX,
 )
+
+
+@pytest.fixture
+def artifact_storage(tmp_path: Path) -> JobStorage:
+    return JobStorage(tmp_path / "storage", max_upload_bytes=1024 * 1024)
 
 
 def test_result_row_mapping_round_trips_every_canonical_field_without_database() -> None:
@@ -129,6 +138,22 @@ def test_result_row_mapping_uses_canonical_json_review_metadata() -> None:
         "batches": [{"issue_ids": ["first", "second"]}]
     }
     assert _map_rows_to_result(document_row, run_row) == result
+
+
+def test_save_export_artifact_rejects_unvalidated_reference_before_database_access() -> None:
+    repository = VerificationRepository(cast(Session, object()))
+
+    with pytest.raises(TypeError, match="PreparedArtifact"):
+        repository.save_export_artifact(
+            export_artifact_id=ARTIFACT_ID,
+            verification_run_id=RUN_ID,
+            review_revision_id=None,
+            source_version="sha256:source-v7",
+            file_name="sample.docx",
+            media_type="application/octet-stream",
+            artifact=ARTIFACT_STORAGE_KEY,  # type: ignore[arg-type]
+            created_at=CREATED_AT,
+        )
 
 
 @pytest.mark.parametrize(
@@ -424,7 +449,12 @@ def test_save_result_translates_conflicting_global_identity_to_value_error(
 
 def test_save_review_revision_and_export_artifact_preserves_identity_and_source(
     db_session: Session,
+    artifact_storage: JobStorage,
 ) -> None:
+    prepared_artifact = _write_artifact(
+        artifact_storage,
+        size_bytes=8192,
+    )
     _create_job(db_session)
     repository = VerificationRepository(db_session)
     repository.save_result(JOB_ID, _result())
@@ -441,11 +471,9 @@ def test_save_review_revision_and_export_artifact_preserves_identity_and_source(
         verification_run_id=RUN_ID,
         review_revision_id=REVISION_ID,
         source_version="sha256:source-v7",
-        file_type=FileType.DOCX,
         file_name="sample-reviewed.docx",
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        storage_key=ARTIFACT_STORAGE_KEY,
-        size_bytes=8192,
+        artifact=prepared_artifact,
         created_at=CREATED_AT + timedelta(minutes=2),
     )
     repository.commit()
@@ -462,11 +490,9 @@ def test_save_review_revision_and_export_artifact_preserves_identity_and_source(
         verification_run_id=RUN_ID,
         review_revision_id=REVISION_ID,
         source_version="sha256:source-v7",
-        file_type=FileType.DOCX,
         file_name="sample-reviewed.docx",
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        storage_key=ARTIFACT_STORAGE_KEY,
-        size_bytes=8192,
+        artifact=prepared_artifact,
         created_at=CREATED_AT + timedelta(minutes=2),
     )
     repository.commit()
@@ -495,37 +521,65 @@ def test_save_review_revision_and_export_artifact_preserves_identity_and_source(
     assert artifact.size_bytes == 8192
 
 
-@pytest.mark.parametrize(
-    "storage_key",
-    [
-        build_artifact_storage_key(SECOND_JOB_ID, ARTIFACT_ID, FileType.DOCX),
-        f"{JOB_ID}/source.docx",
-        "../infrastructure.env",
-        f"artifacts/{JOB_ID}/../{SECOND_JOB_ID}/artifact.docx",
-        "/absolute/artifact.docx",
-    ],
-)
-def test_save_export_artifact_rejects_non_job_owned_storage_key(
+def test_save_export_artifact_rejects_prepared_artifact_for_another_job(
     db_session: Session,
-    storage_key: str,
+    artifact_storage: JobStorage,
 ) -> None:
+    prepared_artifact = _write_artifact(
+        artifact_storage,
+        job_id=SECOND_JOB_ID,
+        size_bytes=10,
+    )
     _create_job(db_session)
     repository = VerificationRepository(db_session)
     repository.save_result(JOB_ID, _result())
 
-    with pytest.raises(InvalidUpload):
+    with pytest.raises(ValueError, match="does not belong"):
         repository.save_export_artifact(
             export_artifact_id=ARTIFACT_ID,
             verification_run_id=RUN_ID,
             review_revision_id=None,
             source_version="sha256:source-v7",
-            file_type=FileType.DOCX,
             file_name="sample.docx",
             media_type="application/octet-stream",
-            storage_key=storage_key,
-            size_bytes=10,
+            artifact=prepared_artifact,
             created_at=CREATED_AT,
         )
+
+
+def test_symlink_backed_artifact_is_rejected_before_metadata_persistence(
+    db_session: Session,
+    artifact_storage: JobStorage,
+    tmp_path: Path,
+) -> None:
+    _create_job(db_session)
+    repository = VerificationRepository(db_session)
+    repository.save_result(JOB_ID, _result())
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = artifact_storage._root / "artifacts" / str(JOB_ID) / "link"
+    link.parent.mkdir(parents=True)
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"symlink creation unavailable: {error}")
+    storage_key = build_artifact_storage_key(
+        JOB_ID,
+        ARTIFACT_ID,
+        FileType.DOCX,
+        subdirectories=("link",),
+    )
+
+    with pytest.raises(InvalidUpload, match="reparse point"):
+        artifact_storage.write_artifact(
+            JOB_ID,
+            storage_key,
+            FileType.DOCX,
+            b"must not escape",
+        )
+
+    assert db_session.scalar(select(func.count()).select_from(ExportArtifactRow)) == 0
+    assert list(outside.iterdir()) == []
 
 
 def test_save_review_revision_rejects_source_version_mismatch(
@@ -628,7 +682,12 @@ def test_database_rejects_review_document_and_source_from_another_run(
 
 def test_database_rejects_artifact_revision_from_another_run(
     db_session: Session,
+    artifact_storage: JobStorage,
 ) -> None:
+    prepared_artifact = _write_artifact(
+        artifact_storage,
+        size_bytes=10,
+    )
     _seed_two_results(db_session)
     repository = VerificationRepository(db_session)
     repository.save_review_revision(
@@ -644,11 +703,9 @@ def test_database_rejects_artifact_revision_from_another_run(
         verification_run_id=RUN_ID,
         review_revision_id=None,
         source_version="sha256:source-v7",
-        file_type=FileType.DOCX,
         file_name="sample.docx",
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        storage_key=ARTIFACT_STORAGE_KEY,
-        size_bytes=10,
+        artifact=prepared_artifact,
         created_at=CREATED_AT,
     )
     repository.commit()
@@ -812,7 +869,12 @@ def test_concurrent_review_revision_conflict_raises_value_error(
 
 def test_concurrent_same_job_artifact_conflict_raises_value_error(
     db_session_factory: sessionmaker[Session],
+    artifact_storage: JobStorage,
 ) -> None:
+    prepared_artifact = _write_artifact(
+        artifact_storage,
+        size_bytes=10,
+    )
     seed_session = db_session_factory()
     try:
         _create_job(seed_session)
@@ -822,7 +884,6 @@ def test_concurrent_same_job_artifact_conflict_raises_value_error(
     finally:
         seed_session.close()
 
-    storage_key = ARTIFACT_STORAGE_KEY
     first_saved = Event()
     second_started = Event()
     second_finished = Event()
@@ -838,11 +899,9 @@ def test_concurrent_same_job_artifact_conflict_raises_value_error(
                 verification_run_id=RUN_ID,
                 review_revision_id=None,
                 source_version="sha256:source-v7",
-                file_type=FileType.DOCX,
                 file_name="first.docx",
                 media_type="application/octet-stream",
-                storage_key=storage_key,
-                size_bytes=10,
+                artifact=prepared_artifact,
                 created_at=CREATED_AT,
             )
             first_saved.set()
@@ -866,11 +925,9 @@ def test_concurrent_same_job_artifact_conflict_raises_value_error(
                 verification_run_id=RUN_ID,
                 review_revision_id=None,
                 source_version="sha256:source-v7",
-                file_type=FileType.DOCX,
                 file_name="second.docx",
                 media_type="application/octet-stream",
-                storage_key=storage_key,
-                size_bytes=10,
+                artifact=prepared_artifact,
                 created_at=CREATED_AT,
             )
             repository.commit()
@@ -900,6 +957,23 @@ def test_get_result_for_job_returns_none_when_job_has_no_run(db_session: Session
     _create_job(db_session)
 
     assert VerificationRepository(db_session).get_result_for_job(JOB_ID) is None
+
+
+def _write_artifact(
+    storage: JobStorage,
+    *,
+    job_id: UUID = JOB_ID,
+    artifact_id: UUID = ARTIFACT_ID,
+    file_type: FileType = FileType.DOCX,
+    size_bytes: int,
+) -> PreparedArtifact:
+    storage_key = build_artifact_storage_key(job_id, artifact_id, file_type)
+    return storage.write_artifact(
+        job_id,
+        storage_key,
+        file_type,
+        b"x" * size_bytes,
+    )
 
 
 def _create_job(
