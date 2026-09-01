@@ -6,7 +6,11 @@ import pytest
 from pydantic import ValidationError
 
 from text_verification.document_processing.errors import OcrOutputError, OcrUnavailableError
-from text_verification.document_processing.ocr_provider import OcrProvider, OcrTextBox
+from text_verification.document_processing.ocr_provider import (
+    OcrProvider,
+    OcrTextBox,
+    _segments_intersect,
+)
 
 
 class FakeArray:
@@ -77,16 +81,29 @@ def test_ocr_text_box_accepts_clockwise_and_counterclockwise_quadrilaterals() ->
     clockwise = OcrTextBox(
         text="cw",
         confidence=0.5,
-        bbox=[[0, 0], [3, 0], [3, 2], [0, 2]],
+        bbox=[[0, 0], [4, 1], [3, 4], [-1, 3]],
     )
     counterclockwise = OcrTextBox(
         text="ccw",
         confidence=0.5,
-        bbox=[[0, 0], [0, 2], [3, 2], [3, 0]],
+        bbox=[[0, 0], [-1, 3], [3, 4], [4, 1]],
     )
 
-    assert clockwise.bbox == ((0.0, 0.0), (3.0, 0.0), (3.0, 2.0), (0.0, 2.0))
-    assert counterclockwise.bbox == ((0.0, 0.0), (0.0, 2.0), (3.0, 2.0), (3.0, 0.0))
+    assert clockwise.bbox == ((0.0, 0.0), (4.0, 1.0), (3.0, 4.0), (-1.0, 3.0))
+    assert counterclockwise.bbox == ((0.0, 0.0), (-1.0, 3.0), (3.0, 4.0), (4.0, 1.0))
+
+
+def test_ocr_text_box_rejects_non_adjacent_edge_touching() -> None:
+    with pytest.raises(ValidationError, match="intersect|touch"):
+        OcrTextBox(
+            text="touch",
+            confidence=0.5,
+            bbox=[[0, 0], [3, 0], [1, 0], [1, 2]],
+        )
+
+
+def test_segments_intersect_detects_collinear_overlap_inclusively() -> None:
+    assert _segments_intersect((0.0, 0.0), (3.0, 0.0), (1.0, 0.0), (2.0, 0.0)) is True
 
 
 def test_provider_does_not_import_rapidocr_until_recognition(monkeypatch) -> None:
@@ -266,15 +283,12 @@ def test_recognize_converts_expected_engine_initialization_failures(monkeypatch)
 
 
 def test_recognize_converts_onnxruntime_session_errors_to_capability_error(monkeypatch) -> None:
-    class FakeOrtModule:
-        class OrtRuntimeError(Exception):
-            pass
-
-        class SessionOptionsError(Exception):
+    class FakeOrtBindings:
+        class RuntimeException(Exception):
             pass
 
     def fake_constructor(*, params: dict[str, object]) -> object:
-        raise FakeOrtModule.OrtRuntimeError("ORT session init failed with /private/model.onnx")
+        raise FakeOrtBindings.RuntimeException("ORT session init failed with /private/model.onnx")
 
     fake_module = SimpleNamespace(
         RapidOCR=fake_constructor,
@@ -284,8 +298,8 @@ def test_recognize_converts_onnxruntime_session_errors_to_capability_error(monke
     def fake_import_module(name: str) -> object:
         if name == "rapidocr":
             return fake_module
-        if name == "onnxruntime":
-            return FakeOrtModule
+        if name == "onnxruntime.capi.onnxruntime_pybind11_state":
+            return FakeOrtBindings
         raise AssertionError(name)
 
     monkeypatch.setattr(importlib, "import_module", fake_import_module)
@@ -298,6 +312,31 @@ def test_recognize_converts_onnxruntime_session_errors_to_capability_error(monke
     assert raised.value.stage == "ocr"
     assert raised.value.retryable is False
     assert "private" not in raised.value.message.lower()
+
+
+def test_recognize_converts_clearly_ort_runtime_errors_when_binding_import_fails(
+    monkeypatch,
+) -> None:
+    def fake_constructor(*, params: dict[str, object]) -> object:
+        raise RuntimeError("onnxruntime failed to initialize native session for model")
+
+    fake_module = SimpleNamespace(
+        RapidOCR=fake_constructor,
+        LangRec=SimpleNamespace(CH="ch", EN="en"),
+    )
+
+    def fake_import_module(name: str) -> object:
+        if name == "rapidocr":
+            return fake_module
+        if name == "onnxruntime.capi.onnxruntime_pybind11_state":
+            raise ModuleNotFoundError("missing onnxruntime bindings")
+        raise AssertionError(name)
+
+    monkeypatch.setattr(importlib, "import_module", fake_import_module)
+    provider = OcrProvider()
+
+    with pytest.raises(OcrUnavailableError):
+        provider.recognize(object(), "zh")
 
 
 def test_recognize_preserves_unrelated_runtime_errors_during_engine_creation(monkeypatch) -> None:
@@ -315,8 +354,8 @@ def test_recognize_preserves_unrelated_runtime_errors_during_engine_creation(mon
     def fake_import_module(name: str) -> object:
         if name == "rapidocr":
             return fake_module
-        if name == "onnxruntime":
-            return SimpleNamespace(InferenceSessionError=Exception)
+        if name == "onnxruntime.capi.onnxruntime_pybind11_state":
+            raise ModuleNotFoundError("missing onnxruntime bindings")
         raise AssertionError(name)
 
     monkeypatch.setattr(importlib, "import_module", fake_import_module)
@@ -392,6 +431,7 @@ def test_recognize_rejects_invalid_confidence_scalars(
         [[0, 0], [1, 0], [2, 0], [3, 0]],
         [[0, 0], [2, 0], [2, 0], [0, 1]],
         [[0, 0], [2, 2], [0, 2], [2, 0]],
+        [[0, 0], [3, 0], [1, 0], [1, 2]],
     ],
 )
 def test_recognize_rejects_invalid_bbox_geometry(monkeypatch, bbox: object) -> None:

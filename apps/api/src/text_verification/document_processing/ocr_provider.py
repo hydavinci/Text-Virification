@@ -34,10 +34,6 @@ class _SupportsArrayProtocol(Protocol):
     def __array__(self) -> object: ...
 
 
-class _OnnxRuntimeExceptionTypes(Protocol):
-    def __iter__(self) -> object: ...
-
-
 class OcrTextBox(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -97,7 +93,7 @@ class OcrTextBox(BaseModel):
         if _polygon_area(points) <= 0.0:
             raise ValueError("bbox must be a non-degenerate quadrilateral")
         if _has_self_intersection(points):
-            raise ValueError("bbox must not self-intersect")
+            raise ValueError("bbox non-adjacent edges must not intersect or touch")
 
         return cast(
             tuple[
@@ -154,10 +150,12 @@ class OcrProvider:
         params = {"Rec.lang_type": _rapidocr_language(module, language)}
         try:
             engine = constructor(params=params)
-        except tuple(_onnxruntime_exception_types()) as error:
-            raise OcrUnavailableError() from error
-        except _EXPECTED_ENGINE_INIT_ERRORS as error:
-            raise OcrUnavailableError() from error
+        except Exception as error:
+            if isinstance(error, _EXPECTED_ENGINE_INIT_ERRORS):
+                raise OcrUnavailableError() from error
+            if _is_expected_onnxruntime_initialization_error(error):
+                raise OcrUnavailableError() from error
+            raise
 
         if not callable(engine):
             raise OcrOutputError("RapidOCR constructor returned a non-callable engine")
@@ -269,13 +267,30 @@ def _segments_intersect(
     second_start: tuple[float, float],
     second_end: tuple[float, float],
 ) -> bool:
+    tolerance = 1e-9
+    first_orientation_start = _orientation(first_start, first_end, second_start)
+    first_orientation_end = _orientation(first_start, first_end, second_end)
+    second_orientation_start = _orientation(second_start, second_end, first_start)
+    second_orientation_end = _orientation(second_start, second_end, first_end)
+
+    if (
+        first_orientation_start * first_orientation_end < -tolerance
+        and second_orientation_start * second_orientation_end < -tolerance
+    ):
+        return True
+
     return (
-        _orientation(first_start, first_end, second_start)
-        * _orientation(first_start, first_end, second_end)
-        < 0
-        and _orientation(second_start, second_end, first_start)
-        * _orientation(second_start, second_end, first_end)
-        < 0
+        abs(first_orientation_start) <= tolerance
+        and _on_segment(first_start, second_start, first_end, tolerance)
+    ) or (
+        abs(first_orientation_end) <= tolerance
+        and _on_segment(first_start, second_end, first_end, tolerance)
+    ) or (
+        abs(second_orientation_start) <= tolerance
+        and _on_segment(second_start, first_start, second_end, tolerance)
+    ) or (
+        abs(second_orientation_end) <= tolerance
+        and _on_segment(second_start, first_end, second_end, tolerance)
     )
 
 
@@ -289,22 +304,71 @@ def _orientation(
     ) * (point[0] - start[0])
 
 
+def _on_segment(
+    start: tuple[float, float],
+    point: tuple[float, float],
+    end: tuple[float, float],
+    tolerance: float,
+) -> bool:
+    return (
+        min(start[0], end[0]) - tolerance <= point[0] <= max(start[0], end[0]) + tolerance
+        and min(start[1], end[1]) - tolerance
+        <= point[1]
+        <= max(start[1], end[1]) + tolerance
+    )
+
+
+def _is_expected_onnxruntime_initialization_error(error: Exception) -> bool:
+    for exception_type in _onnxruntime_exception_types():
+        if isinstance(error, exception_type):
+            return True
+    return _is_clearly_ort_runtime_error(error) and not _onnxruntime_binding_available()
+
+
 def _onnxruntime_exception_types() -> tuple[type[BaseException], ...]:
     try:
-        module = importlib.import_module("onnxruntime")
+        module = importlib.import_module("onnxruntime.capi.onnxruntime_pybind11_state")
     except _EXPECTED_ENGINE_INIT_ERRORS:
         return ()
 
     candidates = tuple(
         exception_type
         for name in (
-            "OrtRuntimeError",
-            "SessionOptionsError",
-            "InvalidArgument",
             "NoSuchFile",
+            "NoModel",
+            "InvalidProtobuf",
+            "InvalidGraph",
+            "EngineError",
+            "RuntimeException",
+            "InvalidArgument",
             "Fail",
+            "NotImplemented",
         )
         if isinstance((exception_type := getattr(module, name, None)), type)
         and issubclass(exception_type, BaseException)
     )
     return candidates
+
+
+def _onnxruntime_binding_available() -> bool:
+    try:
+        importlib.import_module("onnxruntime.capi.onnxruntime_pybind11_state")
+    except _EXPECTED_ENGINE_INIT_ERRORS:
+        return False
+    return True
+
+
+def _is_clearly_ort_runtime_error(error: Exception) -> bool:
+    if not isinstance(error, RuntimeError):
+        return False
+    message = str(error).lower()
+    return any(
+        token in message
+        for token in (
+            "onnxruntime",
+            "inference session",
+            "session init",
+            "native session",
+            "execution provider",
+        )
+    )
