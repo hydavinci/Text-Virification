@@ -26,6 +26,7 @@ from text_verification.domain.jobs import (
     JobRead,
     JobStateConflictError,
     JobStatus,
+    JobUnleasedError,
     TerminalJobStateError,
 )
 from text_verification.domain.ports import (
@@ -66,6 +67,8 @@ RunnerFactory = Callable[[JobStorage, VerificationPipeline], PipelineRunner]
 PROCESS_JOB_MAX_RETRIES = 2
 PROCESS_JOB_RETRY_BACKOFF_CAP_SECONDS = 4
 PROCESS_JOB_RESCUE_MAX_COUNTDOWN_SECONDS = 3600
+PERIODIC_RESCUE_CLAIM_SECONDS = 60
+PERIODIC_RESCUE_LIMIT = 100
 
 _STATUS_ORDER = (
     JobStatus.QUEUED,
@@ -99,6 +102,7 @@ class ProcessAttemptDisposition(StrEnum):
     TERMINAL = "terminal"
     DUPLICATE = "duplicate"
     LEASE_LOST = "lease_lost"
+    UNLEASED = "unleased"
 
 
 @dataclass(frozen=True)
@@ -204,18 +208,6 @@ def _process_job(
             owner_token,
             previous_owner_token=previous_owner_token,
         )
-        if outcome.disposition is ProcessAttemptDisposition.DUPLICATE:
-            _schedule_lease_rescue(parsed_job_id, outcome.retry_at)
-            logger.info(
-                "process_job_duplicate_delivery",
-                extra={"job_id": str(parsed_job_id)},
-            )
-        elif outcome.disposition is ProcessAttemptDisposition.LEASE_LOST:
-            _schedule_lease_rescue(parsed_job_id, outcome.retry_at)
-            logger.info(
-                "process_job_lease_lost",
-                extra={"job_id": str(parsed_job_id)},
-            )
     except Exception as error:
         if task.request.retries < PROCESS_JOB_MAX_RETRIES:
             raise task.retry(
@@ -226,6 +218,32 @@ def _process_job(
         _persist_exhausted_failure(parsed_job_id, owner_token, error)
         _log_original_failure(parsed_job_id, error)
         _reraise(error)
+
+    if outcome.disposition is ProcessAttemptDisposition.DUPLICATE:
+        try:
+            _schedule_lease_rescue(parsed_job_id, outcome.retry_at)
+        except Exception as error:
+            _log_rescue_publish_failure(parsed_job_id, error)
+        else:
+            logger.info(
+                "process_job_duplicate_delivery",
+                extra={"job_id": str(parsed_job_id)},
+            )
+    elif outcome.disposition is ProcessAttemptDisposition.LEASE_LOST:
+        try:
+            _schedule_lease_rescue(parsed_job_id, outcome.retry_at)
+        except Exception as error:
+            _log_rescue_publish_failure(parsed_job_id, error)
+        else:
+            logger.info(
+                "process_job_lease_lost",
+                extra={"job_id": str(parsed_job_id)},
+            )
+    elif outcome.disposition is ProcessAttemptDisposition.UNLEASED:
+        logger.info(
+            "process_job_unleased",
+            extra={"job_id": str(parsed_job_id)},
+        )
 
 
 def _run_process_job_attempt(
@@ -327,6 +345,8 @@ def _run_process_job_attempt(
             ProcessAttemptDisposition.LEASE_LOST,
             error.lease_expires_at,
         )
+    except JobUnleasedError:
+        return ProcessAttemptOutcome(ProcessAttemptDisposition.UNLEASED)
     except TerminalJobStateError:
         return ProcessAttemptOutcome(ProcessAttemptDisposition.TERMINAL)
 
@@ -368,6 +388,51 @@ def _rescue_countdown(
 ) -> int:
     seconds = max(0, ceil((retry_at - now).total_seconds()))
     return min(seconds, PROCESS_JOB_RESCUE_MAX_COUNTDOWN_SECONDS)
+
+
+def _rescue_expired_job_leases() -> list[str]:
+    now = NOW_FACTORY()
+    rescue_owner = uuid4()
+    session_factory = SESSION_FACTORY_PROVIDER()
+    session = session_factory()
+    repository = REPOSITORY_FACTORY(session)
+    try:
+        claims = repository.claim_recoverable_jobs(
+            owner_token=rescue_owner,
+            now=now,
+            lease_expires_at=now + timedelta(seconds=PERIODIC_RESCUE_CLAIM_SECONDS),
+            limit=PERIODIC_RESCUE_LIMIT,
+        )
+        repository.commit()
+    except Exception:
+        repository.rollback()
+        raise
+    finally:
+        session.close()
+
+    dispatched: list[str] = []
+    for claim in claims:
+        if claim.job is None:
+            raise AssertionError("recoverable claim must include a job")
+        job_id = str(claim.job.job_id)
+        try:
+            process_job.apply_async(
+                args=(job_id,),
+                kwargs={"previous_lease_owner_token": str(rescue_owner)},
+            )
+        except Exception as error:
+            _log_rescue_publish_failure(claim.job.job_id, error)
+            raise
+        dispatched.append(job_id)
+    return dispatched
+
+
+rescue_expired_job_leases = cast(
+    Any,
+    celery_app.task(name="text_verification.rescue_expired_job_leases")(
+        _rescue_expired_job_leases
+    ),
+)
 
 
 def _cleanup_expired_jobs() -> list[str]:
@@ -686,6 +751,16 @@ def _log_failure_persist_error(
 def _log_original_failure(job_id: UUID, error: Exception) -> None:
     logger.error(
         "process_job_failed",
+        extra={
+            "job_id": str(job_id),
+            "error_type": type(error).__name__,
+        },
+    )
+
+
+def _log_rescue_publish_failure(job_id: UUID, error: Exception) -> None:
+    logger.error(
+        "process_job_rescue_publish_failed",
         extra={
             "job_id": str(job_id),
             "error_type": type(error).__name__,

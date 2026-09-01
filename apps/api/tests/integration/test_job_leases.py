@@ -365,6 +365,100 @@ def test_expiry_skips_job_with_live_processing_lease(
     assert job.status is JobStatus.QUEUED
 
 
+def test_recoverable_scan_claims_only_expired_or_unleased_nonterminal_jobs(
+    db_session: Session,
+) -> None:
+    now = datetime.now(UTC)
+    expired_lease_job = uuid4()
+    unleased_job = uuid4()
+    live_lease_job = uuid4()
+    retention_expired_job = uuid4()
+    terminal_job = uuid4()
+    repository = JobRepository(db_session)
+    for job_id in (
+        expired_lease_job,
+        unleased_job,
+        live_lease_job,
+        terminal_job,
+    ):
+        _create_job(repository, job_id, expires_at=now + timedelta(hours=1))
+    _create_job(repository, retention_expired_job, expires_at=now)
+    repository.commit()
+    repository.acquire_lease(
+        expired_lease_job,
+        owner_token=uuid4(),
+        now=now - timedelta(minutes=2),
+        lease_expires_at=now - timedelta(minutes=1),
+    )
+    repository.acquire_lease(
+        live_lease_job,
+        owner_token=uuid4(),
+        now=now,
+        lease_expires_at=now + timedelta(minutes=20),
+    )
+    repository.transition(terminal_job, JobStatus.FAILED, 0, "处理失败")
+    repository.commit()
+    rescue_owner = uuid4()
+    rescue_expires_at = now + timedelta(seconds=60)
+
+    claims = repository.claim_recoverable_jobs(
+        owner_token=rescue_owner,
+        now=now,
+        lease_expires_at=rescue_expires_at,
+        limit=100,
+    )
+    repository.commit()
+
+    assert {claim.job.job_id for claim in claims if claim.job is not None} == {
+        expired_lease_job,
+        unleased_job,
+    }
+    for job_id in (expired_lease_job, unleased_job):
+        row = db_session.get(JobRow, job_id)
+        assert row is not None
+        assert row.lease_owner_token == rescue_owner
+        assert row.lease_expires_at == rescue_expires_at
+
+
+def test_concurrent_recoverable_scans_skip_already_claimed_rows(
+    db_session_factory: sessionmaker[Session],
+) -> None:
+    now = datetime.now(UTC)
+    job_ids = [uuid4(), uuid4()]
+    for job_id in job_ids:
+        _seed_job(
+            db_session_factory,
+            job_id,
+            expires_at=now + timedelta(hours=1),
+        )
+
+    first_session = db_session_factory()
+    second_session = db_session_factory()
+    try:
+        first_claims = JobRepository(first_session).claim_recoverable_jobs(
+            owner_token=uuid4(),
+            now=now,
+            lease_expires_at=now + timedelta(seconds=60),
+            limit=100,
+        )
+        second_claims = JobRepository(second_session).claim_recoverable_jobs(
+            owner_token=uuid4(),
+            now=now,
+            lease_expires_at=now + timedelta(seconds=60),
+            limit=100,
+        )
+        first_session.commit()
+        second_session.commit()
+    finally:
+        first_session.close()
+        second_session.close()
+
+    assert {claim.job.job_id for claim in first_claims if claim.job is not None} == set(
+        job_ids
+    )
+    assert second_claims == []
+
+
 def _seed_job(
     session_factory: sessionmaker[Session],
     job_id: UUID,

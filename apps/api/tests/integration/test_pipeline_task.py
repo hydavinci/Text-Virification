@@ -23,6 +23,7 @@ from text_verification.domain.jobs import (
     JobRead,
     JobStateConflictError,
     JobStatus,
+    JobUnleasedError,
     TerminalJobStateError,
 )
 from text_verification.domain.ports import VerificationProgressObserver
@@ -139,6 +140,33 @@ class InMemoryJobRepository:
             job,
             lease_expires_at,
         )
+
+    def claim_recoverable_jobs(
+        self,
+        *,
+        owner_token: UUID,
+        now: datetime,
+        lease_expires_at: datetime,
+        limit: int,
+    ) -> list[JobClaimResult]:
+        claims: list[JobClaimResult] = []
+        for job_id, job in sorted(self._working_jobs.items(), key=lambda item: str(item[0])):
+            if len(claims) >= limit:
+                break
+            if job.status in TERMINAL_STATUSES or job.expires_at <= now:
+                continue
+            lease = self._working_leases[job_id]
+            if lease is not None and lease[1] > now:
+                continue
+            self._working_leases[job_id] = (owner_token, lease_expires_at)
+            claims.append(
+                JobClaimResult(
+                    JobClaimDisposition.ACQUIRED,
+                    job,
+                    lease_expires_at,
+                )
+            )
+        return claims
 
     def transition(
         self,
@@ -312,11 +340,10 @@ class InMemoryJobRepository:
 
     def _assert_claim(self, job_id: UUID, owner_token: UUID, now: datetime) -> None:
         lease = self._working_leases.get(job_id)
-        if lease is None or lease[0] != owner_token or lease[1] <= now:
-            raise JobLeaseLostError(
-                job_id,
-                None if lease is None else lease[1],
-            )
+        if lease is None:
+            raise JobUnleasedError(job_id)
+        if lease[0] != owner_token or lease[1] <= now:
+            raise JobLeaseLostError(job_id, lease[1])
 
     def _assert_status(self, job_id: UUID, expected_status: JobStatus) -> None:
         current_status = self._working_jobs[job_id].status
@@ -698,6 +725,21 @@ class MutableClock:
 
     def __call__(self) -> datetime:
         return self.current
+
+
+@dataclass
+class CapturedCeleryMessage:
+    task_module: object
+    args: tuple[str, ...]
+    kwargs: dict[str, str]
+    countdown: int | None
+
+    def run(self) -> None:
+        self.task_module._process_job(  # type: ignore[attr-defined]
+            FakeBoundTask(),
+            *self.args,
+            **self.kwargs,
+        )
 
 
 @pytest.fixture
@@ -1583,31 +1625,37 @@ def test_owner_death_duplicate_schedules_fresh_message_at_lease_expiry_and_recov
         pipeline=pipeline,
     )
     clock = MutableClock(now)
-    scheduled: list[tuple[str, int]] = []
+    scheduled: list[CapturedCeleryMessage] = []
     monkeypatch.setattr(worker_tasks, "NOW_FACTORY", clock, raising=False)
     monkeypatch.setattr(
-        worker_tasks,
-        "RESCUE_SCHEDULER",
-        lambda scheduled_job_id, countdown: scheduled.append(
-            (scheduled_job_id, countdown)
+        worker_tasks.process_job,
+        "apply_async",
+        lambda args, countdown, kwargs=None: scheduled.append(
+            CapturedCeleryMessage(
+                worker_tasks,
+                tuple(args),
+                dict(kwargs or {}),
+                countdown,
+            )
         ),
-        raising=False,
     )
 
     worker_tasks._process_job(FakeBoundTask(), str(job_id))
 
-    assert scheduled == [(str(job_id), 30)]
+    assert len(scheduled) == 1
+    assert scheduled[0].args == (str(job_id),)
+    assert scheduled[0].countdown == 30
     assert pipeline.commands == []
 
     clock.current = lease_expires_at + timedelta(seconds=1)
-    worker_tasks._process_job(FakeBoundTask(), str(job_id))
+    scheduled[0].run()
 
     assert repository.get_job(job_id).status is JobStatus.COMPLETED
     assert len(pipeline.commands) == 1
 
-    worker_tasks._process_job(FakeBoundTask(), str(job_id))
+    scheduled[0].run()
 
-    assert scheduled == [(str(job_id), 30)]
+    assert len(scheduled) == 1
     assert len(pipeline.commands) == 1
 
 
@@ -1706,3 +1754,67 @@ def test_rescue_scheduler_starts_fresh_task_without_failure_retry_state(
     worker_tasks._default_rescue_scheduler("job-id", 17)
 
     assert calls == [{"args": ("job-id",), "countdown": 17}]
+
+
+def test_immediate_publish_failure_leaves_job_for_periodic_rescue(
+    monkeypatch,
+    worker_storage,
+) -> None:
+    from text_verification.workers import tasks as worker_tasks
+
+    repository = InMemoryJobRepository()
+    verification_repository = InMemoryVerificationRepository()
+    pipeline = RecordingPipeline(
+        build_default_verification_pipeline(Settings(llm_api_key=""))
+    )
+    job_id = _seed_txt_job(repository, worker_storage)
+    now = datetime.now(UTC)
+    lease_expires_at = now + timedelta(seconds=30)
+    repository.force_lease(job_id, uuid4(), lease_expires_at)
+    _configure_worker_dependencies(
+        monkeypatch,
+        repository,
+        worker_storage,
+        verification_repository=verification_repository,
+        pipeline=pipeline,
+    )
+    clock = MutableClock(now)
+    monkeypatch.setattr(worker_tasks, "NOW_FACTORY", clock)
+    monkeypatch.setattr(
+        worker_tasks.process_job,
+        "apply_async",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("broker unavailable")),
+    )
+
+    worker_tasks._process_job(FakeBoundTask(), str(job_id))
+
+    assert repository.get_job(job_id).status is JobStatus.QUEUED
+    assert JobStatus.FAILED not in [
+        event.status for event in repository.list_events_after(job_id, 0)
+    ]
+
+    captured: list[CapturedCeleryMessage] = []
+    clock.current = lease_expires_at + timedelta(seconds=31)
+    monkeypatch.setattr(
+        worker_tasks.process_job,
+        "apply_async",
+        lambda args, kwargs=None, countdown=None: captured.append(
+            CapturedCeleryMessage(
+                worker_tasks,
+                tuple(args),
+                dict(kwargs or {}),
+                countdown,
+            )
+        ),
+    )
+
+    rescued = worker_tasks._rescue_expired_job_leases()
+
+    assert rescued == [str(job_id)]
+    assert len(captured) == 1
+    assert captured[0].kwargs.keys() == {"previous_lease_owner_token"}
+
+    captured[0].run()
+
+    assert repository.get_job(job_id).status is JobStatus.COMPLETED
+    assert len(pipeline.commands) == 1

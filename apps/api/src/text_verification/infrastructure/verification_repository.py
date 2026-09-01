@@ -18,6 +18,7 @@ from text_verification.domain.jobs import (
     JobLeaseLostError,
     JobStateConflictError,
     JobStatus,
+    JobUnleasedError,
     TerminalJobStateError,
 )
 from text_verification.domain.verification import (
@@ -377,11 +378,16 @@ class VerificationRepository:
         owner_token: UUID,
         now: datetime,
     ) -> None:
-        if (
-            job.lease_owner_token != owner_token
-            or job.lease_expires_at is None
-            or job.lease_expires_at <= now
-        ):
+        current_status = JobStatus(job.status)
+        if current_status in TERMINAL_STATUSES:
+            raise TerminalJobStateError(
+                job_id=job.job_id,
+                current_status=current_status,
+                target_status=current_status,
+            )
+        if job.lease_owner_token is None or job.lease_expires_at is None:
+            raise JobUnleasedError(job.job_id)
+        if job.lease_owner_token != owner_token or job.lease_expires_at <= now:
             raise JobLeaseLostError(job.job_id, job.lease_expires_at)
 
     def _assert_expected_status(

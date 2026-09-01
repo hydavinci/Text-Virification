@@ -59,11 +59,17 @@ class JobLeaseLostError(RuntimeError):
     def __init__(
         self,
         job_id: UUID,
-        lease_expires_at: datetime | None = None,
+        lease_expires_at: datetime,
     ) -> None:
         self.job_id = job_id
         self.lease_expires_at = lease_expires_at
         super().__init__(f"Job {job_id} is not owned by the active processing lease.")
+
+
+class JobUnleasedError(RuntimeError):
+    def __init__(self, job_id: UUID) -> None:
+        self.job_id = job_id
+        super().__init__(f"Job {job_id} has no active processing lease.")
 
 
 class JobStateConflictError(RuntimeError):

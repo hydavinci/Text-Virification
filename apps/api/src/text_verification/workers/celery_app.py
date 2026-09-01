@@ -24,6 +24,10 @@ celery_app.conf.update(
         "cleanup-expired-jobs-hourly": {
             "task": "text_verification.cleanup_expired_jobs",
             "schedule": 3600.0,
-        }
+        },
+        "rescue-expired-job-leases": {
+            "task": "text_verification.rescue_expired_job_leases",
+            "schedule": 60.0,
+        },
     },
 )

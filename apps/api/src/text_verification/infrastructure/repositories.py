@@ -16,6 +16,7 @@ from text_verification.domain.jobs import (
     JobRead,
     JobStateConflictError,
     JobStatus,
+    JobUnleasedError,
     TerminalJobStateError,
 )
 from text_verification.infrastructure.orm import JobEventRow, JobRow, VerificationRunRow
@@ -181,7 +182,7 @@ class JobRepository:
             and job.lease_expires_at is not None
             and job.lease_expires_at > changed_at
         ):
-            raise JobLeaseLostError(job_id)
+            raise JobLeaseLostError(job_id, job.lease_expires_at)
         self._apply_transition(
             job,
             status,
@@ -192,6 +193,48 @@ class JobRepository:
             error_message=error_message,
             clear_lease=status in TERMINAL_STATUSES,
         )
+
+    def claim_recoverable_jobs(
+        self,
+        *,
+        owner_token: UUID,
+        now: datetime,
+        lease_expires_at: datetime,
+        limit: int,
+    ) -> list[JobClaimResult]:
+        if lease_expires_at <= now:
+            raise ValueError("lease_expires_at must be later than now.")
+        if limit < 1:
+            raise ValueError("limit must be greater than zero.")
+
+        rows = self._session.scalars(
+            select(JobRow)
+            .where(
+                JobRow.status.not_in(status.value for status in TERMINAL_STATUSES),
+                JobRow.expires_at > now,
+                or_(
+                    JobRow.lease_owner_token.is_(None),
+                    JobRow.lease_expires_at <= now,
+                ),
+            )
+            .order_by(JobRow.lease_expires_at, JobRow.updated_at, JobRow.job_id)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        ).all()
+        for row in rows:
+            row.lease_owner_token = owner_token
+            row.lease_expires_at = lease_expires_at
+            row.updated_at = now
+        if rows:
+            self._session.flush()
+        return [
+            JobClaimResult(
+                JobClaimDisposition.ACQUIRED,
+                self._to_job_read(row),
+                lease_expires_at,
+            )
+            for row in rows
+        ]
 
     def transition_claimed(
         self,
@@ -371,11 +414,16 @@ class JobRepository:
         owner_token: UUID,
         now: datetime,
     ) -> None:
-        if (
-            job.lease_owner_token != owner_token
-            or job.lease_expires_at is None
-            or job.lease_expires_at <= now
-        ):
+        current_status = JobStatus(job.status)
+        if current_status in TERMINAL_STATUSES:
+            raise TerminalJobStateError(
+                job_id=job.job_id,
+                current_status=current_status,
+                target_status=current_status,
+            )
+        if job.lease_owner_token is None or job.lease_expires_at is None:
+            raise JobUnleasedError(job.job_id)
+        if job.lease_owner_token != owner_token or job.lease_expires_at <= now:
             raise JobLeaseLostError(job.job_id, job.lease_expires_at)
 
     def _assert_expected_status(
