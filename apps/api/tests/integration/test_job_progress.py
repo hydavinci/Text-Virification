@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi import FastAPI
 
-from text_verification.domain.documents import FileType
+from text_verification.domain.documents import FileType, TextBlock
 from text_verification.domain.jobs import (
     RESULT_READY_STATUSES,
     TERMINAL_STATUSES,
@@ -399,6 +399,28 @@ def _result_for_job(job: JobRead) -> VerificationResult:
         file_type=job.file_type,
         scenario=Scenario.GENERAL,
         text="需要检查",
+        blocks=(
+            TextBlock(
+                block_id="p-0",
+                kind="paragraph",
+                text="需要检查",
+                global_start=0,
+                global_end=4,
+                block_start=0,
+                block_end=4,
+                page=None,
+                paragraph_index=0,
+                table_index=None,
+                row_index=None,
+                cell_index=None,
+                bbox=None,
+                parent_id=None,
+                style={},
+                source_locator={"paragraph_index": 0},
+            ),
+        ),
+        parser_name="test-parser",
+        parser_version="1",
         stats=VerificationStatistics(
             char_count=4,
             char_count_no_space=4,

@@ -9,7 +9,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from text_verification.compatibility.analyzer import Issue as LegacyIssue
 from text_verification.domain.documents import DocumentModel, FileType, TextBlock
 from text_verification.domain.issues import Issue, IssueSeverity
-from text_verification.domain.verification import VerificationResult
+from text_verification.domain.verification import LEGACY_SUMMARY_LABELS, VerificationResult
 
 _LEGACY_SOURCE = "compatibility.analyzer"
 _LEGACY_SOURCE_VERSION = "1"
@@ -21,6 +21,10 @@ _CONFIDENCE_BY_SEVERITY = {
     IssueSeverity.WARNING: 0.8,
     IssueSeverity.INFO: 0.6,
 }
+
+
+def confidence_for_severity(severity: IssueSeverity | str) -> float:
+    return _CONFIDENCE_BY_SEVERITY[IssueSeverity(severity)]
 
 
 def source_version_for_text(text: str) -> str:
@@ -125,7 +129,7 @@ def legacy_issue_to_domain(
         rule_version=_LEGACY_RULE_VERSION,
         source=_LEGACY_SOURCE,
         source_version=_LEGACY_SOURCE_VERSION,
-        confidence=_CONFIDENCE_BY_SEVERITY[severity],
+        confidence=confidence_for_severity(severity),
         auto_fixable=bool(legacy_issue.suggestion),
         context=legacy_issue.context,
         review=legacy_issue.review or None,
@@ -145,10 +149,18 @@ def verification_result_to_legacy_response(result: VerificationResult) -> dict[s
     return {
         "success": True,
         "filename": result.source_name,
+        "source_name": result.source_name,
+        "file_type": result.file_type.value,
         "text": result.text,
+        "blocks": [block.model_dump(mode="json") for block in result.blocks],
+        "parser_name": result.parser_name,
+        "parser_version": result.parser_version,
         "stats": result.stats.model_dump(mode="json"),
-        "issues": [_domain_issue_to_legacy_payload(issue) for issue in result.issues],
-        "summary": result.summary.model_dump(mode="json", exclude_none=True),
+        "issues": [
+            _domain_issue_to_legacy_payload(issue)
+            for issue in sorted(result.issues, key=lambda item: (item.start, item.end))
+        ],
+        "summary": _legacy_summary(result),
         "file_id": str(result.document_id),
         "file_ext": f".{result.file_type.value}",
         "scenario": result.scenario.value,
@@ -162,6 +174,17 @@ def verification_result_to_legacy_response(result: VerificationResult) -> dict[s
     }
 
 
+def _legacy_summary(result: VerificationResult) -> dict[str, object]:
+    summary = result.summary.model_dump(mode="json", exclude_none=True)
+    for bucket_name, labels in LEGACY_SUMMARY_LABELS.items():
+        bucket = summary[bucket_name]
+        summary[bucket_name] = {
+            labels.get(key, key): count
+            for key, count in bucket.items()
+        }
+    return summary
+
+
 def _domain_issue_to_legacy_payload(issue: Issue) -> dict[str, object]:
     return {
         "type": issue.type,
@@ -170,6 +193,8 @@ def _domain_issue_to_legacy_payload(issue: Issue) -> dict[str, object]:
         "suggestion": issue.suggestion,
         "position": issue.start,
         "end_position": issue.end,
+        "start": issue.start,
+        "end": issue.end,
         "context": issue.context,
         "description": issue.description,
         "rule_id": issue.rule_id,

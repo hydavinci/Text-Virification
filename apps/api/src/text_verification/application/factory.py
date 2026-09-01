@@ -10,6 +10,7 @@ from text_verification.application.verification_pipeline import (
 )
 from text_verification.checkers.compatibility_checker import CompatibilityChecker
 from text_verification.checkers.registry import CheckerRegistry
+from text_verification.compatibility.adapters import confidence_for_severity
 from text_verification.compatibility.analyzer import Issue as LegacyIssue
 from text_verification.compatibility.llm_review import (
     is_llm_review_configured,
@@ -93,8 +94,10 @@ def _to_legacy_issue(issue: Issue) -> LegacyIssue:
 
 
 def _apply_legacy_review(issue: Issue, reviewed: LegacyIssue) -> Issue:
+    severity = IssueSeverity(reviewed.severity)
     updates: dict[str, Any] = {
-        "severity": IssueSeverity(reviewed.severity),
+        "severity": severity,
+        "confidence": confidence_for_severity(severity),
         "description": reviewed.description,
         "review": reviewed.review or None,
         "review_reason": reviewed.review_reason or None,

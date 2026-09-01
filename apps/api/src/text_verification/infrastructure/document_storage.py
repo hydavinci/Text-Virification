@@ -179,6 +179,16 @@ class DocumentStorage:
     def delete(self, document_id: UUID) -> None:
         self._delete_directory(self.document_directory(document_id))
 
+    def delete_storage_key(self, storage_key: str) -> bool:
+        path = self._path_for_storage_key(storage_key)
+        if not path.exists():
+            return False
+        if not path.is_file():
+            raise InvalidUpload("Artifact storage key does not reference a regular file.")
+        path.unlink()
+        self._prune_empty_storage_directories(path.parent)
+        return True
+
     def delete_orphaned_directories(
         self,
         persisted_document_ids: set[UUID],
@@ -348,6 +358,40 @@ class DocumentStorage:
             raise InvalidUpload(f"Upload path is a reparse point: {path}")
         if not self._is_within_root(path.resolve(strict=False)):
             raise InvalidUpload(f"Upload path escapes storage root: {path}")
+
+    def _path_for_storage_key(self, storage_key: str) -> Path:
+        if (
+            not storage_key
+            or "\x00" in storage_key
+            or "\\" in storage_key
+        ):
+            raise InvalidUpload("Artifact storage key is unsafe.")
+        relative_path = PurePosixPath(storage_key)
+        if relative_path.is_absolute() or any(
+            part in {"", ".", ".."} for part in relative_path.parts
+        ):
+            raise InvalidUpload("Artifact storage key is unsafe.")
+
+        path = self._root.joinpath(*relative_path.parts)
+        current = self._root
+        if self._is_reparse_point(current):
+            raise InvalidUpload("Artifact storage key crosses a reparse point.")
+        for part in relative_path.parts:
+            current /= part
+            if self._is_reparse_point(current):
+                raise InvalidUpload("Artifact storage key crosses a reparse point.")
+        if not self._is_within_root(path.resolve(strict=False)):
+            raise InvalidUpload("Artifact storage key escapes the storage root.")
+        return path
+
+    def _prune_empty_storage_directories(self, directory: Path) -> None:
+        current = directory
+        while current != self._root:
+            try:
+                current.rmdir()
+            except OSError:
+                return
+            current = current.parent
 
     def _delete_directory(self, document_directory: Path) -> None:
         is_reparse = self._is_reparse_point(document_directory)

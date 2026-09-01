@@ -16,7 +16,7 @@ from text_verification.api.dependencies import get_verification_pipeline
 from text_verification.application.errors import VerificationError
 from text_verification.application.verification_pipeline import VerificationCommand
 from text_verification.config import Settings, get_settings
-from text_verification.domain.documents import FileType
+from text_verification.domain.documents import FileType, TextBlock
 from text_verification.domain.verification import (
     Scenario,
     VerificationAnalysisMode,
@@ -72,6 +72,28 @@ def _verification_result(*, text: str = "检查文本") -> VerificationResult:
         file_type=FileType.TXT,
         scenario=Scenario.GENERAL,
         text=text,
+        blocks=(
+            TextBlock(
+                block_id="p-0",
+                kind="paragraph",
+                text=text,
+                global_start=0,
+                global_end=len(text),
+                block_start=0,
+                block_end=len(text),
+                page=None,
+                paragraph_index=0,
+                table_index=None,
+                row_index=None,
+                cell_index=None,
+                bbox=None,
+                parent_id=None,
+                style={},
+                source_locator={"paragraph_index": 0},
+            ),
+        ),
+        parser_name="test-parser",
+        parser_version="1",
         stats=VerificationStatistics(
             char_count=len(text),
             char_count_no_space=len(text),
@@ -129,7 +151,12 @@ def test_analyze_direct_text_supports_legacy_options(
     assert set(payload) == {
         "success",
         "filename",
+        "source_name",
+        "file_type",
         "text",
+        "blocks",
+        "parser_name",
+        "parser_version",
         "stats",
         "issues",
         "summary",

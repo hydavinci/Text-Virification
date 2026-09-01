@@ -89,9 +89,21 @@ class InMemoryCleanupRepository:
 class InMemoryCleanupVerificationRepository:
     def __init__(self) -> None:
         self.deleted_job_ids: list[UUID] = []
+        self.artifact_keys: dict[UUID, tuple[str, ...]] = {}
+
+    def list_artifact_storage_keys(self, job_id: UUID) -> tuple[str, ...]:
+        return self.artifact_keys.get(job_id, ())
 
     def delete_results_for_jobs(self, job_ids: list[UUID]) -> None:
         self.deleted_job_ids.extend(job_ids)
+        for job_id in job_ids:
+            self.artifact_keys.pop(job_id, None)
+
+    def commit(self) -> None:
+        return None
+
+    def rollback(self) -> None:
+        return None
 
 
 @dataclass
@@ -129,17 +141,22 @@ def compatibility_storage(tmp_path: Path) -> CompatibilityStorage:
     return CompatibilityStorage(tmp_path / "jobs", max_upload_bytes=25 * 1024 * 1024)
 
 
+@pytest.fixture
+def verification_repository() -> InMemoryCleanupVerificationRepository:
+    return InMemoryCleanupVerificationRepository()
+
+
 @pytest.fixture(autouse=True)
 def cleanup_dependencies(
     monkeypatch: pytest.MonkeyPatch,
     repository: InMemoryCleanupRepository,
+    verification_repository: InMemoryCleanupVerificationRepository,
     storage: JobStorage,
     compatibility_storage: CompatibilityStorage,
 ) -> SessionFactorySpy:
     from text_verification.workers import tasks as worker_tasks
 
     session_factory = SessionFactorySpy([])
-    verification_repository = InMemoryCleanupVerificationRepository()
     monkeypatch.setattr(worker_tasks, "SESSION_FACTORY_PROVIDER", lambda: session_factory)
     monkeypatch.setattr(worker_tasks, "REPOSITORY_FACTORY", lambda session: repository)
     monkeypatch.setattr(
@@ -230,6 +247,98 @@ def test_cleanup_retries_storage_deletion_for_already_expired_jobs(
     ]
     assert caplog.records[0].job_id == str(expired_job.job_id)
     assert caplog.records[0].error_type == "PermissionError"
+
+
+def test_cleanup_deletes_recorded_export_outside_job_directory_before_aggregate(
+    repository: InMemoryCleanupRepository,
+    verification_repository: InMemoryCleanupVerificationRepository,
+    storage: JobStorage,
+    expired_job: JobRead,
+) -> None:
+    from text_verification.workers.tasks import cleanup_expired_jobs
+
+    storage_key = f"exports/{expired_job.job_id}.txt"
+    export_path = storage._root / storage_key
+    export_path.parent.mkdir()
+    export_path.write_text("reviewed", encoding="utf-8")
+    verification_repository.artifact_keys[expired_job.job_id] = (storage_key,)
+
+    deleted_job_ids = cleanup_expired_jobs()
+
+    assert deleted_job_ids == [str(expired_job.job_id)]
+    assert not export_path.exists()
+    assert not storage.job_directory(expired_job.job_id).exists()
+    assert verification_repository.deleted_job_ids == [expired_job.job_id]
+
+
+def test_cleanup_rejects_artifact_traversal_and_keeps_aggregate_for_retry(
+    verification_repository: InMemoryCleanupVerificationRepository,
+    storage: JobStorage,
+    expired_job: JobRead,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from text_verification.workers.tasks import cleanup_expired_jobs
+
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep", encoding="utf-8")
+    verification_repository.artifact_keys[expired_job.job_id] = ("../outside.txt",)
+
+    with caplog.at_level(logging.WARNING, logger="text_verification.workers.tasks"):
+        deleted_job_ids = cleanup_expired_jobs()
+
+    assert deleted_job_ids == []
+    assert outside.read_text(encoding="utf-8") == "keep"
+    assert storage.job_directory(expired_job.job_id).exists()
+    assert verification_repository.deleted_job_ids == []
+    assert [record.getMessage() for record in caplog.records] == [
+        "cleanup_expired_job_delete_failed"
+    ]
+
+
+def test_cleanup_partial_artifact_failure_retries_before_deleting_aggregate(
+    verification_repository: InMemoryCleanupVerificationRepository,
+    storage: JobStorage,
+    expired_job: JobRead,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from text_verification.workers.tasks import cleanup_expired_jobs
+
+    first_key = f"exports/{expired_job.job_id}-a.txt"
+    second_key = f"exports/{expired_job.job_id}-b.txt"
+    first_path = storage._root / first_key
+    second_path = storage._root / second_key
+    first_path.parent.mkdir()
+    first_path.write_text("first", encoding="utf-8")
+    second_path.write_text("second", encoding="utf-8")
+    verification_repository.artifact_keys[expired_job.job_id] = (
+        first_key,
+        second_key,
+    )
+    real_delete_storage_key = storage.delete_storage_key
+    second_attempts = 0
+
+    def flaky_delete_storage_key(storage_key: str) -> bool:
+        nonlocal second_attempts
+        if storage_key == second_key:
+            second_attempts += 1
+            if second_attempts == 1:
+                raise PermissionError("locked")
+        return real_delete_storage_key(storage_key)
+
+    monkeypatch.setattr(storage, "delete_storage_key", flaky_delete_storage_key)
+
+    assert cleanup_expired_jobs() == []
+    assert not first_path.exists()
+    assert second_path.exists()
+    assert storage.job_directory(expired_job.job_id).exists()
+    assert verification_repository.deleted_job_ids == []
+
+    assert cleanup_expired_jobs() == [str(expired_job.job_id)]
+    assert not second_path.exists()
+    assert not storage.job_directory(expired_job.job_id).exists()
+    assert verification_repository.deleted_job_ids == [expired_job.job_id]
+    assert second_attempts == 2
 
 
 def test_cleanup_sweeps_only_stale_unpersisted_directories(

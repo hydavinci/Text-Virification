@@ -118,6 +118,7 @@ class JobClaimDisposition(StrEnum):
     MISSING = "missing"
     TERMINAL = "terminal"
     LEASED = "leased"
+    RETENTION_EXPIRED = "retention_expired"
 
 
 @dataclass(frozen=True)
@@ -125,3 +126,16 @@ class JobClaimResult:
     disposition: JobClaimDisposition
     job: JobRead | None
     lease_expires_at: datetime | None = None
+
+
+class JobRecoveryKind(StrEnum):
+    INITIAL_DISPATCH = "initial_dispatch"
+    EXPIRED_LEASE = "expired_lease"
+
+
+@dataclass(frozen=True)
+class JobRecoveryClaim:
+    kind: JobRecoveryKind
+    job: JobRead
+    attempt: int
+    publication_due_at: datetime

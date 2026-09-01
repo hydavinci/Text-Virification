@@ -1,18 +1,21 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+from threading import Event
 from types import ModuleType
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import CheckConstraint, Engine, inspect
+from sqlalchemy import CheckConstraint, Engine, inspect, text
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.session import sessionmaker
 
 from text_verification.domain.jobs import (
     JobClaimDisposition,
+    JobClaimResult,
     JobLeaseLostError,
     JobStateConflictError,
     JobStatus,
@@ -22,6 +25,9 @@ from text_verification.infrastructure.repositories import JobRepository
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 MIGRATION_PATH = BACKEND_ROOT / "alembic/versions/0003_add_job_leases.py"
+FINAL_MIGRATION_PATH = (
+    BACKEND_ROOT / "alembic/versions/0004_finalize_verification_pipeline.py"
+)
 
 
 def test_job_orm_and_migration_define_paired_lease_fields() -> None:
@@ -50,6 +56,43 @@ def test_database_schema_contains_job_lease_fields(db_engine: Engine) -> None:
     }
     assert {constraint["name"] for constraint in inspector.get_check_constraints("jobs")} >= {
         "ck_jobs_lease_pair"
+    }
+
+
+def test_job_orm_and_final_migration_define_durable_recovery_metadata() -> None:
+    assert {
+        "rescue_due_at",
+        "rescue_attempts",
+        "rescue_last_published_at",
+    } <= set(JobRow.__table__.c.keys())
+    assert {index.name for index in JobRow.__table__.indexes} >= {
+        "ix_jobs_rescue_due_at"
+    }
+    assert {
+        constraint.name
+        for constraint in JobRow.__table__.constraints
+        if isinstance(constraint, CheckConstraint)
+    } >= {"ck_jobs_rescue_attempts"}
+
+    migration = _load_migration(FINAL_MIGRATION_PATH, "final_migration_0004")
+    assert migration.revision == "0004_finalize_verification_pipeline"
+    assert migration.down_revision == "0003_add_job_leases"
+
+
+def test_database_schema_contains_durable_recovery_metadata(db_engine: Engine) -> None:
+    inspector = inspect(db_engine)
+    columns = {column["name"] for column in inspector.get_columns("jobs")}
+
+    assert {
+        "rescue_due_at",
+        "rescue_attempts",
+        "rescue_last_published_at",
+    } <= columns
+    assert {index["name"] for index in inspector.get_indexes("jobs")} >= {
+        "ix_jobs_rescue_due_at"
+    }
+    assert {constraint["name"] for constraint in inspector.get_check_constraints("jobs")} >= {
+        "ck_jobs_rescue_attempts"
     }
 
 
@@ -131,6 +174,125 @@ def test_expired_lease_allows_new_delivery_takeover(
 
     assert takeover.disposition is JobClaimDisposition.ACQUIRED
     assert row.lease_owner_token == second_owner
+
+
+def test_retention_expired_unleased_job_rejects_fresh_delivery(
+    db_session: Session,
+) -> None:
+    job_id = uuid4()
+    now = datetime.now(UTC)
+    repository = JobRepository(db_session)
+    _create_job(repository, job_id, expires_at=now)
+    repository.commit()
+
+    claim = repository.acquire_lease(
+        job_id,
+        owner_token=uuid4(),
+        now=now,
+        lease_expires_at=now + timedelta(minutes=20),
+    )
+    repository.commit()
+
+    row = db_session.get(JobRow, job_id)
+    assert claim.disposition.value == "retention_expired"
+    assert row is not None
+    assert row.lease_owner_token is None
+    assert row.lease_expires_at is None
+
+
+def test_live_predecessor_retry_can_rotate_after_retention_expiry(
+    db_session: Session,
+) -> None:
+    job_id = uuid4()
+    first_owner = uuid4()
+    retry_owner = uuid4()
+    now = datetime.now(UTC)
+    repository = JobRepository(db_session)
+    _create_job(repository, job_id, expires_at=now - timedelta(seconds=30))
+    repository.acquire_lease(
+        job_id,
+        owner_token=first_owner,
+        now=now - timedelta(minutes=1),
+        lease_expires_at=now + timedelta(minutes=20),
+    )
+    repository.commit()
+
+    claim = repository.acquire_lease(
+        job_id,
+        owner_token=retry_owner,
+        previous_owner_token=first_owner,
+        now=now,
+        lease_expires_at=now + timedelta(minutes=20),
+    )
+    repository.commit()
+
+    row = db_session.get(JobRow, job_id)
+    assert claim.disposition is JobClaimDisposition.ACQUIRED
+    assert row is not None
+    assert row.lease_owner_token == retry_owner
+
+
+def test_expiry_and_fresh_delivery_race_never_starts_retention_expired_job(
+    db_session_factory: sessionmaker[Session],
+) -> None:
+    job_id = uuid4()
+    now = datetime.now(UTC)
+    _seed_job(db_session_factory, job_id, expires_at=now)
+    expiry_locked = Event()
+    allow_expiry_commit = Event()
+    claim_started = Event()
+    claim_finished = Event()
+
+    def expire() -> list[UUID]:
+        session = db_session_factory()
+        try:
+            session.execute(text("SET lock_timeout = '4s'"))
+            repository = JobRepository(session)
+            expired = repository.expire_jobs_before(now)
+            expiry_locked.set()
+            if not allow_expiry_commit.wait(timeout=2):
+                raise TimeoutError("timed out waiting to commit expiry")
+            repository.commit()
+            return expired
+        finally:
+            session.close()
+
+    def claim() -> JobClaimResult:
+        session = db_session_factory()
+        try:
+            session.execute(text("SET lock_timeout = '4s'"))
+            claim_started.set()
+            result = JobRepository(session).acquire_lease(
+                job_id,
+                owner_token=uuid4(),
+                now=now,
+                lease_expires_at=now + timedelta(minutes=20),
+            )
+            session.commit()
+            return result
+        finally:
+            claim_finished.set()
+            session.close()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        expiry_future = executor.submit(expire)
+        assert expiry_locked.wait(timeout=2)
+        claim_future = executor.submit(claim)
+        assert claim_started.wait(timeout=1)
+        assert not claim_finished.wait(timeout=0.2)
+        allow_expiry_commit.set()
+        assert expiry_future.result(timeout=5) == [job_id]
+        claim_result = claim_future.result(timeout=5)
+
+    verification_session = db_session_factory()
+    try:
+        job = JobRepository(verification_session).get_job(job_id)
+    finally:
+        verification_session.close()
+
+    assert claim_result.disposition is JobClaimDisposition.TERMINAL
+    assert job is not None
+    assert job.status is JobStatus.EXPIRED
 
 
 def test_retry_rotates_predecessor_lease_only_once(
@@ -365,7 +527,7 @@ def test_expiry_skips_job_with_live_processing_lease(
     assert job.status is JobStatus.QUEUED
 
 
-def test_recoverable_scan_claims_only_expired_or_unleased_nonterminal_jobs(
+def test_due_recovery_scan_claims_only_expired_or_unleased_nonterminal_jobs(
     db_session: Session,
 ) -> None:
     now = datetime.now(UTC)
@@ -398,13 +560,12 @@ def test_recoverable_scan_claims_only_expired_or_unleased_nonterminal_jobs(
     )
     repository.transition(terminal_job, JobStatus.FAILED, 0, "处理失败")
     repository.commit()
-    rescue_owner = uuid4()
-    rescue_expires_at = now + timedelta(seconds=60)
+    recovery_now = now + timedelta(minutes=3)
+    publication_due_at = recovery_now + timedelta(minutes=2)
 
-    claims = repository.claim_recoverable_jobs(
-        owner_token=rescue_owner,
-        now=now,
-        lease_expires_at=rescue_expires_at,
+    claims = repository.claim_due_recoveries(
+        now=recovery_now,
+        publication_due_at=publication_due_at,
         limit=100,
     )
     repository.commit()
@@ -416,14 +577,59 @@ def test_recoverable_scan_claims_only_expired_or_unleased_nonterminal_jobs(
     for job_id in (expired_lease_job, unleased_job):
         row = db_session.get(JobRow, job_id)
         assert row is not None
-        assert row.lease_owner_token == rescue_owner
-        assert row.lease_expires_at == rescue_expires_at
+        assert row.rescue_due_at == publication_due_at
+        assert row.rescue_attempts == 1
 
 
-def test_concurrent_recoverable_scans_skip_already_claimed_rows(
+def test_due_recovery_scan_distinguishes_initial_dispatch_and_expired_lease(
+    db_session: Session,
+) -> None:
+    now = datetime.now(UTC)
+    initial_job = uuid4()
+    expired_lease_job = uuid4()
+    repository = JobRepository(db_session)
+    _create_job(repository, initial_job, expires_at=now + timedelta(hours=1))
+    _create_job(repository, expired_lease_job, expires_at=now + timedelta(hours=1))
+    repository.commit()
+    repository.acquire_lease(
+        expired_lease_job,
+        owner_token=uuid4(),
+        now=now,
+        lease_expires_at=now + timedelta(seconds=1),
+    )
+    repository.commit()
+    publication_time = now + timedelta(minutes=2)
+    publication_due_at = publication_time + timedelta(minutes=2)
+
+    claims = repository.claim_due_recoveries(
+        now=publication_time,
+        publication_due_at=publication_due_at,
+        limit=100,
+    )
+    repository.commit()
+
+    claims_by_job = {
+        claim.job.job_id: claim
+        for claim in claims
+        if claim.job is not None
+    }
+    assert claims_by_job[initial_job].kind.value == "initial_dispatch"
+    assert claims_by_job[expired_lease_job].kind.value == "expired_lease"
+    assert {claim.attempt for claim in claims} == {1}
+    for job_id in (initial_job, expired_lease_job):
+        row = db_session.get(JobRow, job_id)
+        assert row is not None
+        assert row.lease_owner_token is None or row.lease_expires_at <= publication_time
+        assert row.rescue_due_at == publication_due_at
+        assert row.rescue_attempts == 1
+
+
+def test_concurrent_due_recovery_scans_skip_already_claimed_rows(
     db_session_factory: sessionmaker[Session],
 ) -> None:
     now = datetime.now(UTC)
+    recovery_now = now + timedelta(minutes=2)
+    publication_due_at = recovery_now + timedelta(minutes=2)
     job_ids = [uuid4(), uuid4()]
     for job_id in job_ids:
         _seed_job(
@@ -435,16 +641,14 @@ def test_concurrent_recoverable_scans_skip_already_claimed_rows(
     first_session = db_session_factory()
     second_session = db_session_factory()
     try:
-        first_claims = JobRepository(first_session).claim_recoverable_jobs(
-            owner_token=uuid4(),
-            now=now,
-            lease_expires_at=now + timedelta(seconds=60),
+        first_claims = JobRepository(first_session).claim_due_recoveries(
+            now=recovery_now,
+            publication_due_at=publication_due_at,
             limit=100,
         )
-        second_claims = JobRepository(second_session).claim_recoverable_jobs(
-            owner_token=uuid4(),
-            now=now,
-            lease_expires_at=now + timedelta(seconds=60),
+        second_claims = JobRepository(second_session).claim_due_recoveries(
+            now=recovery_now,
+            publication_due_at=publication_due_at,
             limit=100,
         )
         first_session.commit()
@@ -491,11 +695,14 @@ def _create_job(
     )
 
 
-def _load_migration() -> ModuleType:
-    assert MIGRATION_PATH.is_file()
-    spec = spec_from_file_location("task6_migration_0003", MIGRATION_PATH)
+def _load_migration(
+    path: Path = MIGRATION_PATH,
+    module_name: str = "task6_migration_0003",
+) -> ModuleType:
+    assert path.is_file()
+    spec = spec_from_file_location(module_name, path)
     if spec is None or spec.loader is None:
-        raise AssertionError(f"unable to load migration: {MIGRATION_PATH}")
+        raise AssertionError(f"unable to load migration: {path}")
     migration = module_from_spec(spec)
     spec.loader.exec_module(migration)
     return migration

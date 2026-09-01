@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from text_verification.config import Settings
-from text_verification.domain.documents import FileType
+from text_verification.domain.documents import FileType, TextBlock
 from text_verification.domain.issues import Issue, IssueSeverity
 from text_verification.domain.verification import (
     GlossaryTerm,
@@ -67,6 +67,9 @@ def test_verification_result_carries_canonical_ids_and_degradation_metadata() ->
         file_type=FileType.PDF,
         scenario=Scenario.TECHNICAL,
         text="帐号测试",
+        blocks=(_text_block("帐号测试", block_id="p-1", page=1),),
+        parser_name="test-parser",
+        parser_version="1",
         stats=VerificationStatistics(
             char_count=4,
             char_count_no_space=4,
@@ -133,6 +136,9 @@ def _verification_result_with_issues(
         file_type=FileType.TXT,
         scenario=Scenario.GENERAL,
         text=text,
+        blocks=(_text_block(text),),
+        parser_name="test-parser",
+        parser_version="1",
         stats=VerificationStatistics(
             char_count=len(text),
             char_count_no_space=len(text),
@@ -153,6 +159,32 @@ def _verification_result_with_issues(
         ),
         execution_mode=VerificationExecutionMode.SYNCHRONOUS,
         analysis_mode=VerificationAnalysisMode.LOCAL_ONLY,
+    )
+
+
+def _text_block(
+    text: str,
+    *,
+    block_id: str = "p-0",
+    page: int | None = None,
+) -> TextBlock:
+    return TextBlock(
+        block_id=block_id,
+        kind="paragraph",
+        text=text,
+        global_start=0,
+        global_end=len(text),
+        block_start=0,
+        block_end=len(text),
+        page=page,
+        paragraph_index=0,
+        table_index=None,
+        row_index=None,
+        cell_index=None,
+        bbox=None,
+        parent_id=None,
+        style={},
+        source_locator={"paragraph_index": 0},
     )
 
 

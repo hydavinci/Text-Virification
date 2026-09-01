@@ -265,6 +265,40 @@ def test_delete_job_surfaces_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "unlink", real_unlink)
 
 
+def test_delete_storage_key_removes_root_relative_export(tmp_path) -> None:
+    storage = JobStorage(tmp_path, max_upload_bytes=1024)
+    export_path = tmp_path / "exports" / "reviewed.txt"
+    export_path.parent.mkdir()
+    export_path.write_text("reviewed", encoding="utf-8")
+
+    assert storage.delete_storage_key("exports/reviewed.txt") is True
+    assert not export_path.exists()
+    assert storage.delete_storage_key("exports/reviewed.txt") is False
+
+
+@pytest.mark.parametrize(
+    "storage_key",
+    [
+        "../outside.txt",
+        "exports/../../outside.txt",
+        "/absolute/outside.txt",
+        r"exports\..\outside.txt",
+    ],
+)
+def test_delete_storage_key_rejects_path_traversal(
+    tmp_path,
+    storage_key: str,
+) -> None:
+    storage = JobStorage(tmp_path / "jobs", max_upload_bytes=1024)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep", encoding="utf-8")
+
+    with pytest.raises(InvalidUpload, match="storage key"):
+        storage.delete_storage_key(storage_key)
+
+    assert outside.read_text(encoding="utf-8") == "keep"
+
+
 def test_delete_orphaned_directories_removes_only_stale_canonical_unpersisted_directories(
     tmp_path,
 ):

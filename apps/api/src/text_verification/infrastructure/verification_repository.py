@@ -10,7 +10,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
-from text_verification.domain.documents import FileType
+from text_verification.domain.documents import FileType, TextBlock
 from text_verification.domain.issues import Issue, IssueSeverity
 from text_verification.domain.jobs import (
     RESULT_READY_STATUSES,
@@ -31,6 +31,7 @@ from text_verification.domain.verification import (
     VerificationSummary,
 )
 from text_verification.infrastructure.orm import (
+    DocumentBlockRow,
     DocumentRow,
     ExportArtifactRow,
     JobRow,
@@ -164,6 +165,20 @@ class VerificationRepository:
             .execution_options(synchronize_session=False)
         )
 
+    def list_artifact_storage_keys(self, job_id: UUID) -> tuple[str, ...]:
+        return tuple(
+            self._session.scalars(
+                select(ExportArtifactRow.storage_key)
+                .join(
+                    VerificationRunRow,
+                    ExportArtifactRow.verification_run_id
+                    == VerificationRunRow.verification_run_id,
+                )
+                .where(VerificationRunRow.job_id == job_id)
+                .order_by(ExportArtifactRow.storage_key)
+            ).all()
+        )
+
     def save_review_revision(
         self,
         *,
@@ -255,6 +270,9 @@ class VerificationRepository:
         if size_bytes < 0:
             raise ValueError("size_bytes must be greater than or equal to zero.")
         run = self._lock_run(verification_run_id)
+        job = self._lock_job(run.job_id)
+        if JobStatus(job.status) is JobStatus.EXPIRED:
+            raise ValueError(f"Job {job.job_id} has expired.")
         review_revision = self._review_revision_for_run(
             verification_run_id,
             review_revision_id,
@@ -343,6 +361,9 @@ class VerificationRepository:
             select(VerificationRunRow)
             .options(
                 selectinload(VerificationRunRow.document),
+                selectinload(VerificationRunRow.document).selectinload(
+                    DocumentRow.blocks
+                ),
                 selectinload(VerificationRunRow.issues),
             )
             .where(VerificationRunRow.job_id == job_id)
@@ -467,8 +488,14 @@ def _map_result_to_rows(
         source_name=result.source_name,
         file_type=result.file_type.value,
         text=result.text,
+        parser_name=result.parser_name,
+        parser_version=result.parser_version,
         created_at=persisted_at,
     )
+    document_row.blocks = [
+        _map_block_to_row(block, block_index=index)
+        for index, block in enumerate(result.blocks)
+    ]
     run_row = VerificationRunRow(
         verification_run_id=result.verification_run_id,
         job_id=job_id,
@@ -515,6 +542,9 @@ def _map_rows_to_result(
         file_type=FileType(document_row.file_type),
         scenario=Scenario(run_row.scenario),
         text=document_row.text,
+        blocks=tuple(_map_block_to_domain(row) for row in document_row.blocks),
+        parser_name=document_row.parser_name,
+        parser_version=document_row.parser_version,
         stats=VerificationStatistics(
             char_count=run_row.stats_char_count,
             char_count_no_space=run_row.stats_char_count_no_space,
@@ -540,6 +570,53 @@ def _map_rows_to_result(
             is_degraded=run_row.degradation_is_degraded,
             reasons=tuple(run_row.degradation_reasons),
         ),
+    )
+
+
+def _map_block_to_row(
+    block: TextBlock,
+    *,
+    block_index: int,
+) -> DocumentBlockRow:
+    return DocumentBlockRow(
+        block_index=block_index,
+        block_id=block.block_id,
+        kind=block.kind,
+        text=block.text,
+        global_start=block.global_start,
+        global_end=block.global_end,
+        block_start=block.block_start,
+        block_end=block.block_end,
+        page=block.page,
+        paragraph_index=block.paragraph_index,
+        table_index=block.table_index,
+        row_index=block.row_index,
+        cell_index=block.cell_index,
+        bbox=list(block.bbox) if block.bbox is not None else None,
+        parent_id=block.parent_id,
+        style=deepcopy(block.style),
+        source_locator=deepcopy(block.source_locator),
+    )
+
+
+def _map_block_to_domain(row: DocumentBlockRow) -> TextBlock:
+    return TextBlock(
+        block_id=row.block_id,
+        kind=row.kind,
+        text=row.text,
+        global_start=row.global_start,
+        global_end=row.global_end,
+        block_start=row.block_start,
+        block_end=row.block_end,
+        page=row.page,
+        paragraph_index=row.paragraph_index,
+        table_index=row.table_index,
+        row_index=row.row_index,
+        cell_index=row.cell_index,
+        bbox=tuple(row.bbox) if row.bbox is not None else None,
+        parent_id=row.parent_id,
+        style=deepcopy(row.style),
+        source_locator=deepcopy(row.source_locator),
     )
 
 

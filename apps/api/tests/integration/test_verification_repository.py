@@ -10,7 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.session import sessionmaker
 
-from text_verification.domain.documents import FileType
+from text_verification.domain.documents import FileType, TextBlock
 from text_verification.domain.issues import Issue, IssueSeverity
 from text_verification.domain.verification import (
     Scenario,
@@ -22,6 +22,7 @@ from text_verification.domain.verification import (
     VerificationSummary,
 )
 from text_verification.infrastructure.orm import (
+    Base,
     DocumentRow,
     ExportArtifactRow,
     ReviewRevisionRow,
@@ -62,6 +63,42 @@ def test_result_row_mapping_round_trips_every_canonical_field_without_database()
         "sensitive_words": "sha256:sensitive-v2",
     }
     assert run_row.degradation_reasons == ["llm_review_failed", "provider_timeout"]
+
+
+def test_result_row_mapping_round_trips_nested_document_blocks_exactly() -> None:
+    result = _structured_result()
+
+    document_row, run_row = _map_result_to_rows(JOB_ID, result, created_at=CREATED_AT)
+    loaded = _map_rows_to_result(document_row, run_row)
+
+    assert document_row.parser_name == "structured-parser"
+    assert document_row.parser_version == "7.2"
+    assert [row.block_index for row in document_row.blocks] == [0, 1, 2]
+    assert [row.block_id for row in document_row.blocks] == [
+        "heading-0",
+        "body-0",
+        "table-cell-0",
+    ]
+    assert document_row.blocks[2].page == 2
+    assert document_row.blocks[2].paragraph_index == 4
+    assert document_row.blocks[2].table_index == 1
+    assert document_row.blocks[2].row_index == 2
+    assert document_row.blocks[2].cell_index == 3
+    assert document_row.blocks[2].parent_id == "body-0"
+    assert document_row.blocks[2].bbox == [10.5, 20.5, 30.5, 40.5]
+    assert document_row.blocks[2].style == {
+        "font": {"family": "Noto Sans", "bold": True},
+    }
+    assert document_row.blocks[2].source_locator == {
+        "page": 2,
+        "paragraph_index": 4,
+        "table_index": 1,
+        "row_index": 2,
+        "cell_index": 3,
+        "source": "table",
+    }
+    assert loaded == result
+    assert loaded.blocks == result.blocks
 
 
 def test_result_row_mapping_uses_canonical_json_review_metadata() -> None:
@@ -147,6 +184,36 @@ def test_orm_metadata_enforces_cross_owner_relationships() -> None:
         "CASCADE",
     ) in _metadata_foreign_keys(ExportArtifactRow)
 
+    document_blocks = Base.metadata.tables["document_blocks"]
+    assert {"parser_name", "parser_version"} <= set(DocumentRow.__table__.c.keys())
+    assert {
+        "document_id",
+        "block_index",
+        "block_id",
+        "kind",
+        "text",
+        "global_start",
+        "global_end",
+        "block_start",
+        "block_end",
+        "page",
+        "paragraph_index",
+        "table_index",
+        "row_index",
+        "cell_index",
+        "bbox",
+        "parent_id",
+        "style",
+        "source_locator",
+    } <= set(document_blocks.c.keys())
+    assert {
+        constraint.name for constraint in document_blocks.constraints
+    } >= {
+        "uq_document_blocks_identity",
+        "uq_document_blocks_order",
+        "fk_document_blocks_document",
+    }
+
 
 def test_database_schema_contains_normalized_verification_tables(db_engine: Engine) -> None:
     inspector = inspect(db_engine)
@@ -154,6 +221,7 @@ def test_database_schema_contains_normalized_verification_tables(db_engine: Engi
 
     assert {
         "documents",
+        "document_blocks",
         "verification_runs",
         "verification_issues",
         "review_revisions",
@@ -164,6 +232,10 @@ def test_database_schema_contains_normalized_verification_tables(db_engine: Engi
         "uq_documents_identity",
         "uq_documents_document_job",
     } <= _unique_names(inspector, "documents")
+    assert {
+        "uq_document_blocks_identity",
+        "uq_document_blocks_order",
+    } <= _unique_names(inspector, "document_blocks")
     assert {
         "uq_verification_runs_job",
         "uq_verification_runs_run_document",
@@ -184,6 +256,12 @@ def test_database_schema_contains_normalized_verification_tables(db_engine: Engi
     assert ("jobs", ("job_id",), ("job_id",), "CASCADE") in _foreign_keys(
         inspector, "documents"
     )
+    assert (
+        "documents",
+        ("document_id",),
+        ("document_id",),
+        "CASCADE",
+    ) in _foreign_keys(inspector, "document_blocks")
     assert ("jobs", ("job_id",), ("job_id",), "CASCADE") in _foreign_keys(
         inspector, "verification_runs"
     )
@@ -249,6 +327,32 @@ def test_save_and_load_verification_result_round_trips_canonical_data(
     assert loaded.degradation == result.degradation
     assert loaded.summary == result.summary
     assert loaded.stats == result.stats
+
+
+def test_save_and_load_round_trips_full_structured_document(
+    db_session: Session,
+) -> None:
+    _create_job(db_session)
+    repository = VerificationRepository(db_session)
+    result = _structured_result()
+
+    repository.save_result(JOB_ID, result)
+    repository.commit()
+    db_session.expunge_all()
+
+    loaded = repository.get_result_for_job(JOB_ID)
+
+    assert loaded == result
+    assert loaded is not None
+    assert loaded.parser_name == "structured-parser"
+    assert loaded.parser_version == "7.2"
+    assert [block.block_id for block in loaded.blocks] == [
+        "heading-0",
+        "body-0",
+        "table-cell-0",
+    ]
+    assert loaded.blocks[2].bbox == (10.5, 20.5, 30.5, 40.5)
+    assert loaded.blocks[2].source_locator["source"] == "table"
 
 
 def test_save_result_is_idempotent_for_same_job_and_run(db_session: Session) -> None:
@@ -808,6 +912,28 @@ def _result(
         file_type=file_type,
         scenario=Scenario.BUSINESS,
         text="帐号测试\n第二行",
+        blocks=(
+            TextBlock(
+                block_id="paragraph-7",
+                kind="paragraph",
+                text="帐号测试\n第二行",
+                global_start=0,
+                global_end=8,
+                block_start=0,
+                block_end=8,
+                page=3,
+                paragraph_index=7,
+                table_index=None,
+                row_index=None,
+                cell_index=None,
+                bbox=None,
+                parent_id=None,
+                style={},
+                source_locator={"page": 3, "paragraph_index": 7},
+            ),
+        ),
+        parser_name="compatibility-docx",
+        parser_version="1",
         stats=VerificationStatistics(
             char_count=8,
             char_count_no_space=8,
@@ -840,6 +966,100 @@ def _result(
             is_degraded=True,
             reasons=("llm_review_failed", "provider_timeout"),
         ),
+    )
+
+
+def _structured_result() -> VerificationResult:
+    text_value = "帐号测试\n第二行"
+    blocks = (
+        TextBlock(
+            block_id="heading-0",
+            kind="heading",
+            text="帐号测试",
+            global_start=0,
+            global_end=4,
+            block_start=0,
+            block_end=4,
+            page=1,
+            paragraph_index=0,
+            table_index=None,
+            row_index=None,
+            cell_index=None,
+            bbox=(1.0, 2.0, 3.0, 4.0),
+            parent_id="body-0",
+            style={"level": 1},
+            source_locator={"page": 1, "paragraph_index": 0, "source": "heading"},
+        ),
+        TextBlock(
+            block_id="body-0",
+            kind="paragraph",
+            text=text_value,
+            global_start=0,
+            global_end=len(text_value),
+            block_start=0,
+            block_end=len(text_value),
+            page=None,
+            paragraph_index=None,
+            table_index=None,
+            row_index=None,
+            cell_index=None,
+            bbox=None,
+            parent_id=None,
+            style={"section": "body"},
+            source_locator={"source": "document"},
+        ),
+        TextBlock(
+            block_id="table-cell-0",
+            kind="table_cell",
+            text="第二行",
+            global_start=5,
+            global_end=8,
+            block_start=0,
+            block_end=3,
+            page=2,
+            paragraph_index=4,
+            table_index=1,
+            row_index=2,
+            cell_index=3,
+            bbox=(10.5, 20.5, 30.5, 40.5),
+            parent_id="body-0",
+            style={"font": {"family": "Noto Sans", "bold": True}},
+            source_locator={
+                "page": 2,
+                "paragraph_index": 4,
+                "table_index": 1,
+                "row_index": 2,
+                "cell_index": 3,
+                "source": "table",
+            },
+        ),
+    )
+    return VerificationResult(
+        verification_run_id=RUN_ID,
+        document_id=DOCUMENT_ID,
+        source_version="sha256:source-v7",
+        source_name="sample.docx",
+        file_type=FileType.DOCX,
+        scenario=Scenario.BUSINESS,
+        text=text_value,
+        blocks=blocks,
+        parser_name="structured-parser",
+        parser_version="7.2",
+        stats=VerificationStatistics(
+            char_count=8,
+            char_count_no_space=8,
+            line_count=2,
+            paragraph_count=2,
+            language="zh",
+            primary_count=7,
+            primary_label="中文字符",
+        ),
+        issues=(),
+        summary=VerificationSummary(total=0),
+        execution_mode=VerificationExecutionMode.ASYNCHRONOUS,
+        analysis_mode=VerificationAnalysisMode.LOCAL_ONLY,
+        dictionary_versions={},
+        degradation=VerificationDegradation(),
     )
 
 

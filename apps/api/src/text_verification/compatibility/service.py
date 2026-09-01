@@ -149,6 +149,9 @@ def analyze(
         file_type=document.file_type,
         scenario=scenario,
         text=text,
+        blocks=tuple(document.blocks),
+        parser_name=document.parser_name,
+        parser_version=document.parser_version,
         stats=VerificationStatistics.model_validate(text_statistics(text)),
         issues=legacy_issues_to_domain(issues, document, verification_run_id),
         summary=VerificationSummary(

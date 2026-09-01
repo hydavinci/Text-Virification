@@ -110,7 +110,7 @@ def db_session(db_session_factory: sessionmaker[Session], db_engine: Engine) -> 
                 text(
                     "TRUNCATE TABLE "
                     "export_artifacts, review_revisions, verification_issues, "
-                    "verification_runs, documents, job_events, jobs "
+                    "verification_runs, document_blocks, documents, job_events, jobs "
                     "RESTART IDENTITY CASCADE"
                 )
             )

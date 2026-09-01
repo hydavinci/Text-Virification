@@ -21,6 +21,8 @@ from text_verification.domain.jobs import (
     JobEvent,
     JobLeaseLostError,
     JobRead,
+    JobRecoveryClaim,
+    JobRecoveryKind,
     JobStateConflictError,
     JobStatus,
     JobUnleasedError,
@@ -67,6 +69,9 @@ class InMemoryJobRepository:
         self._jobs: dict[UUID, JobRead] = {}
         self._events: dict[UUID, list[JobEvent]] = {}
         self._leases: dict[UUID, tuple[UUID, datetime] | None] = {}
+        self._rescue_due_at: dict[UUID, datetime] = {}
+        self._rescue_attempts: dict[UUID, int] = {}
+        self._rescue_last_published_at: dict[UUID, datetime | None] = {}
         self._reset_working_copy()
 
     def bind_result_checker(self, has_result) -> None:
@@ -96,6 +101,9 @@ class InMemoryJobRepository:
         )
         self._working_jobs[job_id] = job
         self._working_leases[job_id] = None
+        self._working_rescue_due_at[job_id] = created_at + timedelta(minutes=2)
+        self._working_rescue_attempts[job_id] = 0
+        self._working_rescue_last_published_at[job_id] = None
         self._working_events[job_id] = [
             JobEvent(
                 sequence=1,
@@ -131,42 +139,91 @@ class InMemoryJobRepository:
             previous_owner_token is not None
             and lease is not None
             and lease[0] == previous_owner_token
+            and lease[1] > now
         )
-        if lease is not None and lease[1] > now and not can_rotate:
+        can_start = job.expires_at > now and (lease is None or lease[1] <= now)
+        if not can_start and not can_rotate:
+            if job.expires_at <= now:
+                return JobClaimResult(
+                    JobClaimDisposition.RETENTION_EXPIRED,
+                    job,
+                    None if lease is None else lease[1],
+                )
             return JobClaimResult(JobClaimDisposition.LEASED, job, lease[1])
         self._working_leases[job_id] = (owner_token, lease_expires_at)
+        self._working_rescue_due_at[job_id] = lease_expires_at
         return JobClaimResult(
             JobClaimDisposition.ACQUIRED,
             job,
             lease_expires_at,
         )
 
-    def claim_recoverable_jobs(
+    def claim_due_recoveries(
         self,
         *,
-        owner_token: UUID,
         now: datetime,
-        lease_expires_at: datetime,
+        publication_due_at: datetime,
         limit: int,
-    ) -> list[JobClaimResult]:
-        claims: list[JobClaimResult] = []
+    ) -> list[JobRecoveryClaim]:
+        claims: list[JobRecoveryClaim] = []
         for job_id, job in sorted(self._working_jobs.items(), key=lambda item: str(item[0])):
             if len(claims) >= limit:
                 break
             if job.status in TERMINAL_STATUSES or job.expires_at <= now:
                 continue
+            if self._working_rescue_due_at[job_id] > now:
+                continue
             lease = self._working_leases[job_id]
             if lease is not None and lease[1] > now:
                 continue
-            self._working_leases[job_id] = (owner_token, lease_expires_at)
+            self._working_rescue_attempts[job_id] += 1
+            self._working_rescue_due_at[job_id] = publication_due_at
             claims.append(
-                JobClaimResult(
-                    JobClaimDisposition.ACQUIRED,
-                    job,
-                    lease_expires_at,
+                JobRecoveryClaim(
+                    kind=(
+                        JobRecoveryKind.INITIAL_DISPATCH
+                        if lease is None
+                        else JobRecoveryKind.EXPIRED_LEASE
+                    ),
+                    job=job,
+                    attempt=self._working_rescue_attempts[job_id],
+                    publication_due_at=publication_due_at,
                 )
             )
         return claims
+
+    def mark_recovery_published(
+        self,
+        job_id: UUID,
+        *,
+        attempt: int,
+        published_at: datetime,
+    ) -> bool:
+        if self._working_rescue_attempts.get(job_id) != attempt:
+            return False
+        self._working_rescue_last_published_at[job_id] = published_at
+        return True
+
+    def mark_recovery_publish_failed(
+        self,
+        job_id: UUID,
+        *,
+        attempt: int,
+        now: datetime,
+        retry_due_at: datetime,
+    ) -> bool:
+        job = self._working_jobs.get(job_id)
+        lease = self._working_leases.get(job_id)
+        if (
+            job is None
+            or self._working_rescue_attempts.get(job_id) != attempt
+            or job.status in TERMINAL_STATUSES
+            or job.expires_at <= now
+            or (lease is not None and lease[1] > now)
+        ):
+            return False
+        self._working_rescue_due_at[job_id] = retry_due_at
+        return True
 
     def transition(
         self,
@@ -240,6 +297,7 @@ class InMemoryJobRepository:
             error_message=error_message,
         )
         self._working_leases[job_id] = (owner_token, lease_expires_at)
+        self._working_rescue_due_at[job_id] = lease_expires_at
         return self._working_jobs[job_id]
 
     def fail_claimed_job(
@@ -294,6 +352,7 @@ class InMemoryJobRepository:
         lease_expires_at: datetime,
     ) -> None:
         self._leases[job_id] = (owner_token, lease_expires_at)
+        self._rescue_due_at[job_id] = lease_expires_at
         self._reset_working_copy()
 
     def list_events_after(self, job_id: UUID, after_sequence: int) -> list[JobEvent]:
@@ -319,6 +378,11 @@ class InMemoryJobRepository:
             job_id: [event for event in events] for job_id, events in self._working_events.items()
         }
         self._leases = dict(self._working_leases)
+        self._rescue_due_at = dict(self._working_rescue_due_at)
+        self._rescue_attempts = dict(self._working_rescue_attempts)
+        self._rescue_last_published_at = dict(
+            self._working_rescue_last_published_at
+        )
         if self._operations is not None:
             self._operations.extend(
                 f"job:{job.status.value}" for job in self._jobs.values()
@@ -337,6 +401,11 @@ class InMemoryJobRepository:
             job_id: [event for event in events] for job_id, events in self._events.items()
         }
         self._working_leases = dict(self._leases)
+        self._working_rescue_due_at = dict(self._rescue_due_at)
+        self._working_rescue_attempts = dict(self._rescue_attempts)
+        self._working_rescue_last_published_at = dict(
+            self._rescue_last_published_at
+        )
 
     def _assert_claim(self, job_id: UUID, owner_token: UUID, now: datetime) -> None:
         lease = self._working_leases.get(job_id)
@@ -774,9 +843,12 @@ def _seed_txt_job(
     storage: JobStorage,
     *,
     persist_source: bool = True,
+    created_at: datetime | None = None,
+    expires_at: datetime | None = None,
 ) -> UUID:
     job_id = uuid4()
-    created_at = datetime.now(UTC)
+    resolved_created_at = created_at or datetime.now(UTC)
+    resolved_expires_at = expires_at or resolved_created_at + timedelta(hours=24)
     size_bytes = 8
 
     if persist_source:
@@ -789,8 +861,8 @@ def _seed_txt_job(
         file_type=FileType.TXT.value,
         size_bytes=size_bytes,
         storage_key=str(job_id),
-        created_at=created_at,
-        expires_at=created_at + timedelta(hours=24),
+        created_at=resolved_created_at,
+        expires_at=resolved_expires_at,
     )
     repository.commit()
     return job_id
@@ -1812,9 +1884,165 @@ def test_immediate_publish_failure_leaves_job_for_periodic_rescue(
 
     assert rescued == [str(job_id)]
     assert len(captured) == 1
-    assert captured[0].kwargs.keys() == {"previous_lease_owner_token"}
+    assert captured[0].kwargs == {}
 
     captured[0].run()
 
     assert repository.get_job(job_id).status is JobStatus.COMPLETED
     assert len(pipeline.commands) == 1
+
+
+def test_retention_expired_delivery_does_not_run_or_schedule_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+    worker_storage: JobStorage,
+) -> None:
+    from text_verification.workers import tasks as worker_tasks
+
+    now = datetime(2026, 9, 1, 3, 0, tzinfo=UTC)
+    repository = InMemoryJobRepository()
+    verification_repository = InMemoryVerificationRepository()
+    pipeline = RecordingPipeline(
+        build_default_verification_pipeline(Settings(llm_api_key=""))
+    )
+    job_id = _seed_txt_job(
+        repository,
+        worker_storage,
+        created_at=now - timedelta(hours=1),
+        expires_at=now,
+    )
+    _configure_worker_dependencies(
+        monkeypatch,
+        repository,
+        worker_storage,
+        verification_repository=verification_repository,
+        pipeline=pipeline,
+    )
+    scheduled: list[tuple[str, int]] = []
+    monkeypatch.setattr(worker_tasks, "NOW_FACTORY", MutableClock(now))
+    monkeypatch.setattr(
+        worker_tasks,
+        "RESCUE_SCHEDULER",
+        lambda scheduled_job_id, countdown: scheduled.append(
+            (scheduled_job_id, countdown)
+        ),
+    )
+
+    outcome = worker_tasks._run_process_job_attempt(job_id, uuid4())
+    worker_tasks._process_job(FakeBoundTask(), str(job_id))
+
+    assert outcome.disposition.value == "retention_expired"
+    assert pipeline.commands == []
+    assert scheduled == []
+    assert repository.get_job(job_id).status is JobStatus.QUEUED
+
+
+def test_live_predecessor_retry_continues_after_retention_expiry(
+    monkeypatch: pytest.MonkeyPatch,
+    worker_storage: JobStorage,
+) -> None:
+    from text_verification.workers import tasks as worker_tasks
+
+    now = datetime(2026, 9, 1, 3, 0, tzinfo=UTC)
+    first_owner = uuid4()
+    repository = InMemoryJobRepository()
+    verification_repository = InMemoryVerificationRepository()
+    pipeline = RecordingPipeline(
+        build_default_verification_pipeline(Settings(llm_api_key=""))
+    )
+    job_id = _seed_txt_job(
+        repository,
+        worker_storage,
+        created_at=now - timedelta(hours=1),
+        expires_at=now - timedelta(seconds=1),
+    )
+    repository.force_lease(job_id, first_owner, now + timedelta(minutes=20))
+    _configure_worker_dependencies(
+        monkeypatch,
+        repository,
+        worker_storage,
+        verification_repository=verification_repository,
+        pipeline=pipeline,
+    )
+    monkeypatch.setattr(worker_tasks, "NOW_FACTORY", MutableClock(now))
+
+    worker_tasks._process_job(
+        FakeBoundTask(),
+        str(job_id),
+        previous_lease_owner_token=str(first_owner),
+    )
+
+    assert repository.get_job(job_id).status is JobStatus.COMPLETED
+    assert len(pipeline.commands) == 1
+
+
+def test_periodic_recovery_publication_is_bounded_during_worker_outage(
+    monkeypatch: pytest.MonkeyPatch,
+    worker_storage: JobStorage,
+) -> None:
+    from text_verification.workers import tasks as worker_tasks
+
+    created_at = datetime(2026, 9, 1, 3, 0, tzinfo=UTC)
+    repository = InMemoryJobRepository()
+    job_id = _seed_txt_job(
+        repository,
+        worker_storage,
+        created_at=created_at,
+        expires_at=created_at + timedelta(hours=1),
+    )
+    _configure_worker_dependencies(monkeypatch, repository, worker_storage)
+    clock = MutableClock(created_at + timedelta(minutes=2))
+    published: list[str] = []
+    monkeypatch.setattr(worker_tasks, "NOW_FACTORY", clock)
+    monkeypatch.setattr(
+        worker_tasks.process_job,
+        "apply_async",
+        lambda args, **kwargs: published.append(str(args[0])),
+    )
+
+    assert worker_tasks._rescue_expired_job_leases() == [str(job_id)]
+    clock.current += timedelta(seconds=60)
+    assert worker_tasks._rescue_expired_job_leases() == []
+    clock.current += timedelta(seconds=59)
+    assert worker_tasks._rescue_expired_job_leases() == []
+    clock.current += timedelta(seconds=1)
+    assert worker_tasks._rescue_expired_job_leases() == [str(job_id)]
+
+    assert published == [str(job_id), str(job_id)]
+
+
+def test_periodic_recovery_publish_failure_becomes_due_on_later_tick(
+    monkeypatch: pytest.MonkeyPatch,
+    worker_storage: JobStorage,
+) -> None:
+    from text_verification.workers import tasks as worker_tasks
+
+    created_at = datetime(2026, 9, 1, 3, 0, tzinfo=UTC)
+    repository = InMemoryJobRepository()
+    job_id = _seed_txt_job(
+        repository,
+        worker_storage,
+        created_at=created_at,
+        expires_at=created_at + timedelta(hours=1),
+    )
+    _configure_worker_dependencies(monkeypatch, repository, worker_storage)
+    clock = MutableClock(created_at + timedelta(minutes=2))
+    attempts = 0
+
+    def publish(args: tuple[str, ...], **kwargs: object) -> None:
+        del args, kwargs
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("broker unavailable")
+
+    monkeypatch.setattr(worker_tasks, "NOW_FACTORY", clock)
+    monkeypatch.setattr(worker_tasks.process_job, "apply_async", publish)
+
+    with pytest.raises(RuntimeError, match="broker unavailable"):
+        worker_tasks._rescue_expired_job_leases()
+
+    clock.current += timedelta(seconds=59)
+    assert worker_tasks._rescue_expired_job_leases() == []
+    clock.current += timedelta(seconds=1)
+    assert worker_tasks._rescue_expired_job_leases() == [str(job_id)]
+    assert attempts == 2

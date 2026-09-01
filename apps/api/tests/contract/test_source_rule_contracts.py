@@ -5,7 +5,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
+from openai import APITimeoutError
 
 from text_verification.compatibility import llm_review
 from text_verification.compatibility.analyzer import Issue, TextAnalyzer
@@ -140,7 +142,12 @@ def test_llm_fallback_preserves_local_issues(
         def create(self, **kwargs: object) -> object:
             del kwargs
             if case["behavior"] == "raise":
-                raise TimeoutError("internal provider timeout detail")
+                raise APITimeoutError(
+                    request=httpx.Request(
+                        "POST",
+                        "https://provider.invalid/review",
+                    )
+                )
             return SimpleNamespace(
                 choices=[
                     SimpleNamespace(
@@ -179,3 +186,38 @@ def test_llm_fallback_preserves_local_issues(
     assert stats["failed"] is True
     assert stats["failure_code"] == case["failure_code"]
     assert stats["reason"] == case["reason"]
+
+
+def test_llm_fallback_does_not_swallow_arbitrary_builtin_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ContractCompletions:
+        def create(self, **kwargs: object) -> object:
+            del kwargs
+            raise TimeoutError("provider adapter programming timeout")
+
+    class ContractOpenAI:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+            self.chat = SimpleNamespace(completions=ContractCompletions())
+
+    issue = Issue(
+        type="punctuation",
+        severity="warning",
+        original="，，",
+        suggestion="，",
+        position=2,
+        end_position=4,
+        context="测试，，内容",
+        description="连续重复标点",
+        rule_id="repeat_punct",
+        layer="format",
+    )
+    monkeypatch.setattr(llm_review, "OpenAI", ContractOpenAI)
+
+    with pytest.raises(TimeoutError, match="programming timeout"):
+        llm_review.review_issues(
+            Settings(llm_api_key="configured"),
+            "测试，，内容",
+            [issue],
+        )

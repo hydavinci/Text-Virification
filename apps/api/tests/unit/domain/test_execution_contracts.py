@@ -4,7 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from text_verification.config import Settings
-from text_verification.domain.documents import FileType
+from text_verification.domain.documents import FileType, TextBlock
 from text_verification.domain.verification import (
     Scenario,
     VerificationAnalysisMode,
@@ -24,6 +24,28 @@ def test_verification_result_separates_transport_from_analysis_mode() -> None:
         file_type=FileType.TXT,
         scenario=Scenario.GENERAL,
         text="clean",
+        blocks=(
+            TextBlock(
+                block_id="p-0",
+                kind="paragraph",
+                text="clean",
+                global_start=0,
+                global_end=5,
+                block_start=0,
+                block_end=5,
+                page=None,
+                paragraph_index=0,
+                table_index=None,
+                row_index=None,
+                cell_index=None,
+                bbox=None,
+                parent_id=None,
+                style={},
+                source_locator={"paragraph_index": 0},
+            ),
+        ),
+        parser_name="test-parser",
+        parser_version="1",
         stats=VerificationStatistics(
             char_count=5,
             char_count_no_space=5,

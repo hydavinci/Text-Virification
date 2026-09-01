@@ -3,6 +3,7 @@ export type IssueSeverity = 'error' | 'warning' | 'info'
 export type IssueState = 'pending' | 'accepted' | 'rejected'
 export type VerificationExecutionMode = 'synchronous' | 'asynchronous'
 export type VerificationAnalysisMode = 'local_only' | 'local_plus_llm'
+export type FileType = 'docx' | 'doc' | 'pdf' | 'txt' | 'rtf' | 'md' | 'csv'
 
 export interface GlossaryTerm {
   original: string
@@ -45,6 +46,25 @@ export interface VerificationDegradation {
   reasons: string[]
 }
 
+export interface TextBlock {
+  block_id: string
+  kind: 'paragraph' | 'heading' | 'table_cell' | 'header' | 'footer'
+  text: string
+  global_start: number
+  global_end: number
+  block_start: number
+  block_end: number
+  page: number | null
+  paragraph_index: number | null
+  table_index: number | null
+  row_index: number | null
+  cell_index: number | null
+  bbox: [number, number, number, number] | null
+  parent_id: string | null
+  style: Record<string, unknown>
+  source_locator: Record<string, unknown>
+}
+
 export interface VerificationStats {
   char_count: number
   char_count_no_space: number
@@ -67,7 +87,12 @@ export interface VerificationSummary {
 export interface VerificationResult {
   success: boolean
   filename: string
+  source_name: string
+  file_type: FileType
   text: string
+  blocks: TextBlock[]
+  parser_name: string
+  parser_version: string
   stats: VerificationStats
   issues: VerificationIssue[]
   summary: VerificationSummary

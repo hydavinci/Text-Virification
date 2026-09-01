@@ -8,12 +8,12 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
-from text_verification.domain.documents import FileType
+from text_verification.domain.documents import DocumentModel, FileType, TextBlock
 from text_verification.domain.issues import Issue
 
 SummaryCount = Annotated[int, Field(ge=0)]
 
-_LEGACY_TYPE_LABELS = {
+LEGACY_TYPE_LABELS = {
     "typo": "错别字",
     "variant_char": "异形词",
     "width_mixed": "全半角混用",
@@ -35,12 +35,12 @@ _LEGACY_TYPE_LABELS = {
     "pii_bank": "银行卡号",
     "pii_key": "密钥/凭证",
 }
-_LEGACY_SEVERITY_LABELS = {
+LEGACY_SEVERITY_LABELS = {
     "error": "错误",
     "warning": "警告",
     "info": "建议",
 }
-_LEGACY_LAYER_LABELS = {
+LEGACY_LAYER_LABELS = {
     "character": "字符层",
     "vocabulary": "词汇层",
     "sentence": "句子层",
@@ -48,10 +48,10 @@ _LEGACY_LAYER_LABELS = {
     "discourse": "语篇/语体层",
     "security": "合规/安全层",
 }
-_LEGACY_SUMMARY_LABELS = {
-    "by_type": _LEGACY_TYPE_LABELS,
-    "by_severity": _LEGACY_SEVERITY_LABELS,
-    "by_layer": _LEGACY_LAYER_LABELS,
+LEGACY_SUMMARY_LABELS = {
+    "by_type": LEGACY_TYPE_LABELS,
+    "by_severity": LEGACY_SEVERITY_LABELS,
+    "by_layer": LEGACY_LAYER_LABELS,
 }
 
 
@@ -137,6 +137,9 @@ class VerificationResult(BaseModel):
     file_type: FileType
     scenario: Scenario
     text: str
+    blocks: tuple[TextBlock, ...]
+    parser_name: str
+    parser_version: str
     stats: VerificationStatistics
     issues: tuple[Issue, ...]
     summary: VerificationSummary
@@ -147,6 +150,16 @@ class VerificationResult(BaseModel):
 
     @model_validator(mode="after")
     def validate_issues_and_summary(self) -> VerificationResult:
+        DocumentModel(
+            document_id=self.document_id,
+            source_version=self.source_version,
+            file_type=self.file_type,
+            source_name=self.source_name,
+            text=self.text,
+            blocks=list(self.blocks),
+            parser_name=self.parser_name,
+            parser_version=self.parser_version,
+        )
         for issue in self.issues:
             if issue.document_id != self.document_id:
                 raise ValueError("issue document ownership must match the verification result")
@@ -171,7 +184,7 @@ class VerificationResult(BaseModel):
             if sum(actual.values()) != len(self.issues):
                 raise ValueError(f"summary {field_name} total must match the issue count")
             allowed_counts = [dict(expected)]
-            if labels := _LEGACY_SUMMARY_LABELS.get(field_name):
+            if labels := LEGACY_SUMMARY_LABELS.get(field_name):
                 localized: Counter[str] = Counter()
                 for key, count in expected.items():
                     localized[labels.get(key, key)] += count

@@ -123,6 +123,9 @@ def test_pipeline_parses_checks_reviews_and_summarizes_in_order(tmp_path: Path) 
     assert result.document_id == document_id
     assert result.source_name == "用户原始名称.txt"
     assert result.source_version == parsed_document.source_version
+    assert result.blocks == tuple(parsed_document.blocks)
+    assert result.parser_name == parsed_document.parser_name
+    assert result.parser_version == parsed_document.parser_version
     assert result.execution_mode is VerificationExecutionMode.ASYNCHRONOUS
     assert result.analysis_mode is VerificationAnalysisMode.LOCAL_PLUS_LLM
     assert result.verification_run_id == checker.contexts[0].verification_run_id
@@ -415,6 +418,11 @@ def test_successful_canonical_llm_review_preserves_issue_ownership(
     assert result.issues[0].verification_run_id == result.verification_run_id
     assert verification_run_ids == [result.verification_run_id]
     assert result.issues[0].severity is IssueSeverity.INFO
+    assert result.issues[0].confidence == 0.6
+    assert result.issues[0].start == 2
+    assert result.issues[0].end == 4
+    assert result.issues[0].block_start == 2
+    assert result.issues[0].block_end == 4
     assert result.issues[0].review == "uncertain"
     assert result.summary.total == 1
     assert result.summary.by_severity == {"info": 1}

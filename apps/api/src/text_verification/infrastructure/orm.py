@@ -34,6 +34,10 @@ class JobRow(Base):
             "OR (lease_owner_token IS NOT NULL AND lease_expires_at IS NOT NULL)",
             name="ck_jobs_lease_pair",
         ),
+        CheckConstraint(
+            "rescue_attempts >= 0",
+            name="ck_jobs_rescue_attempts",
+        ),
     )
 
     job_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
@@ -56,6 +60,16 @@ class JobRow(Base):
         DateTime(timezone=True),
         nullable=True,
         index=True,
+    )
+    rescue_due_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        index=True,
+    )
+    rescue_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    rescue_last_published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
     )
     events: Mapped[list[JobEventRow]] = relationship(
         back_populates="job",
@@ -107,11 +121,75 @@ class DocumentRow(Base):
     source_name: Mapped[str] = mapped_column(Text)
     file_type: Mapped[str] = mapped_column(String(16))
     text: Mapped[str] = mapped_column(Text)
+    parser_name: Mapped[str] = mapped_column(Text)
+    parser_version: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    blocks: Mapped[list[DocumentBlockRow]] = relationship(
+        back_populates="document",
+        cascade="all, delete-orphan",
+        order_by="DocumentBlockRow.block_index",
+        passive_deletes=True,
+    )
     runs: Mapped[list[VerificationRunRow]] = relationship(
         back_populates="document",
         passive_deletes=True,
     )
+
+
+class DocumentBlockRow(Base):
+    __tablename__ = "document_blocks"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["document_id"],
+            ["documents.document_id"],
+            name="fk_document_blocks_document",
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint(
+            "document_id",
+            "block_id",
+            name="uq_document_blocks_identity",
+        ),
+        UniqueConstraint(
+            "document_id",
+            "block_index",
+            name="uq_document_blocks_order",
+        ),
+        CheckConstraint("block_index >= 0", name="ck_document_blocks_index"),
+        CheckConstraint(
+            "global_start >= 0 AND global_end >= global_start",
+            name="ck_document_blocks_global_range",
+        ),
+        CheckConstraint(
+            "block_start >= 0 AND block_end >= block_start",
+            name="ck_document_blocks_local_range",
+        ),
+    )
+
+    block_row_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        autoincrement=True,
+    )
+    document_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True))
+    block_index: Mapped[int] = mapped_column(Integer)
+    block_id: Mapped[str] = mapped_column(Text)
+    kind: Mapped[str] = mapped_column(String(32))
+    text: Mapped[str] = mapped_column(Text)
+    global_start: Mapped[int] = mapped_column(Integer)
+    global_end: Mapped[int] = mapped_column(Integer)
+    block_start: Mapped[int] = mapped_column(Integer)
+    block_end: Mapped[int] = mapped_column(Integer)
+    page: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    paragraph_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    table_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    row_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cell_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    bbox: Mapped[list[float] | None] = mapped_column(JSONB, nullable=True)
+    parent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    style: Mapped[dict[str, object]] = mapped_column(JSONB)
+    source_locator: Mapped[dict[str, object]] = mapped_column(JSONB)
+    document: Mapped[DocumentRow] = relationship(back_populates="blocks")
 
 
 class VerificationRunRow(Base):

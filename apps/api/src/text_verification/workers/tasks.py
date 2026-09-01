@@ -67,7 +67,8 @@ RunnerFactory = Callable[[JobStorage, VerificationPipeline], PipelineRunner]
 PROCESS_JOB_MAX_RETRIES = 2
 PROCESS_JOB_RETRY_BACKOFF_CAP_SECONDS = 4
 PROCESS_JOB_RESCUE_MAX_COUNTDOWN_SECONDS = 3600
-PERIODIC_RESCUE_CLAIM_SECONDS = 60
+PERIODIC_RESCUE_PUBLICATION_SECONDS = 120
+PERIODIC_RESCUE_FAILURE_RETRY_SECONDS = 60
 PERIODIC_RESCUE_LIMIT = 100
 
 _STATUS_ORDER = (
@@ -103,6 +104,7 @@ class ProcessAttemptDisposition(StrEnum):
     DUPLICATE = "duplicate"
     LEASE_LOST = "lease_lost"
     UNLEASED = "unleased"
+    RETENTION_EXPIRED = "retention_expired"
 
 
 @dataclass(frozen=True)
@@ -265,6 +267,8 @@ def _run_process_job_attempt(
         return ProcessAttemptOutcome(ProcessAttemptDisposition.MISSING)
     if claim.disposition is JobClaimDisposition.TERMINAL:
         return ProcessAttemptOutcome(ProcessAttemptDisposition.TERMINAL)
+    if claim.disposition is JobClaimDisposition.RETENTION_EXPIRED:
+        return ProcessAttemptOutcome(ProcessAttemptDisposition.RETENTION_EXPIRED)
     if claim.disposition is JobClaimDisposition.LEASED:
         return ProcessAttemptOutcome(
             ProcessAttemptDisposition.DUPLICATE,
@@ -392,15 +396,14 @@ def _rescue_countdown(
 
 def _rescue_expired_job_leases() -> list[str]:
     now = NOW_FACTORY()
-    rescue_owner = uuid4()
     session_factory = SESSION_FACTORY_PROVIDER()
     session = session_factory()
     repository = REPOSITORY_FACTORY(session)
     try:
-        claims = repository.claim_recoverable_jobs(
-            owner_token=rescue_owner,
+        claims = repository.claim_due_recoveries(
             now=now,
-            lease_expires_at=now + timedelta(seconds=PERIODIC_RESCUE_CLAIM_SECONDS),
+            publication_due_at=now
+            + timedelta(seconds=PERIODIC_RESCUE_PUBLICATION_SECONDS),
             limit=PERIODIC_RESCUE_LIMIT,
         )
         repository.commit()
@@ -416,13 +419,24 @@ def _rescue_expired_job_leases() -> list[str]:
             raise AssertionError("recoverable claim must include a job")
         job_id = str(claim.job.job_id)
         try:
-            process_job.apply_async(
-                args=(job_id,),
-                kwargs={"previous_lease_owner_token": str(rescue_owner)},
-            )
+            process_job.apply_async(args=(job_id,))
         except Exception as error:
+            _mark_recovery_publish_failed(
+                session_factory,
+                claim.job.job_id,
+                attempt=claim.attempt,
+                now=now,
+                retry_due_at=now
+                + timedelta(seconds=PERIODIC_RESCUE_FAILURE_RETRY_SECONDS),
+            )
             _log_rescue_publish_failure(claim.job.job_id, error)
             raise
+        _mark_recovery_published(
+            session_factory,
+            claim.job.job_id,
+            attempt=claim.attempt,
+            published_at=now,
+        )
         dispatched.append(job_id)
     return dispatched
 
@@ -441,11 +455,9 @@ def _cleanup_expired_jobs() -> list[str]:
     session_factory = SESSION_FACTORY_PROVIDER()
     session = session_factory()
     repository = REPOSITORY_FACTORY(session)
-    verification_repository = VERIFICATION_REPOSITORY_FACTORY(session)
 
     try:
         expired_job_ids = repository.expire_jobs_before(now)
-        verification_repository.delete_results_for_jobs(expired_job_ids)
         persisted_job_ids = repository.list_job_ids()
         repository.commit()
     except Exception:
@@ -457,9 +469,28 @@ def _cleanup_expired_jobs() -> list[str]:
     storage = STORAGE_FACTORY()
     deleted_job_ids: list[str] = []
     for expired_job_id in expired_job_ids:
+        try:
+            artifact_storage_keys = _artifact_storage_keys(
+                session_factory,
+                expired_job_id,
+            )
+        except Exception as error:
+            logger.warning(
+                "cleanup_expired_job_metadata_failed",
+                extra={
+                    "job_id": str(expired_job_id),
+                    "error_type": type(error).__name__,
+                },
+            )
+            continue
         job_directory = storage.job_directory(expired_job_id)
         had_directory = job_directory.exists() or job_directory.is_symlink()
+        deleted_artifact = False
         try:
+            for storage_key in artifact_storage_keys:
+                deleted_artifact = (
+                    storage.delete_storage_key(storage_key) or deleted_artifact
+                )
             storage.delete_job(expired_job_id)
         except Exception as error:
             logger.warning(
@@ -470,7 +501,18 @@ def _cleanup_expired_jobs() -> list[str]:
                 },
             )
             continue
-        if had_directory:
+        try:
+            _delete_results_for_job(session_factory, expired_job_id)
+        except Exception as error:
+            logger.warning(
+                "cleanup_expired_job_result_delete_failed",
+                extra={
+                    "job_id": str(expired_job_id),
+                    "error_type": type(error).__name__,
+                },
+            )
+            continue
+        if had_directory or deleted_artifact:
             deleted_job_ids.append(str(expired_job_id))
     deleted_job_ids.extend(
         str(orphan_id)
@@ -554,6 +596,83 @@ def _transition_claimed(
         )
         repository.commit()
         return job
+    except Exception:
+        repository.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def _mark_recovery_published(
+    session_factory: sessionmaker[Session],
+    job_id: UUID,
+    *,
+    attempt: int,
+    published_at: datetime,
+) -> None:
+    session = session_factory()
+    repository = REPOSITORY_FACTORY(session)
+    try:
+        repository.mark_recovery_published(
+            job_id,
+            attempt=attempt,
+            published_at=published_at,
+        )
+        repository.commit()
+    except Exception:
+        repository.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def _mark_recovery_publish_failed(
+    session_factory: sessionmaker[Session],
+    job_id: UUID,
+    *,
+    attempt: int,
+    now: datetime,
+    retry_due_at: datetime,
+) -> None:
+    session = session_factory()
+    repository = REPOSITORY_FACTORY(session)
+    try:
+        repository.mark_recovery_publish_failed(
+            job_id,
+            attempt=attempt,
+            now=now,
+            retry_due_at=retry_due_at,
+        )
+        repository.commit()
+    except Exception:
+        repository.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def _artifact_storage_keys(
+    session_factory: sessionmaker[Session],
+    job_id: UUID,
+) -> tuple[str, ...]:
+    session = session_factory()
+    repository = VERIFICATION_REPOSITORY_FACTORY(session)
+    try:
+        return repository.list_artifact_storage_keys(job_id)
+    finally:
+        repository.rollback()
+        session.close()
+
+
+def _delete_results_for_job(
+    session_factory: sessionmaker[Session],
+    job_id: UUID,
+) -> None:
+    session = session_factory()
+    repository = VERIFICATION_REPOSITORY_FACTORY(session)
+    try:
+        repository.delete_results_for_jobs([job_id])
+        repository.commit()
     except Exception:
         repository.rollback()
         raise

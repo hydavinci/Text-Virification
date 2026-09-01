@@ -6,7 +6,31 @@ import type { VerificationResult } from '../src/types/verification'
 const resultPayload: VerificationResult = {
   success: true,
   filename: 'sample.txt',
+  source_name: 'sample.txt',
+  file_type: 'txt',
   text: '这是测试。',
+  blocks: [
+    {
+      block_id: 'p-0',
+      kind: 'paragraph',
+      text: '这是测试。',
+      global_start: 0,
+      global_end: 5,
+      block_start: 0,
+      block_end: 5,
+      page: null,
+      paragraph_index: 0,
+      table_index: null,
+      row_index: null,
+      cell_index: null,
+      bbox: null,
+      parent_id: null,
+      style: {},
+      source_locator: { paragraph_index: 0 }
+    }
+  ],
+  parser_name: 'compatibility-flat-text',
+  parser_version: '1',
   stats: {
     char_count: 5,
     char_count_no_space: 5,

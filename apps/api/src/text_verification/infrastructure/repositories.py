@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from text_verification.domain.documents import FileType
@@ -14,6 +16,8 @@ from text_verification.domain.jobs import (
     JobEvent,
     JobLeaseLostError,
     JobRead,
+    JobRecoveryClaim,
+    JobRecoveryKind,
     JobStateConflictError,
     JobStatus,
     JobUnleasedError,
@@ -34,6 +38,7 @@ CLAIMED_NEXT_STATUS = {
     JobStatus.CHECKING_SENSITIVE: JobStatus.CHECKING_CHINESE,
     JobStatus.CHECKING_CHINESE: JobStatus.CHECKING_ENGLISH,
 }
+INITIAL_DISPATCH_RECOVERY_DELAY = timedelta(minutes=2)
 
 
 class JobRepository:
@@ -68,6 +73,9 @@ class JobRepository:
             expires_at=expires_at,
             lease_owner_token=None,
             lease_expires_at=None,
+            rescue_due_at=created_at + INITIAL_DISPATCH_RECOVERY_DELAY,
+            rescue_attempts=0,
+            rescue_last_published_at=None,
         )
         row.events.append(
             JobEventRow(
@@ -104,28 +112,38 @@ class JobRepository:
         if lease_expires_at <= now:
             raise ValueError("lease_expires_at must be later than now.")
 
-        lease_available = [
-            JobRow.lease_owner_token.is_(None),
-            JobRow.lease_expires_at <= now,
-        ]
-        if previous_owner_token is not None:
-            lease_available.append(
-                and_(
-                    JobRow.lease_owner_token == previous_owner_token,
-                    JobRow.lease_expires_at > now,
-                )
+        lease_available = and_(
+            JobRow.expires_at > now,
+            or_(
+                JobRow.lease_owner_token.is_(None),
+                JobRow.lease_expires_at <= now,
+            ),
+        )
+        continuing_live_owner = (
+            and_(
+                JobRow.lease_owner_token == previous_owner_token,
+                JobRow.lease_expires_at > now,
             )
+            if previous_owner_token is not None
+            else None
+        )
+        acquisition_available = (
+            or_(lease_available, continuing_live_owner)
+            if continuing_live_owner is not None
+            else lease_available
+        )
 
         row = self._session.execute(
             update(JobRow)
             .where(
                 JobRow.job_id == job_id,
                 JobRow.status.not_in(status.value for status in TERMINAL_STATUSES),
-                or_(*lease_available),
+                acquisition_available,
             )
             .values(
                 lease_owner_token=owner_token,
                 lease_expires_at=lease_expires_at,
+                rescue_due_at=lease_expires_at,
                 updated_at=now,
             )
             .returning(JobRow)
@@ -145,11 +163,12 @@ class JobRepository:
         ).scalar_one_or_none()
         if existing is None:
             return JobClaimResult(JobClaimDisposition.MISSING, None, None)
-        disposition = (
-            JobClaimDisposition.TERMINAL
-            if JobStatus(existing.status) in TERMINAL_STATUSES
-            else JobClaimDisposition.LEASED
-        )
+        if JobStatus(existing.status) in TERMINAL_STATUSES:
+            disposition = JobClaimDisposition.TERMINAL
+        elif existing.expires_at <= now:
+            disposition = JobClaimDisposition.RETENTION_EXPIRED
+        else:
+            disposition = JobClaimDisposition.LEASED
         return JobClaimResult(
             disposition,
             self._to_job_read(existing),
@@ -194,16 +213,15 @@ class JobRepository:
             clear_lease=status in TERMINAL_STATUSES,
         )
 
-    def claim_recoverable_jobs(
+    def claim_due_recoveries(
         self,
         *,
-        owner_token: UUID,
         now: datetime,
-        lease_expires_at: datetime,
+        publication_due_at: datetime,
         limit: int,
-    ) -> list[JobClaimResult]:
-        if lease_expires_at <= now:
-            raise ValueError("lease_expires_at must be later than now.")
+    ) -> list[JobRecoveryClaim]:
+        if publication_due_at <= now:
+            raise ValueError("publication_due_at must be later than now.")
         if limit < 1:
             raise ValueError("limit must be greater than zero.")
 
@@ -212,29 +230,87 @@ class JobRepository:
             .where(
                 JobRow.status.not_in(status.value for status in TERMINAL_STATUSES),
                 JobRow.expires_at > now,
+                JobRow.rescue_due_at <= now,
                 or_(
                     JobRow.lease_owner_token.is_(None),
                     JobRow.lease_expires_at <= now,
                 ),
             )
-            .order_by(JobRow.lease_expires_at, JobRow.updated_at, JobRow.job_id)
+            .order_by(JobRow.rescue_due_at, JobRow.updated_at, JobRow.job_id)
             .limit(limit)
             .with_for_update(skip_locked=True)
         ).all()
+        claims: list[JobRecoveryClaim] = []
         for row in rows:
-            row.lease_owner_token = owner_token
-            row.lease_expires_at = lease_expires_at
-            row.updated_at = now
+            kind = (
+                JobRecoveryKind.INITIAL_DISPATCH
+                if row.lease_owner_token is None
+                else JobRecoveryKind.EXPIRED_LEASE
+            )
+            row.rescue_attempts += 1
+            row.rescue_due_at = publication_due_at
+            claims.append(
+                JobRecoveryClaim(
+                    kind=kind,
+                    job=self._to_job_read(row),
+                    attempt=row.rescue_attempts,
+                    publication_due_at=publication_due_at,
+                )
+            )
         if rows:
             self._session.flush()
-        return [
-            JobClaimResult(
-                JobClaimDisposition.ACQUIRED,
-                self._to_job_read(row),
-                lease_expires_at,
-            )
-            for row in rows
-        ]
+        return claims
+
+    def mark_recovery_published(
+        self,
+        job_id: UUID,
+        *,
+        attempt: int,
+        published_at: datetime,
+    ) -> bool:
+        result = cast(
+            CursorResult[Any],
+            self._session.execute(
+                update(JobRow)
+                .where(
+                    JobRow.job_id == job_id,
+                    JobRow.rescue_attempts == attempt,
+                )
+                .values(rescue_last_published_at=published_at)
+                .execution_options(synchronize_session=False)
+            ),
+        )
+        return bool(result.rowcount)
+
+    def mark_recovery_publish_failed(
+        self,
+        job_id: UUID,
+        *,
+        attempt: int,
+        now: datetime,
+        retry_due_at: datetime,
+    ) -> bool:
+        if retry_due_at <= now:
+            raise ValueError("retry_due_at must be later than now.")
+        result = cast(
+            CursorResult[Any],
+            self._session.execute(
+                update(JobRow)
+                .where(
+                    JobRow.job_id == job_id,
+                    JobRow.rescue_attempts == attempt,
+                    JobRow.status.not_in(status.value for status in TERMINAL_STATUSES),
+                    JobRow.expires_at > now,
+                    or_(
+                        JobRow.lease_owner_token.is_(None),
+                        JobRow.lease_expires_at <= now,
+                    ),
+                )
+                .values(rescue_due_at=retry_due_at)
+                .execution_options(synchronize_session=False)
+            ),
+        )
+        return bool(result.rowcount)
 
     def transition_claimed(
         self,
@@ -369,6 +445,7 @@ class JobRepository:
                 row.updated_at = cutoff
                 row.lease_owner_token = None
                 row.lease_expires_at = None
+                row.rescue_due_at = cutoff
                 self._session.add(
                     JobEventRow(
                         job_id=row.job_id,
@@ -478,6 +555,7 @@ class JobRepository:
             job.lease_expires_at = None
         elif lease_expires_at is not None:
             job.lease_expires_at = lease_expires_at
+            job.rescue_due_at = lease_expires_at
         self._session.add(
             JobEventRow(
                 job_id=job.job_id,

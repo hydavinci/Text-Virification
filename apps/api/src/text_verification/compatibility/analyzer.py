@@ -19,6 +19,11 @@ from text_verification.domain.ports import (
     VerificationProgressObserver,
     VerificationProgressStage,
 )
+from text_verification.domain.verification import (
+    LEGACY_LAYER_LABELS,
+    LEGACY_SEVERITY_LABELS,
+    LEGACY_TYPE_LABELS,
+)
 
 
 @dataclass
@@ -2693,37 +2698,10 @@ class TextAnalyzer:
             'by_rule': {},
             'by_layer': {},
         }
-        type_names = {
-            'typo': '错别字',
-            'variant_char': '异形词',
-            'width_mixed': '全半角混用',
-            'missing_char': '漏字/缺字',
-            'idiom_misuse': '成语误用',
-            'expression': '语病/表达',
-            'grammar': '语法',
-            'logic': '逻辑',
-            'punctuation': '标点符号',
-            'spacing': '多余空格',
-            'number_format': '数字/格式',
-            'repetition': '重复词语',
-            'style': '文风/格式',
-            'colloquial': '口语化',
-            'term_consistency': '术语不一致',
-            'pii_id': '身份证号',
-            'pii_phone': '手机号',
-            'pii_email': '邮箱地址',
-            'pii_bank': '银行卡号',
-            'pii_key': '密钥/凭证',
-        }
-        severity_names = {
-            'error': '错误',
-            'warning': '警告',
-            'info': '建议',
-        }
         for issue in issues:
-            type_cn = type_names.get(issue.type, issue.type)
-            sev_cn = severity_names.get(issue.severity, issue.severity)
-            layer_cn = LAYER_NAMES.get(issue.layer, issue.layer)
+            type_cn = LEGACY_TYPE_LABELS.get(issue.type, issue.type)
+            sev_cn = LEGACY_SEVERITY_LABELS.get(issue.severity, issue.severity)
+            layer_cn = LEGACY_LAYER_LABELS.get(issue.layer, issue.layer)
             summary['by_type'][type_cn] = summary['by_type'].get(type_cn, 0) + 1
             summary['by_severity'][sev_cn] = summary['by_severity'].get(sev_cn, 0) + 1
             summary['by_rule'][issue.rule_id] = summary['by_rule'].get(issue.rule_id, 0) + 1

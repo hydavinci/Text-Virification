@@ -9,7 +9,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.session import sessionmaker
 
-from text_verification.domain.documents import FileType
+from text_verification.domain.documents import FileType, TextBlock
 from text_verification.domain.issues import Issue, IssueSeverity
 from text_verification.domain.jobs import JobStatus
 from text_verification.domain.verification import (
@@ -373,6 +373,28 @@ def _result(job_id: UUID, run_id: UUID) -> VerificationResult:
         file_type=FileType.TXT,
         scenario=Scenario.GENERAL,
         text=text_value,
+        blocks=(
+            TextBlock(
+                block_id="p-0",
+                kind="paragraph",
+                text=text_value,
+                global_start=0,
+                global_end=len(text_value),
+                block_start=0,
+                block_end=len(text_value),
+                page=None,
+                paragraph_index=0,
+                table_index=None,
+                row_index=None,
+                cell_index=None,
+                bbox=None,
+                parent_id=None,
+                style={},
+                source_locator={"paragraph_index": 0},
+            ),
+        ),
+        parser_name="test-parser",
+        parser_version="1",
         stats=VerificationStatistics(
             char_count=4,
             char_count_no_space=4,
