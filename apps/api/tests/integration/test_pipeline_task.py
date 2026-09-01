@@ -132,9 +132,13 @@ class InMemoryJobRepository:
             and lease[0] == previous_owner_token
         )
         if lease is not None and lease[1] > now and not can_rotate:
-            return JobClaimResult(JobClaimDisposition.LEASED, job)
+            return JobClaimResult(JobClaimDisposition.LEASED, job, lease[1])
         self._working_leases[job_id] = (owner_token, lease_expires_at)
-        return JobClaimResult(JobClaimDisposition.ACQUIRED, job)
+        return JobClaimResult(
+            JobClaimDisposition.ACQUIRED,
+            job,
+            lease_expires_at,
+        )
 
     def transition(
         self,
@@ -309,7 +313,10 @@ class InMemoryJobRepository:
     def _assert_claim(self, job_id: UUID, owner_token: UUID, now: datetime) -> None:
         lease = self._working_leases.get(job_id)
         if lease is None or lease[0] != owner_token or lease[1] <= now:
-            raise JobLeaseLostError(job_id)
+            raise JobLeaseLostError(
+                job_id,
+                None if lease is None else lease[1],
+            )
 
     def _assert_status(self, job_id: UUID, expected_status: JobStatus) -> None:
         current_status = self._working_jobs[job_id].status
@@ -616,6 +623,7 @@ class SessionBoundaryPipeline:
 class LeaseLosingPipeline:
     repository: InMemoryJobRepository
     replacement_owner: UUID
+    replacement_expires_at: datetime | None = None
 
     def run(
         self,
@@ -630,7 +638,8 @@ class LeaseLosingPipeline:
         self.repository.force_lease(
             command.document_id,
             self.replacement_owner,
-            datetime.now(UTC) + timedelta(minutes=20),
+            self.replacement_expires_at
+            or datetime.now(UTC) + timedelta(minutes=20),
         )
         raise VerificationError(
             "parser_failed",
@@ -668,6 +677,27 @@ class FlakySessionFactory:
         session = FakeSession()
         self.sessions.append(session)
         return session
+
+
+@dataclass
+class FakeTaskRequest:
+    retries: int = 0
+
+
+@dataclass
+class FakeBoundTask:
+    request: FakeTaskRequest = field(default_factory=FakeTaskRequest)
+
+    def retry(self, **kwargs):
+        raise AssertionError(f"failure retry must not be used for lease rescue: {kwargs}")
+
+
+@dataclass
+class MutableClock:
+    current: datetime
+
+    def __call__(self) -> datetime:
+        return self.current
 
 
 @pytest.fixture
@@ -868,7 +898,7 @@ def test_pipeline_runner_persists_result_in_postgresql(
     finally:
         verification_session.close()
 
-    assert outcome is ProcessAttemptDisposition.PROCESSED
+    assert outcome.disposition is ProcessAttemptDisposition.PROCESSED
     assert result is not None
     assert result.document_id == job_id
     assert result.source_name == "sample.txt"
@@ -1339,10 +1369,11 @@ def test_duplicate_delivery_with_live_lease_is_explicit_noop(
         build_default_verification_pipeline(Settings(llm_api_key=""))
     )
     job_id = _seed_txt_job(repository, worker_storage)
+    lease_expires_at = datetime.now(UTC) + timedelta(minutes=20)
     repository.force_lease(
         job_id,
         uuid4(),
-        datetime.now(UTC) + timedelta(minutes=20),
+        lease_expires_at,
     )
     _configure_worker_dependencies(
         monkeypatch,
@@ -1354,7 +1385,8 @@ def test_duplicate_delivery_with_live_lease_is_explicit_noop(
 
     outcome = _run_process_job_attempt(job_id, uuid4())
 
-    assert outcome is ProcessAttemptDisposition.DUPLICATE
+    assert outcome.disposition is ProcessAttemptDisposition.DUPLICATE
+    assert outcome.retry_at == lease_expires_at
     assert pipeline.commands == []
     assert repository.get_job(job_id).status is JobStatus.QUEUED
     assert [event.status for event in repository.list_events_after(job_id, 0)] == [
@@ -1397,7 +1429,7 @@ def test_expired_lease_is_reclaimed_and_resumes_without_duplicate_events(
 
     outcome = _run_process_job_attempt(job_id, uuid4())
 
-    assert outcome is ProcessAttemptDisposition.PROCESSED
+    assert outcome.disposition is ProcessAttemptDisposition.PROCESSED
     assert len(pipeline.commands) == 1
     assert [
         event.status for event in repository.list_events_after(job_id, 0)
@@ -1494,7 +1526,7 @@ def test_expected_failure_after_lease_loss_does_not_mutate_job(
 
     outcome = _run_process_job_attempt(job_id, uuid4())
 
-    assert outcome is ProcessAttemptDisposition.LEASE_LOST
+    assert outcome.disposition is ProcessAttemptDisposition.LEASE_LOST
     assert repository.get_job(job_id).status is JobStatus.PARSING
     assert JobStatus.FAILED not in [
         event.status for event in repository.list_events_after(job_id, 0)
@@ -1526,3 +1558,151 @@ def test_worker_rejects_result_persistence_before_final_progress_stage(
     assert result.failed()
     assert verification_repository.get_result_for_job(job_id) is None
     assert repository.get_job(job_id).status is JobStatus.FAILED
+
+
+def test_owner_death_duplicate_schedules_fresh_message_at_lease_expiry_and_recovers(
+    monkeypatch,
+    worker_storage,
+) -> None:
+    from text_verification.workers import tasks as worker_tasks
+
+    repository = InMemoryJobRepository()
+    verification_repository = InMemoryVerificationRepository()
+    pipeline = RecordingPipeline(
+        build_default_verification_pipeline(Settings(llm_api_key=""))
+    )
+    job_id = _seed_txt_job(repository, worker_storage)
+    now = datetime.now(UTC)
+    lease_expires_at = now + timedelta(seconds=30)
+    repository.force_lease(job_id, uuid4(), lease_expires_at)
+    _configure_worker_dependencies(
+        monkeypatch,
+        repository,
+        worker_storage,
+        verification_repository=verification_repository,
+        pipeline=pipeline,
+    )
+    clock = MutableClock(now)
+    scheduled: list[tuple[str, int]] = []
+    monkeypatch.setattr(worker_tasks, "NOW_FACTORY", clock, raising=False)
+    monkeypatch.setattr(
+        worker_tasks,
+        "RESCUE_SCHEDULER",
+        lambda scheduled_job_id, countdown: scheduled.append(
+            (scheduled_job_id, countdown)
+        ),
+        raising=False,
+    )
+
+    worker_tasks._process_job(FakeBoundTask(), str(job_id))
+
+    assert scheduled == [(str(job_id), 30)]
+    assert pipeline.commands == []
+
+    clock.current = lease_expires_at + timedelta(seconds=1)
+    worker_tasks._process_job(FakeBoundTask(), str(job_id))
+
+    assert repository.get_job(job_id).status is JobStatus.COMPLETED
+    assert len(pipeline.commands) == 1
+
+    worker_tasks._process_job(FakeBoundTask(), str(job_id))
+
+    assert scheduled == [(str(job_id), 30)]
+    assert len(pipeline.commands) == 1
+
+
+def test_lease_lost_schedules_recovery_at_replacement_lease_expiry(
+    monkeypatch,
+    worker_storage,
+) -> None:
+    from text_verification.workers import tasks as worker_tasks
+
+    repository = InMemoryJobRepository()
+    verification_repository = InMemoryVerificationRepository()
+    job_id = _seed_txt_job(repository, worker_storage)
+    now = datetime.now(UTC)
+    replacement_expires_at = now + timedelta(seconds=45)
+    _configure_worker_dependencies(
+        monkeypatch,
+        repository,
+        worker_storage,
+        verification_repository=verification_repository,
+        pipeline=LeaseLosingPipeline(
+            repository,
+            uuid4(),
+            replacement_expires_at,
+        ),
+    )
+    scheduled: list[tuple[str, int]] = []
+    monkeypatch.setattr(worker_tasks, "NOW_FACTORY", MutableClock(now), raising=False)
+    monkeypatch.setattr(
+        worker_tasks,
+        "RESCUE_SCHEDULER",
+        lambda scheduled_job_id, countdown: scheduled.append(
+            (scheduled_job_id, countdown)
+        ),
+        raising=False,
+    )
+
+    worker_tasks._process_job(FakeBoundTask(), str(job_id))
+
+    assert scheduled == [(str(job_id), 45)]
+    assert repository.get_job(job_id).status is JobStatus.PARSING
+    assert JobStatus.FAILED not in [
+        event.status for event in repository.list_events_after(job_id, 0)
+    ]
+
+
+def test_terminal_delivery_does_not_schedule_lease_rescue(
+    monkeypatch,
+    worker_storage,
+) -> None:
+    from text_verification.workers import tasks as worker_tasks
+
+    repository = InMemoryJobRepository()
+    job_id = _seed_txt_job(repository, worker_storage)
+    repository.transition(job_id, JobStatus.COMPLETED, 100, "处理完成")
+    repository.commit()
+    _configure_worker_dependencies(monkeypatch, repository, worker_storage)
+    scheduled: list[tuple[str, int]] = []
+    monkeypatch.setattr(
+        worker_tasks,
+        "RESCUE_SCHEDULER",
+        lambda scheduled_job_id, countdown: scheduled.append(
+            (scheduled_job_id, countdown)
+        ),
+        raising=False,
+    )
+
+    worker_tasks._process_job(FakeBoundTask(), str(job_id))
+
+    assert scheduled == []
+
+
+def test_rescue_countdown_targets_expiry_and_is_nonnegative() -> None:
+    from text_verification.workers.tasks import _rescue_countdown
+
+    now = datetime(2026, 9, 1, 3, 0, 0, 100_000, tzinfo=UTC)
+
+    assert _rescue_countdown(
+        now + timedelta(seconds=4, microseconds=100_000),
+        now=now,
+    ) == 5
+    assert _rescue_countdown(now - timedelta(seconds=1), now=now) == 0
+
+
+def test_rescue_scheduler_starts_fresh_task_without_failure_retry_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from text_verification.workers import tasks as worker_tasks
+
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        worker_tasks.process_job,
+        "apply_async",
+        lambda **kwargs: calls.append(kwargs),
+    )
+
+    worker_tasks._default_rescue_scheduler("job-id", 17)
+
+    assert calls == [{"args": ("job-id",), "countdown": 17}]

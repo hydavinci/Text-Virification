@@ -86,6 +86,7 @@ def test_live_lease_makes_duplicate_delivery_explicit_noop(
 
     assert first.disposition is JobClaimDisposition.ACQUIRED
     assert duplicate.disposition is JobClaimDisposition.LEASED
+    assert duplicate.lease_expires_at == now + timedelta(minutes=20)
     assert duplicate.job is not None
     assert duplicate.job.status is JobStatus.QUEUED
 

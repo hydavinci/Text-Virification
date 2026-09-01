@@ -134,6 +134,7 @@ class JobRepository:
             return JobClaimResult(
                 disposition=JobClaimDisposition.ACQUIRED,
                 job=self._to_job_read(row),
+                lease_expires_at=row.lease_expires_at,
             )
 
         existing = self._session.execute(
@@ -142,13 +143,17 @@ class JobRepository:
             .execution_options(populate_existing=True)
         ).scalar_one_or_none()
         if existing is None:
-            return JobClaimResult(JobClaimDisposition.MISSING, None)
+            return JobClaimResult(JobClaimDisposition.MISSING, None, None)
         disposition = (
             JobClaimDisposition.TERMINAL
             if JobStatus(existing.status) in TERMINAL_STATUSES
             else JobClaimDisposition.LEASED
         )
-        return JobClaimResult(disposition, self._to_job_read(existing))
+        return JobClaimResult(
+            disposition,
+            self._to_job_read(existing),
+            existing.lease_expires_at,
+        )
 
     def transition(
         self,
@@ -371,7 +376,7 @@ class JobRepository:
             or job.lease_expires_at is None
             or job.lease_expires_at <= now
         ):
-            raise JobLeaseLostError(job.job_id)
+            raise JobLeaseLostError(job.job_id, job.lease_expires_at)
 
     def _assert_expected_status(
         self,

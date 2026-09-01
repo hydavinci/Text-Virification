@@ -382,7 +382,7 @@ class VerificationRepository:
             or job.lease_expires_at is None
             or job.lease_expires_at <= now
         ):
-            raise JobLeaseLostError(job.job_id)
+            raise JobLeaseLostError(job.job_id, job.lease_expires_at)
 
     def _assert_expected_status(
         self,

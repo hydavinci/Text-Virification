@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from math import ceil
 from typing import Any, NoReturn, cast
 from uuid import UUID, uuid4
 
@@ -63,6 +65,7 @@ PipelineFactory = Callable[[], VerificationPipeline]
 RunnerFactory = Callable[[JobStorage, VerificationPipeline], PipelineRunner]
 PROCESS_JOB_MAX_RETRIES = 2
 PROCESS_JOB_RETRY_BACKOFF_CAP_SECONDS = 4
+PROCESS_JOB_RESCUE_MAX_COUNTDOWN_SECONDS = 3600
 
 _STATUS_ORDER = (
     JobStatus.QUEUED,
@@ -98,6 +101,12 @@ class ProcessAttemptDisposition(StrEnum):
     LEASE_LOST = "lease_lost"
 
 
+@dataclass(frozen=True)
+class ProcessAttemptOutcome:
+    disposition: ProcessAttemptDisposition
+    retry_at: datetime | None = None
+
+
 def _get_job_storage() -> JobStorage:
     settings = get_settings()
     return JobStorage(settings.storage_root, settings.max_upload_bytes)
@@ -112,6 +121,10 @@ def _get_verification_pipeline() -> VerificationPipeline:
     return build_default_verification_pipeline(get_settings())
 
 
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
 SESSION_FACTORY_PROVIDER: SessionFactoryProvider = get_session_factory
 STORAGE_FACTORY: StorageFactory = _get_job_storage
 COMPATIBILITY_STORAGE_FACTORY: CompatibilityStorageFactory = _get_compatibility_storage
@@ -119,6 +132,7 @@ REPOSITORY_FACTORY: RepositoryFactory = JobRepository
 VERIFICATION_REPOSITORY_FACTORY: VerificationRepositoryFactory = VerificationRepository
 PIPELINE_FACTORY: PipelineFactory = _get_verification_pipeline
 RUNNER_FACTORY: RunnerFactory = PipelineRunner
+NOW_FACTORY: Callable[[], datetime] = _utc_now
 
 
 class _LeaseProgressObserver(VerificationProgressObserver):
@@ -156,7 +170,7 @@ class _LeaseProgressObserver(VerificationProgressObserver):
             )
 
         progress, message = _STATUS_EVENT_DETAILS[target_status]
-        now = datetime.now(UTC)
+        now = NOW_FACTORY()
         job = _transition_claimed(
             self._session_factory,
             self._job_id,
@@ -190,12 +204,14 @@ def _process_job(
             owner_token,
             previous_owner_token=previous_owner_token,
         )
-        if outcome is ProcessAttemptDisposition.DUPLICATE:
+        if outcome.disposition is ProcessAttemptDisposition.DUPLICATE:
+            _schedule_lease_rescue(parsed_job_id, outcome.retry_at)
             logger.info(
                 "process_job_duplicate_delivery",
                 extra={"job_id": str(parsed_job_id)},
             )
-        elif outcome is ProcessAttemptDisposition.LEASE_LOST:
+        elif outcome.disposition is ProcessAttemptDisposition.LEASE_LOST:
+            _schedule_lease_rescue(parsed_job_id, outcome.retry_at)
             logger.info(
                 "process_job_lease_lost",
                 extra={"job_id": str(parsed_job_id)},
@@ -217,7 +233,7 @@ def _run_process_job_attempt(
     owner_token: UUID,
     *,
     previous_owner_token: UUID | None = None,
-) -> ProcessAttemptDisposition:
+) -> ProcessAttemptOutcome:
     session_factory = SESSION_FACTORY_PROVIDER()
     lease_seconds = get_settings().job_lease_seconds
     claim = _acquire_claim(
@@ -228,11 +244,14 @@ def _run_process_job_attempt(
         lease_seconds=lease_seconds,
     )
     if claim.disposition is JobClaimDisposition.MISSING:
-        return ProcessAttemptDisposition.MISSING
+        return ProcessAttemptOutcome(ProcessAttemptDisposition.MISSING)
     if claim.disposition is JobClaimDisposition.TERMINAL:
-        return ProcessAttemptDisposition.TERMINAL
+        return ProcessAttemptOutcome(ProcessAttemptDisposition.TERMINAL)
     if claim.disposition is JobClaimDisposition.LEASED:
-        return ProcessAttemptDisposition.DUPLICATE
+        return ProcessAttemptOutcome(
+            ProcessAttemptDisposition.DUPLICATE,
+            claim.lease_expires_at,
+        )
     job = claim.job
     if job is None:
         raise AssertionError("acquired claim must include the job")
@@ -264,7 +283,7 @@ def _run_process_job_attempt(
                     owner_token=owner_token,
                     expected_status=observer.current_status,
                 )
-                return ProcessAttemptDisposition.PROCESSED
+                return ProcessAttemptOutcome(ProcessAttemptDisposition.PROCESSED)
 
             observer.ensure_upload_validated()
             runner = RUNNER_FACTORY(STORAGE_FACTORY(), PIPELINE_FACTORY())
@@ -282,7 +301,7 @@ def _run_process_job_attempt(
                 owner_token=owner_token,
                 expected_status=observer.current_status,
             )
-            return ProcessAttemptDisposition.PROCESSED
+            return ProcessAttemptOutcome(ProcessAttemptDisposition.PROCESSED)
         except InvalidUpload as error:
             return _persist_expected_failure(
                 session_factory,
@@ -303,10 +322,13 @@ def _run_process_job_attempt(
                 error=error,
                 error_message=error.message,
             )
-    except JobLeaseLostError:
-        return ProcessAttemptDisposition.LEASE_LOST
+    except JobLeaseLostError as error:
+        return ProcessAttemptOutcome(
+            ProcessAttemptDisposition.LEASE_LOST,
+            error.lease_expires_at,
+        )
     except TerminalJobStateError:
-        return ProcessAttemptDisposition.TERMINAL
+        return ProcessAttemptOutcome(ProcessAttemptDisposition.TERMINAL)
 
 
 process_job = cast(
@@ -320,8 +342,36 @@ process_job = cast(
 )
 
 
+def _default_rescue_scheduler(job_id: str, countdown: int) -> None:
+    process_job.apply_async(args=(job_id,), countdown=countdown)
+
+
+RESCUE_SCHEDULER: Callable[[str, int], None] = _default_rescue_scheduler
+
+
+def _schedule_lease_rescue(
+    job_id: UUID,
+    retry_at: datetime | None,
+) -> None:
+    if retry_at is None:
+        raise RuntimeError(f"Job {job_id} lease rescue is missing an expiry.")
+    RESCUE_SCHEDULER(
+        str(job_id),
+        _rescue_countdown(retry_at, now=NOW_FACTORY()),
+    )
+
+
+def _rescue_countdown(
+    retry_at: datetime,
+    *,
+    now: datetime,
+) -> int:
+    seconds = max(0, ceil((retry_at - now).total_seconds()))
+    return min(seconds, PROCESS_JOB_RESCUE_MAX_COUNTDOWN_SECONDS)
+
+
 def _cleanup_expired_jobs() -> list[str]:
-    now = datetime.now(UTC)
+    now = NOW_FACTORY()
     orphan_cutoff = now - timedelta(hours=get_settings().job_retention_hours)
     session_factory = SESSION_FACTORY_PROVIDER()
     session = session_factory()
@@ -394,7 +444,7 @@ def _acquire_claim(
 ) -> JobClaimResult:
     session = session_factory()
     repository = REPOSITORY_FACTORY(session)
-    now = datetime.now(UTC)
+    now = NOW_FACTORY()
     try:
         claim = repository.acquire_lease(
             job_id,
@@ -458,7 +508,7 @@ def _get_claimed_result(
         return repository.get_result_for_claimed_job(
             job_id,
             owner_token=owner_token,
-            now=datetime.now(UTC),
+            now=NOW_FACTORY(),
         )
     finally:
         repository.rollback()
@@ -481,7 +531,7 @@ def _save_claimed_result(
             result,
             owner_token=owner_token,
             expected_status=expected_status,
-            now=datetime.now(UTC),
+            now=NOW_FACTORY(),
         )
         repository.commit()
     except Exception:
@@ -507,7 +557,7 @@ def _complete_claimed_job(
             expected_status=expected_status,
             progress=100,
             message=COMPLETED_EVENT_MESSAGE,
-            now=datetime.now(UTC),
+            now=NOW_FACTORY(),
         )
         repository.commit()
     except Exception:
@@ -525,7 +575,7 @@ def _persist_expected_failure(
     expected_status: JobStatus,
     error: Exception,
     error_message: str,
-) -> ProcessAttemptDisposition:
+) -> ProcessAttemptOutcome:
     try:
         failure_applied = _fail_claimed_job(
             session_factory,
@@ -541,7 +591,7 @@ def _persist_expected_failure(
                 owner_token=owner_token,
                 expected_status=expected_status,
             )
-        return ProcessAttemptDisposition.PROCESSED
+        return ProcessAttemptOutcome(ProcessAttemptDisposition.PROCESSED)
     except (JobLeaseLostError, TerminalJobStateError):
         raise
     except Exception as persist_error:
@@ -570,7 +620,7 @@ def _fail_claimed_job(
             message=FAILED_EVENT_MESSAGE,
             error_code=PIPELINE_FAILURE_CODE,
             error_message=error_message,
-            now=datetime.now(UTC),
+            now=NOW_FACTORY(),
         )
         repository.commit()
         return applied
