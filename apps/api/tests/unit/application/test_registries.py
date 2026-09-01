@@ -11,10 +11,12 @@ import pytest
 
 from text_verification.checkers.compatibility_checker import CompatibilityChecker
 from text_verification.checkers.registry import CheckerRegistry
+from text_verification.compatibility import exporters as exporters_module
 from text_verification.compatibility.analyzer import Issue as LegacyIssue
 from text_verification.compatibility.exporters import (
     ExportedDocument,
     ExportError,
+    TextEdit,
     export_original,
 )
 from text_verification.domain.documents import DocumentModel, FileType, TextBlock
@@ -63,6 +65,29 @@ class FakeChecker:
             issues=self.issues,
             dictionary_versions=self.dictionary_versions,
         )
+
+
+@dataclass
+class _CountingPdfEdit:
+    _start: int
+    _end: int
+    _replacement: str
+    property_reads: list[int]
+
+    @property
+    def start(self) -> int:
+        self.property_reads[0] += 1
+        return self._start
+
+    @property
+    def end(self) -> int:
+        self.property_reads[0] += 1
+        return self._end
+
+    @property
+    def replacement(self) -> str:
+        self.property_reads[0] += 1
+        return self._replacement
 
 
 def test_parser_registry_returns_registered_parser_for_file_type() -> None:
@@ -755,6 +780,151 @@ def test_pdf_export_rejects_conflicting_insertions_before_artifact_write(
     assert not target.exists()
 
 
+def test_pdf_edit_validation_accepts_touching_intervals_in_stable_source_order() -> None:
+    edits = [
+        TextEdit(4, 6, "four"),
+        TextEdit(2, 4, "two"),
+        TextEdit(2, 2, "at-boundary"),
+        TextEdit(0, 2, "zero"),
+        TextEdit(6, 6, "at-end"),
+    ]
+
+    assert exporters_module._validate_and_order_pdf_edits(edits, 6) == [
+        TextEdit(0, 2, "zero"),
+        TextEdit(2, 2, "at-boundary"),
+        TextEdit(2, 4, "two"),
+        TextEdit(4, 6, "four"),
+        TextEdit(6, 6, "at-end"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "edits",
+    [
+        [TextEdit(0, 3, "first"), TextEdit(2, 4, "second")],
+        [TextEdit(0, 4, "outer"), TextEdit(1, 3, "inner")],
+        [TextEdit(2, 2, "first"), TextEdit(2, 2, "second")],
+        [TextEdit(0, 4, "range"), TextEdit(2, 2, "inside")],
+    ],
+    ids=["overlap", "containment", "same-position-insertions", "interior-insertion"],
+)
+def test_pdf_edit_validation_rejects_ambiguous_intervals(edits: list[TextEdit]) -> None:
+    with pytest.raises(ExportError, match="overlapping or ambiguous"):
+        exporters_module._validate_and_order_pdf_edits(edits, 4)
+
+
+def test_pdf_edit_validation_reads_a_linear_number_of_intervals() -> None:
+    count = 512
+    property_reads = [0]
+    edits = [
+        _CountingPdfEdit(index * 2, index * 2 + 1, str(index), property_reads)
+        for index in range(count)
+    ]
+
+    ordered = exporters_module._validate_and_order_pdf_edits(edits, count * 2)
+
+    assert len(ordered) == count
+    assert property_reads[0] <= count * 20
+
+
+@pytest.mark.parametrize(
+    ("direction", "writing_mode"),
+    [
+        ((-1.0, 0.0), 0),
+        ((0.0, 1.0), 1),
+    ],
+    ids=["rtl", "vertical"],
+)
+def test_pdf_export_rejects_directional_replacement_before_mutation_or_artifact_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    direction: tuple[float, float],
+    writing_mode: int,
+) -> None:
+    import pymupdf
+
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "fixtures"
+        / "pdf"
+        / "repeated-span.pdf"
+    )
+    document = _with_pdf_character_direction(
+        PdfParser().parse(source),
+        direction=direction,
+        writing_mode=writing_mode,
+    )
+    monkeypatch.setattr(PdfParser, "parse", lambda self, path: document)
+    mutations: list[tuple[float, float, float, float]] = []
+    original_redact = pymupdf.Page.add_redact_annot
+
+    def recording_redact(
+        page: pymupdf.Page,
+        rectangle: pymupdf.Rect,
+        *args: object,
+        **kwargs: object,
+    ) -> pymupdf.Annot:
+        mutations.append(tuple(rectangle))
+        return original_redact(page, rectangle, *args, **kwargs)
+
+    monkeypatch.setattr(pymupdf.Page, "add_redact_annot", recording_redact)
+    target = tmp_path / "must-not-exist-directional.pdf"
+    exporter = CompatibilityExporter(
+        FileType.PDF,
+        source_path_resolver=StaticSourcePathResolver(source),
+    )
+
+    with pytest.raises(ExportError) as raised:
+        exporter.export(
+            document,
+            [_issue(start=0, end=5, original="token", suggestion="alpha")],
+            target,
+        )
+
+    assert str(raised.value) == (
+        "PDF compatibility mapping validation failed: directional source text "
+        "cannot be safely replaced."
+    )
+    assert mutations == []
+    assert not target.exists()
+
+
+def test_pdf_export_tracks_directional_source_when_every_glyph_is_mapped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pymupdf
+
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "fixtures"
+        / "pdf"
+        / "repeated-span.pdf"
+    )
+    document = _with_pdf_character_direction(
+        PdfParser().parse(source),
+        direction=(0.0, 1.0),
+        writing_mode=1,
+    )
+    monkeypatch.setattr(PdfParser, "parse", lambda self, path: document)
+    target = tmp_path / "directional-tracked.pdf"
+    exporter = CompatibilityExporter(
+        FileType.PDF,
+        source_path_resolver=StaticSourcePathResolver(source),
+    )
+
+    exporter.export(
+        document,
+        [_issue(start=0, end=5, original="token", suggestion="alpha")],
+        target,
+        track_changes=True,
+    )
+
+    with pymupdf.open(target) as output:
+        annotations = list(output[0].annots() or ())
+    assert len(annotations) == 1
+
+
 def test_pdf_export_maps_a_complete_multi_codepoint_glyph_group_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -988,6 +1158,25 @@ def _group_first_pdf_glyphs(
     )
     locator["characters"] = [first, *characters[len(text) :]]
     return grouped
+
+
+def _with_pdf_character_direction(
+    document: DocumentModel,
+    *,
+    direction: tuple[float, float],
+    writing_mode: int,
+) -> DocumentModel:
+    directional = document.model_copy(deep=True)
+    for block in directional.blocks:
+        characters = block.source_locator.get("characters")
+        if not isinstance(characters, list):
+            continue
+        for character in characters:
+            if not isinstance(character, dict):
+                continue
+            character["line_direction"] = list(direction)
+            character["writing_mode"] = writing_mode
+    return directional
 
 
 @dataclass(frozen=True)

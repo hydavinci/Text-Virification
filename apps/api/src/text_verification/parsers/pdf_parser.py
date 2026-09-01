@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from difflib import SequenceMatcher
+from math import isfinite
 from pathlib import Path
 from typing import Any, Literal
 from uuid import NAMESPACE_URL, uuid5
@@ -109,7 +109,11 @@ def _extract_page(
     tables, table_warnings = _extract_tables(page, page_number, limits)
     tables = _normalize_tables(tables, geometry)
     all_spans = _extract_spans(raw_spans, [])
-    tables, table_span_indices = _align_table_characters(tables, all_spans)
+    tables, table_span_indices = _align_table_characters(
+        tables,
+        all_spans,
+        limits=limits,
+    )
     spans = [
         span
         for span in all_spans
@@ -194,6 +198,7 @@ def _extract_tables(
         )
     tables: list[Any] = []
     cell_count = 0
+    table_text_characters = 0
     for table_index, table in enumerate(found_tables):
         rows = table.rows
         cell_count += sum(len(row.cells) for row in rows)
@@ -221,7 +226,21 @@ def _extract_tables(
                     if cell_index < len(extracted_row)
                     else ""
                 )
-                cells.append((_normalize_block_text(raw_text or ""), raw_bbox))
+                text = _normalize_block_text(raw_text or "")
+                if len(text) > limits.max_table_text_chars_per_cell:
+                    raise PdfResourceLimitError(
+                        limit="max_table_text_chars_per_cell",
+                        maximum=limits.max_table_text_chars_per_cell,
+                        actual=len(text),
+                    )
+                table_text_characters += len(text)
+                if table_text_characters > limits.max_table_text_chars_per_page:
+                    raise PdfResourceLimitError(
+                        limit="max_table_text_chars_per_page",
+                        maximum=limits.max_table_text_chars_per_page,
+                        actual=table_text_characters,
+                    )
+                cells.append((text, raw_bbox))
             normalized_rows.append(tuple(cells))
         tables.append((table_index, table.bbox, tuple(normalized_rows)))
     return tables, []
@@ -275,6 +294,8 @@ def _extract_raw_spans(page: Any, geometry: _PageGeometry) -> list[_RawSpan]:
                 characters = _raw_span_characters(
                     raw_span,
                     geometry,
+                    line_direction=line_direction,
+                    writing_mode=writing_mode,
                     line_index=raw_line_index,
                     span_order=span_order,
                 )
@@ -321,6 +342,8 @@ def _extract_spans(raw_spans: list[_RawSpan], tables: list[PdfTable]) -> list[Pd
 def _align_table_characters(
     tables: list[PdfTable],
     spans: list[PdfTextSpan],
+    *,
+    limits: PdfResourceLimits,
 ) -> tuple[list[PdfTable], set[int]]:
     aligned_tables: list[PdfTable] = []
     used_span_indices: set[int] = set()
@@ -332,7 +355,18 @@ def _align_table_characters(
                 if not cell.text or cell.bbox is None:
                     aligned_cells.append(cell)
                     continue
-                candidates = _table_cell_candidate_spans(cell.text, cell.bbox, spans)
+                candidates = _table_cell_candidate_spans(cell.bbox, spans)
+                candidate_count = sum(
+                    len(character.text)
+                    for candidate in candidates
+                    for character in candidate.characters
+                )
+                if candidate_count > limits.max_table_glyph_candidates_per_cell:
+                    raise PdfResourceLimitError(
+                        limit="max_table_glyph_candidates_per_cell",
+                        maximum=limits.max_table_glyph_candidates_per_cell,
+                        actual=candidate_count,
+                    )
                 used_span_indices.update(span.span_index for span in candidates)
                 aligned_cells.append(
                     cell.model_copy(
@@ -341,6 +375,7 @@ def _align_table_characters(
                                 cell.text,
                                 cell.bbox,
                                 spans,
+                                candidates=candidates,
                             )
                         }
                     )
@@ -356,44 +391,74 @@ def _align_cell_characters(
     text: str,
     bbox: tuple[float, float, float, float],
     spans: list[PdfTextSpan],
+    *,
+    candidates: list[PdfTextSpan] | None = None,
 ) -> tuple[PdfTextCharacter, ...]:
-    candidates = _table_cell_candidate_spans(text, bbox, spans)
-    if not candidates:
+    resolved_candidates = (
+        candidates
+        if candidates is not None
+        else _table_cell_candidate_spans(bbox, spans)
+    )
+    if not resolved_candidates:
         return _unmapped_character_models(text)
-    lines = _visual_lines(tuple(candidates))
-    candidate_text, _, candidate_groups = _lines_text_and_source_metadata(lines)
+    lines = _visual_lines(tuple(resolved_candidates))
+    _, _, candidate_groups = _lines_text_and_source_metadata(lines)
+    target_units = _normalized_alignment_units(text)
+    source_groups = [
+        (candidate_group, units)
+        for candidate_group in candidate_groups
+        if isinstance(candidate_group.get("text"), str)
+        and (units := _normalized_alignment_units(str(candidate_group["text"])))
+    ]
+    source_positions = _AlignmentTokenPositions.from_tokens(
+        [units[0][0] for _, units in source_groups]
+    )
+    target_positions = _AlignmentTokenPositions.from_tokens(
+        [unit[0] for unit in target_units]
+    )
     mapped: dict[int, PdfTextCharacter] = {}
-    matcher = SequenceMatcher(a=candidate_text, b=text, autojunk=False)
-    for operation, raw_start, raw_end, target_start, _target_end in matcher.get_opcodes():
-        if operation != "equal":
-            continue
-        for group in candidate_groups:
-            group_start = group.get("source_start")
-            group_end = group.get("source_end")
-            group_text = group.get("text")
-            if not (
-                isinstance(group_start, int)
-                and isinstance(group_end, int)
-                and isinstance(group_text, str)
-                and raw_start <= group_start
-                and group_end <= raw_end
+    source_index = 0
+    target_index = 0
+    while source_index < len(source_groups) and target_index < len(target_units):
+        candidate_group, candidate_units = source_groups[source_index]
+        candidate_token = candidate_units[0][0]
+        target_token = target_units[target_index][0]
+        if _alignment_tokens_match(candidate_token, target_token):
+            if (
+                target_index + len(candidate_units) <= len(target_units)
+                and all(
+                    _alignment_tokens_match(
+                        candidate_units[unit_index][0],
+                        target_units[target_index + unit_index][0],
+                    )
+                    for unit_index in range(1, len(candidate_units))
+                )
             ):
-                continue
-            aligned_start = target_start + group_start - raw_start
-            aligned_end = aligned_start + len(group_text)
-            if text[aligned_start:aligned_end] != group_text:
-                continue
-            bbox_value = group.get("bbox")
-            mapped[aligned_start] = PdfTextCharacter(
-                text=group_text,
-                bbox=tuple(bbox_value) if isinstance(bbox_value, list) else None,
-                source_start=aligned_start,
-                source_end=aligned_end,
-                mapping_state=PdfCharacterMappingState(
-                    str(group.get("mapping_state"))
-                ),
-                group_id=str(group.get("group_id")),
-            )
+                target_start = target_units[target_index][1]
+                target_end = target_units[target_index + len(candidate_units) - 1][2]
+                aligned_character = _aligned_table_character(
+                    text=text[target_start:target_end],
+                    source_start=target_start,
+                    source_end=target_end,
+                    source_group=candidate_group,
+                )
+                if aligned_character is not None:
+                    mapped[target_start] = aligned_character
+                target_index += len(candidate_units)
+            source_index += 1
+            continue
+
+        next_source = source_positions.next_after(target_token, source_index + 1)
+        next_target = target_positions.next_after(candidate_token, target_index + 1)
+        if next_source is not None and (
+            next_target is None
+            or next_source - source_index <= next_target - target_index
+        ):
+            source_index = next_source
+        elif next_target is not None:
+            target_index = next_target
+        else:
+            source_index += 1
     aligned: list[PdfTextCharacter] = []
     cursor = 0
     while cursor < len(text):
@@ -423,11 +488,9 @@ def _align_cell_characters(
 
 
 def _table_cell_candidate_spans(
-    text: str,
     bbox: tuple[float, float, float, float],
     spans: list[PdfTextSpan],
 ) -> list[PdfTextSpan]:
-    del text
     return [
         span
         for span in spans
@@ -436,6 +499,159 @@ def _table_cell_candidate_spans(
             and bbox[1] <= (span.bbox[1] + span.bbox[3]) / 2 <= bbox[3]
         )
     ]
+
+
+def _normalized_alignment_units(text: str) -> list[tuple[str, int, int]]:
+    units: list[tuple[str, int, int]] = []
+    cursor = 0
+    while cursor < len(text):
+        start = cursor
+        character = text[cursor]
+        if character.isspace():
+            cursor += 1
+            while cursor < len(text) and text[cursor].isspace():
+                cursor += 1
+            units.append((" ", start, cursor))
+            continue
+        units.append((character, start, start + 1))
+        cursor += 1
+    return units
+
+
+@dataclass
+class _AlignmentTokenPositions:
+    positions: dict[str, list[int]]
+    cursors: dict[str, int] = field(default_factory=dict)
+
+    @classmethod
+    def from_tokens(cls, tokens: list[str]) -> _AlignmentTokenPositions:
+        positions: dict[str, list[int]] = {}
+        for index, token in enumerate(tokens):
+            positions.setdefault(token, []).append(index)
+        return cls(positions)
+
+    def next_after(self, token: str, index: int) -> int | None:
+        positions = self.positions.get(token)
+        if positions is None:
+            return None
+        cursor = self.cursors.get(token, 0)
+        while cursor < len(positions) and positions[cursor] < index:
+            cursor += 1
+        self.cursors[token] = cursor
+        return positions[cursor] if cursor < len(positions) else None
+
+
+def _alignment_tokens_match(source: str, target: str) -> bool:
+    return source == target
+
+
+def _aligned_table_character(
+    *,
+    text: str,
+    source_start: int,
+    source_end: int,
+    source_group: dict[str, object],
+) -> PdfTextCharacter | None:
+    mapping_state_value = source_group.get("mapping_state")
+    group_id = source_group.get("group_id")
+    direction = _source_group_direction(source_group.get("line_direction"))
+    writing_mode = source_group.get("writing_mode")
+    raw_line_index = source_group.get("raw_line_index")
+    span_order = source_group.get("span_order")
+    if (
+        not isinstance(mapping_state_value, str)
+        or not isinstance(group_id, str)
+        or not group_id
+        or direction is None
+        or isinstance(writing_mode, bool)
+        or not isinstance(writing_mode, int)
+        or writing_mode not in {mode.value for mode in PdfWritingMode}
+        or isinstance(raw_line_index, bool)
+        or not isinstance(raw_line_index, int)
+        or raw_line_index < 0
+        or (
+            span_order is not None
+            and (
+                isinstance(span_order, bool)
+                or not isinstance(span_order, int)
+                or span_order < 0
+            )
+        )
+    ):
+        return None
+    try:
+        mapping_state = PdfCharacterMappingState(mapping_state_value)
+    except ValueError:
+        return None
+    bbox = _source_group_bbox(source_group.get("bbox"))
+    if mapping_state is PdfCharacterMappingState.GLYPH and (
+        bbox is None or text.isspace() or span_order is None
+    ):
+        return None
+    if (
+        mapping_state is PdfCharacterMappingState.GLYPHLESS
+        and (bbox is not None or text.isspace())
+    ):
+        return None
+    if mapping_state is PdfCharacterMappingState.SYNTHETIC_SPACE and (
+        bbox is not None or not text.isspace()
+    ):
+        return None
+    if mapping_state is PdfCharacterMappingState.UNMAPPED:
+        return None
+    return PdfTextCharacter(
+        text=text,
+        bbox=bbox,
+        source_start=source_start,
+        source_end=source_end,
+        mapping_state=mapping_state,
+        group_id=group_id,
+        line_direction=direction,
+        writing_mode=PdfWritingMode(writing_mode),
+        raw_line_index=raw_line_index,
+        span_order=span_order,
+    )
+
+
+def _source_group_direction(
+    value: object,
+) -> tuple[float, float] | None:
+    if not isinstance(value, tuple | list) or len(value) != 2:
+        return None
+    x, y = value
+    if (
+        isinstance(x, bool)
+        or not isinstance(x, int | float)
+        or not isfinite(float(x))
+        or isinstance(y, bool)
+        or not isinstance(y, int | float)
+        or not isfinite(float(y))
+        or (float(x) == 0.0 and float(y) == 0.0)
+    ):
+        return None
+    return float(x), float(y)
+
+
+def _source_group_bbox(
+    value: object,
+) -> tuple[float, float, float, float] | None:
+    if value is None:
+        return None
+    if not isinstance(value, tuple | list) or len(value) != 4:
+        return None
+    coordinates: list[float] = []
+    for coordinate in value:
+        if (
+            isinstance(coordinate, bool)
+            or not isinstance(coordinate, int | float)
+            or not isfinite(float(coordinate))
+        ):
+            return None
+        coordinates.append(float(coordinate))
+    x0, y0, x1, y1 = coordinates
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return x0, y0, x1, y1
 
 
 def _unmapped_character_models(text: str) -> tuple[PdfTextCharacter, ...]:
@@ -502,6 +718,8 @@ def _raw_span_characters(
     raw_span: dict[str, object],
     geometry: _PageGeometry,
     *,
+    line_direction: tuple[float, float],
+    writing_mode: PdfWritingMode,
     line_index: int,
     span_order: int,
 ) -> tuple[PdfTextCharacter, ...]:
@@ -549,7 +767,13 @@ def _raw_span_characters(
         )
         normalized.append((raw_text, bbox, mapping_state, group_id))
         whitespace_pending = False
-    return _characters_with_offsets(normalized)
+    return _characters_with_offsets(
+        normalized,
+        line_direction=line_direction,
+        writing_mode=writing_mode,
+        raw_line_index=line_index,
+        span_order=span_order,
+    )
 
 
 def _normalize_span_boundaries(spans: list[PdfTextSpan]) -> list[PdfTextSpan]:
@@ -710,7 +934,13 @@ def _span_with_characters(
         )
         for index, character in enumerate(characters)
     ]
-    normalized_characters = _characters_with_offsets(values)
+    normalized_characters = _characters_with_offsets(
+        values,
+        line_direction=span.line_direction,
+        writing_mode=span.writing_mode,
+        raw_line_index=span.line_index,
+        span_order=span.span_order,
+    )
     return span.model_copy(
         update={
             "text": "".join(character.text for character in normalized_characters),
@@ -739,6 +969,11 @@ def _characters_with_offsets(
             str,
         ]
     ],
+    *,
+    line_direction: tuple[float, float] = (1.0, 0.0),
+    writing_mode: PdfWritingMode = PdfWritingMode.HORIZONTAL,
+    raw_line_index: int = 0,
+    span_order: int | None = None,
 ) -> tuple[PdfTextCharacter, ...]:
     characters: list[PdfTextCharacter] = []
     cursor = 0
@@ -751,6 +986,10 @@ def _characters_with_offsets(
                 source_end=cursor + len(text),
                 mapping_state=mapping_state,
                 group_id=group_id,
+                line_direction=line_direction,
+                writing_mode=writing_mode,
+                raw_line_index=raw_line_index,
+                span_order=span_order,
             )
         )
         cursor += len(text)
@@ -758,26 +997,17 @@ def _characters_with_offsets(
 
 
 def _canonical_blocks(pages: tuple[PdfPageMetadata, ...]) -> tuple[list[TextBlock], str]:
-    extracted: list[_ExtractedBlock] = []
+    ordered: list[_ExtractedBlock] = []
     for page in pages:
         visual_lines = _visual_lines(page.spans)
+        extracted: list[_ExtractedBlock] = []
         if visual_lines and not page.tables and not page.images:
             extracted.append(_page_block(page.page, visual_lines))
         else:
             extracted.extend(_line_blocks(page.page, visual_lines))
         extracted.extend(_table_blocks(page.page, page.tables))
         extracted.extend(_image_blocks(page.page, page.images))
-
-    ordered = sorted(
-        extracted,
-        key=lambda item: (
-            item.page,
-            item.bbox[1],
-            item.bbox[0],
-            _kind_order(item.kind),
-            item.ordinal,
-        ),
-    )
+        ordered.extend(_order_page_blocks(extracted))
     text_parts: list[str] = []
     blocks: list[TextBlock] = []
     cursor = 0
@@ -867,11 +1097,7 @@ def _visual_lines(spans: tuple[PdfTextSpan, ...]) -> list[_VisualLine]:
         )
         for line in grouped.values()
     ]
-    if any(
-        line.writing_mode is PdfWritingMode.VERTICAL
-        or line.line_direction[0] <= 0
-        for line in lines
-    ):
+    if any(_line_preserves_raw_flow(line) for line in lines):
         return lines
     return sorted(
         lines,
@@ -880,6 +1106,14 @@ def _visual_lines(spans: tuple[PdfTextSpan, ...]) -> list[_VisualLine]:
             line.bbox[0],
             line.line_index,
         ),
+    )
+
+
+def _line_preserves_raw_flow(line: _VisualLine) -> bool:
+    return (
+        line.writing_mode is PdfWritingMode.VERTICAL
+        or line.line_direction[0] <= 0.0
+        or line.line_direction[1] != 0.0
     )
 
 
@@ -897,6 +1131,27 @@ class _ExtractedBlock:
     cell_index: int | None
     style: dict[str, object]
     source_locator: dict[str, object]
+    preserve_raw_flow: bool
+
+
+def _order_page_blocks(items: list[_ExtractedBlock]) -> list[_ExtractedBlock]:
+    directional = [item for item in items if item.preserve_raw_flow]
+    if not directional:
+        return sorted(items, key=_visual_block_order)
+    remaining = [item for item in items if not item.preserve_raw_flow]
+    return [
+        *sorted(directional, key=lambda item: (item.ordinal, item.block_id)),
+        *sorted(remaining, key=_visual_block_order),
+    ]
+
+
+def _visual_block_order(item: _ExtractedBlock) -> tuple[float, float, int, int]:
+    return (
+        item.bbox[1],
+        item.bbox[0],
+        _kind_order(item.kind),
+        item.ordinal,
+    )
 
 
 def _page_block(page: int, lines: list[_VisualLine]) -> _ExtractedBlock:
@@ -927,6 +1182,7 @@ def _page_block(page: int, lines: list[_VisualLine]) -> _ExtractedBlock:
             "segments": segments,
             "characters": characters,
         },
+        preserve_raw_flow=False,
     )
 
 
@@ -961,6 +1217,7 @@ def _line_blocks(page: int, lines: list[_VisualLine]) -> list[_ExtractedBlock]:
                     "segments": segments,
                     "characters": characters,
                 },
+                preserve_raw_flow=_line_preserves_raw_flow(line),
             )
         )
     return blocks
@@ -990,6 +1247,7 @@ def _table_blocks(page: int, tables: tuple[PdfTable, ...]) -> list[_ExtractedBlo
                 "segments": _line_segments_from_text(cell.text, cell.bbox),
                 "characters": _table_cell_source_characters(cell),
             },
+            preserve_raw_flow=False,
         )
         for table in tables
         for row in table.rows
@@ -1019,6 +1277,7 @@ def _image_blocks(page: int, images: tuple[PdfImage, ...]) -> list[_ExtractedBlo
                 "xref": image.xref,
                 "bbox": list(image.bbox),
             },
+            preserve_raw_flow=False,
         )
         for image in images
     ]
@@ -1111,7 +1370,6 @@ def _line_segments_from_text(
 def _table_cell_source_characters(
     cell: PdfTableCell,
 ) -> list[dict[str, object]]:
-    line_index = 0
     characters: list[dict[str, object]] = []
     for character in cell.characters:
         characters.append(
@@ -1120,16 +1378,15 @@ def _table_cell_source_characters(
                 bbox=character.bbox,
                 source_start=character.source_start,
                 mapping_state=character.mapping_state,
-                line_index=line_index,
+                line_index=character.raw_line_index,
                 span_index=None,
                 group_id=character.group_id,
-                line_direction=(1.0, 0.0),
-                writing_mode=PdfWritingMode.HORIZONTAL,
-                raw_line_index=line_index,
-                span_order=None,
+                line_direction=character.line_direction,
+                writing_mode=character.writing_mode,
+                raw_line_index=character.raw_line_index,
+                span_order=character.span_order,
             )
         )
-        line_index += character.text.count("\n")
     return characters
 
 

@@ -72,6 +72,10 @@ def test_text_character_metadata_is_immutable_json_safe_and_offset_exact() -> No
         source_end=1,
         mapping_state=PdfCharacterMappingState.GLYPH,
         group_id="line-0-span-0-glyph-0",
+        line_direction=(-1.0, 0.0),
+        writing_mode=0,
+        raw_line_index=2,
+        span_order=3,
     )
     span = PdfTextSpan(
         text="W",
@@ -99,6 +103,10 @@ def test_text_character_metadata_is_immutable_json_safe_and_offset_exact() -> No
             "source_end": 1,
             "mapping_state": "glyph",
             "group_id": "line-0-span-0-glyph-0",
+            "line_direction": [-1.0, 0.0],
+            "writing_mode": 0,
+            "raw_line_index": 2,
+            "span_order": 3,
         }
     ]
     assert span.model_dump(mode="json")["line_direction"] == [1.0, 0.0]
@@ -123,6 +131,10 @@ def test_multi_codepoint_glyph_group_has_one_bbox_and_stable_boundaries() -> Non
         "source_end": 3,
         "mapping_state": "glyph",
         "group_id": "line-2-span-4-glyph-1",
+        "line_direction": [1.0, 0.0],
+        "writing_mode": 0,
+        "raw_line_index": 0,
+        "span_order": None,
     }
 
 
@@ -150,6 +162,10 @@ def test_pdf_text_metadata_accepts_legacy_json_without_group_or_writing_fields()
     )
 
     assert character.group_id is None
+    assert character.line_direction == (1.0, 0.0)
+    assert character.writing_mode.value == 0
+    assert character.raw_line_index == 0
+    assert character.span_order is None
     assert span.line_direction == (1.0, 0.0)
     assert span.writing_mode.value == 0
     assert span.line_index == 0

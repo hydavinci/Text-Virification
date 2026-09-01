@@ -44,11 +44,17 @@ class _PdfGlyphRectangle:
     source_start: int
     source_end: int
     line_index: int
+    line_direction: tuple[float, float]
+    writing_mode: int
 
 
 _PDF_MAPPING_VALIDATION_ERROR = (
     "PDF compatibility mapping validation failed: "
     "character metadata is incomplete or invalid."
+)
+_PDF_DIRECTIONAL_COMPATIBILITY_ERROR = (
+    "PDF compatibility mapping validation failed: directional source text "
+    "cannot be safely replaced."
 )
 _PDF_EDIT_CONFLICT_ERROR = "PDF edits contain overlapping or ambiguous source ranges."
 _PDF_INSERTION_SPACE_ERROR = "PDF replacement text does not fit the mapped source area."
@@ -731,27 +737,28 @@ def _validate_and_order_pdf_edits(
     text_length: int,
 ) -> list[TextEdit]:
     ordered = sorted(edits, key=lambda edit: (edit.start, edit.end, edit.replacement))
+    active_range_start: int | None = None
+    active_range_end: int | None = None
+    previous_insertion_position: int | None = None
     for edit in ordered:
         if edit.start < 0 or edit.end < edit.start or edit.end > text_length:
             raise ExportError("An edit position is outside the original document.")
-    for index, first in enumerate(ordered):
-        for second in ordered[index + 1 :]:
-            first_insertion = first.start == first.end
-            second_insertion = second.start == second.end
-            if first_insertion and second_insertion:
-                if first.start == second.start:
-                    raise ExportError(_PDF_EDIT_CONFLICT_ERROR)
-                continue
-            if first_insertion:
-                if second.start <= first.start <= second.end:
-                    raise ExportError(_PDF_EDIT_CONFLICT_ERROR)
-                continue
-            if second_insertion:
-                if first.start <= second.start <= first.end:
-                    raise ExportError(_PDF_EDIT_CONFLICT_ERROR)
-                continue
-            if first.start < second.end and second.start < first.end:
+        is_insertion = edit.start == edit.end
+        if is_insertion:
+            if previous_insertion_position == edit.start:
                 raise ExportError(_PDF_EDIT_CONFLICT_ERROR)
+            if (
+                active_range_start is not None
+                and active_range_end is not None
+                and active_range_start < edit.start < active_range_end
+            ):
+                raise ExportError(_PDF_EDIT_CONFLICT_ERROR)
+            previous_insertion_position = edit.start
+            continue
+        if active_range_end is not None and edit.start < active_range_end:
+            raise ExportError(_PDF_EDIT_CONFLICT_ERROR)
+        active_range_start = edit.start
+        active_range_end = edit.end
     return ordered
 
 
@@ -814,11 +821,13 @@ def _export_pdf_edits(
                     "PDF original-format export does not support insertion-only edits; "
                     "replace existing text or export the edited text as TXT."
                 )
-            page, rectangles, anchor = _pdf_edit_location(
+            page, rectangles, anchor, replacement_compatible = _pdf_edit_location(
                 document,
                 canonical_document,
                 edit,
             )
+            if not track_changes and not replacement_compatible:
+                raise ExportError(_PDF_DIRECTIONAL_COMPATIBILITY_ERROR)
             resolved.append((page, rectangles, anchor, original, edit.replacement))
 
         redactions: list[tuple[object, object, str, float]] = []
@@ -894,7 +903,7 @@ def _pdf_edit_location(
     pdf: object,
     document: object,
     edit: TextEdit,
-) -> tuple[object, list[object], object]:
+) -> tuple[object, list[object], object, bool]:
     for block in document.blocks:  # type: ignore[attr-defined]
         if not (block.global_start <= edit.start and edit.end <= block.global_end):
             continue
@@ -926,7 +935,12 @@ def _pdf_edit_location(
         ]
         if not rectangles:
             raise ExportError(_PDF_MAPPING_VALIDATION_ERROR)
-        return page, rectangles, rectangles[0]
+        return (
+            page,
+            rectangles,
+            rectangles[0],
+            all(_pdf_glyph_is_horizontal_ltr(glyph) for glyph in glyphs),
+        )
     raise ExportError(_PDF_MAPPING_VALIDATION_ERROR)
 
 
@@ -1003,15 +1017,51 @@ def _validated_pdf_glyphs(
         if mapping_state != "glyph":
             raise ExportError(_PDF_MAPPING_VALIDATION_ERROR)
         bbox = _validated_pdf_bbox(bbox_value)
+        line_direction, writing_mode = _validated_pdf_source_direction(value)
         glyphs.append(
             _PdfGlyphRectangle(
                 rectangle=_pdf_page_rectangle(page, bbox),
                 source_start=source_start,
                 source_end=source_end,
                 line_index=line_index,
+                line_direction=line_direction,
+                writing_mode=writing_mode,
             )
         )
     return glyphs
+
+
+def _validated_pdf_source_direction(
+    value: dict[str, object],
+) -> tuple[tuple[float, float], int]:
+    direction_value = value.get("line_direction", (1.0, 0.0))
+    writing_mode = value.get("writing_mode", 0)
+    if (
+        not isinstance(direction_value, tuple | list)
+        or len(direction_value) != 2
+        or isinstance(writing_mode, bool)
+        or not isinstance(writing_mode, int)
+        or writing_mode not in {0, 1}
+    ):
+        raise ExportError(_PDF_MAPPING_VALIDATION_ERROR)
+    direction: list[float] = []
+    for component in direction_value:
+        if (
+            isinstance(component, bool)
+            or not isinstance(component, int | float)
+            or not isfinite(float(component))
+        ):
+            raise ExportError(_PDF_MAPPING_VALIDATION_ERROR)
+        direction.append(float(component))
+    if direction == [0.0, 0.0]:
+        raise ExportError(_PDF_MAPPING_VALIDATION_ERROR)
+    return (direction[0], direction[1]), writing_mode
+
+
+def _pdf_glyph_is_horizontal_ltr(glyph: _PdfGlyphRectangle) -> bool:
+    return glyph.writing_mode == 0 and glyph.line_direction[0] > 0 and abs(
+        glyph.line_direction[1]
+    ) <= 1e-6
 
 
 def _validated_pdf_bbox(value: object) -> tuple[float, float, float, float]:
@@ -1067,6 +1117,8 @@ def _coalesce_pdf_glyph_rectangles(
             source_start=previous.source_start,
             source_end=glyph.source_end,
             line_index=previous.line_index,
+            line_direction=previous.line_direction,
+            writing_mode=previous.writing_mode,
         )
     return coalesced
 
@@ -1078,6 +1130,8 @@ def _pdf_glyph_rectangles_are_adjacent(
     if (
         previous.source_end != following.source_start
         or previous.line_index != following.line_index
+        or previous.line_direction != following.line_direction
+        or previous.writing_mode != following.writing_mode
     ):
         return False
     previous_rectangle = previous.rectangle

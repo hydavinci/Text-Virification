@@ -29,6 +29,8 @@ from text_verification.document_processing.pdf_models import (
     PdfDocumentMetadata,
     PdfPageKind,
     PdfPageMetadata,
+    PdfTable,
+    PdfTableCell,
     PdfTextCharacter,
     PdfTextSpan,
 )
@@ -134,12 +136,49 @@ def test_result_row_mapping_round_trips_typed_document_metadata() -> None:
                                             source_end=1,
                                             mapping_state=PdfCharacterMappingState.GLYPH,
                                             group_id="line-0-span-0-glyph-0",
+                                            line_direction=(-1.0, 0.0),
+                                            writing_mode=0,
+                                            raw_line_index=2,
+                                            span_order=3,
                                         ),
                                     ),
                                     line_direction=(-1.0, 0.0),
                                     writing_mode=0,
                                     line_index=2,
                                     span_order=3,
+                                ),
+                            ),
+                            tables=(
+                                PdfTable(
+                                    table_index=0,
+                                    bbox=(20.0, 20.0, 40.0, 40.0),
+                                    row_count=1,
+                                    column_count=1,
+                                    rows=(
+                                        (
+                                            PdfTableCell(
+                                                text="A",
+                                                bbox=(20.0, 20.0, 40.0, 40.0),
+                                                table_index=0,
+                                                row_index=0,
+                                                cell_index=0,
+                                                characters=(
+                                                    PdfTextCharacter(
+                                                        text="A",
+                                                        bbox=(20.0, 20.0, 30.0, 30.0),
+                                                        source_start=0,
+                                                        source_end=1,
+                                                        mapping_state=PdfCharacterMappingState.GLYPH,
+                                                        group_id="line-2-span-3-glyph-0",
+                                                        line_direction=(-1.0, 0.0),
+                                                        writing_mode=0,
+                                                        raw_line_index=2,
+                                                        span_order=3,
+                                                    ),
+                                                ),
+                                            ),
+                                        ),
+                                    ),
                                 ),
                             ),
                         ),
@@ -152,9 +191,18 @@ def test_result_row_mapping_round_trips_typed_document_metadata() -> None:
     )
 
     document_row, run_row = _map_result_to_rows(JOB_ID, result, created_at=CREATED_AT)
+    loaded = _map_rows_to_result(document_row, run_row)
 
     assert document_row.document_metadata == result.metadata.model_dump(mode="json")
-    assert _map_rows_to_result(document_row, run_row) == result
+    assert loaded == result
+    aligned_character = loaded.metadata.pdf.pages[0].tables[0].rows[0][0].characters[0]
+    assert (
+        aligned_character.line_direction,
+        aligned_character.writing_mode.value,
+        aligned_character.raw_line_index,
+        aligned_character.span_order,
+        aligned_character.group_id,
+    ) == ((-1.0, 0.0), 0, 2, 3, "line-2-span-3-glyph-0")
 def test_result_row_mapping_round_trips_nested_document_blocks_exactly() -> None:
     result = _structured_result()
 

@@ -70,6 +70,10 @@ class PdfTextCharacter(_PdfModel):
     source_end: PositiveInt
     mapping_state: PdfCharacterMappingState
     group_id: str | None = Field(default=None, min_length=1)
+    line_direction: tuple[float, float] = (1.0, 0.0)
+    writing_mode: PdfWritingMode = PdfWritingMode.HORIZONTAL
+    raw_line_index: NonNegativeInt = 0
+    span_order: NonNegativeInt | None = None
 
     @field_validator("bbox", mode="before")
     @classmethod
@@ -77,6 +81,17 @@ class PdfTextCharacter(_PdfModel):
         if value is None:
             return None
         return _strict_bbox(value, field_name="bbox")
+
+    @field_validator("line_direction", mode="before")
+    @classmethod
+    def validate_line_direction(cls, value: object) -> tuple[float, float]:
+        if not isinstance(value, tuple | list) or len(value) != 2:
+            raise TypeError("line_direction must contain two finite coordinates")
+        x = _strict_finite_float(value[0], field_name="line_direction")
+        y = _strict_finite_float(value[1], field_name="line_direction")
+        if x == 0.0 and y == 0.0:
+            raise ValueError("line_direction must not be the zero vector")
+        return x, y
 
     @model_validator(mode="after")
     def validate_mapping(self) -> PdfTextCharacter:
@@ -317,6 +332,9 @@ class PdfResourceLimits(_PdfModel):
     max_image_rectangles_per_page: PositiveInt = 500
     max_tables_per_page: PositiveInt = 50
     max_table_cells_per_page: PositiveInt = 10_000
+    max_table_text_chars_per_cell: PositiveInt = 100_000
+    max_table_text_chars_per_page: PositiveInt = 1_000_000
+    max_table_glyph_candidates_per_cell: PositiveInt = 100_000
 
 
 def _contains(outer: BBox, inner: BBox) -> bool:
