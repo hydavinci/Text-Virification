@@ -8,7 +8,7 @@ WORKDIR /build
 COPY pyproject.toml ./
 COPY src ./src
 
-RUN python -m pip wheel --wheel-dir /wheels ".[dev]"
+RUN python -m pip wheel --wheel-dir /wheels ".[dev,ocr]"
 
 FROM python:3.12-slim AS runtime
 
@@ -27,7 +27,7 @@ RUN groupadd --system app \
     && useradd --system --gid app --create-home app
 
 COPY --from=builder /wheels /wheels
-RUN python -m pip install --no-index --find-links=/wheels "text-verification[dev]" \
+RUN python -m pip install --no-index --find-links=/wheels "text-verification[dev,ocr]" \
     && rm -rf /wheels
 
 WORKDIR /app

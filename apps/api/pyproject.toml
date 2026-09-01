@@ -29,6 +29,11 @@ dev = [
   "pytest-cov>=6,<7",
   "ruff>=0.9,<1",
 ]
+ocr = [
+  "numpy>=2,<3",
+  "opencv-python-headless>=4.10,<5",
+  "rapidocr>=3,<4",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
