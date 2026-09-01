@@ -144,6 +144,7 @@ class JobRepository:
                 lease_owner_token=owner_token,
                 lease_expires_at=lease_expires_at,
                 rescue_due_at=lease_expires_at,
+                rescue_last_published_at=None,
                 updated_at=now,
             )
             .returning(JobRow)
@@ -231,6 +232,7 @@ class JobRepository:
                 JobRow.status.not_in(status.value for status in TERMINAL_STATUSES),
                 JobRow.expires_at > now,
                 JobRow.rescue_due_at <= now,
+                JobRow.rescue_last_published_at.is_(None),
                 or_(
                     JobRow.lease_owner_token.is_(None),
                     JobRow.lease_expires_at <= now,
@@ -275,6 +277,13 @@ class JobRepository:
                 .where(
                     JobRow.job_id == job_id,
                     JobRow.rescue_attempts == attempt,
+                    JobRow.rescue_last_published_at.is_(None),
+                    JobRow.status.not_in(status.value for status in TERMINAL_STATUSES),
+                    JobRow.expires_at > published_at,
+                    or_(
+                        JobRow.lease_owner_token.is_(None),
+                        JobRow.lease_expires_at <= published_at,
+                    ),
                 )
                 .values(rescue_last_published_at=published_at)
                 .execution_options(synchronize_session=False)
@@ -306,7 +315,10 @@ class JobRepository:
                         JobRow.lease_expires_at <= now,
                     ),
                 )
-                .values(rescue_due_at=retry_due_at)
+                .values(
+                    rescue_due_at=retry_due_at,
+                    rescue_last_published_at=None,
+                )
                 .execution_options(synchronize_session=False)
             ),
         )
@@ -446,6 +458,7 @@ class JobRepository:
                 row.lease_owner_token = None
                 row.lease_expires_at = None
                 row.rescue_due_at = cutoff
+                row.rescue_last_published_at = None
                 self._session.add(
                     JobEventRow(
                         job_id=row.job_id,
@@ -553,9 +566,11 @@ class JobRepository:
         if clear_lease:
             job.lease_owner_token = None
             job.lease_expires_at = None
+            job.rescue_last_published_at = None
         elif lease_expires_at is not None:
             job.lease_expires_at = lease_expires_at
             job.rescue_due_at = lease_expires_at
+            job.rescue_last_published_at = None
         self._session.add(
             JobEventRow(
                 job_id=job.job_id,

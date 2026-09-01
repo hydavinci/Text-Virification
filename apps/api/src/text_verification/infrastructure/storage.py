@@ -17,6 +17,8 @@ StoredUpload = document_storage.StoredDocument
 UnsupportedFileType = document_storage.UnsupportedFileType
 UploadCleanupFailed = document_storage.UploadCleanupFailed
 UploadTooLarge = document_storage.UploadTooLarge
+build_artifact_storage_key = document_storage.build_artifact_storage_key
+validate_artifact_storage_key = document_storage.validate_artifact_storage_key
 
 
 class JobStorage(DocumentStorage):
@@ -45,6 +47,10 @@ class JobStorage(DocumentStorage):
 
     def delete_job(self, job_id: UUID) -> None:
         self._delete_job_directory(self.job_directory(job_id))
+
+    def delete_artifact(self, job_id: UUID, storage_key: str) -> bool:
+        validate_artifact_storage_key(job_id, storage_key)
+        return self.delete_storage_key(storage_key)
 
     def _delete_directory(self, document_directory: Path) -> None:
         self._delete_job_directory(document_directory)

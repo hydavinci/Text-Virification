@@ -257,9 +257,9 @@ def test_cleanup_deletes_recorded_export_outside_job_directory_before_aggregate(
 ) -> None:
     from text_verification.workers.tasks import cleanup_expired_jobs
 
-    storage_key = f"exports/{expired_job.job_id}.txt"
+    storage_key = f"artifacts/{expired_job.job_id}/{uuid4()}.txt"
     export_path = storage._root / storage_key
-    export_path.parent.mkdir()
+    export_path.parent.mkdir(parents=True)
     export_path.write_text("reviewed", encoding="utf-8")
     verification_repository.artifact_keys[expired_job.job_id] = (storage_key,)
 
@@ -296,6 +296,38 @@ def test_cleanup_rejects_artifact_traversal_and_keeps_aggregate_for_retry(
     ]
 
 
+def test_cleanup_rejects_cross_job_artifact_and_keeps_metadata(
+    verification_repository: InMemoryCleanupVerificationRepository,
+    storage: JobStorage,
+    expired_job: JobRead,
+    repository: InMemoryCleanupRepository,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from text_verification.workers.tasks import cleanup_expired_jobs
+
+    other_job = repository.create_job(
+        status=JobStatus.COMPLETED,
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+    storage_key = f"artifacts/{other_job.job_id}/{uuid4()}.txt"
+    artifact_path = storage._root / storage_key
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_text("keep", encoding="utf-8")
+    verification_repository.artifact_keys[expired_job.job_id] = (storage_key,)
+
+    with caplog.at_level(logging.WARNING, logger="text_verification.workers.tasks"):
+        deleted_job_ids = cleanup_expired_jobs()
+
+    assert deleted_job_ids == []
+    assert artifact_path.read_text(encoding="utf-8") == "keep"
+    assert storage.job_directory(expired_job.job_id).exists()
+    assert verification_repository.artifact_keys[expired_job.job_id] == (storage_key,)
+    assert verification_repository.deleted_job_ids == []
+    assert [record.getMessage() for record in caplog.records] == [
+        "cleanup_expired_job_delete_failed"
+    ]
+
+
 def test_cleanup_partial_artifact_failure_retries_before_deleting_aggregate(
     verification_repository: InMemoryCleanupVerificationRepository,
     storage: JobStorage,
@@ -304,29 +336,29 @@ def test_cleanup_partial_artifact_failure_retries_before_deleting_aggregate(
 ) -> None:
     from text_verification.workers.tasks import cleanup_expired_jobs
 
-    first_key = f"exports/{expired_job.job_id}-a.txt"
-    second_key = f"exports/{expired_job.job_id}-b.txt"
+    first_key = f"artifacts/{expired_job.job_id}/{uuid4()}-a.txt"
+    second_key = f"artifacts/{expired_job.job_id}/{uuid4()}-b.txt"
     first_path = storage._root / first_key
     second_path = storage._root / second_key
-    first_path.parent.mkdir()
+    first_path.parent.mkdir(parents=True)
     first_path.write_text("first", encoding="utf-8")
     second_path.write_text("second", encoding="utf-8")
     verification_repository.artifact_keys[expired_job.job_id] = (
         first_key,
         second_key,
     )
-    real_delete_storage_key = storage.delete_storage_key
+    real_delete_artifact = storage.delete_artifact
     second_attempts = 0
 
-    def flaky_delete_storage_key(storage_key: str) -> bool:
+    def flaky_delete_artifact(job_id: UUID, storage_key: str) -> bool:
         nonlocal second_attempts
         if storage_key == second_key:
             second_attempts += 1
             if second_attempts == 1:
                 raise PermissionError("locked")
-        return real_delete_storage_key(storage_key)
+        return real_delete_artifact(job_id, storage_key)
 
-    monkeypatch.setattr(storage, "delete_storage_key", flaky_delete_storage_key)
+    monkeypatch.setattr(storage, "delete_artifact", flaky_delete_artifact)
 
     assert cleanup_expired_jobs() == []
     assert not first_path.exists()

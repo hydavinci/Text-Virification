@@ -285,6 +285,12 @@ class VerificationIssueRow(Base):
             name="fk_verification_issues_run_document",
             ondelete="CASCADE",
         ),
+        ForeignKeyConstraint(
+            ["document_id", "block_id"],
+            ["document_blocks.document_id", "document_blocks.block_id"],
+            name="fk_verification_issues_document_block",
+            ondelete="CASCADE",
+        ),
         UniqueConstraint(
             "verification_run_id",
             "issue_id",

@@ -160,6 +160,7 @@ class VerificationResult(BaseModel):
             parser_name=self.parser_name,
             parser_version=self.parser_version,
         )
+        blocks_by_id = {block.block_id: block for block in self.blocks}
         for issue in self.issues:
             if issue.document_id != self.document_id:
                 raise ValueError("issue document ownership must match the verification result")
@@ -169,6 +170,26 @@ class VerificationResult(BaseModel):
                 raise ValueError("issue range exceeds verification result text")
             if self.text[issue.start:issue.end] != issue.original:
                 raise ValueError("issue original text must match verification result text")
+            if issue.block_id is None:
+                continue
+            block = blocks_by_id.get(issue.block_id)
+            if block is None:
+                raise ValueError("issue block must exist in the verification result")
+            if issue.start < block.global_start or issue.end > block.global_end:
+                raise ValueError("issue global range must be contained by its block")
+            if issue.block_start is None or issue.block_end is None:
+                raise ValueError("issue block offsets must be present for its block")
+            expected_block_start = block.block_start + issue.start - block.global_start
+            expected_block_end = block.block_start + issue.end - block.global_start
+            if (
+                issue.block_start != expected_block_start
+                or issue.block_end != expected_block_end
+            ):
+                raise ValueError("issue local offsets must map exactly to global offsets")
+            local_start = issue.block_start - block.block_start
+            local_end = issue.block_end - block.block_start
+            if block.text[local_start:local_end] != issue.original:
+                raise ValueError("issue original text must match its block slice")
 
         if self.summary.total != len(self.issues):
             raise ValueError("summary total must match the issue count")

@@ -50,6 +50,41 @@ class UploadCleanupFailed(RuntimeError):
     pass
 
 
+ARTIFACT_NAMESPACE = "artifacts"
+
+
+def validate_storage_key(storage_key: str) -> PurePosixPath:
+    if (
+        not storage_key
+        or "\x00" in storage_key
+        or "\\" in storage_key
+        or storage_key.startswith("/")
+        or (len(storage_key) >= 2 and storage_key[1] == ":")
+    ):
+        raise InvalidUpload("Artifact storage key is unsafe.")
+    raw_parts = storage_key.split("/")
+    if any(part in {"", ".", ".."} for part in raw_parts):
+        raise InvalidUpload("Artifact storage key is unsafe.")
+    return PurePosixPath(*raw_parts)
+
+
+def build_artifact_storage_key(
+    job_id: UUID,
+    artifact_id: UUID,
+    file_type: FileType | str,
+) -> str:
+    resolved_file_type = file_type if isinstance(file_type, FileType) else FileType(file_type)
+    return f"{ARTIFACT_NAMESPACE}/{job_id}/{artifact_id}.{resolved_file_type.value}"
+
+
+def validate_artifact_storage_key(job_id: UUID, storage_key: str) -> PurePosixPath:
+    relative_path = validate_storage_key(storage_key)
+    expected_prefix = (ARTIFACT_NAMESPACE, str(job_id))
+    if len(relative_path.parts) < 3 or relative_path.parts[:2] != expected_prefix:
+        raise InvalidUpload(f"Artifact storage key does not belong to job {job_id}.")
+    return relative_path
+
+
 def preserve_original_name(original_name: str) -> str:
     return original_name
 
@@ -360,18 +395,7 @@ class DocumentStorage:
             raise InvalidUpload(f"Upload path escapes storage root: {path}")
 
     def _path_for_storage_key(self, storage_key: str) -> Path:
-        if (
-            not storage_key
-            or "\x00" in storage_key
-            or "\\" in storage_key
-        ):
-            raise InvalidUpload("Artifact storage key is unsafe.")
-        relative_path = PurePosixPath(storage_key)
-        if relative_path.is_absolute() or any(
-            part in {"", ".", ".."} for part in relative_path.parts
-        ):
-            raise InvalidUpload("Artifact storage key is unsafe.")
-
+        relative_path = validate_storage_key(storage_key)
         path = self._root.joinpath(*relative_path.parts)
         current = self._root
         if self._is_reparse_point(current):

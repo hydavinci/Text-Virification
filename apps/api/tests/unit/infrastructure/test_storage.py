@@ -9,6 +9,7 @@ from uuid import uuid4
 import pytest
 
 from text_verification.domain.documents import FileType
+from text_verification.infrastructure import storage as storage_module
 from text_verification.infrastructure.storage import (
     InvalidUpload,
     JobStorage,
@@ -274,6 +275,94 @@ def test_delete_storage_key_removes_root_relative_export(tmp_path) -> None:
     assert storage.delete_storage_key("exports/reviewed.txt") is True
     assert not export_path.exists()
     assert storage.delete_storage_key("exports/reviewed.txt") is False
+
+
+def test_artifact_storage_key_builder_uses_job_owned_namespace() -> None:
+    job_id = uuid4()
+    artifact_id = uuid4()
+
+    storage_key = storage_module.build_artifact_storage_key(
+        job_id,
+        artifact_id,
+        FileType.DOCX,
+    )
+
+    assert storage_key == f"artifacts/{job_id}/{artifact_id}.docx"
+
+
+def test_delete_artifact_removes_only_key_owned_by_job(tmp_path) -> None:
+    storage = JobStorage(tmp_path, max_upload_bytes=1024)
+    job_id = uuid4()
+    artifact_id = uuid4()
+    storage_key = f"artifacts/{job_id}/{artifact_id}.txt"
+    artifact_path = tmp_path / storage_key
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_text("reviewed", encoding="utf-8")
+
+    assert storage.delete_artifact(job_id, storage_key) is True
+    assert not artifact_path.exists()
+    assert storage.delete_artifact(job_id, storage_key) is False
+
+
+def test_delete_artifact_rejects_cross_job_key(tmp_path) -> None:
+    storage = JobStorage(tmp_path, max_upload_bytes=1024)
+    owner_job_id = uuid4()
+    other_job_id = uuid4()
+    storage_key = f"artifacts/{other_job_id}/{uuid4()}.txt"
+    artifact_path = tmp_path / storage_key
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_text("keep", encoding="utf-8")
+
+    with pytest.raises(InvalidUpload, match="does not belong"):
+        storage.delete_artifact(owner_job_id, storage_key)
+
+    assert artifact_path.read_text(encoding="utf-8") == "keep"
+
+
+@pytest.mark.parametrize(
+    "storage_key",
+    [
+        "{job_id}/source.txt",
+        "compatibility/{job_id}/source.txt",
+        "artifacts/{job_id}/../other/artifact.txt",
+        "/absolute/artifact.txt",
+        "infrastructure.env",
+    ],
+)
+def test_artifact_storage_key_validator_rejects_non_artifact_paths(
+    storage_key: str,
+) -> None:
+    job_id = uuid4()
+
+    with pytest.raises(InvalidUpload):
+        storage_module.validate_artifact_storage_key(
+            job_id,
+            storage_key.format(job_id=job_id),
+        )
+
+
+def test_delete_artifact_rejects_symlink_escape(tmp_path) -> None:
+    storage = JobStorage(tmp_path / "jobs", max_upload_bytes=1024)
+    job_id = uuid4()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    artifact_id = uuid4()
+    outside_artifact = outside / f"{artifact_id}.txt"
+    outside_artifact.write_text("keep", encoding="utf-8")
+    artifact_directory = storage._root / "artifacts" / str(job_id)
+    artifact_directory.parent.mkdir(parents=True)
+    try:
+        artifact_directory.symlink_to(outside, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"symlink creation unavailable: {error}")
+
+    with pytest.raises(InvalidUpload, match="reparse point"):
+        storage.delete_artifact(
+            job_id,
+            f"artifacts/{job_id}/{artifact_id}.txt",
+        )
+
+    assert outside_artifact.read_text(encoding="utf-8") == "keep"
 
 
 @pytest.mark.parametrize(

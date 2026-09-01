@@ -30,6 +30,10 @@ from text_verification.infrastructure.orm import (
     VerificationRunRow,
 )
 from text_verification.infrastructure.repositories import JobRepository
+from text_verification.infrastructure.storage import (
+    InvalidUpload,
+    build_artifact_storage_key,
+)
 from text_verification.infrastructure.verification_repository import (
     VerificationRepository,
     _map_result_to_rows,
@@ -49,6 +53,11 @@ SECOND_ISSUE_ID = UUID("40000000-0000-0000-0000-000000000014")
 SECOND_REVISION_ID = UUID("50000000-0000-0000-0000-000000000015")
 SECOND_ARTIFACT_ID = UUID("60000000-0000-0000-0000-000000000016")
 CREATED_AT = datetime(2026, 8, 31, 7, 0, tzinfo=UTC)
+ARTIFACT_STORAGE_KEY = build_artifact_storage_key(
+    JOB_ID,
+    ARTIFACT_ID,
+    FileType.DOCX,
+)
 
 
 def test_result_row_mapping_round_trips_every_canonical_field_without_database() -> None:
@@ -160,6 +169,11 @@ def test_orm_metadata_enforces_cross_owner_relationships() -> None:
             "verification_runs.verification_run_id",
             "verification_runs.document_id",
         ),
+        "CASCADE",
+    ) in _metadata_foreign_keys(VerificationIssueRow)
+    assert (
+        ("document_id", "block_id"),
+        ("document_blocks.document_id", "document_blocks.block_id"),
         "CASCADE",
     ) in _metadata_foreign_keys(VerificationIssueRow)
     assert (
@@ -275,6 +289,12 @@ def test_database_schema_contains_normalized_verification_tables(db_engine: Engi
         "verification_runs",
         ("verification_run_id", "document_id"),
         ("verification_run_id", "document_id"),
+        "CASCADE",
+    ) in _foreign_keys(inspector, "verification_issues")
+    assert (
+        "document_blocks",
+        ("document_id", "block_id"),
+        ("document_id", "block_id"),
         "CASCADE",
     ) in _foreign_keys(inspector, "verification_issues")
     assert (
@@ -424,7 +444,7 @@ def test_save_review_revision_and_export_artifact_preserves_identity_and_source(
         file_type=FileType.DOCX,
         file_name="sample-reviewed.docx",
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        storage_key="exports/60000000-0000-0000-0000-000000000006.docx",
+        storage_key=ARTIFACT_STORAGE_KEY,
         size_bytes=8192,
         created_at=CREATED_AT + timedelta(minutes=2),
     )
@@ -445,7 +465,7 @@ def test_save_review_revision_and_export_artifact_preserves_identity_and_source(
         file_type=FileType.DOCX,
         file_name="sample-reviewed.docx",
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        storage_key="exports/60000000-0000-0000-0000-000000000006.docx",
+        storage_key=ARTIFACT_STORAGE_KEY,
         size_bytes=8192,
         created_at=CREATED_AT + timedelta(minutes=2),
     )
@@ -471,10 +491,41 @@ def test_save_review_revision_and_export_artifact_preserves_identity_and_source(
     assert artifact.review_revision_id == REVISION_ID
     assert artifact.source_version == "sha256:source-v7"
     assert artifact.file_type == FileType.DOCX.value
-    assert artifact.storage_key == (
-        "exports/60000000-0000-0000-0000-000000000006.docx"
-    )
+    assert artifact.storage_key == ARTIFACT_STORAGE_KEY
     assert artifact.size_bytes == 8192
+
+
+@pytest.mark.parametrize(
+    "storage_key",
+    [
+        build_artifact_storage_key(SECOND_JOB_ID, ARTIFACT_ID, FileType.DOCX),
+        f"{JOB_ID}/source.docx",
+        "../infrastructure.env",
+        f"artifacts/{JOB_ID}/../{SECOND_JOB_ID}/artifact.docx",
+        "/absolute/artifact.docx",
+    ],
+)
+def test_save_export_artifact_rejects_non_job_owned_storage_key(
+    db_session: Session,
+    storage_key: str,
+) -> None:
+    _create_job(db_session)
+    repository = VerificationRepository(db_session)
+    repository.save_result(JOB_ID, _result())
+
+    with pytest.raises(InvalidUpload):
+        repository.save_export_artifact(
+            export_artifact_id=ARTIFACT_ID,
+            verification_run_id=RUN_ID,
+            review_revision_id=None,
+            source_version="sha256:source-v7",
+            file_type=FileType.DOCX,
+            file_name="sample.docx",
+            media_type="application/octet-stream",
+            storage_key=storage_key,
+            size_bytes=10,
+            created_at=CREATED_AT,
+        )
 
 
 def test_save_review_revision_rejects_source_version_mismatch(
@@ -596,7 +647,7 @@ def test_database_rejects_artifact_revision_from_another_run(
         file_type=FileType.DOCX,
         file_name="sample.docx",
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        storage_key="exports/cross-owner.docx",
+        storage_key=ARTIFACT_STORAGE_KEY,
         size_bytes=10,
         created_at=CREATED_AT,
     )
@@ -759,16 +810,19 @@ def test_concurrent_review_revision_conflict_raises_value_error(
     assert not isinstance(error, IntegrityError)
 
 
-def test_concurrent_cross_run_artifact_conflict_raises_value_error(
+def test_concurrent_same_job_artifact_conflict_raises_value_error(
     db_session_factory: sessionmaker[Session],
 ) -> None:
     seed_session = db_session_factory()
     try:
-        _seed_two_results(seed_session)
+        _create_job(seed_session)
+        repository = VerificationRepository(seed_session)
+        repository.save_result(JOB_ID, _result())
+        repository.commit()
     finally:
         seed_session.close()
 
-    storage_key = "exports/concurrent.docx"
+    storage_key = ARTIFACT_STORAGE_KEY
     first_saved = Event()
     second_started = Event()
     second_finished = Event()
@@ -809,7 +863,7 @@ def test_concurrent_cross_run_artifact_conflict_raises_value_error(
             second_started.set()
             repository.save_export_artifact(
                 export_artifact_id=SECOND_ARTIFACT_ID,
-                verification_run_id=SECOND_RUN_ID,
+                verification_run_id=RUN_ID,
                 review_revision_id=None,
                 source_version="sha256:source-v7",
                 file_type=FileType.DOCX,
@@ -884,8 +938,8 @@ def _result(
         page=3,
         start=0,
         end=2,
-        block_start=4,
-        block_end=6,
+        block_start=0,
+        block_end=2,
         original="帐号",
         suggestion="账号",
         alternatives=["账户", "账号名称"],

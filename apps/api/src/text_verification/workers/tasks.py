@@ -489,7 +489,8 @@ def _cleanup_expired_jobs() -> list[str]:
         try:
             for storage_key in artifact_storage_keys:
                 deleted_artifact = (
-                    storage.delete_storage_key(storage_key) or deleted_artifact
+                    storage.delete_artifact(expired_job_id, storage_key)
+                    or deleted_artifact
                 )
             storage.delete_job(expired_job_id)
         except Exception as error:

@@ -150,11 +150,33 @@ def upgrade() -> None:
         "'{\"locator_kind\":\"file\",\"note\":\"migrated persisted result\"}'::jsonb "
         "FROM documents"
     )
+    op.execute(
+        'UPDATE verification_issues SET '
+        "block_id = 'file-0', "
+        "block_start = start, "
+        'block_end = "end" '
+        "WHERE block_id IS NOT NULL "
+        "OR block_start IS NOT NULL "
+        "OR block_end IS NOT NULL"
+    )
+    op.create_foreign_key(
+        "fk_verification_issues_document_block",
+        "verification_issues",
+        "document_blocks",
+        ["document_id", "block_id"],
+        ["document_id", "block_id"],
+        ondelete="CASCADE",
+    )
     op.alter_column("documents", "parser_name", server_default=None)
     op.alter_column("documents", "parser_version", server_default=None)
 
 
 def downgrade() -> None:
+    op.drop_constraint(
+        "fk_verification_issues_document_block",
+        "verification_issues",
+        type_="foreignkey",
+    )
     op.drop_table("document_blocks")
     op.drop_column("documents", "parser_version")
     op.drop_column("documents", "parser_name")

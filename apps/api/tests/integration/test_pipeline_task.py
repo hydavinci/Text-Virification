@@ -152,6 +152,7 @@ class InMemoryJobRepository:
             return JobClaimResult(JobClaimDisposition.LEASED, job, lease[1])
         self._working_leases[job_id] = (owner_token, lease_expires_at)
         self._working_rescue_due_at[job_id] = lease_expires_at
+        self._working_rescue_last_published_at[job_id] = None
         return JobClaimResult(
             JobClaimDisposition.ACQUIRED,
             job,
@@ -172,6 +173,8 @@ class InMemoryJobRepository:
             if job.status in TERMINAL_STATUSES or job.expires_at <= now:
                 continue
             if self._working_rescue_due_at[job_id] > now:
+                continue
+            if self._working_rescue_last_published_at[job_id] is not None:
                 continue
             lease = self._working_leases[job_id]
             if lease is not None and lease[1] > now:
@@ -199,7 +202,10 @@ class InMemoryJobRepository:
         attempt: int,
         published_at: datetime,
     ) -> bool:
-        if self._working_rescue_attempts.get(job_id) != attempt:
+        if (
+            self._working_rescue_attempts.get(job_id) != attempt
+            or self._working_rescue_last_published_at.get(job_id) is not None
+        ):
             return False
         self._working_rescue_last_published_at[job_id] = published_at
         return True
@@ -223,6 +229,7 @@ class InMemoryJobRepository:
         ):
             return False
         self._working_rescue_due_at[job_id] = retry_due_at
+        self._working_rescue_last_published_at[job_id] = None
         return True
 
     def transition(
@@ -298,6 +305,7 @@ class InMemoryJobRepository:
         )
         self._working_leases[job_id] = (owner_token, lease_expires_at)
         self._working_rescue_due_at[job_id] = lease_expires_at
+        self._working_rescue_last_published_at[job_id] = None
         return self._working_jobs[job_id]
 
     def fail_claimed_job(
@@ -1975,7 +1983,7 @@ def test_live_predecessor_retry_continues_after_retention_expiry(
     assert len(pipeline.commands) == 1
 
 
-def test_periodic_recovery_publication_is_bounded_during_worker_outage(
+def test_broker_confirmed_recovery_is_not_republished_during_worker_outage(
     monkeypatch: pytest.MonkeyPatch,
     worker_storage: JobStorage,
 ) -> None:
@@ -1987,7 +1995,7 @@ def test_periodic_recovery_publication_is_bounded_during_worker_outage(
         repository,
         worker_storage,
         created_at=created_at,
-        expires_at=created_at + timedelta(hours=1),
+        expires_at=created_at + timedelta(hours=4),
     )
     _configure_worker_dependencies(monkeypatch, repository, worker_storage)
     clock = MutableClock(created_at + timedelta(minutes=2))
@@ -2002,10 +2010,56 @@ def test_periodic_recovery_publication_is_bounded_during_worker_outage(
     assert worker_tasks._rescue_expired_job_leases() == [str(job_id)]
     clock.current += timedelta(seconds=60)
     assert worker_tasks._rescue_expired_job_leases() == []
-    clock.current += timedelta(seconds=59)
+    clock.current += timedelta(hours=1)
+    assert worker_tasks._rescue_expired_job_leases() == []
+
+    assert published == [str(job_id)]
+
+
+def test_publish_before_confirmation_crash_allows_one_later_republication(
+    monkeypatch: pytest.MonkeyPatch,
+    worker_storage: JobStorage,
+) -> None:
+    from text_verification.workers import tasks as worker_tasks
+
+    created_at = datetime(2026, 9, 1, 3, 0, tzinfo=UTC)
+    repository = InMemoryJobRepository()
+    job_id = _seed_txt_job(
+        repository,
+        worker_storage,
+        created_at=created_at,
+        expires_at=created_at + timedelta(hours=4),
+    )
+    _configure_worker_dependencies(monkeypatch, repository, worker_storage)
+    clock = MutableClock(created_at + timedelta(minutes=2))
+    published: list[str] = []
+    confirmation_attempts = 0
+    real_mark_published = worker_tasks._mark_recovery_published
+
+    def mark_published(*args, **kwargs) -> None:
+        nonlocal confirmation_attempts
+        confirmation_attempts += 1
+        if confirmation_attempts == 1:
+            raise RuntimeError("worker crashed before publication confirmation")
+        real_mark_published(*args, **kwargs)
+
+    monkeypatch.setattr(worker_tasks, "NOW_FACTORY", clock)
+    monkeypatch.setattr(
+        worker_tasks.process_job,
+        "apply_async",
+        lambda args, **kwargs: published.append(str(args[0])),
+    )
+    monkeypatch.setattr(worker_tasks, "_mark_recovery_published", mark_published)
+
+    with pytest.raises(RuntimeError, match="before publication confirmation"):
+        worker_tasks._rescue_expired_job_leases()
+
+    clock.current += timedelta(seconds=119)
     assert worker_tasks._rescue_expired_job_leases() == []
     clock.current += timedelta(seconds=1)
     assert worker_tasks._rescue_expired_job_leases() == [str(job_id)]
+    clock.current += timedelta(hours=1)
+    assert worker_tasks._rescue_expired_job_leases() == []
 
     assert published == [str(job_id), str(job_id)]
 

@@ -39,6 +39,7 @@ from text_verification.infrastructure.orm import (
     VerificationIssueRow,
     VerificationRunRow,
 )
+from text_verification.infrastructure.storage import validate_artifact_storage_key
 
 
 class JobResultState(StrEnum):
@@ -273,6 +274,7 @@ class VerificationRepository:
         job = self._lock_job(run.job_id)
         if JobStatus(job.status) is JobStatus.EXPIRED:
             raise ValueError(f"Job {job.job_id} has expired.")
+        validate_artifact_storage_key(job.job_id, storage_key)
         review_revision = self._review_revision_for_run(
             verification_run_id,
             review_revision_id,

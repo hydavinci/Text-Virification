@@ -123,6 +123,7 @@ def _verification_result_with_issues(
     document_id=None,
     verification_run_id=None,
     text: str,
+    blocks: tuple[TextBlock, ...] | None = None,
     summary: VerificationSummary | None = None,
 ) -> VerificationResult:
     first_issue = issues[0]
@@ -136,7 +137,7 @@ def _verification_result_with_issues(
         file_type=FileType.TXT,
         scenario=Scenario.GENERAL,
         text=text,
-        blocks=(_text_block(text),),
+        blocks=blocks or (_text_block(text),),
         parser_name="test-parser",
         parser_version="1",
         stats=VerificationStatistics(
@@ -167,13 +168,14 @@ def _text_block(
     *,
     block_id: str = "p-0",
     page: int | None = None,
+    global_start: int = 0,
 ) -> TextBlock:
     return TextBlock(
         block_id=block_id,
         kind="paragraph",
         text=text,
-        global_start=0,
-        global_end=len(text),
+        global_start=global_start,
+        global_end=global_start + len(text),
         block_start=0,
         block_end=len(text),
         page=page,
@@ -261,6 +263,60 @@ def test_verification_result_rejects_issue_from_another_run() -> None:
 def test_verification_result_rejects_issue_original_not_matching_document_text() -> None:
     with pytest.raises(ValidationError, match="original text"):
         _verification_result(_canonical_issue(), text="账号测试")
+
+
+def test_verification_result_rejects_issue_referencing_missing_block() -> None:
+    issue = _canonical_issue().model_copy(update={"block_id": "missing"})
+
+    with pytest.raises(ValidationError, match="issue block must exist"):
+        _verification_result(issue)
+
+
+def test_verification_result_rejects_issue_local_offsets_not_mapping_to_global() -> None:
+    issue = _canonical_issue().model_copy(
+        update={
+            "block_id": "p-1",
+            "start": 2,
+            "end": 4,
+            "block_start": 1,
+            "block_end": 3,
+        }
+    )
+    blocks = (
+        _text_block("前缀", block_id="p-0"),
+        _text_block("帐号测试", block_id="p-1", global_start=2),
+    )
+
+    with pytest.raises(ValidationError, match="local offsets must map"):
+        _verification_result_with_issues(
+            (issue,),
+            text="前缀帐号测试",
+            blocks=blocks,
+        )
+
+
+def test_verification_result_accepts_issue_mapped_to_nonzero_global_block() -> None:
+    issue = _canonical_issue().model_copy(
+        update={
+            "block_id": "p-1",
+            "start": 2,
+            "end": 4,
+            "block_start": 0,
+            "block_end": 2,
+        }
+    )
+    blocks = (
+        _text_block("前缀", block_id="p-0"),
+        _text_block("帐号测试", block_id="p-1", global_start=2),
+    )
+
+    result = _verification_result_with_issues(
+        (issue,),
+        text="前缀帐号测试",
+        blocks=blocks,
+    )
+
+    assert result.issues == (issue,)
 
 
 @pytest.mark.parametrize(
