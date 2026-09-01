@@ -1,10 +1,11 @@
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from pathlib import Path
 from threading import Event
-from typing import cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import CheckConstraint, Engine, String, Text, func, inspect, select, text
@@ -13,7 +14,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.session import sessionmaker
 
+from alembic import command
 from text_verification.application import (
+    ArtifactLifecycleStatus,
     ArtifactPersistenceRequest,
     ArtifactPersistenceResult,
     ArtifactPersistenceService,
@@ -29,7 +32,6 @@ from text_verification.domain.verification import (
     VerificationStatistics,
     VerificationSummary,
 )
-from text_verification.infrastructure import verification_repository as repository_module
 from text_verification.infrastructure.orm import (
     Base,
     DocumentRow,
@@ -146,44 +148,6 @@ def test_result_row_mapping_uses_canonical_json_review_metadata() -> None:
     assert _map_rows_to_result(document_row, run_row) == result
 
 
-def test_save_export_artifact_rejects_unvalidated_reference_before_database_access() -> None:
-    repository = VerificationRepository(cast(Session, object()))
-
-    with pytest.raises(TypeError, match="PublishedArtifact"):
-        repository.save_export_artifact(
-            export_artifact_id=ARTIFACT_ID,
-            verification_run_id=RUN_ID,
-            review_revision_id=None,
-            source_version="sha256:source-v7",
-            file_name="sample.docx",
-            media_type="application/octet-stream",
-            artifact=ARTIFACT_STORAGE_KEY,  # type: ignore[arg-type]
-            created_at=CREATED_AT,
-        )
-
-
-def test_verified_artifact_must_match_published_fingerprint(tmp_path: Path) -> None:
-    storage = JobStorage(tmp_path, max_upload_bytes=1024)
-    job_id = UUID("10000000-0000-0000-0000-000000000099")
-    artifact_id = UUID("60000000-0000-0000-0000-000000000099")
-    storage_key = build_artifact_storage_key(job_id, artifact_id, FileType.TXT)
-    published = storage.publish_artifact(
-        job_id,
-        artifact_id,
-        storage_key,
-        FileType.TXT,
-        b"verified",
-    )
-    verified = storage.verify_artifact(published)
-    forged = replace(verified, content_sha256="0" * 64)
-
-    with pytest.raises(ValueError, match="does not match"):
-        repository_module._validate_verified_artifact_consistency(  # type: ignore[attr-defined]
-            published,
-            forged,
-        )
-
-
 @pytest.mark.parametrize(
     "column",
     [
@@ -221,6 +185,26 @@ def test_export_artifact_orm_defines_optional_sha256_digest() -> None:
         for constraint in ExportArtifactRow.__table__.constraints
         if isinstance(constraint, CheckConstraint)
     } >= {"ck_export_artifacts_sha256"}
+
+
+def test_export_artifact_orm_defines_pending_ready_lifecycle() -> None:
+    columns = ExportArtifactRow.__table__.c
+
+    assert columns.status.nullable is False
+    assert columns.reserved_at.nullable is False
+    assert columns.ready_at.nullable is True
+    assert {
+        constraint.name
+        for constraint in ExportArtifactRow.__table__.constraints
+        if isinstance(constraint, CheckConstraint)
+    } >= {
+        "ck_export_artifacts_status",
+        "ck_export_artifacts_ready_state",
+        "ck_export_artifacts_pending_digest",
+    }
+    assert {index.name for index in ExportArtifactRow.__table__.indexes} >= {
+        "ix_export_artifacts_status_reserved_at"
+    }
 
 
 def test_orm_metadata_enforces_cross_owner_relationships() -> None:
@@ -337,10 +321,21 @@ def test_database_schema_contains_normalized_verification_tables(db_engine: Engi
         column["name"]: column for column in inspector.get_columns("export_artifacts")
     }
     assert artifact_columns["content_sha256"]["nullable"] is True
+    assert artifact_columns["status"]["nullable"] is False
+    assert artifact_columns["reserved_at"]["nullable"] is False
+    assert artifact_columns["ready_at"]["nullable"] is True
     assert {
         constraint["name"]
         for constraint in inspector.get_check_constraints("export_artifacts")
-    } >= {"ck_export_artifacts_sha256"}
+    } >= {
+        "ck_export_artifacts_sha256",
+        "ck_export_artifacts_status",
+        "ck_export_artifacts_ready_state",
+        "ck_export_artifacts_pending_digest",
+    }
+    assert {
+        index["name"] for index in inspector.get_indexes("export_artifacts")
+    } >= {"ix_export_artifacts_status_reserved_at"}
     assert ("jobs", ("job_id",), ("job_id",), "CASCADE") in _foreign_keys(
         inspector, "documents"
     )
@@ -395,6 +390,86 @@ def test_database_schema_contains_normalized_verification_tables(db_engine: Engi
         ("review_revision_id", "verification_run_id"),
         "CASCADE",
     ) in _foreign_keys(inspector, "export_artifacts")
+
+
+def test_upgrade_from_0004_marks_legacy_artifacts_ready(
+    db_engine: Engine,
+    alembic_config,
+) -> None:
+    job_id = UUID("10000000-0000-0000-0000-000000000091")
+    document_id = UUID("20000000-0000-0000-0000-000000000092")
+    run_id = UUID("30000000-0000-0000-0000-000000000093")
+    artifact_id = UUID("60000000-0000-0000-0000-000000000094")
+    created_at = datetime(2026, 9, 1, 3, 0, tzinfo=UTC)
+    storage_key = build_artifact_storage_key(job_id, artifact_id, FileType.TXT)
+
+    try:
+        command.downgrade(alembic_config, "0004_finalize_verification_pipeline")
+        session = Session(db_engine)
+        try:
+            _create_job(
+                session,
+                job_id=job_id,
+                source_name="legacy.txt",
+                file_type=FileType.TXT,
+            )
+            VerificationRepository(session).save_result(
+                job_id,
+                _result(
+                    document_id=document_id,
+                    verification_run_id=run_id,
+                    issue_id=uuid4(),
+                    source_name="legacy.txt",
+                    file_type=FileType.TXT,
+                ),
+            )
+            session.commit()
+        finally:
+            session.close()
+        with db_engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO export_artifacts ("
+                    "export_artifact_id, verification_run_id, review_revision_id, "
+                    "source_version, file_type, file_name, media_type, storage_key, "
+                    "size_bytes, created_at"
+                    ") VALUES ("
+                    ":artifact_id, :run_id, NULL, :source_version, 'txt', "
+                    "'legacy.txt', 'text/plain', :storage_key, 6, :created_at"
+                    ")"
+                ),
+                {
+                    "artifact_id": artifact_id,
+                    "run_id": run_id,
+                    "source_version": "sha256:source-v7",
+                    "storage_key": storage_key,
+                    "created_at": created_at,
+                },
+            )
+
+        command.upgrade(alembic_config, "head")
+
+        with db_engine.connect() as connection:
+            row = connection.execute(
+                text(
+                    "SELECT content_sha256, status, reserved_at, ready_at "
+                    "FROM export_artifacts "
+                    "WHERE export_artifact_id = :artifact_id"
+                ),
+                {"artifact_id": artifact_id},
+            ).one()
+        assert row == (None, "ready", created_at, created_at)
+    finally:
+        command.upgrade(alembic_config, "head")
+        with db_engine.begin() as connection:
+            connection.execute(
+                text(
+                    "TRUNCATE TABLE "
+                    "export_artifacts, review_revisions, verification_issues, "
+                    "verification_runs, document_blocks, documents, job_events, jobs "
+                    "RESTART IDENTITY CASCADE"
+                )
+            )
 
 
 def test_save_and_load_verification_result_round_trips_canonical_data(
@@ -508,10 +583,7 @@ def test_save_review_revision_and_export_artifact_preserves_identity_and_source(
         created_at=CREATED_AT + timedelta(minutes=2),
     )
     _create_job(db_session)
-    repository = VerificationRepository(
-        db_session,
-        artifact_verifier=artifact_storage.verify_artifact,
-    )
+    repository = VerificationRepository(db_session)
     repository.save_result(JOB_ID, _result())
     repository.save_review_revision(
         review_revision_id=REVISION_ID,
@@ -521,7 +593,9 @@ def test_save_review_revision_and_export_artifact_preserves_identity_and_source(
         text="账号测试\n第二行",
         created_at=CREATED_AT + timedelta(minutes=1),
     )
-    first = ArtifactPersistenceService(artifact_storage, repository).persist(request)
+    repository.commit()
+    service = _artifact_service_for_session(artifact_storage, db_session)
+    first = service.persist(request)
     repository.save_review_revision(
         review_revision_id=REVISION_ID,
         verification_run_id=RUN_ID,
@@ -530,7 +604,9 @@ def test_save_review_revision_and_export_artifact_preserves_identity_and_source(
         text="账号测试\n第二行",
         created_at=CREATED_AT + timedelta(minutes=1),
     )
-    second = ArtifactPersistenceService(artifact_storage, repository).persist(request)
+    repository.commit()
+    second = service.persist(request)
+    db_session.expire_all()
 
     revision = db_session.scalar(
         select(ReviewRevisionRow).where(
@@ -559,38 +635,32 @@ def test_save_review_revision_and_export_artifact_preserves_identity_and_source(
     assert second.created is False
 
 
-def test_save_export_artifact_rejects_verified_artifact_for_another_job(
+def test_reserve_export_artifact_rejects_key_for_another_job(
     db_session: Session,
-    artifact_storage: JobStorage,
 ) -> None:
     storage_key = build_artifact_storage_key(
         SECOND_JOB_ID,
         ARTIFACT_ID,
         FileType.DOCX,
     )
-    published = artifact_storage.publish_artifact(
-        SECOND_JOB_ID,
-        ARTIFACT_ID,
-        storage_key,
-        FileType.DOCX,
-        b"x" * 10,
-    )
     _create_job(db_session)
-    repository = VerificationRepository(
-        db_session,
-        artifact_verifier=artifact_storage.verify_artifact,
-    )
+    repository = VerificationRepository(db_session)
     repository.save_result(JOB_ID, _result())
+    repository.commit()
 
     with pytest.raises(ValueError, match="does not belong"):
-        repository.save_export_artifact(
+        repository.reserve_export_artifact(
             export_artifact_id=ARTIFACT_ID,
             verification_run_id=RUN_ID,
             review_revision_id=None,
             source_version="sha256:source-v7",
+            file_type=FileType.DOCX,
             file_name="sample.docx",
             media_type="application/octet-stream",
-            artifact=published,
+            storage_key=storage_key,
+            size_bytes=10,
+            content_sha256="0" * 64,
+            reserved_at=CREATED_AT,
             created_at=CREATED_AT,
         )
 
@@ -603,6 +673,7 @@ def test_symlink_backed_artifact_is_rejected_before_metadata_persistence(
     _create_job(db_session)
     repository = VerificationRepository(db_session)
     repository.save_result(JOB_ID, _result())
+    repository.commit()
     outside = tmp_path / "outside"
     outside.mkdir()
     link = artifact_storage._root / "artifacts" / str(JOB_ID) / "link"
@@ -618,16 +689,31 @@ def test_symlink_backed_artifact_is_rejected_before_metadata_persistence(
         subdirectories=("link",),
     )
 
-    with pytest.raises(InvalidUpload, match="reparse point"):
-        artifact_storage.publish_artifact(
-            JOB_ID,
-            ARTIFACT_ID,
-            storage_key,
-            FileType.DOCX,
-            b"must not escape",
+    request = ArtifactPersistenceRequest(
+        job_id=JOB_ID,
+        export_artifact_id=ARTIFACT_ID,
+        verification_run_id=RUN_ID,
+        review_revision_id=None,
+        source_version="sha256:source-v7",
+        file_type=FileType.DOCX,
+        file_name="sample.docx",
+        media_type="application/octet-stream",
+        storage_key=storage_key,
+        data=b"must not escape",
+        created_at=CREATED_AT,
+    )
+    with pytest.raises(InvalidUpload, match="unsafe directory entry"):
+        _artifact_service_for_session(
+            artifact_storage,
+            db_session,
+        ).persist(
+            request
         )
 
-    assert db_session.scalar(select(func.count()).select_from(ExportArtifactRow)) == 0
+    db_session.expire_all()
+    pending = db_session.get(ExportArtifactRow, ARTIFACT_ID)
+    assert pending is not None
+    assert pending.status == "pending"
     assert list(outside.iterdir()) == []
 
 
@@ -636,10 +722,7 @@ def test_artifact_service_compensates_wrong_job_rejection(
     artifact_storage: JobStorage,
 ) -> None:
     _create_job(db_session)
-    repository = VerificationRepository(
-        db_session,
-        artifact_verifier=artifact_storage.verify_artifact,
-    )
+    repository = VerificationRepository(db_session)
     repository.save_result(JOB_ID, _result())
     repository.commit()
     request = _artifact_request(
@@ -648,7 +731,7 @@ def test_artifact_service_compensates_wrong_job_rejection(
     )
 
     with pytest.raises(ValueError, match="does not belong"):
-        ArtifactPersistenceService(artifact_storage, repository).persist(request)
+        _artifact_service_for_session(artifact_storage, db_session).persist(request)
 
     assert not (artifact_storage._root / request.storage_key).exists()
     assert db_session.scalar(select(func.count()).select_from(ExportArtifactRow)) == 0
@@ -659,10 +742,7 @@ def test_artifact_service_compensates_source_version_rejection(
     artifact_storage: JobStorage,
 ) -> None:
     _create_job(db_session)
-    repository = VerificationRepository(
-        db_session,
-        artifact_verifier=artifact_storage.verify_artifact,
-    )
+    repository = VerificationRepository(db_session)
     repository.save_result(JOB_ID, _result())
     repository.commit()
     request = _artifact_request(
@@ -671,7 +751,7 @@ def test_artifact_service_compensates_source_version_rejection(
     )
 
     with pytest.raises(ValueError, match="source version"):
-        ArtifactPersistenceService(artifact_storage, repository).persist(request)
+        _artifact_service_for_session(artifact_storage, db_session).persist(request)
 
     assert not (artifact_storage._root / request.storage_key).exists()
     assert db_session.scalar(select(func.count()).select_from(ExportArtifactRow)) == 0
@@ -682,34 +762,133 @@ def test_artifact_service_keeps_idempotent_file_after_metadata_conflict(
     artifact_storage: JobStorage,
 ) -> None:
     _create_job(db_session)
-    repository = VerificationRepository(
-        db_session,
-        artifact_verifier=artifact_storage.verify_artifact,
-    )
+    repository = VerificationRepository(db_session)
     repository.save_result(JOB_ID, _result())
     repository.commit()
     first_request = _artifact_request(
         file_name="first.docx",
         data=b"idempotent",
     )
-    first = ArtifactPersistenceService(artifact_storage, repository).persist(
-        first_request
-    )
+    service = _artifact_service_for_session(artifact_storage, db_session)
+    first = service.persist(first_request)
     conflicting_request = _artifact_request(
         file_name="different.docx",
         data=b"idempotent",
     )
 
     with pytest.raises(ValueError, match="different data"):
-        ArtifactPersistenceService(artifact_storage, repository).persist(
-            conflicting_request
-        )
+        service.persist(conflicting_request)
 
+    db_session.expire_all()
     artifact = db_session.get(ExportArtifactRow, ARTIFACT_ID)
     assert first.path.read_bytes() == b"idempotent"
     assert artifact is not None
     assert artifact.file_name == "first.docx"
     assert artifact.content_sha256 == first.content_sha256
+
+
+def test_legacy_ready_artifact_with_null_digest_is_lazily_fingerprinted(
+    db_session_factory: sessionmaker[Session],
+    artifact_storage: JobStorage,
+) -> None:
+    seed_session = db_session_factory()
+    request = _artifact_request(data=b"legacy")
+    try:
+        _create_job(seed_session)
+        repository = VerificationRepository(seed_session)
+        repository.save_result(JOB_ID, _result())
+        repository.commit()
+        seed_session.add(
+            ExportArtifactRow(
+                export_artifact_id=ARTIFACT_ID,
+                verification_run_id=RUN_ID,
+                review_revision_id=None,
+                source_version=request.source_version,
+                file_type=request.file_type.value,
+                file_name=request.file_name,
+                media_type=request.media_type,
+                storage_key=request.storage_key,
+                size_bytes=len(request.data),
+                content_sha256=None,
+                status="ready",
+                reserved_at=request.created_at,
+                ready_at=request.created_at,
+                created_at=request.created_at,
+            )
+        )
+        seed_session.commit()
+    finally:
+        seed_session.close()
+    with artifact_storage.publish_verified_artifact(
+        request.job_id,
+        request.export_artifact_id,
+        request.storage_key,
+        request.file_type,
+        request.data,
+    ):
+        pass
+
+    result = ArtifactPersistenceService(
+        artifact_storage,
+        _artifact_repository_factory(db_session_factory),
+    ).persist(request)
+
+    verification_session = db_session_factory()
+    try:
+        row = verification_session.get(ExportArtifactRow, ARTIFACT_ID)
+        assert row is not None
+        assert row.status == "ready"
+        assert row.content_sha256 == result.content_sha256
+        assert result.created is False
+    finally:
+        verification_session.close()
+
+
+def test_identical_pending_reservation_refreshes_activity_timestamp(
+    db_session: Session,
+) -> None:
+    _create_job(db_session)
+    repository = VerificationRepository(db_session)
+    repository.save_result(JOB_ID, _result())
+    repository.commit()
+    request = _artifact_request(data=b"pending")
+    content_sha256 = sha256(request.data).hexdigest()
+    first_reserved_at = CREATED_AT + timedelta(minutes=1)
+    second_reserved_at = CREATED_AT + timedelta(minutes=2)
+
+    repository.reserve_export_artifact(
+        export_artifact_id=request.export_artifact_id,
+        verification_run_id=request.verification_run_id,
+        review_revision_id=request.review_revision_id,
+        source_version=request.source_version,
+        file_type=request.file_type,
+        file_name=request.file_name,
+        media_type=request.media_type,
+        storage_key=request.storage_key,
+        size_bytes=len(request.data),
+        content_sha256=content_sha256,
+        reserved_at=first_reserved_at,
+        created_at=request.created_at,
+    )
+    repository.commit()
+    reservation = repository.reserve_export_artifact(
+        export_artifact_id=request.export_artifact_id,
+        verification_run_id=request.verification_run_id,
+        review_revision_id=request.review_revision_id,
+        source_version=request.source_version,
+        file_type=request.file_type,
+        file_name=request.file_name,
+        media_type=request.media_type,
+        storage_key=request.storage_key,
+        size_bytes=len(request.data),
+        content_sha256=content_sha256,
+        reserved_at=second_reserved_at,
+        created_at=request.created_at,
+    )
+    repository.commit()
+
+    assert reservation.status is ArtifactLifecycleStatus.PENDING
+    assert reservation.reserved_at == second_reserved_at
 
 
 def test_save_review_revision_rejects_source_version_mismatch(
@@ -815,10 +994,7 @@ def test_database_rejects_artifact_revision_from_another_run(
     artifact_storage: JobStorage,
 ) -> None:
     _seed_two_results(db_session)
-    repository = VerificationRepository(
-        db_session,
-        artifact_verifier=artifact_storage.verify_artifact,
-    )
+    repository = VerificationRepository(db_session)
     repository.save_review_revision(
         review_revision_id=SECOND_REVISION_ID,
         verification_run_id=SECOND_RUN_ID,
@@ -827,7 +1003,8 @@ def test_database_rejects_artifact_revision_from_another_run(
         text="账号测试",
         created_at=CREATED_AT,
     )
-    ArtifactPersistenceService(artifact_storage, repository).persist(
+    repository.commit()
+    _artifact_service_for_session(artifact_storage, db_session).persist(
         _artifact_request(data=b"x" * 10)
     )
 
@@ -1005,24 +1182,12 @@ def test_concurrent_identical_artifact_service_retries_succeed(
     start = Event()
 
     def worker() -> ArtifactPersistenceResult:
-        session = db_session_factory()
-        repository = VerificationRepository(
-            session,
-            artifact_verifier=artifact_storage.verify_artifact,
-        )
-        try:
-            session.execute(text("SET lock_timeout = '4s'"))
-            if not start.wait(timeout=2):
-                raise TimeoutError("timed out waiting to start artifact persistence")
-            return ArtifactPersistenceService(
-                artifact_storage,
-                repository,
-            ).persist(request)
-        except Exception:
-            repository.rollback()
-            raise
-        finally:
-            session.close()
+        if not start.wait(timeout=2):
+            raise TimeoutError("timed out waiting to start artifact persistence")
+        return ArtifactPersistenceService(
+            artifact_storage,
+            _artifact_repository_factory(db_session_factory),
+        ).persist(request)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = [executor.submit(worker) for _ in range(2)]
@@ -1039,10 +1204,90 @@ def test_concurrent_identical_artifact_service_retries_succeed(
         verification_session.close()
 
 
+def test_concurrent_conflicting_artifact_service_rejects_one_writer(
+    db_session_factory: sessionmaker[Session],
+    artifact_storage: JobStorage,
+) -> None:
+    seed_session = db_session_factory()
+    try:
+        _create_job(seed_session)
+        repository = VerificationRepository(seed_session)
+        repository.save_result(JOB_ID, _result())
+        repository.commit()
+    finally:
+        seed_session.close()
+
+    requests = (
+        _artifact_request(data=b"first"),
+        _artifact_request(data=b"other"),
+    )
+    start = Event()
+
+    def worker(request: ArtifactPersistenceRequest):
+        if not start.wait(timeout=2):
+            raise TimeoutError("timed out waiting to start artifact persistence")
+        try:
+            return ArtifactPersistenceService(
+                artifact_storage,
+                _artifact_repository_factory(db_session_factory),
+            ).persist(request)
+        except Exception as error:
+            return error
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(worker, request) for request in requests]
+        start.set()
+        outcomes = [future.result(timeout=5) for future in futures]
+
+    successes = [
+        outcome for outcome in outcomes if isinstance(outcome, ArtifactPersistenceResult)
+    ]
+    failures = [outcome for outcome in outcomes if isinstance(outcome, Exception)]
+    assert len(successes) == 1
+    assert len(failures) == 1
+    assert isinstance(failures[0], ValueError)
+    assert "different content" in str(failures[0])
+    successful_data = next(
+        request.data
+        for request in requests
+        if sha256(request.data).hexdigest() == successes[0].content_sha256
+    )
+    assert successes[0].path.read_bytes() == successful_data
+
+
 def test_get_result_for_job_returns_none_when_job_has_no_run(db_session: Session) -> None:
     _create_job(db_session)
 
     assert VerificationRepository(db_session).get_result_for_job(JOB_ID) is None
+
+
+def _artifact_repository_factory(
+    session_factory: sessionmaker[Session],
+):
+    @contextmanager
+    def factory() -> Iterator[VerificationRepository]:
+        session = session_factory()
+        try:
+            yield VerificationRepository(session)
+        finally:
+            session.close()
+
+    return factory
+
+
+def _artifact_service_for_session(
+    storage: JobStorage,
+    session: Session,
+) -> ArtifactPersistenceService:
+    session_factory = sessionmaker(
+        bind=session.get_bind(),
+        autoflush=False,
+        expire_on_commit=False,
+    )
+    return ArtifactPersistenceService(
+        storage,
+        _artifact_repository_factory(session_factory),
+    )
 
 
 def _artifact_request(

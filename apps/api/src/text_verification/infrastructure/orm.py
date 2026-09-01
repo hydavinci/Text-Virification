@@ -397,6 +397,11 @@ class ReviewRevisionRow(Base):
 class ExportArtifactRow(Base):
     __tablename__ = "export_artifacts"
     __table_args__ = (
+        Index(
+            "ix_export_artifacts_status_reserved_at",
+            "status",
+            "reserved_at",
+        ),
         ForeignKeyConstraint(
             ["verification_run_id"],
             ["verification_runs.verification_run_id"],
@@ -419,6 +424,19 @@ class ExportArtifactRow(Base):
             "OR content_sha256 ~ '^[0-9a-f]{64}$'",
             name="ck_export_artifacts_sha256",
         ),
+        CheckConstraint(
+            "status IN ('pending', 'ready')",
+            name="ck_export_artifacts_status",
+        ),
+        CheckConstraint(
+            "(status = 'pending' AND ready_at IS NULL) "
+            "OR (status = 'ready' AND ready_at IS NOT NULL)",
+            name="ck_export_artifacts_ready_state",
+        ),
+        CheckConstraint(
+            "status <> 'pending' OR content_sha256 IS NOT NULL",
+            name="ck_export_artifacts_pending_digest",
+        ),
     )
 
     export_artifact_id: Mapped[UUID] = mapped_column(
@@ -437,5 +455,11 @@ class ExportArtifactRow(Base):
     storage_key: Mapped[str] = mapped_column(Text)
     size_bytes: Mapped[int] = mapped_column(BigInteger)
     content_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    status: Mapped[str] = mapped_column(String(16))
+    reserved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    ready_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     run: Mapped[VerificationRunRow] = relationship(back_populates="export_artifacts")

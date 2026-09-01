@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Event
@@ -132,10 +134,7 @@ def test_atomic_result_snapshot_blocks_expiry_until_result_is_materialized(
             session.execute(text("SET lock_timeout = '4s'"))
             cleanup_started.set()
             jobs = JobRepository(session)
-            results = VerificationRepository(
-                session,
-                artifact_verifier=artifact_storage.verify_artifact,
-            )
+            results = VerificationRepository(session)
             expired_ids = jobs.expire_jobs_before(now + timedelta(minutes=1))
             results.delete_results_for_jobs(expired_ids)
             results.commit()
@@ -299,9 +298,18 @@ def _seed_completed_aggregate(
         text=result.text,
         created_at=created_at,
     )
+    results.commit()
     artifact_id = uuid4()
     storage_key = build_artifact_storage_key(job_id, artifact_id, FileType.TXT)
-    ArtifactPersistenceService(artifact_storage, results).persist(
+    session_factory = sessionmaker(
+        bind=session.get_bind(),
+        autoflush=False,
+        expire_on_commit=False,
+    )
+    ArtifactPersistenceService(
+        artifact_storage,
+        _artifact_repository_factory(session_factory),
+    ).persist(
         ArtifactPersistenceRequest(
             job_id=job_id,
             export_artifact_id=artifact_id,
@@ -318,6 +326,20 @@ def _seed_completed_aggregate(
     )
     jobs.transition(job_id, JobStatus.COMPLETED, 100, "处理完成")
     jobs.commit()
+
+
+def _artifact_repository_factory(
+    session_factory: sessionmaker[Session],
+):
+    @contextmanager
+    def factory() -> Iterator[VerificationRepository]:
+        repository_session = session_factory()
+        try:
+            yield VerificationRepository(repository_session)
+        finally:
+            repository_session.close()
+
+    return factory
 
 
 def _advance_to_checking_english(

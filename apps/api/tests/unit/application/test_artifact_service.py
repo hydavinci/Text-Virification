@@ -1,6 +1,8 @@
-from collections.abc import Callable
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 from uuid import uuid4
 
@@ -8,42 +10,64 @@ import pytest
 
 from text_verification import application
 from text_verification.domain.documents import FileType
-from text_verification.infrastructure.storage import (
-    JobStorage,
-    PublishedArtifact,
-    VerifiedArtifact,
-    build_artifact_storage_key,
-)
+from text_verification.infrastructure.storage import JobStorage, build_artifact_storage_key
 
 
 @dataclass
-class FakeArtifactRepository:
-    verifier: Callable[[PublishedArtifact], VerifiedArtifact]
-    save_error: Exception | None = None
-    commit_error: Exception | None = None
-    mutate_before_error: bytes | None = None
-    saved: list[VerifiedArtifact] = field(default_factory=list)
-    commits: int = 0
-    rollbacks: int = 0
+class ScriptedReservationRepository:
+    reservation: object
+    ready_snapshot: object
+    reserve_error: Exception | None = None
+    finalize_error: Exception | None = None
+    after_consistency: Callable[[], None] | None = None
+    commit_error_on_call: int | None = None
+    read_snapshot: object | None = None
+    read_error: Exception | None = None
+    commit_calls: int = 0
+    rollback_calls: int = 0
 
-    def save_export_artifact(self, **values: object) -> VerifiedArtifact:
-        artifact = values["artifact"]
-        assert isinstance(artifact, PublishedArtifact)
-        verified = self.verifier(artifact)
-        self.saved.append(verified)
-        if self.mutate_before_error is not None:
-            verified.path.write_bytes(self.mutate_before_error)
-        if self.save_error is not None:
-            raise self.save_error
-        return verified
+    def reserve_export_artifact(self, **values: object):
+        del values
+        if self.reserve_error is not None:
+            raise self.reserve_error
+        return self.reservation
+
+    def finalize_export_artifact(self, reservation, **values: object):
+        del reservation
+        consistency_check = values["consistency_check"]
+        assert callable(consistency_check)
+        consistency_check()
+        if self.after_consistency is not None:
+            self.after_consistency()
+        if self.finalize_error is not None:
+            raise self.finalize_error
+        return self.ready_snapshot
+
+    def read_export_artifact(self, export_artifact_id):
+        del export_artifact_id
+        if self.read_error is not None:
+            raise self.read_error
+        return self.read_snapshot
 
     def commit(self) -> None:
-        self.commits += 1
-        if self.commit_error is not None:
-            raise self.commit_error
+        self.commit_calls += 1
+        if self.commit_error_on_call == self.commit_calls:
+            raise RuntimeError("commit outcome unknown")
 
     def rollback(self) -> None:
-        self.rollbacks += 1
+        self.rollback_calls += 1
+
+
+def _repository_factory(
+    *repositories: ScriptedReservationRepository,
+):
+    remaining = iter(repositories)
+
+    @contextmanager
+    def factory() -> Iterator[ScriptedReservationRepository]:
+        yield next(remaining)
+
+    return factory
 
 
 def _request(
@@ -73,11 +97,80 @@ def _request(
     )
 
 
-def test_artifact_service_publishes_verifies_and_commits(tmp_path: Path) -> None:
+def _reservation_and_snapshot(request, *, status, digest: str):
+    reservation = application.ArtifactReservation(
+        export_artifact_id=request.export_artifact_id,
+        job_id=request.job_id,
+        verification_run_id=request.verification_run_id,
+        review_revision_id=request.review_revision_id,
+        source_version=request.source_version,
+        file_type=request.file_type,
+        file_name=request.file_name,
+        media_type=request.media_type,
+        storage_key=request.storage_key,
+        size_bytes=len(request.data),
+        content_sha256=digest,
+        status=application.ArtifactLifecycleStatus.PENDING,
+        reserved_at=request.created_at,
+        created_at=request.created_at,
+    )
+    snapshot_values = asdict(reservation)
+    snapshot_values.update(
+        status=status,
+        ready_at=(
+            request.created_at
+            if status is application.ArtifactLifecycleStatus.READY
+            else None
+        ),
+    )
+    snapshot = application.ArtifactSnapshot(**snapshot_values)
+    return reservation, snapshot
+
+
+def _scripted_repository(
+    request,
+    *,
+    reserve_error: Exception | None = None,
+    finalize_error: Exception | None = None,
+    after_consistency: Callable[[], None] | None = None,
+    commit_error_on_call: int | None = None,
+    read_status=None,
+    read_digest: str | None = None,
+):
+    digest = sha256(request.data).hexdigest()
+    reservation, ready = _reservation_and_snapshot(
+        request,
+        status=application.ArtifactLifecycleStatus.READY,
+        digest=digest,
+    )
+    read_snapshot = None
+    if read_status is not None:
+        _, read_snapshot = _reservation_and_snapshot(
+            request,
+            status=read_status,
+            digest=read_digest or digest,
+        )
+    return ScriptedReservationRepository(
+        reservation=reservation,
+        ready_snapshot=ready,
+        reserve_error=reserve_error,
+        finalize_error=finalize_error,
+        after_consistency=after_consistency,
+        commit_error_on_call=commit_error_on_call,
+        read_snapshot=read_snapshot,
+    )
+
+
+def test_artifact_service_reserves_publishes_finalizes_and_commits(
+    tmp_path: Path,
+) -> None:
     storage = JobStorage(tmp_path, max_upload_bytes=1024)
-    repository = FakeArtifactRepository(storage.verify_artifact)
     request = _request()
-    service = application.ArtifactPersistenceService(storage, repository)
+    repository = _scripted_repository(request)
+    service = application.ArtifactPersistenceService(
+        storage,
+        _repository_factory(repository, repository),
+    )
 
     result = service.persist(request)
 
@@ -87,9 +180,8 @@ def test_artifact_service_publishes_verifies_and_commits(tmp_path: Path) -> None
     assert result.size_bytes == len(request.data)
     assert len(result.content_sha256) == 64
     assert result.created is True
-    assert repository.commits == 1
-    assert repository.rollbacks == 0
-    assert repository.saved[0].content_sha256 == result.content_sha256
+    assert repository.commit_calls == 2
+    assert repository.rollback_calls == 0
 
 
 @pytest.mark.parametrize(
@@ -97,83 +189,270 @@ def test_artifact_service_publishes_verifies_and_commits(tmp_path: Path) -> None
     [
         ValueError("artifact does not belong to job"),
         ValueError("source version does not match"),
+        ValueError("storage key is already persisted"),
     ],
 )
-def test_artifact_service_compensates_new_file_after_repository_rejection(
+def test_reservation_rejection_occurs_before_filesystem_publication(
     tmp_path: Path,
     error: Exception,
 ) -> None:
     storage = JobStorage(tmp_path, max_upload_bytes=1024)
-    repository = FakeArtifactRepository(storage.verify_artifact, save_error=error)
     request = _request()
-    service = application.ArtifactPersistenceService(storage, repository)
+    repository = _scripted_repository(request, reserve_error=error)
 
     with pytest.raises(ValueError, match=str(error)):
-        service.persist(request)
+        application.ArtifactPersistenceService(
+            storage,
+            _repository_factory(repository),
+        ).persist(request)
 
     assert not (tmp_path / request.storage_key).exists()
-    assert repository.commits == 0
-    assert repository.rollbacks == 1
+    assert repository.rollback_calls == 1
 
 
-def test_artifact_service_keeps_preexisting_idempotent_file_on_unique_conflict(
+def test_finalize_failure_compensates_new_file_but_keeps_pending_reservation(
     tmp_path: Path,
 ) -> None:
     storage = JobStorage(tmp_path, max_upload_bytes=1024)
     request = _request()
-    existing = storage.publish_artifact(
+    repository = _scripted_repository(
+        request,
+        finalize_error=ValueError("finalize conflict"),
+    )
+
+    with pytest.raises(ValueError, match="finalize conflict"):
+        application.ArtifactPersistenceService(
+            storage,
+            _repository_factory(repository, repository),
+        ).persist(request)
+
+    assert not (tmp_path / request.storage_key).exists()
+    assert repository.commit_calls == 1
+    assert repository.rollback_calls == 1
+
+
+def test_finalize_failure_does_not_delete_preexisting_idempotent_file(
+    tmp_path: Path,
+) -> None:
+    storage = JobStorage(tmp_path, max_upload_bytes=1024)
+    request = _request()
+    with storage.publish_verified_artifact(
         request.job_id,
         request.export_artifact_id,
         request.storage_key,
         request.file_type,
         request.data,
+    ):
+        pass
+    repository = _scripted_repository(
+        request,
+        finalize_error=ValueError("finalize conflict"),
     )
-    repository = FakeArtifactRepository(
-        storage.verify_artifact,
-        save_error=ValueError("storage key is already persisted")
-    )
-    service = application.ArtifactPersistenceService(storage, repository)
 
-    with pytest.raises(ValueError, match="already persisted"):
-        service.persist(request)
+    with pytest.raises(ValueError, match="finalize conflict"):
+        application.ArtifactPersistenceService(
+            storage,
+            _repository_factory(repository, repository),
+        ).persist(request)
 
-    assert existing.path.read_bytes() == request.data
-    assert repository.rollbacks == 1
+    assert (tmp_path / request.storage_key).read_bytes() == request.data
 
 
-def test_artifact_service_compensates_new_file_after_commit_exception(
+def test_finalize_commit_succeeded_then_raised_is_proven_ready(
     tmp_path: Path,
 ) -> None:
     storage = JobStorage(tmp_path, max_upload_bytes=1024)
-    repository = FakeArtifactRepository(
-        storage.verify_artifact,
-        commit_error=RuntimeError("commit failed"),
-    )
     request = _request()
-    service = application.ArtifactPersistenceService(storage, repository)
+    primary = _scripted_repository(request, commit_error_on_call=2)
+    fresh = _scripted_repository(
+        request,
+        read_status=application.ArtifactLifecycleStatus.READY,
+    )
 
-    with pytest.raises(RuntimeError, match="commit failed"):
-        service.persist(request)
+    result = application.ArtifactPersistenceService(
+        storage,
+        _repository_factory(primary, primary, fresh),
+    ).persist(request)
+
+    assert result.storage_key == request.storage_key
+    assert result.path.read_bytes() == request.data
+    assert primary.rollback_calls == 1
+
+
+def test_finalize_commit_failed_before_commit_compensates_pending(
+    tmp_path: Path,
+) -> None:
+    storage = JobStorage(tmp_path, max_upload_bytes=1024)
+    request = _request()
+    primary = _scripted_repository(request, commit_error_on_call=2)
+    fresh = _scripted_repository(
+        request,
+        read_status=application.ArtifactLifecycleStatus.PENDING,
+    )
+
+    with pytest.raises(RuntimeError, match="commit outcome unknown"):
+        application.ArtifactPersistenceService(
+            storage,
+            _repository_factory(primary, primary, fresh),
+        ).persist(request)
 
     assert not (tmp_path / request.storage_key).exists()
-    assert repository.commits == 1
-    assert repository.rollbacks == 1
+    assert fresh.read_snapshot is not None
+    assert (
+        fresh.read_snapshot.status
+        is application.ArtifactLifecycleStatus.PENDING
+    )
 
 
-def test_artifact_service_does_not_delete_file_changed_after_verification(
+def test_unprovable_finalize_commit_retains_file_and_reservation(
     tmp_path: Path,
 ) -> None:
     storage = JobStorage(tmp_path, max_upload_bytes=1024)
-    repository = FakeArtifactRepository(
-        storage.verify_artifact,
-        save_error=ValueError("flush failed"),
-        mutate_before_error=b"changed",
-    )
     request = _request()
-    service = application.ArtifactPersistenceService(storage, repository)
+    primary = _scripted_repository(request, commit_error_on_call=2)
+    fresh = _scripted_repository(
+        request,
+        read_status=application.ArtifactLifecycleStatus.READY,
+        read_digest="0" * 64,
+    )
 
-    with pytest.raises(ValueError, match="flush failed"):
-        service.persist(request)
+    with pytest.raises(application.ArtifactReconciliationRequiredError):
+        application.ArtifactPersistenceService(
+            storage,
+            _repository_factory(primary, primary, fresh),
+        ).persist(request)
 
-    assert (tmp_path / request.storage_key).read_bytes() == b"changed"
-    assert repository.rollbacks == 1
+    assert (tmp_path / request.storage_key).read_bytes() == request.data
+    assert fresh.read_snapshot is not None
+
+
+def test_failed_outcome_probe_raises_typed_reconciliation_error(
+    tmp_path: Path,
+) -> None:
+    storage = JobStorage(tmp_path, max_upload_bytes=1024)
+    request = _request()
+    primary = _scripted_repository(request, commit_error_on_call=2)
+    fresh = _scripted_repository(request)
+    fresh.read_error = RuntimeError("database unavailable")
+
+    with pytest.raises(application.ArtifactReconciliationRequiredError):
+        application.ArtifactPersistenceService(
+            storage,
+            _repository_factory(primary, primary, fresh),
+        ).persist(request)
+
+    assert (tmp_path / request.storage_key).read_bytes() == request.data
+
+
+def test_entry_changed_after_hash_is_retained_for_reconciliation(
+    tmp_path: Path,
+) -> None:
+    storage = JobStorage(tmp_path, max_upload_bytes=1024)
+    request = _request()
+    artifact_path = tmp_path / request.storage_key
+    repository = _scripted_repository(
+        request,
+        finalize_error=ValueError("finalize failed"),
+        after_consistency=lambda: artifact_path.write_bytes(b"changed"),
+    )
+
+    with pytest.raises(application.ArtifactReconciliationRequiredError):
+        application.ArtifactPersistenceService(
+            storage,
+            _repository_factory(repository, repository),
+        ).persist(request)
+
+    assert artifact_path.read_bytes() == b"changed"
+
+
+@dataclass
+class PendingReconciliationRepository:
+    pending: application.ArtifactSnapshot
+    finalized: bool = False
+    deleted: bool = False
+    commit_calls: int = 0
+    rollback_calls: int = 0
+
+    def list_stale_pending_artifacts(self, older_than):
+        del older_than
+        return () if self.deleted or self.finalized else (self.pending,)
+
+    def finalize_export_artifact(self, reservation, **values):
+        values["consistency_check"]()
+        self.finalized = True
+        snapshot_values = asdict(self.pending)
+        snapshot_values.update(
+            status=application.ArtifactLifecycleStatus.READY,
+            ready_at=values["ready_at"],
+        )
+        return application.ArtifactSnapshot(**snapshot_values)
+
+    def delete_pending_export_artifact(self, **values):
+        assert values["export_artifact_id"] == self.pending.export_artifact_id
+        self.deleted = True
+        return True
+
+    def read_export_artifact(self, export_artifact_id):
+        del export_artifact_id
+        return self.pending
+
+    def commit(self):
+        self.commit_calls += 1
+
+    def rollback(self):
+        self.rollback_calls += 1
+
+
+def test_stale_pending_reconciliation_finalizes_matching_file(
+    tmp_path: Path,
+) -> None:
+    storage = JobStorage(tmp_path, max_upload_bytes=1024)
+    request = _request()
+    digest = sha256(request.data).hexdigest()
+    _, pending = _reservation_and_snapshot(
+        request,
+        status=application.ArtifactLifecycleStatus.PENDING,
+        digest=digest,
+    )
+    with storage.publish_verified_artifact(
+        request.job_id,
+        request.export_artifact_id,
+        request.storage_key,
+        request.file_type,
+        request.data,
+    ):
+        pass
+    repository = PendingReconciliationRepository(pending)
+
+    result = application.ArtifactPendingReconciliationService(
+        storage,
+        _repository_factory(repository, repository),
+    ).reconcile_before(datetime(2026, 9, 1, 4, 30, tzinfo=UTC))
+
+    assert result.ready_artifact_ids == (request.export_artifact_id,)
+    assert repository.finalized is True
+    assert repository.deleted is False
+    assert (tmp_path / request.storage_key).exists()
+
+
+def test_stale_pending_reconciliation_deletes_missing_reservation(
+    tmp_path: Path,
+) -> None:
+    storage = JobStorage(tmp_path, max_upload_bytes=1024)
+    request = _request()
+    digest = sha256(request.data).hexdigest()
+    _, pending = _reservation_and_snapshot(
+        request,
+        status=application.ArtifactLifecycleStatus.PENDING,
+        digest=digest,
+    )
+    repository = PendingReconciliationRepository(pending)
+
+    result = application.ArtifactPendingReconciliationService(
+        storage,
+        _repository_factory(repository, repository),
+    ).reconcile_before(datetime(2026, 9, 1, 4, 30, tzinfo=UTC))
+
+    assert result.deleted_artifact_ids == (request.export_artifact_id,)
+    assert repository.deleted is True
+    assert repository.finalized is False

@@ -11,6 +11,11 @@ from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
+from text_verification.domain.artifacts import (
+    ArtifactLifecycleStatus,
+    ArtifactReservation,
+    ArtifactSnapshot,
+)
 from text_verification.domain.documents import FileType, TextBlock
 from text_verification.domain.issues import Issue, IssueSeverity
 from text_verification.domain.jobs import (
@@ -40,11 +45,7 @@ from text_verification.infrastructure.orm import (
     VerificationIssueRow,
     VerificationRunRow,
 )
-from text_verification.infrastructure.storage import (
-    PublishedArtifact,
-    VerifiedArtifact,
-    validate_artifact_identity,
-)
+from text_verification.infrastructure.storage import validate_artifact_identity
 
 
 class JobResultState(StrEnum):
@@ -62,14 +63,8 @@ class JobResultSnapshot:
 
 
 class VerificationRepository:
-    def __init__(
-        self,
-        session: Session,
-        *,
-        artifact_verifier: Callable[[PublishedArtifact], VerifiedArtifact] | None = None,
-    ) -> None:
+    def __init__(self, session: Session) -> None:
         self._session = session
-        self._artifact_verifier = artifact_verifier
 
     def save_result(self, job_id: UUID, result: VerificationResult) -> None:
         job = self._lock_job(job_id)
@@ -274,39 +269,36 @@ class VerificationRepository:
                 f"Review revision {review_revision_id} conflicts with existing data."
             ) from error
 
-    def save_export_artifact(
+    def reserve_export_artifact(
         self,
         *,
         export_artifact_id: UUID,
         verification_run_id: UUID,
         review_revision_id: UUID | None,
         source_version: str,
+        file_type: FileType | str,
         file_name: str,
         media_type: str,
-        artifact: PublishedArtifact,
+        storage_key: str,
+        size_bytes: int,
+        content_sha256: str,
+        reserved_at: datetime,
         created_at: datetime,
-    ) -> VerifiedArtifact:
-        if not isinstance(artifact, PublishedArtifact):
-            raise TypeError("artifact must be a storage-published PublishedArtifact.")
+    ) -> ArtifactReservation:
+        if size_bytes < 0:
+            raise ValueError("Artifact size must be greater than or equal to zero.")
+        _validate_sha256(content_sha256)
+        normalized_file_type = FileType(file_type)
         run = self._lock_run(verification_run_id)
         job = self._lock_job(run.job_id)
         if JobStatus(job.status) is JobStatus.EXPIRED:
             raise ValueError(f"Job {job.job_id} has expired.")
-        if artifact.artifact_id != export_artifact_id:
-            raise ValueError(
-                f"Artifact reference {artifact.artifact_id} does not match "
-                f"export artifact {export_artifact_id}."
-            )
         validate_artifact_identity(
             job.job_id,
             export_artifact_id,
-            artifact.file_type,
-            artifact.storage_key,
+            normalized_file_type,
+            storage_key,
         )
-        if artifact.job_id != job.job_id:
-            raise ValueError(
-                f"Artifact {artifact.storage_key!r} does not belong to job {job.job_id}."
-            )
         review_revision = self._review_revision_for_run(
             verification_run_id,
             review_revision_id,
@@ -322,26 +314,11 @@ class VerificationRepository:
                 f"{expected_source_version!r}."
             )
 
-        if self._artifact_verifier is None:
-            raise RuntimeError("Artifact persistence requires a storage verifier.")
-        verified = self._artifact_verifier(artifact)
-        _validate_verified_artifact_consistency(artifact, verified)
-        validate_artifact_identity(
-            job.job_id,
-            export_artifact_id,
-            verified.file_type,
-            verified.storage_key,
-        )
-        normalized_file_type = verified.file_type.value
-        storage_key = verified.storage_key
-        size_bytes = verified.size_bytes
-        content_sha256 = verified.content_sha256
-        _validate_sha256(content_sha256)
         values = (
             verification_run_id,
             review_revision_id,
             source_version,
-            normalized_file_type,
+            normalized_file_type.value,
             file_name,
             media_type,
             storage_key,
@@ -363,12 +340,31 @@ class VerificationRepository:
                 existing.content_sha256,
                 existing.created_at,
             )
-            if persisted != values:
+            persisted_without_digest = persisted[:8] + persisted[9:]
+            values_without_digest = values[:8] + values[9:]
+            if persisted_without_digest != values_without_digest:
                 raise ValueError(
                     f"Export artifact {export_artifact_id} is already persisted "
                     "with different data."
                 )
-            return verified
+            if (
+                existing.content_sha256 is not None
+                and existing.content_sha256 != content_sha256
+            ):
+                raise ValueError(
+                    f"Export artifact {export_artifact_id} is already reserved "
+                    "with different content."
+                )
+            if (
+                ArtifactLifecycleStatus(existing.status)
+                is ArtifactLifecycleStatus.PENDING
+            ):
+                existing.reserved_at = reserved_at
+                self._session.flush()
+            return _artifact_reservation_from_row(
+                existing,
+                expected_content_sha256=content_sha256,
+            )
 
         conflicting_storage_key = self._session.scalar(
             select(ExportArtifactRow.export_artifact_id).where(
@@ -386,12 +382,15 @@ class VerificationRepository:
                         verification_run_id=verification_run_id,
                         review_revision_id=review_revision_id,
                         source_version=source_version,
-                        file_type=normalized_file_type,
+                        file_type=normalized_file_type.value,
                         file_name=file_name,
                         media_type=media_type,
                         storage_key=storage_key,
                         size_bytes=size_bytes,
                         content_sha256=content_sha256,
+                        status=ArtifactLifecycleStatus.PENDING.value,
+                        reserved_at=reserved_at,
+                        ready_at=None,
                         created_at=created_at,
                     )
                 )
@@ -400,7 +399,78 @@ class VerificationRepository:
             raise ValueError(
                 f"Export artifact {export_artifact_id} conflicts with existing data."
             ) from error
-        return verified
+        row = self._session.get(ExportArtifactRow, export_artifact_id)
+        if row is None:
+            raise AssertionError("reserved artifact row was not persisted")
+        return _artifact_reservation_from_row(
+            row,
+            expected_content_sha256=content_sha256,
+        )
+
+    def finalize_export_artifact(
+        self,
+        reservation: ArtifactReservation,
+        *,
+        ready_at: datetime,
+        consistency_check: Callable[[], None],
+    ) -> ArtifactSnapshot:
+        row = self._lock_artifact(reservation.export_artifact_id)
+        _assert_artifact_row_matches_reservation(row, reservation)
+        consistency_check()
+        if row.content_sha256 is None:
+            row.content_sha256 = reservation.content_sha256
+        if row.content_sha256 != reservation.content_sha256:
+            raise ValueError(
+                f"Export artifact {reservation.export_artifact_id} has "
+                "different persisted content."
+            )
+        row.size_bytes = reservation.size_bytes
+        row.status = ArtifactLifecycleStatus.READY.value
+        row.ready_at = row.ready_at or ready_at
+        self._session.flush()
+        return _artifact_snapshot_from_row(row)
+
+    def read_export_artifact(
+        self,
+        export_artifact_id: UUID,
+    ) -> ArtifactSnapshot | None:
+        row = self._session.get(ExportArtifactRow, export_artifact_id)
+        return None if row is None else _artifact_snapshot_from_row(row)
+
+    def delete_pending_export_artifact(
+        self,
+        *,
+        export_artifact_id: UUID,
+        content_sha256: str,
+    ) -> bool:
+        row = self._session.get(ExportArtifactRow, export_artifact_id)
+        if row is None:
+            return False
+        if (
+            ArtifactLifecycleStatus(row.status) is not ArtifactLifecycleStatus.PENDING
+            or row.content_sha256 != content_sha256
+        ):
+            return False
+        self._session.delete(row)
+        self._session.flush()
+        return True
+
+    def list_stale_pending_artifacts(
+        self,
+        older_than: datetime,
+    ) -> tuple[ArtifactSnapshot, ...]:
+        rows = self._session.scalars(
+            select(ExportArtifactRow)
+            .where(
+                ExportArtifactRow.status == ArtifactLifecycleStatus.PENDING.value,
+                ExportArtifactRow.reserved_at < older_than,
+            )
+            .order_by(
+                ExportArtifactRow.reserved_at,
+                ExportArtifactRow.export_artifact_id,
+            )
+        ).all()
+        return tuple(_artifact_snapshot_from_row(row) for row in rows)
 
     def commit(self) -> None:
         self._session.commit()
@@ -443,6 +513,17 @@ class VerificationRepository:
         )
         if row is None:
             raise LookupError(f"Verification run {verification_run_id} does not exist.")
+        return row
+
+    def _lock_artifact(self, export_artifact_id: UUID) -> ExportArtifactRow:
+        row = self._session.scalar(
+            select(ExportArtifactRow)
+            .where(ExportArtifactRow.export_artifact_id == export_artifact_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if row is None:
+            raise LookupError(f"Export artifact {export_artifact_id} does not exist.")
         return row
 
     def _assert_active_lease(
@@ -740,29 +821,80 @@ def _validate_sha256(value: str) -> None:
         raise ValueError("Artifact content SHA-256 must be 64 lowercase hexadecimal characters.")
 
 
-def _validate_verified_artifact_consistency(
-    published: PublishedArtifact,
-    verified: VerifiedArtifact,
+def _artifact_reservation_from_row(
+    row: ExportArtifactRow,
+    *,
+    expected_content_sha256: str,
+) -> ArtifactReservation:
+    return ArtifactReservation(
+        export_artifact_id=row.export_artifact_id,
+        job_id=row.run.job_id,
+        verification_run_id=row.verification_run_id,
+        review_revision_id=row.review_revision_id,
+        source_version=row.source_version,
+        file_type=FileType(row.file_type),
+        file_name=row.file_name,
+        media_type=row.media_type,
+        storage_key=row.storage_key,
+        size_bytes=row.size_bytes,
+        content_sha256=row.content_sha256 or expected_content_sha256,
+        status=ArtifactLifecycleStatus(row.status),
+        reserved_at=row.reserved_at,
+        created_at=row.created_at,
+    )
+
+
+def _artifact_snapshot_from_row(row: ExportArtifactRow) -> ArtifactSnapshot:
+    return ArtifactSnapshot(
+        export_artifact_id=row.export_artifact_id,
+        job_id=row.run.job_id,
+        verification_run_id=row.verification_run_id,
+        review_revision_id=row.review_revision_id,
+        source_version=row.source_version,
+        file_type=FileType(row.file_type),
+        file_name=row.file_name,
+        media_type=row.media_type,
+        storage_key=row.storage_key,
+        size_bytes=row.size_bytes,
+        content_sha256=row.content_sha256,
+        status=ArtifactLifecycleStatus(row.status),
+        reserved_at=row.reserved_at,
+        ready_at=row.ready_at,
+        created_at=row.created_at,
+    )
+
+
+def _assert_artifact_row_matches_reservation(
+    row: ExportArtifactRow,
+    reservation: ArtifactReservation,
 ) -> None:
-    published_fingerprint = (
-        published.job_id,
-        published.artifact_id,
-        published.storage_key,
-        published.file_type,
-        published.size_bytes,
-        published.content_sha256,
-        published.created,
+    persisted = (
+        row.export_artifact_id,
+        row.run.job_id,
+        row.verification_run_id,
+        row.review_revision_id,
+        row.source_version,
+        row.file_type,
+        row.file_name,
+        row.media_type,
+        row.storage_key,
+        row.size_bytes,
+        row.created_at,
     )
-    verified_fingerprint = (
-        verified.job_id,
-        verified.artifact_id,
-        verified.storage_key,
-        verified.file_type,
-        verified.size_bytes,
-        verified.content_sha256,
-        verified.created,
+    expected = (
+        reservation.export_artifact_id,
+        reservation.job_id,
+        reservation.verification_run_id,
+        reservation.review_revision_id,
+        reservation.source_version,
+        reservation.file_type.value,
+        reservation.file_name,
+        reservation.media_type,
+        reservation.storage_key,
+        reservation.size_bytes,
+        reservation.created_at,
     )
-    if verified_fingerprint != published_fingerprint:
+    if persisted != expected:
         raise ValueError(
-            "Storage-verified artifact does not match the published artifact."
+            f"Export artifact {reservation.export_artifact_id} reservation changed."
         )

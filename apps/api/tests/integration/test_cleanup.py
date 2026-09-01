@@ -14,7 +14,10 @@ import pytest
 from text_verification.compatibility.storage import CompatibilityStorage
 from text_verification.domain.documents import FileType
 from text_verification.domain.jobs import JobEvent, JobRead, JobStatus
-from text_verification.infrastructure.storage import JobStorage
+from text_verification.infrastructure.storage import (
+    JobStorage,
+    build_artifact_storage_key,
+)
 
 
 class InMemoryCleanupRepository:
@@ -101,6 +104,10 @@ class InMemoryCleanupVerificationRepository:
             for storage_key in keys
         )
 
+    def list_stale_pending_artifacts(self, older_than: datetime) -> tuple[object, ...]:
+        del older_than
+        return ()
+
     def delete_results_for_jobs(self, job_ids: list[UUID]) -> None:
         self.deleted_job_ids.extend(job_ids)
         for job_id in job_ids:
@@ -129,6 +136,29 @@ class SessionFactorySpy:
         session = FakeSession()
         self.sessions.append(session)
         return session
+
+
+@dataclass(frozen=True)
+class ArtifactFixture:
+    storage_key: str
+    path: Path
+
+
+def _publish_artifact_fixture(
+    storage: JobStorage,
+    job_id: UUID,
+    artifact_id: UUID,
+    data: bytes,
+) -> ArtifactFixture:
+    storage_key = build_artifact_storage_key(job_id, artifact_id, FileType.TXT)
+    with storage.publish_verified_artifact(
+        job_id,
+        artifact_id,
+        storage_key,
+        FileType.TXT,
+        data,
+    ) as handle:
+        return ArtifactFixture(storage_key=handle.storage_key, path=handle.path)
 
 
 @pytest.fixture
@@ -407,7 +437,7 @@ def test_cleanup_sweeps_only_stale_unpersisted_directories(
     assert storage.job_directory(persisted.job_id).exists()
 
 
-def test_cleanup_sweeps_only_stale_unreferenced_artifacts(
+def test_cleanup_keeps_pending_reference_and_sweeps_stale_orphan(
     repository: InMemoryCleanupRepository,
     verification_repository: InMemoryCleanupVerificationRepository,
     storage: JobStorage,
@@ -418,44 +448,41 @@ def test_cleanup_sweeps_only_stale_unreferenced_artifacts(
         status=JobStatus.COMPLETED,
         expires_at=datetime.now(UTC) + timedelta(hours=1),
     )
-    referenced_id = uuid4()
+    pending_id = uuid4()
     orphan_job_id = uuid4()
     orphan_id = uuid4()
     recent_id = uuid4()
-    referenced = storage.publish_artifact(
+    pending = _publish_artifact_fixture(
+        storage,
         live_job.job_id,
-        referenced_id,
-        f"artifacts/{live_job.job_id}/{referenced_id}.txt",
-        FileType.TXT,
-        b"referenced",
+        pending_id,
+        b"pending",
     )
-    orphan = storage.publish_artifact(
+    orphan = _publish_artifact_fixture(
+        storage,
         orphan_job_id,
         orphan_id,
-        f"artifacts/{orphan_job_id}/{orphan_id}.txt",
-        FileType.TXT,
         b"orphan",
     )
-    recent = storage.publish_artifact(
+    recent = _publish_artifact_fixture(
+        storage,
         live_job.job_id,
         recent_id,
-        f"artifacts/{live_job.job_id}/{recent_id}.txt",
-        FileType.TXT,
         b"recent",
     )
     recent_temp = recent.path.with_name(f".{recent.path.name}.active.uploading")
     recent_temp.write_bytes(b"in progress")
     stale_timestamp = (datetime.now(UTC) - timedelta(hours=25)).timestamp()
-    os.utime(referenced.path, (stale_timestamp, stale_timestamp))
+    os.utime(pending.path, (stale_timestamp, stale_timestamp))
     os.utime(orphan.path, (stale_timestamp, stale_timestamp))
     os.utime(orphan.path.parent, (stale_timestamp, stale_timestamp))
     verification_repository.artifact_keys[live_job.job_id] = (
-        referenced.storage_key,
+        pending.storage_key,
     )
 
     cleanup_expired_jobs()
 
-    assert referenced.path.exists()
+    assert pending.path.exists()
     assert not orphan.path.exists()
     assert not orphan.path.parent.exists()
     assert recent.path.exists()

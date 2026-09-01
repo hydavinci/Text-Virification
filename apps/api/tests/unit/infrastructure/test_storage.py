@@ -302,26 +302,36 @@ def test_publish_artifact_retry_reuses_identical_existing_file(tmp_path) -> None
         FileType.TXT,
     )
 
-    first = storage.publish_artifact(
+    with storage.publish_verified_artifact(
         job_id,
         artifact_id,
         storage_key,
         FileType.TXT,
         b"same content",
-    )
-    second = storage.publish_artifact(
+    ) as first:
+        first_values = (
+            first.created,
+            first.size_bytes,
+            first.content_sha256,
+            first.path,
+        )
+    with storage.publish_verified_artifact(
         job_id,
         artifact_id,
         storage_key,
         FileType.TXT,
         b"same content",
-    )
+    ) as second:
+        second_values = (
+            second.created,
+            second.size_bytes,
+            second.content_sha256,
+        )
 
-    assert first.created is True
-    assert second.created is False
-    assert second.size_bytes == first.size_bytes
-    assert second.content_sha256 == first.content_sha256
-    assert first.path.read_bytes() == b"same content"
+    assert first_values[0] is True
+    assert second_values[0] is False
+    assert second_values[1:] == first_values[1:3]
+    assert first_values[3].read_bytes() == b"same content"
 
 
 def test_publish_artifact_rejects_different_content_without_overwrite(tmp_path) -> None:
@@ -333,16 +343,17 @@ def test_publish_artifact_rejects_different_content_without_overwrite(tmp_path) 
         artifact_id,
         FileType.TXT,
     )
-    published = storage.publish_artifact(
+    with storage.publish_verified_artifact(
         job_id,
         artifact_id,
         storage_key,
         FileType.TXT,
         b"original",
-    )
+    ) as handle:
+        artifact_path = handle.path
 
     with pytest.raises(InvalidUpload, match="different content"):
-        storage.publish_artifact(
+        storage.publish_verified_artifact(
             job_id,
             artifact_id,
             storage_key,
@@ -350,18 +361,18 @@ def test_publish_artifact_rejects_different_content_without_overwrite(tmp_path) 
             b"replacement",
         )
 
-    assert published.path.read_bytes() == b"original"
+    assert artifact_path.read_bytes() == b"original"
 
 
-def test_fallback_publish_is_non_clobbering(
+def test_publish_fails_closed_without_descriptor_operations(
     tmp_path,
     monkeypatch,
 ) -> None:
     storage = JobStorage(tmp_path, max_upload_bytes=1024)
     monkeypatch.setattr(
-        storage,
-        "_supports_descriptor_artifact_operations",
-        lambda: False,
+        storage_module.ArtifactStorage,
+        "_supports_descriptor_operations",
+        lambda self: False,
     )
     job_id = uuid4()
     artifact_id = uuid4()
@@ -370,24 +381,16 @@ def test_fallback_publish_is_non_clobbering(
         artifact_id,
         FileType.TXT,
     )
-    published = storage.publish_artifact(
-        job_id,
-        artifact_id,
-        storage_key,
-        FileType.TXT,
-        b"fallback",
-    )
-
-    with pytest.raises(InvalidUpload, match="different content"):
-        storage.publish_artifact(
+    with pytest.raises(InvalidUpload, match="descriptor-relative"):
+        storage.publish_verified_artifact(
             job_id,
             artifact_id,
             storage_key,
             FileType.TXT,
-            b"changed!",
+            b"fallback",
         )
 
-    assert published.path.read_bytes() == b"fallback"
+    assert not (tmp_path / storage_key).exists()
 
 
 def test_concurrent_identical_artifact_writers_publish_once(tmp_path) -> None:
@@ -403,22 +406,58 @@ def test_concurrent_identical_artifact_writers_publish_once(tmp_path) -> None:
 
     def publish():
         start.wait(timeout=2)
-        return storage.publish_artifact(
+        with storage.publish_verified_artifact(
             job_id,
             artifact_id,
             storage_key,
             FileType.TXT,
             b"concurrent",
-        )
+        ) as handle:
+            return (
+                handle.created,
+                handle.content_sha256,
+                handle.path,
+            )
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(executor.map(lambda _: publish(), range(2)))
 
-    assert sorted(result.created for result in results) == [False, True]
-    assert {result.content_sha256 for result in results} == {
-        results[0].content_sha256
-    }
-    assert results[0].path.read_bytes() == b"concurrent"
+    assert sorted(result[0] for result in results) == [False, True]
+    assert {result[1] for result in results} == {results[0][1]}
+    assert results[0][2].read_bytes() == b"concurrent"
+
+
+def test_concurrent_conflicting_artifact_writers_never_overwrite(tmp_path) -> None:
+    storage = JobStorage(tmp_path, max_upload_bytes=1024)
+    job_id = uuid4()
+    artifact_id = uuid4()
+    storage_key = storage_module.build_artifact_storage_key(
+        job_id,
+        artifact_id,
+        FileType.TXT,
+    )
+    start = Barrier(2)
+
+    def publish(data: bytes):
+        start.wait(timeout=2)
+        try:
+            with storage.publish_verified_artifact(
+                job_id,
+                artifact_id,
+                storage_key,
+                FileType.TXT,
+                data,
+            ) as handle:
+                return ("published", data, handle.path)
+        except InvalidUpload:
+            return ("conflict", data, tmp_path / storage_key)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(publish, (b"first", b"other")))
+
+    assert sorted(result[0] for result in results) == ["conflict", "published"]
+    published = next(result for result in results if result[0] == "published")
+    assert published[2].read_bytes() == published[1]
 
 
 def test_verify_artifact_rejects_same_size_content_change(tmp_path) -> None:
@@ -430,17 +469,105 @@ def test_verify_artifact_rejects_same_size_content_change(tmp_path) -> None:
         artifact_id,
         FileType.TXT,
     )
-    published = storage.publish_artifact(
+    with storage.publish_verified_artifact(
         job_id,
         artifact_id,
         storage_key,
         FileType.TXT,
         b"first",
-    )
-    published.path.write_bytes(b"other")
+    ) as handle:
+        handle.path.write_bytes(b"other")
 
-    with pytest.raises(InvalidUpload, match="fingerprint"):
-        storage.verify_artifact(published)
+        with pytest.raises(InvalidUpload, match="directory entry"):
+            handle.assert_current()
+
+
+def test_verification_handle_rejects_replaced_leaf_entry(tmp_path) -> None:
+    storage = JobStorage(tmp_path, max_upload_bytes=1024)
+    job_id = uuid4()
+    artifact_id = uuid4()
+    storage_key = storage_module.build_artifact_storage_key(
+        job_id,
+        artifact_id,
+        FileType.TXT,
+    )
+
+    with storage.publish_verified_artifact(
+        job_id,
+        artifact_id,
+        storage_key,
+        FileType.TXT,
+        b"content",
+    ) as handle:
+        moved = handle.path.with_suffix(".moved")
+        handle.path.rename(moved)
+        handle.path.write_bytes(b"content")
+
+        with pytest.raises(InvalidUpload, match="directory entry"):
+            handle.assert_current()
+
+
+def test_verification_handle_rejects_replaced_directory_entry(tmp_path) -> None:
+    storage = JobStorage(tmp_path, max_upload_bytes=1024)
+    job_id = uuid4()
+    artifact_id = uuid4()
+    storage_key = storage_module.build_artifact_storage_key(
+        job_id,
+        artifact_id,
+        FileType.TXT,
+        subdirectories=("reports",),
+    )
+
+    with storage.publish_verified_artifact(
+        job_id,
+        artifact_id,
+        storage_key,
+        FileType.TXT,
+        b"content",
+    ) as handle:
+        original_directory = handle.path.parent
+        moved_directory = original_directory.with_name("reports-moved")
+        original_directory.rename(moved_directory)
+        original_directory.mkdir()
+        (original_directory / handle.path.name).write_bytes(b"content")
+
+        with pytest.raises(InvalidUpload, match="directory entry"):
+            handle.assert_current()
+
+
+def test_post_link_handle_failure_removes_only_created_final(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    storage = JobStorage(tmp_path, max_upload_bytes=1024)
+    job_id = uuid4()
+    artifact_id = uuid4()
+    storage_key = storage_module.build_artifact_storage_key(
+        job_id,
+        artifact_id,
+        FileType.TXT,
+    )
+    artifact_store_type = storage_module.ArtifactStorage
+    monkeypatch.setattr(
+        artifact_store_type,
+        "_build_handle",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("handle construction failed")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="handle construction failed"):
+        storage.publish_verified_artifact(
+            job_id,
+            artifact_id,
+            storage_key,
+            FileType.TXT,
+            b"content",
+        )
+
+    artifact_path = tmp_path / storage_key
+    assert not artifact_path.exists()
+    assert list(artifact_path.parent.glob("*.uploading")) == []
 
 
 def test_verify_artifact_returns_owned_reference_for_nested_path(tmp_path) -> None:
@@ -454,23 +581,21 @@ def test_verify_artifact_returns_owned_reference_for_nested_path(tmp_path) -> No
         subdirectories=("reports", "reviewed"),
     )
 
-    published = storage.publish_artifact(
+    with storage.publish_verified_artifact(
         job_id,
         artifact_id,
         storage_key,
         FileType.TXT,
         b"reviewed",
-    )
-    artifact = storage.verify_artifact(published)
-
-    assert artifact.job_id == job_id
-    assert artifact.storage_key == (
-        f"artifacts/{job_id}/reports/reviewed/{artifact_id}.txt"
-    )
-    assert artifact.path == tmp_path / artifact.storage_key
-    assert artifact.path.read_bytes() == b"reviewed"
-    assert artifact.file_type is FileType.TXT
-    assert artifact.size_bytes == 8
+    ) as artifact:
+        assert artifact.job_id == job_id
+        assert artifact.storage_key == (
+            f"artifacts/{job_id}/reports/reviewed/{artifact_id}.txt"
+        )
+        assert artifact.path == tmp_path / artifact.storage_key
+        assert artifact.path.read_bytes() == b"reviewed"
+        assert artifact.file_type is FileType.TXT
+        assert artifact.size_bytes == 8
 
 
 def test_publish_artifact_rejects_nested_symlink_escape(tmp_path) -> None:
@@ -492,8 +617,8 @@ def test_publish_artifact_rejects_nested_symlink_escape(tmp_path) -> None:
         subdirectories=("link",),
     )
 
-    with pytest.raises(InvalidUpload, match="reparse point"):
-        storage.publish_artifact(
+    with pytest.raises(InvalidUpload, match="unsafe directory entry"):
+        storage.publish_verified_artifact(
             job_id,
             artifact_id,
             storage_key,
@@ -502,41 +627,6 @@ def test_publish_artifact_rejects_nested_symlink_escape(tmp_path) -> None:
         )
 
     assert list(outside.iterdir()) == []
-
-
-def test_publish_artifact_rejects_nested_reparse_component(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    storage = JobStorage(tmp_path, max_upload_bytes=1024)
-    job_id = uuid4()
-    artifact_id = uuid4()
-    storage_key = storage_module.build_artifact_storage_key(
-        job_id,
-        artifact_id,
-        FileType.TXT,
-        subdirectories=("reports",),
-    )
-    reparse_path = storage._root / "artifacts" / str(job_id) / "reports"
-    monkeypatch.setattr(
-        JobStorage,
-        "_is_reparse_point",
-        lambda self, path: path == reparse_path,
-    )
-    monkeypatch.setattr(
-        JobStorage,
-        "_supports_descriptor_artifact_operations",
-        lambda self: False,
-    )
-
-    with pytest.raises(InvalidUpload, match="reparse point"):
-        storage.publish_artifact(
-            job_id,
-            artifact_id,
-            storage_key,
-            FileType.TXT,
-            b"must not escape",
-        )
 
 
 def test_delete_artifact_removes_only_key_owned_by_job(tmp_path) -> None:
@@ -549,16 +639,17 @@ def test_delete_artifact_removes_only_key_owned_by_job(tmp_path) -> None:
         FileType.TXT,
         subdirectories=("reports", "reviewed"),
     )
-    artifact = storage.publish_artifact(
+    with storage.publish_verified_artifact(
         job_id,
         artifact_id,
         storage_key,
         FileType.TXT,
         b"reviewed",
-    )
+    ) as handle:
+        artifact_path = handle.path
 
     assert storage.delete_artifact(job_id, storage_key) is True
-    assert not artifact.path.exists()
+    assert not artifact_path.exists()
     assert storage.delete_artifact(job_id, storage_key) is False
 
 
@@ -614,7 +705,7 @@ def test_delete_artifact_rejects_symlink_escape(tmp_path) -> None:
     except OSError as error:
         pytest.skip(f"symlink creation unavailable: {error}")
 
-    with pytest.raises(InvalidUpload, match="reparse point"):
+    with pytest.raises(InvalidUpload, match="unsafe directory entry"):
         storage.delete_artifact(
             job_id,
             f"artifacts/{job_id}/{artifact_id}.txt",
@@ -636,16 +727,17 @@ def test_orphan_sweep_rejects_reparse_job_directory(
         artifact_id,
         FileType.TXT,
     )
-    artifact = storage.publish_artifact(
+    with storage.publish_verified_artifact(
         job_id,
         artifact_id,
         storage_key,
         FileType.TXT,
         b"keep",
-    )
+    ) as artifact:
+        artifact_path = artifact.path
     stale_timestamp = (datetime.now(UTC) - timedelta(hours=25)).timestamp()
-    os.utime(artifact.path, (stale_timestamp, stale_timestamp))
-    reparse_path = artifact.path.parent
+    os.utime(artifact_path, (stale_timestamp, stale_timestamp))
+    reparse_path = artifact_path.parent
     monkeypatch.setattr(
         storage,
         "_is_reparse_point",
@@ -659,7 +751,7 @@ def test_orphan_sweep_rejects_reparse_job_directory(
         )
 
     assert deleted == []
-    assert artifact.path.read_bytes() == b"keep"
+    assert artifact_path.read_bytes() == b"keep"
     assert [record.getMessage() for record in caplog.records] == [
         "cleanup_orphaned_artifact_delete_failed"
     ]

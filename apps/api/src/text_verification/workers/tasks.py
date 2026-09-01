@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -13,6 +14,7 @@ from celery import Task  # type: ignore[import-untyped]
 from sqlalchemy.orm import Session, sessionmaker
 
 from text_verification.application import (
+    ArtifactPendingReconciliationService,
     VerificationError,
     VerificationPipeline,
     build_default_verification_pipeline,
@@ -523,6 +525,21 @@ def _cleanup_expired_jobs() -> list[str]:
         )
     )
     try:
+        reconciliation = ArtifactPendingReconciliationService(
+            storage,
+            _artifact_repository_context_factory(session_factory),
+        ).reconcile_before(orphan_cutoff)
+        for artifact_id in reconciliation.deferred_artifact_ids:
+            logger.warning(
+                "cleanup_pending_artifact_reconciliation_deferred",
+                extra={"export_artifact_id": str(artifact_id)},
+            )
+    except Exception as error:
+        logger.warning(
+            "cleanup_pending_artifact_reconciliation_failed",
+            extra={"error_type": type(error).__name__},
+        )
+    try:
         referenced_artifact_keys = _all_artifact_storage_keys(session_factory)
     except Exception as error:
         logger.warning(
@@ -681,6 +698,20 @@ def _artifact_storage_keys(
     finally:
         repository.rollback()
         session.close()
+
+
+def _artifact_repository_context_factory(
+    session_factory: sessionmaker[Session],
+) -> Callable[[], AbstractContextManager[VerificationRepository]]:
+    @contextmanager
+    def repository_context() -> Iterator[VerificationRepository]:
+        session = session_factory()
+        try:
+            yield VERIFICATION_REPOSITORY_FACTORY(session)
+        finally:
+            session.close()
+
+    return repository_context
 
 
 def _all_artifact_storage_keys(
