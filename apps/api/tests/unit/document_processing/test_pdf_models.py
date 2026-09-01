@@ -71,6 +71,7 @@ def test_text_character_metadata_is_immutable_json_safe_and_offset_exact() -> No
         source_start=0,
         source_end=1,
         mapping_state=PdfCharacterMappingState.GLYPH,
+        group_id="line-0-span-0-glyph-0",
     )
     span = PdfTextSpan(
         text="W",
@@ -81,6 +82,10 @@ def test_text_character_metadata_is_immutable_json_safe_and_offset_exact() -> No
         color=0,
         span_index=0,
         characters=(character,),
+        line_direction=(1.0, 0.0),
+        writing_mode=0,
+        line_index=0,
+        span_order=0,
     )
 
     with pytest.raises(ValidationError):
@@ -93,8 +98,62 @@ def test_text_character_metadata_is_immutable_json_safe_and_offset_exact() -> No
             "source_start": 0,
             "source_end": 1,
             "mapping_state": "glyph",
+            "group_id": "line-0-span-0-glyph-0",
         }
     ]
+    assert span.model_dump(mode="json")["line_direction"] == [1.0, 0.0]
+    assert span.model_dump(mode="json")["writing_mode"] == 0
+
+
+def test_multi_codepoint_glyph_group_has_one_bbox_and_stable_boundaries() -> None:
+    character = PdfTextCharacter(
+        text="👩‍💻",
+        bbox=(1.0, 2.0, 9.0, 12.0),
+        source_start=0,
+        source_end=3,
+        mapping_state=PdfCharacterMappingState.GLYPH,
+        group_id="line-2-span-4-glyph-1",
+    )
+
+    assert character.source_end - character.source_start == len(character.text)
+    assert character.model_dump(mode="json") == {
+        "text": "👩‍💻",
+        "bbox": [1.0, 2.0, 9.0, 12.0],
+        "source_start": 0,
+        "source_end": 3,
+        "mapping_state": "glyph",
+        "group_id": "line-2-span-4-glyph-1",
+    }
+
+
+def test_pdf_text_metadata_accepts_legacy_json_without_group_or_writing_fields() -> None:
+    character = PdfTextCharacter.model_validate(
+        {
+            "text": "W",
+            "bbox": [1.0, 2.0, 9.0, 12.0],
+            "source_start": 0,
+            "source_end": 1,
+            "mapping_state": "glyph",
+        }
+    )
+    span = PdfTextSpan.model_validate(
+        {
+            "text": "W",
+            "bbox": [1.0, 2.0, 9.0, 12.0],
+            "font_name": "Helvetica",
+            "font_size": 10.0,
+            "font_flags": 0,
+            "color": 0,
+            "span_index": 0,
+            "characters": [character.model_dump(mode="json", exclude_none=True)],
+        }
+    )
+
+    assert character.group_id is None
+    assert span.line_direction == (1.0, 0.0)
+    assert span.writing_mode.value == 0
+    assert span.line_index == 0
+    assert span.span_order == 0
 
 
 @pytest.mark.parametrize(

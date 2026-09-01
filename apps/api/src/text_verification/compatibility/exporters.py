@@ -50,6 +50,8 @@ _PDF_MAPPING_VALIDATION_ERROR = (
     "PDF compatibility mapping validation failed: "
     "character metadata is incomplete or invalid."
 )
+_PDF_EDIT_CONFLICT_ERROR = "PDF edits contain overlapping or ambiguous source ranges."
+_PDF_INSERTION_SPACE_ERROR = "PDF replacement text does not fit the mapped source area."
 
 
 MEDIA_TYPES = {
@@ -105,14 +107,15 @@ def export_original(
         )
         return ExportedDocument(content, extension, MEDIA_TYPES[extension])
     if extension == "pdf":
-        pdf_edits = (
-            _coalesce_pdf_modified_text_edits(edits, original_text or "")
-            if edits is not None and modified_text is not None and not replacements
-            else edits
-        )
         content = (
-            _export_pdf_edits(source_path, original_text or "", pdf_edits, track_changes)
-            if pdf_edits is not None
+            _export_pdf_edits(
+                source_path,
+                original_text or "",
+                edits,
+                track_changes,
+                coalesce_modified_text=modified_text is not None and not replacements,
+            )
+            if edits is not None
             else _export_pdf(source_path, cleaned_replacements, track_changes)
         )
         return ExportedDocument(content, "pdf", MEDIA_TYPES["pdf"])
@@ -160,12 +163,18 @@ def _build_edits(
 def _coalesce_pdf_modified_text_edits(
     edits: list[TextEdit],
     original_text: str,
+    document: object,
 ) -> list[TextEdit]:
     if not edits:
         return []
     groups: list[list[TextEdit]] = [[edits[0]]]
     for edit in edits[1:]:
-        if edit.start - groups[-1][-1].end <= 1:
+        if _pdf_edits_can_coalesce(
+            groups[-1][-1],
+            edit,
+            original_text,
+            document,
+        ):
             groups[-1].append(edit)
         else:
             groups.append([edit])
@@ -189,6 +198,62 @@ def _coalesce_pdf_modified_text_edits(
             )
         )
     return coalesced
+
+
+def _pdf_edits_can_coalesce(
+    first: TextEdit,
+    second: TextEdit,
+    original_text: str,
+    document: object,
+) -> bool:
+    separator = original_text[first.end:second.start]
+    if second.start < first.end or len(separator) > 1 or any(
+        character.isspace() for character in separator
+    ):
+        return False
+    identity = _pdf_source_line_identity(document, first.start, second.end)
+    return identity is not None
+
+
+def _pdf_source_line_identity(
+    document: object,
+    start: int,
+    end: int,
+) -> tuple[str, int, int] | None:
+    for block in document.blocks:  # type: ignore[attr-defined]
+        if not (block.global_start <= start and end <= block.global_end):
+            continue
+        page_number = block.source_locator.get("page")
+        characters = block.source_locator.get("characters")
+        if not isinstance(page_number, int) or not isinstance(characters, list):
+            return None
+        local_start = start - block.global_start
+        local_end = end - block.global_start
+        covered: set[int] = set()
+        line_indices: set[int] = set()
+        for value in characters:
+            if not isinstance(value, dict):
+                continue
+            group_start = value.get("source_start")
+            group_end = value.get("source_end")
+            line_index = value.get("line_index")
+            if not (
+                isinstance(group_start, int)
+                and isinstance(group_end, int)
+                and isinstance(line_index, int)
+                and group_start < local_end
+                and group_end > local_start
+                and value.get("mapping_state") == "glyph"
+            ):
+                continue
+            covered.update(
+                range(max(group_start, local_start), min(group_end, local_end))
+            )
+            line_indices.add(line_index)
+        if covered != set(range(local_start, local_end)) or len(line_indices) != 1:
+            return None
+        return block.block_id, page_number, next(iter(line_indices))
+    return None
 
 
 def _document_text_paragraphs(document: object) -> list[object]:
@@ -661,6 +726,35 @@ def _export_text_edits(
     return _apply_text_edits(content, edits, track_changes).encode(encoding)
 
 
+def _validate_and_order_pdf_edits(
+    edits: list[TextEdit],
+    text_length: int,
+) -> list[TextEdit]:
+    ordered = sorted(edits, key=lambda edit: (edit.start, edit.end, edit.replacement))
+    for edit in ordered:
+        if edit.start < 0 or edit.end < edit.start or edit.end > text_length:
+            raise ExportError("An edit position is outside the original document.")
+    for index, first in enumerate(ordered):
+        for second in ordered[index + 1 :]:
+            first_insertion = first.start == first.end
+            second_insertion = second.start == second.end
+            if first_insertion and second_insertion:
+                if first.start == second.start:
+                    raise ExportError(_PDF_EDIT_CONFLICT_ERROR)
+                continue
+            if first_insertion:
+                if second.start <= first.start <= second.end:
+                    raise ExportError(_PDF_EDIT_CONFLICT_ERROR)
+                continue
+            if second_insertion:
+                if first.start <= second.start <= first.end:
+                    raise ExportError(_PDF_EDIT_CONFLICT_ERROR)
+                continue
+            if first.start < second.end and second.start < first.end:
+                raise ExportError(_PDF_EDIT_CONFLICT_ERROR)
+    return ordered
+
+
 def _export_pdf(
     source_path: Path,
     replacements: list[tuple[str, str]],
@@ -688,6 +782,8 @@ def _export_pdf_edits(
     original_text: str,
     edits: list[TextEdit],
     track_changes: bool,
+    *,
+    coalesce_modified_text: bool = False,
 ) -> bytes:
     try:
         import fitz
@@ -699,8 +795,19 @@ def _export_pdf_edits(
         canonical_document = PdfParser().parse(source_path)
         if canonical_document.text != original_text:
             raise ExportError("The stored PDF no longer matches the analyzed document.")
+        ordered_edits = _validate_and_order_pdf_edits(edits, len(original_text))
+        if coalesce_modified_text:
+            ordered_edits = _coalesce_pdf_modified_text_edits(
+                ordered_edits,
+                original_text,
+                canonical_document,
+            )
+            ordered_edits = _validate_and_order_pdf_edits(
+                ordered_edits,
+                len(original_text),
+            )
         resolved: list[tuple[object, list[object], object, str, str]] = []
-        for edit in edits:
+        for edit in ordered_edits:
             original = original_text[edit.start:edit.end]
             if not original:
                 raise ExportError(
@@ -743,23 +850,44 @@ def _export_pdf_edits(
                     page.rect.x1 - 2,
                     rectangle.y1 + font_size,
                 )
-                try:
-                    page.insert_textbox(
-                        insertion_box,
-                        suggestion,
-                        fontsize=font_size,
-                        fontname="china-s" if _has_cjk(suggestion) else "helv",
-                    )
-                except Exception:
-                    page.insert_textbox(
-                        insertion_box,
-                        suggestion,
-                        fontsize=font_size,
-                        fontname="helv",
-                    )
+                _insert_pdf_textbox(
+                    page,
+                    insertion_box,
+                    suggestion,
+                    font_size,
+                )
         return document.tobytes(garbage=4, deflate=True)
     finally:
         document.close()
+
+
+def _insert_pdf_textbox(
+    page: object,
+    insertion_box: object,
+    suggestion: str,
+    font_size: float,
+) -> None:
+    try:
+        result = page.insert_textbox(  # type: ignore[attr-defined]
+            insertion_box,
+            suggestion,
+            fontsize=font_size,
+            fontname="china-s" if _has_cjk(suggestion) else "helv",
+        )
+    except Exception:
+        result = page.insert_textbox(  # type: ignore[attr-defined]
+            insertion_box,
+            suggestion,
+            fontsize=font_size,
+            fontname="helv",
+        )
+    if (
+        isinstance(result, bool)
+        or not isinstance(result, int | float)
+        or not isfinite(float(result))
+        or result < 0
+    ):
+        raise ExportError(_PDF_INSERTION_SPACE_ERROR)
 
 
 def _pdf_edit_location(
@@ -812,44 +940,63 @@ def _validated_pdf_glyphs(
     if local_start < 0 or local_end > len(block_text) or local_end <= local_start:
         raise ExportError(_PDF_MAPPING_VALIDATION_ERROR)
 
-    by_offset: dict[int, dict[str, object]] = {}
+    selected: list[dict[str, object]] = []
+    covered_offsets: set[int] = set()
+    group_ids: set[str] = set()
     for value in characters:
         if not isinstance(value, dict):
             continue
         source_start = value.get("source_start")
+        source_end = value.get("source_end")
         if (
             isinstance(source_start, bool)
             or not isinstance(source_start, int)
-            or not local_start <= source_start < local_end
+            or isinstance(source_end, bool)
+            or not isinstance(source_end, int)
+            or source_start >= local_end
+            or source_end <= local_start
         ):
             continue
-        if source_start in by_offset:
-            raise ExportError(_PDF_MAPPING_VALIDATION_ERROR)
-        by_offset[source_start] = value
-
-    glyphs: list[_PdfGlyphRectangle] = []
-    for source_start in range(local_start, local_end):
-        value = by_offset.get(source_start)
-        if value is None:
-            raise ExportError(_PDF_MAPPING_VALIDATION_ERROR)
-        source_end = value.get("source_end")
         text = value.get("text")
-        mapping_state = value.get("mapping_state")
-        bbox_value = value.get("bbox")
         line_index = value.get("line_index")
-        expected = block_text[source_start]
+        group_id = value.get("group_id")
         if (
-            isinstance(source_end, bool)
-            or source_end != source_start + 1
-            or not isinstance(text, str)
-            or len(text) != 1
-            or text != expected
+            not isinstance(text, str)
+            or not text
+            or source_end != source_start + len(text)
+            or source_start < 0
+            or source_end > len(block_text)
+            or block_text[source_start:source_end] != text
             or isinstance(line_index, bool)
             or not isinstance(line_index, int)
             or line_index < 0
+            or not isinstance(group_id, str)
+            or not group_id
+            or group_id in group_ids
+            or source_start < local_start
+            or source_end > local_end
         ):
             raise ExportError(_PDF_MAPPING_VALIDATION_ERROR)
-        if expected.isspace():
+        group_ids.add(group_id)
+        for offset in range(source_start, source_end):
+            if offset in covered_offsets:
+                raise ExportError(_PDF_MAPPING_VALIDATION_ERROR)
+            covered_offsets.add(offset)
+        selected.append(value)
+
+    if covered_offsets != set(range(local_start, local_end)):
+        raise ExportError(_PDF_MAPPING_VALIDATION_ERROR)
+
+    glyphs: list[_PdfGlyphRectangle] = []
+    for value in sorted(selected, key=lambda group: int(group["source_start"])):
+        source_start = int(value["source_start"])
+        source_end = int(value["source_end"])
+        text = value.get("text")
+        mapping_state = value.get("mapping_state")
+        bbox_value = value.get("bbox")
+        line_index = int(value["line_index"])
+        assert isinstance(text, str)
+        if text.isspace():
             if mapping_state != "synthetic_space" or bbox_value is not None:
                 raise ExportError(_PDF_MAPPING_VALIDATION_ERROR)
             continue
@@ -860,7 +1007,7 @@ def _validated_pdf_glyphs(
             _PdfGlyphRectangle(
                 rectangle=_pdf_page_rectangle(page, bbox),
                 source_start=source_start,
-                source_end=source_start + 1,
+                source_end=source_end,
                 line_index=line_index,
             )
         )

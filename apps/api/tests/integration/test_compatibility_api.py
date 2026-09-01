@@ -838,6 +838,121 @@ def test_pdf_export_resolves_duplicates_and_rejects_unsafe_insertions(
     assert "does not support insertion-only edits" in inserted.json()["detail"]
 
 
+def test_pdf_modified_text_keeps_edits_across_newline_independent(
+    app: FastAPI,
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import pymupdf
+
+    override_storage(app, tmp_path)
+    document = pymupdf.open()
+    page = document.new_page()
+    page.insert_text((72, 72), "A")
+    page.insert_text((72, 100), "B")
+    source = document.tobytes()
+    document.close()
+    analyzed = client.post(
+        "/api/v1/analyze",
+        files={"file": ("lines.pdf", source, "application/pdf")},
+    )
+    assert analyzed.status_code == 200
+    assert analyzed.json()["text"] == "A\nB"
+
+    inserted: list[str] = []
+    original_insert_textbox = pymupdf.Page.insert_textbox
+
+    def recording_insert_textbox(
+        page: pymupdf.Page,
+        rectangle: object,
+        buffer: str | list[str],
+        **kwargs: object,
+    ) -> float:
+        assert isinstance(buffer, str)
+        inserted.append(buffer)
+        return original_insert_textbox(page, rectangle, buffer, **kwargs)
+
+    monkeypatch.setattr(pymupdf.Page, "insert_textbox", recording_insert_textbox)
+    exported = client.post(
+        "/api/v1/export-original",
+        json={
+            "file_id": analyzed.json()["file_id"],
+            "filename": "lines.pdf",
+            "modified_text": "X\nY",
+            "track_changes": False,
+        },
+    )
+
+    assert exported.status_code == 200
+    assert inserted == ["X", "Y"]
+    with pymupdf.open(stream=exported.content, filetype="pdf") as output:
+        assert output[0].get_text("text").strip() == "X\nY"
+
+
+def test_pdf_positioned_edits_apply_in_canonical_source_order(
+    app: FastAPI,
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import pymupdf
+
+    override_storage(app, tmp_path)
+    document = pymupdf.open()
+    page = document.new_page()
+    page.insert_text((72, 72), "A B")
+    source = document.tobytes()
+    document.close()
+    analyzed = client.post(
+        "/api/v1/analyze",
+        files={"file": ("ordered.pdf", source, "application/pdf")},
+    )
+    assert analyzed.status_code == 200
+
+    inserted: list[str] = []
+    original_insert_textbox = pymupdf.Page.insert_textbox
+
+    def recording_insert_textbox(
+        page: pymupdf.Page,
+        rectangle: object,
+        buffer: str | list[str],
+        **kwargs: object,
+    ) -> float:
+        assert isinstance(buffer, str)
+        inserted.append(buffer)
+        return original_insert_textbox(page, rectangle, buffer, **kwargs)
+
+    monkeypatch.setattr(pymupdf.Page, "insert_textbox", recording_insert_textbox)
+    exported = client.post(
+        "/api/v1/export-original",
+        json={
+            "file_id": analyzed.json()["file_id"],
+            "filename": "ordered.pdf",
+            "replacements": [
+                {
+                    "original": "B",
+                    "suggestion": "Y",
+                    "position": 2,
+                    "end_position": 3,
+                },
+                {
+                    "original": "A",
+                    "suggestion": "X",
+                    "position": 0,
+                    "end_position": 1,
+                },
+            ],
+            "track_changes": False,
+        },
+    )
+
+    assert exported.status_code == 200
+    assert inserted == ["X", "Y"]
+    with pymupdf.open(stream=exported.content, filetype="pdf") as output:
+        assert output[0].get_text("text").strip() == "X Y"
+
+
 def test_pdf_analysis_maps_uploaded_issue_to_page_block_offsets(
     app: FastAPI,
     client: TestClient,
@@ -1074,6 +1189,47 @@ def test_pdf_export_redacts_only_the_exact_glyph_in_a_proportional_span(
     assert exported.status_code == 200
     with pymupdf.open(stream=exported.content, filetype="pdf") as output:
         assert output[0].get_text("text").strip() == "WWWWX"
+
+
+def test_pdf_export_edits_table_cell_glyphs_without_duplicating_outside_text(
+    app: FastAPI,
+    client: TestClient,
+    tmp_path: Path,
+) -> None:
+    override_storage(app, tmp_path)
+    source = PDF_FIXTURE_DIRECTORY.joinpath("table-structure.pdf").read_bytes()
+    analyzed = client.post(
+        "/api/v1/analyze",
+        files={"file": ("table.pdf", source, "application/pdf")},
+    )
+    assert analyzed.status_code == 200
+    assert analyzed.json()["text"] == "A1\nA2\nB1\nB1"
+
+    exported = client.post(
+        "/api/v1/export-original",
+        json={
+            "file_id": analyzed.json()["file_id"],
+            "filename": "table.pdf",
+            "replacements": [
+                {
+                    "original": "A1",
+                    "suggestion": "X1",
+                    "position": 0,
+                    "end_position": 2,
+                }
+            ],
+            "track_changes": False,
+        },
+    )
+
+    assert exported.status_code == 200
+    reparsed = client.post(
+        "/api/v1/analyze",
+        files={"file": ("table.pdf", exported.content, "application/pdf")},
+    )
+    assert reparsed.status_code == 200
+    assert reparsed.json()["text"] == "X1\nA2\nB1\nB1"
+    assert reparsed.json()["text"].count("B1") == 2
 
 
 def test_pdf_export_replaces_a_range_crossing_styled_source_spans(

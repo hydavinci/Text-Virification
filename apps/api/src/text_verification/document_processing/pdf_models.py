@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from enum import StrEnum
+from enum import IntEnum, StrEnum
 from math import isfinite
 from numbers import Real
 from typing import Annotated, Literal
@@ -21,8 +21,14 @@ class PdfPageKind(StrEnum):
 
 class PdfCharacterMappingState(StrEnum):
     GLYPH = "glyph"
+    GLYPHLESS = "glyphless"
     SYNTHETIC_SPACE = "synthetic_space"
     UNMAPPED = "unmapped"
+
+
+class PdfWritingMode(IntEnum):
+    HORIZONTAL = 0
+    VERTICAL = 1
 
 
 def _strict_finite_float(value: object, *, field_name: str) -> float:
@@ -58,11 +64,12 @@ class PdfExtractionWarning(_PdfModel):
 
 
 class PdfTextCharacter(_PdfModel):
-    text: str = Field(min_length=1, max_length=1)
+    text: str = Field(min_length=1)
     bbox: BBox | None
     source_start: NonNegativeInt
     source_end: PositiveInt
     mapping_state: PdfCharacterMappingState
+    group_id: str | None = Field(default=None, min_length=1)
 
     @field_validator("bbox", mode="before")
     @classmethod
@@ -73,11 +80,14 @@ class PdfTextCharacter(_PdfModel):
 
     @model_validator(mode="after")
     def validate_mapping(self) -> PdfTextCharacter:
-        if self.source_end != self.source_start + 1:
-            raise ValueError("character source range must contain exactly one character")
+        if self.source_end != self.source_start + len(self.text):
+            raise ValueError("character source range must match glyph group text")
         if self.mapping_state is PdfCharacterMappingState.GLYPH:
             if self.bbox is None or self.text.isspace():
                 raise ValueError("glyph characters require a bbox and non-whitespace text")
+        elif self.mapping_state is PdfCharacterMappingState.GLYPHLESS:
+            if self.bbox is not None or self.text.isspace():
+                raise ValueError("glyphless characters require non-whitespace text and no bbox")
         elif self.mapping_state is PdfCharacterMappingState.SYNTHETIC_SPACE:
             if self.bbox is not None or not self.text.isspace():
                 raise ValueError("synthetic whitespace must not have a glyph bbox")
@@ -95,6 +105,10 @@ class PdfTextSpan(_PdfModel):
     color: NonNegativeInt
     span_index: NonNegativeInt
     characters: tuple[PdfTextCharacter, ...] = ()
+    line_direction: tuple[float, float] = (1.0, 0.0)
+    writing_mode: PdfWritingMode = PdfWritingMode.HORIZONTAL
+    line_index: NonNegativeInt = 0
+    span_order: NonNegativeInt = 0
 
     @field_validator("bbox", mode="before")
     @classmethod
@@ -105,6 +119,17 @@ class PdfTextSpan(_PdfModel):
     @classmethod
     def validate_font_size(cls, value: object) -> float:
         return _strict_finite_float(value, field_name="font_size")
+
+    @field_validator("line_direction", mode="before")
+    @classmethod
+    def validate_line_direction(cls, value: object) -> tuple[float, float]:
+        if not isinstance(value, tuple | list) or len(value) != 2:
+            raise TypeError("line_direction must contain two finite coordinates")
+        x = _strict_finite_float(value[0], field_name="line_direction")
+        y = _strict_finite_float(value[1], field_name="line_direction")
+        if x == 0.0 and y == 0.0:
+            raise ValueError("line_direction must not be the zero vector")
+        return x, y
 
     @model_validator(mode="after")
     def validate_characters(self) -> PdfTextSpan:
@@ -119,6 +144,13 @@ class PdfTextSpan(_PdfModel):
             expected_start = character.source_end
         if expected_start != len(self.text):
             raise ValueError("span character source ranges must cover span text")
+        group_ids = [
+            character.group_id
+            for character in self.characters
+            if character.group_id is not None
+        ]
+        if len(group_ids) != len(set(group_ids)):
+            raise ValueError("span glyph group IDs must be unique")
         return self
 
 
@@ -128,6 +160,7 @@ class PdfTableCell(_PdfModel):
     table_index: NonNegativeInt
     row_index: NonNegativeInt
     cell_index: NonNegativeInt
+    characters: tuple[PdfTextCharacter, ...] = ()
 
     @field_validator("bbox", mode="before")
     @classmethod
@@ -135,6 +168,21 @@ class PdfTableCell(_PdfModel):
         if value is None:
             return None
         return _strict_bbox(value, field_name="bbox")
+
+    @model_validator(mode="after")
+    def validate_characters(self) -> PdfTableCell:
+        if not self.characters:
+            return self
+        if "".join(character.text for character in self.characters) != self.text:
+            raise ValueError("table cell characters must reconstruct cell text")
+        expected_start = 0
+        for character in self.characters:
+            if character.source_start != expected_start:
+                raise ValueError("table cell character source ranges must be contiguous")
+            expected_start = character.source_end
+        if expected_start != len(self.text):
+            raise ValueError("table cell character source ranges must cover cell text")
+        return self
 
 
 class PdfTable(_PdfModel):
@@ -230,6 +278,13 @@ class PdfPageMetadata(_PdfModel):
             for row in table.rows
             for cell in row
             if cell.bbox is not None
+        ] + [
+            character.bbox
+            for table in self.tables
+            for row in table.rows
+            for cell in row
+            for character in cell.characters
+            if character.bbox is not None
         ] + [image.bbox for image in self.images]
         if any(not _contains(self.page_bbox, bbox) for bbox in bboxes):
             raise ValueError("content bbox must be within page bounds")

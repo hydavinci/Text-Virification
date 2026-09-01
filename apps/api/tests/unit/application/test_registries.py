@@ -12,7 +12,11 @@ import pytest
 from text_verification.checkers.compatibility_checker import CompatibilityChecker
 from text_verification.checkers.registry import CheckerRegistry
 from text_verification.compatibility.analyzer import Issue as LegacyIssue
-from text_verification.compatibility.exporters import ExportedDocument, ExportError
+from text_verification.compatibility.exporters import (
+    ExportedDocument,
+    ExportError,
+    export_original,
+)
 from text_verification.domain.documents import DocumentModel, FileType, TextBlock
 from text_verification.domain.issues import Issue, IssueSeverity
 from text_verification.domain.ports import CheckContext, CheckResult
@@ -669,6 +673,253 @@ def test_pdf_export_validates_every_segment_before_mutation_or_artifact_write(
     assert not target.exists()
 
 
+def test_pdf_export_rejects_overlapping_ranges_before_mutation_or_artifact_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pymupdf
+
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "fixtures"
+        / "pdf"
+        / "repeated-span.pdf"
+    )
+    document = PdfParser().parse(source)
+    mutations: list[tuple[float, float, float, float]] = []
+    original_redact = pymupdf.Page.add_redact_annot
+
+    def recording_redact(
+        page: pymupdf.Page,
+        rectangle: pymupdf.Rect,
+        *args: object,
+        **kwargs: object,
+    ) -> pymupdf.Annot:
+        mutations.append(tuple(rectangle))
+        return original_redact(page, rectangle, *args, **kwargs)
+
+    monkeypatch.setattr(pymupdf.Page, "add_redact_annot", recording_redact)
+    target = tmp_path / "must-not-exist-overlap.pdf"
+    exporter = CompatibilityExporter(
+        FileType.PDF,
+        source_path_resolver=StaticSourcePathResolver(source),
+    )
+
+    raised: ExportError | None = None
+    try:
+        exporter.export(
+            document,
+            [
+                _issue(start=0, end=5, original="token", suggestion="alpha"),
+                _issue(start=3, end=8, original="en to", suggestion="beta"),
+            ],
+            target,
+        )
+    except ExportError as error:
+        raised = error
+
+    assert str(raised) == "PDF edits contain overlapping or ambiguous source ranges."
+    assert mutations == []
+    assert not target.exists()
+
+
+def test_pdf_export_rejects_conflicting_insertions_before_artifact_write(
+    tmp_path: Path,
+) -> None:
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "fixtures"
+        / "pdf"
+        / "repeated-span.pdf"
+    )
+    document = PdfParser().parse(source)
+    target = tmp_path / "must-not-exist-insertions.pdf"
+
+    raised: ExportError | None = None
+    try:
+        exported = export_original(
+            source,
+            "pdf",
+            [
+                ("", "A", 5, 5),
+                ("", "B", 5, 5),
+            ],
+            False,
+            original_text=document.text,
+        )
+        target.write_bytes(exported.content)
+    except ExportError as error:
+        raised = error
+
+    assert str(raised) == "PDF edits contain overlapping or ambiguous source ranges."
+    assert not target.exists()
+
+
+def test_pdf_export_maps_a_complete_multi_codepoint_glyph_group_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pymupdf
+
+    source = tmp_path / "grouped.pdf"
+    source_document = pymupdf.open()
+    source_document.new_page().insert_text((72, 72), "fi")
+    source_document.save(source)
+    source_document.close()
+    document = _group_first_pdf_glyphs(PdfParser().parse(source), "fi")
+    monkeypatch.setattr(PdfParser, "parse", lambda self, path: document)
+
+    mutations: list[tuple[float, float, float, float]] = []
+    original_redact = pymupdf.Page.add_redact_annot
+
+    def recording_redact(
+        page: pymupdf.Page,
+        rectangle: pymupdf.Rect,
+        *args: object,
+        **kwargs: object,
+    ) -> pymupdf.Annot:
+        mutations.append(tuple(rectangle))
+        return original_redact(page, rectangle, *args, **kwargs)
+
+    monkeypatch.setattr(pymupdf.Page, "add_redact_annot", recording_redact)
+    target = tmp_path / "grouped-output.pdf"
+    CompatibilityExporter(
+        FileType.PDF,
+        source_path_resolver=StaticSourcePathResolver(source),
+    ).export(
+        document,
+        [_issue(start=0, end=2, original="fi", suggestion="X")],
+        target,
+    )
+
+    assert len(mutations) == 1
+    with pymupdf.open(target) as output:
+        assert output[0].get_text("text").strip() == "X"
+
+
+def test_pdf_export_rejects_a_partial_multi_codepoint_glyph_group(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pymupdf
+
+    source = tmp_path / "grouped-partial.pdf"
+    source_document = pymupdf.open()
+    source_document.new_page().insert_text((72, 72), "fi")
+    source_document.save(source)
+    source_document.close()
+    document = _group_first_pdf_glyphs(PdfParser().parse(source), "fi")
+    monkeypatch.setattr(PdfParser, "parse", lambda self, path: document)
+
+    mutations: list[tuple[float, float, float, float]] = []
+    original_redact = pymupdf.Page.add_redact_annot
+
+    def recording_redact(
+        page: pymupdf.Page,
+        rectangle: pymupdf.Rect,
+        *args: object,
+        **kwargs: object,
+    ) -> pymupdf.Annot:
+        mutations.append(tuple(rectangle))
+        return original_redact(page, rectangle, *args, **kwargs)
+
+    monkeypatch.setattr(pymupdf.Page, "add_redact_annot", recording_redact)
+    target = tmp_path / "grouped-partial-output.pdf"
+    exporter = CompatibilityExporter(
+        FileType.PDF,
+        source_path_resolver=StaticSourcePathResolver(source),
+    )
+
+    with pytest.raises(ExportError, match="mapping validation failed"):
+        exporter.export(
+            document,
+            [_issue(start=0, end=1, original="f", suggestion="X")],
+            target,
+        )
+
+    assert mutations == []
+    assert not target.exists()
+
+
+def test_pdf_export_rejects_negative_insert_textbox_result_without_artifact(
+    tmp_path: Path,
+) -> None:
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "fixtures"
+        / "pdf"
+        / "repeated-span.pdf"
+    )
+    document = PdfParser().parse(source)
+    target = tmp_path / "must-not-exist-long-replacement.pdf"
+    exporter = CompatibilityExporter(
+        FileType.PDF,
+        source_path_resolver=StaticSourcePathResolver(source),
+    )
+
+    with pytest.raises(ExportError, match="does not fit the mapped source area"):
+        exporter.export(
+            document,
+            [
+                _issue(
+                    start=0,
+                    end=5,
+                    original="token",
+                    suggestion="replacement-" * 200,
+                )
+            ],
+            target,
+        )
+
+    assert not target.exists()
+
+
+def test_pdf_export_checks_fallback_insert_textbox_result_without_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pymupdf
+
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "fixtures"
+        / "pdf"
+        / "repeated-span.pdf"
+    )
+    document = PdfParser().parse(source)
+    calls = 0
+
+    def failing_then_insufficient(
+        page: pymupdf.Page,
+        rectangle: object,
+        buffer: str | list[str],
+        **kwargs: object,
+    ) -> float:
+        del page, rectangle, buffer, kwargs
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("font unavailable")
+        return -1.0
+
+    monkeypatch.setattr(pymupdf.Page, "insert_textbox", failing_then_insufficient)
+    target = tmp_path / "must-not-exist-fallback.pdf"
+    exporter = CompatibilityExporter(
+        FileType.PDF,
+        source_path_resolver=StaticSourcePathResolver(source),
+    )
+
+    with pytest.raises(ExportError, match="does not fit the mapped source area"):
+        exporter.export(
+            document,
+            [_issue(start=0, end=5, original="token", suggestion="替换")],
+            target,
+        )
+
+    assert calls == 2
+    assert not target.exists()
+
+
 @dataclass
 class RecordingAnalyzer:
     issues: list[LegacyIssue]
@@ -709,6 +960,34 @@ class InterleavingAnalyzer:
         self.dictionary_versions = {f"{text}_dict": f"version:{text}"}
         self.barrier.wait(timeout=2)
         return []
+
+
+def _group_first_pdf_glyphs(
+    document: DocumentModel,
+    text: str,
+) -> DocumentModel:
+    grouped = document.model_copy(deep=True)
+    locator = grouped.blocks[0].source_locator
+    characters = locator["characters"]
+    source_characters = characters[: len(text)]
+    bboxes = [character["bbox"] for character in source_characters]
+    first = dict(source_characters[0])
+    first.update(
+        {
+            "text": text,
+            "bbox": [
+                min(bbox[0] for bbox in bboxes),
+                min(bbox[1] for bbox in bboxes),
+                max(bbox[2] for bbox in bboxes),
+                max(bbox[3] for bbox in bboxes),
+            ],
+            "source_start": 0,
+            "source_end": len(text),
+            "group_id": "synthetic-multi-codepoint-group",
+        }
+    )
+    locator["characters"] = [first, *characters[len(text) :]]
+    return grouped
 
 
 @dataclass(frozen=True)
