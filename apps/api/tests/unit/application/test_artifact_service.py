@@ -1,7 +1,8 @@
+import os
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from dataclasses import asdict, dataclass, field, replace
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 from uuid import uuid4
@@ -368,16 +369,23 @@ def test_entry_changed_after_hash_is_retained_for_reconciliation(
 @dataclass
 class PendingReconciliationRepository:
     pending: application.ArtifactSnapshot
+    refresh_before_stale_action: bool = False
+    before_missing_check: Callable[[], None] | None = None
     finalized: bool = False
     deleted: bool = False
     commit_calls: int = 0
     rollback_calls: int = 0
+    stale_finalize_calls: int = 0
+    stale_delete_calls: int = 0
+    missing_check_calls: int = 0
 
     def list_stale_pending_artifacts(self, older_than):
         del older_than
         return () if self.deleted or self.finalized else (self.pending,)
 
     def finalize_export_artifact(self, reservation, **values):
+        del reservation
+        self._refresh_if_requested()
         values["consistency_check"]()
         self.finalized = True
         snapshot_values = asdict(self.pending)
@@ -392,6 +400,33 @@ class PendingReconciliationRepository:
         self.deleted = True
         return True
 
+    def finalize_stale_pending_export_artifact(self, reservation, **values):
+        self.stale_finalize_calls += 1
+        self._refresh_if_requested()
+        if self.pending.reserved_at != reservation.reserved_at:
+            return None
+        values["consistency_check"]()
+        self.finalized = True
+        self.pending = replace(
+            self.pending,
+            status=application.ArtifactLifecycleStatus.READY,
+            ready_at=values["ready_at"],
+        )
+        return self.pending
+
+    def delete_stale_pending_export_artifact(self, reservation, *, missing_check):
+        self.stale_delete_calls += 1
+        self._refresh_if_requested()
+        if self.pending.reserved_at != reservation.reserved_at:
+            return False
+        if self.before_missing_check is not None:
+            self.before_missing_check()
+        self.missing_check_calls += 1
+        if not missing_check():
+            return False
+        self.deleted = True
+        return True
+
     def read_export_artifact(self, export_artifact_id):
         del export_artifact_id
         return self.pending
@@ -401,6 +436,13 @@ class PendingReconciliationRepository:
 
     def rollback(self):
         self.rollback_calls += 1
+
+    def _refresh_if_requested(self) -> None:
+        if self.refresh_before_stale_action:
+            self.pending = replace(
+                self.pending,
+                reserved_at=self.pending.reserved_at + timedelta(minutes=1),
+            )
 
 
 def test_stale_pending_reconciliation_finalizes_matching_file(
@@ -431,6 +473,7 @@ def test_stale_pending_reconciliation_finalizes_matching_file(
 
     assert result.ready_artifact_ids == (request.export_artifact_id,)
     assert repository.finalized is True
+    assert repository.stale_finalize_calls == 1
     assert repository.deleted is False
     assert (tmp_path / request.storage_key).exists()
 
@@ -455,4 +498,206 @@ def test_stale_pending_reconciliation_deletes_missing_reservation(
 
     assert result.deleted_artifact_ids == (request.export_artifact_id,)
     assert repository.deleted is True
+    assert repository.stale_delete_calls == 1
+    assert repository.missing_check_calls == 1
     assert repository.finalized is False
+
+
+def test_stale_pending_reconciliation_skips_refreshed_missing_reservation(
+    tmp_path: Path,
+) -> None:
+    storage = JobStorage(tmp_path, max_upload_bytes=1024)
+    request = _request()
+    digest = sha256(request.data).hexdigest()
+    _, pending = _reservation_and_snapshot(
+        request,
+        status=application.ArtifactLifecycleStatus.PENDING,
+        digest=digest,
+    )
+    repository = PendingReconciliationRepository(
+        pending,
+        refresh_before_stale_action=True,
+    )
+
+    result = application.ArtifactPendingReconciliationService(
+        storage,
+        _repository_factory(repository, repository),
+    ).reconcile_before(datetime(2026, 9, 1, 4, 30, tzinfo=UTC))
+
+    assert result.deleted_artifact_ids == ()
+    assert repository.deleted is False
+    assert repository.stale_delete_calls == 1
+    assert repository.missing_check_calls == 0
+    assert repository.pending.reserved_at == pending.reserved_at + timedelta(minutes=1)
+
+
+def test_stale_pending_reconciliation_skips_refreshed_matching_reservation(
+    tmp_path: Path,
+) -> None:
+    storage = JobStorage(tmp_path, max_upload_bytes=1024)
+    request = _request()
+    digest = sha256(request.data).hexdigest()
+    _, pending = _reservation_and_snapshot(
+        request,
+        status=application.ArtifactLifecycleStatus.PENDING,
+        digest=digest,
+    )
+    with storage.publish_verified_artifact(
+        request.job_id,
+        request.export_artifact_id,
+        request.storage_key,
+        request.file_type,
+        request.data,
+    ):
+        pass
+    repository = PendingReconciliationRepository(
+        pending,
+        refresh_before_stale_action=True,
+    )
+
+    result = application.ArtifactPendingReconciliationService(
+        storage,
+        _repository_factory(repository, repository),
+    ).reconcile_before(datetime(2026, 9, 1, 4, 30, tzinfo=UTC))
+
+    assert result.ready_artifact_ids == ()
+    assert repository.finalized is False
+    assert repository.stale_finalize_calls == 1
+    assert repository.pending.reserved_at == pending.reserved_at + timedelta(minutes=1)
+
+
+def test_stale_pending_reconciliation_rechecks_missing_file_under_row_lock(
+    tmp_path: Path,
+) -> None:
+    storage = JobStorage(tmp_path, max_upload_bytes=1024)
+    request = _request()
+    digest = sha256(request.data).hexdigest()
+    _, pending = _reservation_and_snapshot(
+        request,
+        status=application.ArtifactLifecycleStatus.PENDING,
+        digest=digest,
+    )
+
+    def publish_after_initial_missing_check() -> None:
+        with storage.publish_verified_artifact(
+            request.job_id,
+            request.export_artifact_id,
+            request.storage_key,
+            request.file_type,
+            request.data,
+        ):
+            pass
+
+    repository = PendingReconciliationRepository(
+        pending,
+        before_missing_check=publish_after_initial_missing_check,
+    )
+
+    result = application.ArtifactPendingReconciliationService(
+        storage,
+        _repository_factory(repository, repository),
+    ).reconcile_before(datetime(2026, 9, 1, 4, 30, tzinfo=UTC))
+
+    assert result.deleted_artifact_ids == ()
+    assert repository.deleted is False
+    assert repository.stale_delete_calls == 1
+    assert repository.missing_check_calls == 1
+    assert (tmp_path / request.storage_key).read_bytes() == request.data
+
+
+@dataclass
+class OrphanSweepRepository:
+    referenced_storage_keys: set[str] = field(default_factory=set)
+    committed: int = 0
+    rolled_back: int = 0
+    deleted_storage_keys: list[str] = field(default_factory=list)
+
+    def delete_unreferenced_artifact(
+        self,
+        *,
+        job_id,
+        artifact_id,
+        file_type,
+        storage_key,
+        candidate_storage_key,
+        delete_path,
+    ):
+        del job_id, artifact_id, file_type, storage_key
+        if candidate_storage_key in self.referenced_storage_keys:
+            return False
+        deleted = delete_path(True)
+        if deleted:
+            self.deleted_storage_keys.append(candidate_storage_key)
+        return deleted
+
+    def commit(self) -> None:
+        self.committed += 1
+
+    def rollback(self) -> None:
+        self.rolled_back += 1
+
+
+def _publish_stale_orphan(
+    storage: JobStorage,
+    request: application.ArtifactPersistenceRequest,
+    *,
+    older_than: datetime,
+) -> Path:
+    with storage.publish_verified_artifact(
+        request.job_id,
+        request.export_artifact_id,
+        request.storage_key,
+        request.file_type,
+        request.data,
+    ) as handle:
+        path = handle.path
+    stale_timestamp = (older_than - timedelta(seconds=1)).timestamp()
+    os.utime(path, (stale_timestamp, stale_timestamp))
+    return path
+
+
+def test_orphan_sweep_skips_stale_file_reserved_before_candidate_deletion(
+    tmp_path: Path,
+) -> None:
+    storage = JobStorage(tmp_path, max_upload_bytes=1024)
+    request = _request()
+    cutoff = request.created_at + timedelta(hours=1)
+    path = _publish_stale_orphan(storage, request, older_than=cutoff)
+    repository = OrphanSweepRepository({request.storage_key})
+
+    result = application.ArtifactOrphanCleanupService(
+        storage,
+        _repository_factory(repository),
+    ).sweep_before(cutoff)
+
+    assert result.deleted_storage_keys == ()
+    assert result.deferred_storage_keys == ()
+    assert path.read_bytes() == request.data
+    assert repository.deleted_storage_keys == []
+
+
+def test_orphan_sweep_deletes_before_reservation_then_later_publication_succeeds(
+    tmp_path: Path,
+) -> None:
+    storage = JobStorage(tmp_path, max_upload_bytes=1024)
+    request = _request()
+    cutoff = request.created_at + timedelta(hours=1)
+    path = _publish_stale_orphan(storage, request, older_than=cutoff)
+    cleanup_repository = OrphanSweepRepository()
+
+    cleanup = application.ArtifactOrphanCleanupService(
+        storage,
+        _repository_factory(cleanup_repository),
+    ).sweep_before(cutoff)
+
+    assert cleanup.deleted_storage_keys == (request.storage_key,)
+    assert not path.exists()
+
+    persistence_repository = _scripted_repository(request)
+    persisted = application.ArtifactPersistenceService(
+        storage,
+        _repository_factory(persistence_repository, persistence_repository),
+    ).persist(request)
+
+    assert persisted.created is True
+    assert path.read_bytes() == request.data

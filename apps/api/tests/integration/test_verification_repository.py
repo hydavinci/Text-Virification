@@ -1,3 +1,4 @@
+import os
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -17,6 +18,7 @@ from sqlalchemy.orm.session import sessionmaker
 from alembic import command
 from text_verification.application import (
     ArtifactLifecycleStatus,
+    ArtifactPendingReconciliationService,
     ArtifactPersistenceRequest,
     ArtifactPersistenceResult,
     ArtifactPersistenceService,
@@ -1253,6 +1255,346 @@ def test_concurrent_conflicting_artifact_service_rejects_one_writer(
         if sha256(request.data).hexdigest() == successes[0].content_sha256
     )
     assert successes[0].path.read_bytes() == successful_data
+
+
+def test_postgres_orphan_cleanup_waits_for_committed_pending_reservation(
+    db_session_factory: sessionmaker[Session],
+    artifact_storage: JobStorage,
+) -> None:
+    job_id = uuid4()
+    run_id = uuid4()
+    request = _artifact_request(
+        job_id=job_id,
+        artifact_id=uuid4(),
+        verification_run_id=run_id,
+        data=b"reserved before cleanup",
+    )
+    seed_session = db_session_factory()
+    try:
+        _create_job(seed_session, job_id=job_id)
+        repository = VerificationRepository(seed_session)
+        repository.save_result(
+            job_id,
+            _result(
+                document_id=uuid4(),
+                verification_run_id=run_id,
+                issue_id=uuid4(),
+            ),
+        )
+        repository.commit()
+    finally:
+        seed_session.close()
+
+    with artifact_storage.publish_verified_artifact(
+        request.job_id,
+        request.export_artifact_id,
+        request.storage_key,
+        request.file_type,
+        request.data,
+    ) as handle:
+        artifact_path = handle.path
+    cutoff = CREATED_AT + timedelta(hours=1)
+    stale_timestamp = (cutoff - timedelta(seconds=1)).timestamp()
+    os.utime(artifact_path, (stale_timestamp, stale_timestamp))
+    (candidate,) = artifact_storage.discover_stale_orphaned_artifacts(cutoff)
+
+    reservation_written = Event()
+    allow_reservation_commit = Event()
+    cleanup_started = Event()
+    cleanup_finished = Event()
+
+    def reserve() -> None:
+        session = db_session_factory()
+        repository = VerificationRepository(session)
+        try:
+            session.execute(text("SET lock_timeout = '4s'"))
+            repository.reserve_export_artifact(
+                export_artifact_id=request.export_artifact_id,
+                verification_run_id=request.verification_run_id,
+                review_revision_id=request.review_revision_id,
+                source_version=request.source_version,
+                file_type=request.file_type,
+                file_name=request.file_name,
+                media_type=request.media_type,
+                storage_key=request.storage_key,
+                size_bytes=len(request.data),
+                content_sha256=sha256(request.data).hexdigest(),
+                reserved_at=request.created_at,
+                created_at=request.created_at,
+            )
+            reservation_written.set()
+            if not allow_reservation_commit.wait(timeout=2):
+                raise TimeoutError("timed out waiting to commit pending reservation")
+            repository.commit()
+        except Exception:
+            repository.rollback()
+            raise
+        finally:
+            session.close()
+
+    def cleanup() -> bool:
+        session = db_session_factory()
+        repository = VerificationRepository(session)
+        try:
+            session.execute(text("SET lock_timeout = '4s'"))
+            cleanup_started.set()
+            deleted = repository.delete_unreferenced_artifact(
+                job_id=candidate.job_id,
+                artifact_id=candidate.artifact_id,
+                file_type=candidate.file_type,
+                storage_key=candidate.storage_key,
+                candidate_storage_key=candidate.path_storage_key,
+                delete_path=lambda prune_empty_directories: (
+                    artifact_storage.delete_stale_orphaned_artifact(
+                        candidate,
+                        cutoff,
+                        prune_empty_directories=prune_empty_directories,
+                    )
+                ),
+            )
+            repository.commit()
+            return deleted
+        except Exception:
+            repository.rollback()
+            raise
+        finally:
+            cleanup_finished.set()
+            session.close()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        reservation_future = executor.submit(reserve)
+        assert reservation_written.wait(timeout=2)
+        cleanup_future = executor.submit(cleanup)
+        assert cleanup_started.wait(timeout=1)
+        assert not cleanup_finished.wait(timeout=0.2)
+        allow_reservation_commit.set()
+        reservation_future.result(timeout=5)
+        assert cleanup_future.result(timeout=5) is False
+
+    assert artifact_path.read_bytes() == request.data
+    verification_session = db_session_factory()
+    try:
+        row = verification_session.get(ExportArtifactRow, request.export_artifact_id)
+        assert row is not None
+        assert row.status == ArtifactLifecycleStatus.PENDING.value
+    finally:
+        verification_session.close()
+
+
+def test_postgres_orphan_cleanup_deletes_before_reservation_then_publication(
+    db_session_factory: sessionmaker[Session],
+    artifact_storage: JobStorage,
+) -> None:
+    job_id = uuid4()
+    run_id = uuid4()
+    request = _artifact_request(
+        job_id=job_id,
+        artifact_id=uuid4(),
+        verification_run_id=run_id,
+        data=b"cleanup before reservation",
+    )
+    seed_session = db_session_factory()
+    try:
+        _create_job(seed_session, job_id=job_id)
+        repository = VerificationRepository(seed_session)
+        repository.save_result(
+            job_id,
+            _result(
+                document_id=uuid4(),
+                verification_run_id=run_id,
+                issue_id=uuid4(),
+            ),
+        )
+        repository.commit()
+    finally:
+        seed_session.close()
+
+    with artifact_storage.publish_verified_artifact(
+        request.job_id,
+        request.export_artifact_id,
+        request.storage_key,
+        request.file_type,
+        request.data,
+    ) as handle:
+        artifact_path = handle.path
+    cutoff = CREATED_AT + timedelta(hours=1)
+    stale_timestamp = (cutoff - timedelta(seconds=1)).timestamp()
+    os.utime(artifact_path, (stale_timestamp, stale_timestamp))
+    (candidate,) = artifact_storage.discover_stale_orphaned_artifacts(cutoff)
+
+    cleanup_locked_job = Event()
+    allow_cleanup_delete = Event()
+    publication_started = Event()
+    publication_finished = Event()
+
+    def cleanup() -> bool:
+        session = db_session_factory()
+        repository = VerificationRepository(session)
+        try:
+            session.execute(text("SET lock_timeout = '4s'"))
+
+            def delete_path(prune_empty_directories: bool) -> bool:
+                cleanup_locked_job.set()
+                if not allow_cleanup_delete.wait(timeout=2):
+                    raise TimeoutError("timed out waiting to delete stale artifact")
+                return artifact_storage.delete_stale_orphaned_artifact(
+                    candidate,
+                    cutoff,
+                    prune_empty_directories=prune_empty_directories,
+                )
+
+            deleted = repository.delete_unreferenced_artifact(
+                job_id=candidate.job_id,
+                artifact_id=candidate.artifact_id,
+                file_type=candidate.file_type,
+                storage_key=candidate.storage_key,
+                candidate_storage_key=candidate.path_storage_key,
+                delete_path=delete_path,
+            )
+            repository.commit()
+            return deleted
+        except Exception:
+            repository.rollback()
+            raise
+        finally:
+            session.close()
+
+    def publish() -> ArtifactPersistenceResult:
+        publication_started.set()
+        try:
+            return ArtifactPersistenceService(
+                artifact_storage,
+                _artifact_repository_factory(db_session_factory),
+            ).persist(request)
+        finally:
+            publication_finished.set()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        cleanup_future = executor.submit(cleanup)
+        assert cleanup_locked_job.wait(timeout=2)
+        publication_future = executor.submit(publish)
+        assert publication_started.wait(timeout=1)
+        assert not publication_finished.wait(timeout=0.2)
+        allow_cleanup_delete.set()
+        assert cleanup_future.result(timeout=5) is True
+        published = publication_future.result(timeout=5)
+
+    assert published.created is True
+    assert artifact_path.read_bytes() == request.data
+    verification_session = db_session_factory()
+    try:
+        row = verification_session.get(ExportArtifactRow, request.export_artifact_id)
+        assert row is not None
+        assert row.status == ArtifactLifecycleStatus.READY.value
+    finally:
+        verification_session.close()
+
+
+def test_postgres_stale_reconciliation_skips_row_refreshed_after_listing(
+    db_session_factory: sessionmaker[Session],
+    artifact_storage: JobStorage,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_id = uuid4()
+    run_id = uuid4()
+    request = _artifact_request(
+        job_id=job_id,
+        artifact_id=uuid4(),
+        verification_run_id=run_id,
+        data=b"refreshed after stale listing",
+    )
+    initial_reserved_at = CREATED_AT
+    refreshed_reserved_at = CREATED_AT + timedelta(hours=1)
+    cutoff = CREATED_AT + timedelta(minutes=30)
+    seed_session = db_session_factory()
+    try:
+        _create_job(seed_session, job_id=job_id)
+        repository = VerificationRepository(seed_session)
+        repository.save_result(
+            job_id,
+            _result(
+                document_id=uuid4(),
+                verification_run_id=run_id,
+                issue_id=uuid4(),
+            ),
+        )
+        repository.reserve_export_artifact(
+            export_artifact_id=request.export_artifact_id,
+            verification_run_id=request.verification_run_id,
+            review_revision_id=request.review_revision_id,
+            source_version=request.source_version,
+            file_type=request.file_type,
+            file_name=request.file_name,
+            media_type=request.media_type,
+            storage_key=request.storage_key,
+            size_bytes=len(request.data),
+            content_sha256=sha256(request.data).hexdigest(),
+            reserved_at=initial_reserved_at,
+            created_at=request.created_at,
+        )
+        repository.commit()
+    finally:
+        seed_session.close()
+
+    missing_file_opened = Event()
+    allow_missing_result = Event()
+    original_open_verified = artifact_storage.open_verified_artifact
+
+    def open_verified_after_refresh(*args, **kwargs):
+        missing_file_opened.set()
+        if not allow_missing_result.wait(timeout=2):
+            raise TimeoutError("timed out waiting to refresh pending reservation")
+        return original_open_verified(*args, **kwargs)
+
+    monkeypatch.setattr(
+        artifact_storage,
+        "open_verified_artifact",
+        open_verified_after_refresh,
+    )
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        reconciliation_future = executor.submit(
+            ArtifactPendingReconciliationService(
+                artifact_storage,
+                _artifact_repository_factory(db_session_factory),
+            ).reconcile_before,
+            cutoff,
+        )
+        assert missing_file_opened.wait(timeout=2)
+        refresh_session = db_session_factory()
+        try:
+            refreshed = VerificationRepository(refresh_session).reserve_export_artifact(
+                export_artifact_id=request.export_artifact_id,
+                verification_run_id=request.verification_run_id,
+                review_revision_id=request.review_revision_id,
+                source_version=request.source_version,
+                file_type=request.file_type,
+                file_name=request.file_name,
+                media_type=request.media_type,
+                storage_key=request.storage_key,
+                size_bytes=len(request.data),
+                content_sha256=sha256(request.data).hexdigest(),
+                reserved_at=refreshed_reserved_at,
+                created_at=request.created_at,
+            )
+            refresh_session.commit()
+        finally:
+            refresh_session.close()
+        allow_missing_result.set()
+        reconciliation = reconciliation_future.result(timeout=5)
+
+    assert refreshed.reserved_at == refreshed_reserved_at
+    assert reconciliation.deleted_artifact_ids == ()
+    assert reconciliation.ready_artifact_ids == ()
+    assert reconciliation.deferred_artifact_ids == ()
+    verification_session = db_session_factory()
+    try:
+        row = verification_session.get(ExportArtifactRow, request.export_artifact_id)
+        assert row is not None
+        assert row.status == ArtifactLifecycleStatus.PENDING.value
+        assert row.reserved_at == refreshed_reserved_at
+    finally:
+        verification_session.close()
 
 
 def test_get_result_for_job_returns_none_when_job_has_no_run(db_session: Session) -> None:

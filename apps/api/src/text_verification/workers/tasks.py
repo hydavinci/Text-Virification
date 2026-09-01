@@ -14,6 +14,7 @@ from celery import Task  # type: ignore[import-untyped]
 from sqlalchemy.orm import Session, sessionmaker
 
 from text_verification.application import (
+    ArtifactOrphanCleanupService,
     ArtifactPendingReconciliationService,
     VerificationError,
     VerificationPipeline,
@@ -540,23 +541,20 @@ def _cleanup_expired_jobs() -> list[str]:
             extra={"error_type": type(error).__name__},
         )
     try:
-        referenced_artifact_keys = _all_artifact_storage_keys(session_factory)
+        orphan_cleanup = ArtifactOrphanCleanupService(
+            storage,
+            _artifact_repository_context_factory(session_factory),
+        ).sweep_before(orphan_cutoff)
+        for storage_key in orphan_cleanup.deferred_storage_keys:
+            logger.warning(
+                "cleanup_orphaned_artifact_deferred",
+                extra={"storage_key": storage_key},
+            )
     except Exception as error:
         logger.warning(
-            "cleanup_artifact_metadata_failed",
+            "cleanup_orphaned_artifacts_failed",
             extra={"error_type": type(error).__name__},
         )
-    else:
-        try:
-            storage.delete_orphaned_artifacts(
-                set(referenced_artifact_keys),
-                orphan_cutoff,
-            )
-        except Exception as error:
-            logger.warning(
-                "cleanup_orphaned_artifacts_failed",
-                extra={"error_type": type(error).__name__},
-            )
     try:
         COMPATIBILITY_STORAGE_FACTORY().delete_stale_directories(orphan_cutoff)
     except Exception as error:
@@ -712,18 +710,6 @@ def _artifact_repository_context_factory(
             session.close()
 
     return repository_context
-
-
-def _all_artifact_storage_keys(
-    session_factory: sessionmaker[Session],
-) -> tuple[str, ...]:
-    session = session_factory()
-    repository = VERIFICATION_REPOSITORY_FACTORY(session)
-    try:
-        return repository.list_all_artifact_storage_keys()
-    finally:
-        repository.rollback()
-        session.close()
 
 
 def _delete_results_for_job(

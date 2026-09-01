@@ -1,4 +1,6 @@
 from text_verification.application.artifact_service import (
+    ArtifactOrphanCleanupResult,
+    ArtifactOrphanCleanupService,
     ArtifactPendingReconciliationResult,
     ArtifactPendingReconciliationService,
     ArtifactPersistenceRequest,
@@ -22,6 +24,8 @@ __all__ = [
     "ArtifactPersistenceRequest",
     "ArtifactPersistenceResult",
     "ArtifactPersistenceService",
+    "ArtifactOrphanCleanupResult",
+    "ArtifactOrphanCleanupService",
     "ArtifactPendingReconciliationResult",
     "ArtifactPendingReconciliationService",
     "ArtifactReconciliationRequiredError",

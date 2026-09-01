@@ -17,6 +17,7 @@ from text_verification.domain.artifacts import (
 from text_verification.domain.documents import FileType
 from text_verification.infrastructure.artifact_storage import (
     ArtifactNotFoundError,
+    ArtifactOrphanCandidate,
     ArtifactVerificationHandle,
 )
 from text_verification.infrastructure.storage import JobStorage
@@ -54,6 +55,14 @@ class ArtifactRepository(Protocol):
         consistency_check: Callable[[], None],
     ) -> ArtifactSnapshot: ...
 
+    def finalize_stale_pending_export_artifact(
+        self,
+        reservation: ArtifactReservation,
+        *,
+        ready_at: datetime,
+        consistency_check: Callable[[], None],
+    ) -> ArtifactSnapshot | None: ...
+
     def read_export_artifact(
         self,
         export_artifact_id: UUID,
@@ -64,11 +73,22 @@ class ArtifactRepository(Protocol):
         older_than: datetime,
     ) -> tuple[ArtifactSnapshot, ...]: ...
 
-    def delete_pending_export_artifact(
+    def delete_stale_pending_export_artifact(
+        self,
+        reservation: ArtifactReservation,
+        *,
+        missing_check: Callable[[], bool],
+    ) -> bool: ...
+
+    def delete_unreferenced_artifact(
         self,
         *,
-        export_artifact_id: UUID,
-        content_sha256: str,
+        job_id: UUID,
+        artifact_id: UUID,
+        file_type: FileType,
+        storage_key: str,
+        candidate_storage_key: str,
+        delete_path: Callable[[bool], bool],
     ) -> bool: ...
 
     def commit(self) -> None: ...
@@ -114,6 +134,12 @@ class ArtifactPendingReconciliationResult:
     ready_artifact_ids: tuple[UUID, ...]
     deleted_artifact_ids: tuple[UUID, ...]
     deferred_artifact_ids: tuple[UUID, ...]
+
+
+@dataclass(frozen=True)
+class ArtifactOrphanCleanupResult:
+    deleted_storage_keys: tuple[str, ...]
+    deferred_storage_keys: tuple[str, ...]
 
 
 class ArtifactPersistenceService:
@@ -442,16 +468,20 @@ class ArtifactPendingReconciliationService:
                     expected_digest=snapshot.content_sha256,
                 )
             except ArtifactNotFoundError:
-                with self._repository_factory() as repository:
-                    try:
-                        deleted = repository.delete_pending_export_artifact(
-                            export_artifact_id=snapshot.export_artifact_id,
-                            content_sha256=snapshot.content_sha256,
-                        )
-                        repository.commit()
-                    except Exception:
-                        repository.rollback()
-                        raise
+                try:
+                    with self._repository_factory() as repository:
+                        try:
+                            deleted = repository.delete_stale_pending_export_artifact(
+                                reservation,
+                                missing_check=self._missing_check_for(snapshot),
+                            )
+                            repository.commit()
+                        except Exception:
+                            repository.rollback()
+                            raise
+                except Exception:
+                    deferred_ids.append(snapshot.export_artifact_id)
+                    continue
                 if deleted:
                     deleted_ids.append(snapshot.export_artifact_id)
                 continue
@@ -463,7 +493,7 @@ class ArtifactPendingReconciliationService:
                 try:
                     with self._repository_factory() as repository:
                         try:
-                            repository.finalize_export_artifact(
+                            finalized = repository.finalize_stale_pending_export_artifact(
                                 reservation,
                                 ready_at=self._now_factory(),
                                 consistency_check=handle.assert_current,
@@ -476,6 +506,8 @@ class ArtifactPendingReconciliationService:
                 except Exception:
                     deferred_ids.append(snapshot.export_artifact_id)
                     continue
+                if finalized is None:
+                    continue
             ready_ids.append(snapshot.export_artifact_id)
 
         return ArtifactPendingReconciliationResult(
@@ -483,3 +515,72 @@ class ArtifactPendingReconciliationService:
             deleted_artifact_ids=tuple(deleted_ids),
             deferred_artifact_ids=tuple(deferred_ids),
         )
+
+    def _missing_check_for(
+        self,
+        snapshot: ArtifactSnapshot,
+    ) -> Callable[[], bool]:
+        def missing_check() -> bool:
+            return self._storage.is_artifact_missing(
+                snapshot.job_id,
+                snapshot.export_artifact_id,
+                snapshot.storage_key,
+                snapshot.file_type,
+            )
+
+        return missing_check
+
+
+class ArtifactOrphanCleanupService:
+    """Delete stale artifact candidates only while their owning job is locked."""
+
+    def __init__(
+        self,
+        storage: JobStorage,
+        repository_factory: ArtifactRepositoryFactory,
+    ) -> None:
+        self._storage = storage
+        self._repository_factory = repository_factory
+
+    def sweep_before(self, older_than: datetime) -> ArtifactOrphanCleanupResult:
+        deleted_storage_keys: list[str] = []
+        deferred_storage_keys: list[str] = []
+        for candidate in self._storage.discover_stale_orphaned_artifacts(older_than):
+            try:
+                with self._repository_factory() as repository:
+                    try:
+                        deleted = repository.delete_unreferenced_artifact(
+                            job_id=candidate.job_id,
+                            artifact_id=candidate.artifact_id,
+                            file_type=candidate.file_type,
+                            storage_key=candidate.storage_key,
+                            candidate_storage_key=candidate.path_storage_key,
+                            delete_path=self._delete_path_for(candidate, older_than),
+                        )
+                        repository.commit()
+                    except Exception:
+                        repository.rollback()
+                        raise
+            except Exception:
+                deferred_storage_keys.append(candidate.path_storage_key)
+                continue
+            if deleted:
+                deleted_storage_keys.append(candidate.path_storage_key)
+        return ArtifactOrphanCleanupResult(
+            deleted_storage_keys=tuple(deleted_storage_keys),
+            deferred_storage_keys=tuple(deferred_storage_keys),
+        )
+
+    def _delete_path_for(
+        self,
+        candidate: ArtifactOrphanCandidate,
+        older_than: datetime,
+    ) -> Callable[[bool], bool]:
+        def delete_path(prune_empty_directories: bool) -> bool:
+            return self._storage.delete_stale_orphaned_artifact(
+                candidate,
+                older_than,
+                prune_empty_directories=prune_empty_directories,
+            )
+
+        return delete_path

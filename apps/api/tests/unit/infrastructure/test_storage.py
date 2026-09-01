@@ -745,12 +745,11 @@ def test_orphan_sweep_rejects_reparse_job_directory(
     )
 
     with caplog.at_level(logging.WARNING, logger="text_verification.infrastructure.storage"):
-        deleted = storage.delete_orphaned_artifacts(
-            set(),
+        candidates = storage.discover_stale_orphaned_artifacts(
             datetime.now(UTC) - timedelta(hours=24),
         )
 
-    assert deleted == []
+    assert candidates == ()
     assert artifact_path.read_bytes() == b"keep"
     assert [record.getMessage() for record in caplog.records] == [
         "cleanup_orphaned_artifact_delete_failed"

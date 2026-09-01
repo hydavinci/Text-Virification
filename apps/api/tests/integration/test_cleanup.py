@@ -108,6 +108,21 @@ class InMemoryCleanupVerificationRepository:
         del older_than
         return ()
 
+    def delete_unreferenced_artifact(
+        self,
+        *,
+        job_id: UUID,
+        artifact_id: UUID,
+        file_type: FileType,
+        storage_key: str,
+        candidate_storage_key: str,
+        delete_path,
+    ) -> bool:
+        del artifact_id, file_type, storage_key
+        if candidate_storage_key in self.list_all_artifact_storage_keys():
+            return False
+        return delete_path(not self.artifact_keys.get(job_id))
+
     def delete_results_for_jobs(self, job_ids: list[UUID]) -> None:
         self.deleted_job_ids.extend(job_ids)
         for job_id in job_ids:
@@ -487,6 +502,57 @@ def test_cleanup_keeps_pending_reference_and_sweeps_stale_orphan(
     assert not orphan.path.parent.exists()
     assert recent.path.exists()
     assert recent_temp.exists()
+
+
+def test_cleanup_removes_stale_unreferenced_artifact_uploading_file(
+    storage: JobStorage,
+) -> None:
+    from text_verification.workers.tasks import cleanup_expired_jobs
+
+    job_id = uuid4()
+    artifact_id = uuid4()
+    storage_key = build_artifact_storage_key(job_id, artifact_id, FileType.TXT)
+    upload_path = storage._root / storage_key
+    upload_path = upload_path.with_name(
+        f".{upload_path.name}.{uuid4().hex}.uploading"
+    )
+    upload_path.parent.mkdir(parents=True)
+    upload_path.write_bytes(b"abandoned upload")
+    stale_timestamp = (datetime.now(UTC) - timedelta(hours=25)).timestamp()
+    os.utime(upload_path, (stale_timestamp, stale_timestamp))
+
+    cleanup_expired_jobs()
+
+    assert not upload_path.exists()
+    assert not upload_path.parent.exists()
+
+
+def test_cleanup_removes_stale_uploading_file_for_referenced_final_artifact(
+    repository: InMemoryCleanupRepository,
+    verification_repository: InMemoryCleanupVerificationRepository,
+    storage: JobStorage,
+) -> None:
+    from text_verification.workers.tasks import cleanup_expired_jobs
+
+    job = repository.create_job(
+        status=JobStatus.COMPLETED,
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+    artifact_id = uuid4()
+    storage_key = build_artifact_storage_key(job.job_id, artifact_id, FileType.TXT)
+    upload_path = (storage._root / storage_key).with_name(
+        f".{artifact_id}.txt.{uuid4().hex}.uploading"
+    )
+    upload_path.parent.mkdir(parents=True)
+    upload_path.write_bytes(b"abandoned upload")
+    verification_repository.artifact_keys[job.job_id] = (storage_key,)
+    stale_timestamp = (datetime.now(UTC) - timedelta(hours=25)).timestamp()
+    os.utime(upload_path, (stale_timestamp, stale_timestamp))
+
+    cleanup_expired_jobs()
+
+    assert not upload_path.exists()
+    assert upload_path.parent.exists()
 
 
 def test_cleanup_rejects_symlink_in_artifact_orphan_sweep(

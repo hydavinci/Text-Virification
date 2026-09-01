@@ -45,7 +45,10 @@ from text_verification.infrastructure.orm import (
     VerificationIssueRow,
     VerificationRunRow,
 )
-from text_verification.infrastructure.storage import validate_artifact_identity
+from text_verification.infrastructure.storage import (
+    validate_artifact_identity,
+    validate_artifact_storage_key,
+)
 
 
 class JobResultState(StrEnum):
@@ -326,7 +329,7 @@ class VerificationRepository:
             content_sha256,
             created_at,
         )
-        existing = self._session.get(ExportArtifactRow, export_artifact_id)
+        existing = self._lock_artifact_or_none(export_artifact_id)
         if existing is not None:
             persisted = (
                 existing.verification_run_id,
@@ -414,21 +417,32 @@ class VerificationRepository:
         ready_at: datetime,
         consistency_check: Callable[[], None],
     ) -> ArtifactSnapshot:
+        self._lock_job(reservation.job_id)
         row = self._lock_artifact(reservation.export_artifact_id)
         _assert_artifact_row_matches_reservation(row, reservation)
         consistency_check()
-        if row.content_sha256 is None:
-            row.content_sha256 = reservation.content_sha256
-        if row.content_sha256 != reservation.content_sha256:
-            raise ValueError(
-                f"Export artifact {reservation.export_artifact_id} has "
-                "different persisted content."
-            )
-        row.size_bytes = reservation.size_bytes
-        row.status = ArtifactLifecycleStatus.READY.value
-        row.ready_at = row.ready_at or ready_at
+        snapshot = _finalize_artifact_row(row, reservation, ready_at)
         self._session.flush()
-        return _artifact_snapshot_from_row(row)
+        return snapshot
+
+    def finalize_stale_pending_export_artifact(
+        self,
+        reservation: ArtifactReservation,
+        *,
+        ready_at: datetime,
+        consistency_check: Callable[[], None],
+    ) -> ArtifactSnapshot | None:
+        self._lock_job(reservation.job_id)
+        row = self._lock_artifact_or_none(reservation.export_artifact_id)
+        if row is None or not _pending_artifact_row_matches_reservation(
+            row,
+            reservation,
+        ):
+            return None
+        consistency_check()
+        snapshot = _finalize_artifact_row(row, reservation, ready_at)
+        self._session.flush()
+        return snapshot
 
     def read_export_artifact(
         self,
@@ -437,23 +451,71 @@ class VerificationRepository:
         row = self._session.get(ExportArtifactRow, export_artifact_id)
         return None if row is None else _artifact_snapshot_from_row(row)
 
-    def delete_pending_export_artifact(
+    def delete_stale_pending_export_artifact(
         self,
+        reservation: ArtifactReservation,
         *,
-        export_artifact_id: UUID,
-        content_sha256: str,
+        missing_check: Callable[[], bool],
     ) -> bool:
-        row = self._session.get(ExportArtifactRow, export_artifact_id)
-        if row is None:
-            return False
-        if (
-            ArtifactLifecycleStatus(row.status) is not ArtifactLifecycleStatus.PENDING
-            or row.content_sha256 != content_sha256
+        self._lock_job(reservation.job_id)
+        row = self._lock_artifact_or_none(reservation.export_artifact_id)
+        if row is None or not _pending_artifact_row_matches_reservation(
+            row,
+            reservation,
         ):
+            return False
+        if not missing_check():
             return False
         self._session.delete(row)
         self._session.flush()
         return True
+
+    def delete_unreferenced_artifact(
+        self,
+        *,
+        job_id: UUID,
+        artifact_id: UUID,
+        file_type: FileType | str,
+        storage_key: str,
+        candidate_storage_key: str,
+        delete_path: Callable[[bool], bool],
+    ) -> bool:
+        validate_artifact_identity(
+            job_id,
+            artifact_id,
+            file_type,
+            storage_key,
+        )
+        validate_artifact_storage_key(job_id, candidate_storage_key)
+        job = self._lock_job_or_none(job_id)
+        if job is None:
+            return delete_path(True)
+        referenced = self._session.scalar(
+            select(ExportArtifactRow.export_artifact_id)
+            .where(
+                ExportArtifactRow.storage_key == candidate_storage_key,
+                ExportArtifactRow.status.in_(
+                    (
+                        ArtifactLifecycleStatus.PENDING.value,
+                        ArtifactLifecycleStatus.READY.value,
+                    )
+                ),
+            )
+            .limit(1)
+        )
+        if referenced is not None:
+            return False
+        any_job_artifact = self._session.scalar(
+            select(ExportArtifactRow.export_artifact_id)
+            .join(
+                VerificationRunRow,
+                ExportArtifactRow.verification_run_id
+                == VerificationRunRow.verification_run_id,
+            )
+            .where(VerificationRunRow.job_id == job.job_id)
+            .limit(1)
+        )
+        return delete_path(any_job_artifact is None)
 
     def list_stale_pending_artifacts(
         self,
@@ -493,15 +555,18 @@ class VerificationRepository:
         )
 
     def _lock_job(self, job_id: UUID) -> JobRow:
-        row = self._session.execute(
+        row = self._lock_job_or_none(job_id)
+        if row is None:
+            raise LookupError(f"Job {job_id} does not exist.")
+        return row
+
+    def _lock_job_or_none(self, job_id: UUID) -> JobRow | None:
+        return self._session.execute(
             select(JobRow)
             .where(JobRow.job_id == job_id)
             .with_for_update()
             .execution_options(populate_existing=True)
         ).scalar_one_or_none()
-        if row is None:
-            raise LookupError(f"Job {job_id} does not exist.")
-        return row
 
     def _lock_run(self, verification_run_id: UUID) -> VerificationRunRow:
         row = self._session.scalar(
@@ -516,15 +581,21 @@ class VerificationRepository:
         return row
 
     def _lock_artifact(self, export_artifact_id: UUID) -> ExportArtifactRow:
-        row = self._session.scalar(
+        row = self._lock_artifact_or_none(export_artifact_id)
+        if row is None:
+            raise LookupError(f"Export artifact {export_artifact_id} does not exist.")
+        return row
+
+    def _lock_artifact_or_none(
+        self,
+        export_artifact_id: UUID,
+    ) -> ExportArtifactRow | None:
+        return self._session.scalar(
             select(ExportArtifactRow)
             .where(ExportArtifactRow.export_artifact_id == export_artifact_id)
             .with_for_update()
             .execution_options(populate_existing=True)
         )
-        if row is None:
-            raise LookupError(f"Export artifact {export_artifact_id} does not exist.")
-        return row
 
     def _assert_active_lease(
         self,
@@ -868,6 +939,28 @@ def _assert_artifact_row_matches_reservation(
     row: ExportArtifactRow,
     reservation: ArtifactReservation,
 ) -> None:
+    if not _artifact_row_matches_reservation(row, reservation):
+        raise ValueError(
+            f"Export artifact {reservation.export_artifact_id} reservation changed."
+        )
+
+
+def _pending_artifact_row_matches_reservation(
+    row: ExportArtifactRow,
+    reservation: ArtifactReservation,
+) -> bool:
+    return (
+        reservation.status is ArtifactLifecycleStatus.PENDING
+        and _artifact_row_matches_reservation(row, reservation)
+        and ArtifactLifecycleStatus(row.status) is ArtifactLifecycleStatus.PENDING
+        and row.reserved_at == reservation.reserved_at
+    )
+
+
+def _artifact_row_matches_reservation(
+    row: ExportArtifactRow,
+    reservation: ArtifactReservation,
+) -> bool:
     persisted = (
         row.export_artifact_id,
         row.run.job_id,
@@ -894,7 +987,28 @@ def _assert_artifact_row_matches_reservation(
         reservation.size_bytes,
         reservation.created_at,
     )
-    if persisted != expected:
-        raise ValueError(
-            f"Export artifact {reservation.export_artifact_id} reservation changed."
+    return (
+        persisted == expected
+        and (
+            row.content_sha256 is None
+            or row.content_sha256 == reservation.content_sha256
         )
+    )
+
+
+def _finalize_artifact_row(
+    row: ExportArtifactRow,
+    reservation: ArtifactReservation,
+    ready_at: datetime,
+) -> ArtifactSnapshot:
+    if row.content_sha256 is None:
+        row.content_sha256 = reservation.content_sha256
+    if row.content_sha256 != reservation.content_sha256:
+        raise ValueError(
+            f"Export artifact {reservation.export_artifact_id} has "
+            "different persisted content."
+        )
+    row.size_bytes = reservation.size_bytes
+    row.status = ArtifactLifecycleStatus.READY.value
+    row.ready_at = row.ready_at or ready_at
+    return _artifact_snapshot_from_row(row)

@@ -10,6 +10,7 @@ from text_verification.domain.capabilities import CapabilityProfile
 from text_verification.domain.documents import FileType
 from text_verification.infrastructure import document_storage
 from text_verification.infrastructure.artifact_storage import (
+    ArtifactOrphanCandidate,
     ArtifactStorage,
     ArtifactVerificationHandle,
 )
@@ -94,22 +95,35 @@ class JobStorage(DocumentStorage):
     def delete_artifact(self, job_id: UUID, storage_key: str) -> bool:
         return self._artifact_storage.delete_owned(job_id, storage_key)
 
-    def delete_orphaned_artifacts(
+    def is_artifact_missing(
         self,
-        referenced_storage_keys: set[str],
+        job_id: UUID,
+        artifact_id: UUID,
+        storage_key: str,
+        file_type: FileType | str,
+    ) -> bool:
+        return self._artifact_storage.is_artifact_missing(
+            job_id,
+            artifact_id,
+            storage_key,
+            file_type,
+        )
+
+    def discover_stale_orphaned_artifacts(
+        self,
         older_than: datetime,
-    ) -> list[str]:
+    ) -> tuple[ArtifactOrphanCandidate, ...]:
         artifact_root = self._root / document_storage.ARTIFACT_NAMESPACE
         if not artifact_root.exists() and not artifact_root.is_symlink():
-            return []
+            return ()
         if self._is_reparse_point(artifact_root) or not artifact_root.is_dir():
             self._log_orphaned_artifact_failure(
                 document_storage.ARTIFACT_NAMESPACE,
                 InvalidUpload("Artifact root is an unsafe directory."),
             )
-            return []
+            return ()
 
-        deleted: list[str] = []
+        candidates: list[ArtifactOrphanCandidate] = []
         with os.scandir(artifact_root) as job_entries:
             for job_entry in job_entries:
                 job_path = Path(job_entry.path)
@@ -127,31 +141,33 @@ class JobStorage(DocumentStorage):
                     continue
                 if str(job_id) != job_entry.name:
                     continue
-                job_mtime = datetime.fromtimestamp(
-                    job_entry.stat(follow_symlinks=False).st_mtime,
-                    UTC,
-                )
-                self._sweep_artifact_directory(
+                self._discover_stale_artifact_candidates(
                     job_id,
                     job_path,
-                    referenced_storage_keys,
                     older_than,
-                    deleted,
+                    candidates,
                 )
-                if job_mtime < older_than:
-                    try:
-                        job_path.rmdir()
-                    except OSError:
-                        pass
-        return deleted
+        return tuple(candidates)
 
-    def _sweep_artifact_directory(
+    def delete_stale_orphaned_artifact(
+        self,
+        candidate: ArtifactOrphanCandidate,
+        older_than: datetime,
+        *,
+        prune_empty_directories: bool,
+    ) -> bool:
+        return self._artifact_storage.delete_stale_candidate(
+            candidate,
+            older_than,
+            prune_empty_directories=prune_empty_directories,
+        )
+
+    def _discover_stale_artifact_candidates(
         self,
         job_id: UUID,
         directory: Path,
-        referenced_storage_keys: set[str],
         older_than: datetime,
-        deleted: list[str],
+        candidates: list[ArtifactOrphanCandidate],
     ) -> None:
         with os.scandir(directory) as entries:
             for entry in entries:
@@ -164,46 +180,103 @@ class JobStorage(DocumentStorage):
                             "Artifact orphan candidate is a reparse point."
                         )
                     if entry.is_dir(follow_symlinks=False):
-                        directory_mtime = datetime.fromtimestamp(
-                            stat_result.st_mtime,
-                            UTC,
-                        )
-                        self._sweep_artifact_directory(
+                        self._discover_stale_artifact_candidates(
                             job_id,
                             path,
-                            referenced_storage_keys,
                             older_than,
-                            deleted,
+                            candidates,
                         )
-                        if directory_mtime < older_than:
-                            try:
-                                path.rmdir()
-                            except OSError:
-                                pass
                         continue
                     if not entry.is_file(follow_symlinks=False):
                         raise InvalidUpload(
                             "Artifact orphan candidate is not a regular file."
                         )
-                    if storage_key in referenced_storage_keys:
-                        continue
                     if datetime.fromtimestamp(stat_result.st_mtime, UTC) >= older_than:
                         continue
-                    if self._delete_stale_artifact(job_id, storage_key, older_than):
-                        deleted.append(storage_key)
+                    candidates.append(
+                        self._parse_orphan_candidate(job_id, storage_key)
+                    )
                 except Exception as error:
                     self._log_orphaned_artifact_failure(storage_key, error)
 
-    def _delete_stale_artifact(
+    def _parse_orphan_candidate(
         self,
         job_id: UUID,
         storage_key: str,
-        older_than: datetime,
-    ) -> bool:
-        return self._artifact_storage.delete_stale_unreferenced(
+    ) -> ArtifactOrphanCandidate:
+        try:
+            relative_path = validate_artifact_storage_key(job_id, storage_key)
+            artifact_text, separator, file_type_text = relative_path.name.rpartition(".")
+            if not separator:
+                raise ValueError("Artifact filename has no file type suffix.")
+            artifact_id = UUID(artifact_text)
+            if str(artifact_id) != artifact_text:
+                raise ValueError("Artifact filename does not use a canonical UUID.")
+            file_type = FileType(file_type_text)
+            validate_artifact_identity(
+                job_id,
+                artifact_id,
+                file_type,
+                storage_key,
+            )
+            return ArtifactOrphanCandidate(
+                job_id,
+                artifact_id,
+                file_type,
+                storage_key,
+                storage_key,
+            )
+        except (InvalidUpload, ValueError):
+            return self._parse_uploading_orphan_candidate(
+                job_id,
+                storage_key,
+            )
+
+    def _parse_uploading_orphan_candidate(
+        self,
+        job_id: UUID,
+        storage_key: str,
+    ) -> ArtifactOrphanCandidate:
+        try:
+            relative_path = validate_artifact_storage_key(job_id, storage_key)
+            temporary_name = relative_path.name
+            temporary_suffix = ".uploading"
+            if (
+                not temporary_name.startswith(".")
+                or not temporary_name.endswith(temporary_suffix)
+            ):
+                raise ValueError("Artifact filename is not a temporary upload.")
+            artifact_name, separator, temporary_id = temporary_name[
+                1 : -len(temporary_suffix)
+            ].rpartition(".")
+            if not separator or UUID(temporary_id).hex != temporary_id:
+                raise ValueError("Artifact temporary upload ID is not canonical.")
+            artifact_text, separator, file_type_text = artifact_name.rpartition(".")
+            if not separator:
+                raise ValueError("Artifact filename has no file type suffix.")
+            artifact_id = UUID(artifact_text)
+            if str(artifact_id) != artifact_text:
+                raise ValueError("Artifact filename does not use a canonical UUID.")
+            file_type = FileType(file_type_text)
+            canonical_storage_key = "/".join(
+                (*relative_path.parts[:-1], artifact_name)
+            )
+            validate_artifact_identity(
+                job_id,
+                artifact_id,
+                file_type,
+                canonical_storage_key,
+            )
+        except (InvalidUpload, ValueError) as error:
+            raise InvalidUpload(
+                "Artifact orphan candidate does not have canonical identity."
+            ) from error
+        return ArtifactOrphanCandidate(
             job_id,
+            artifact_id,
+            file_type,
+            canonical_storage_key,
             storage_key,
-            older_than,
         )
 
     def _log_orphaned_artifact_failure(

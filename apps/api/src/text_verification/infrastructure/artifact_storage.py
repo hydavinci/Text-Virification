@@ -11,6 +11,7 @@ from uuid import UUID, uuid4
 
 from text_verification.domain.documents import FileType
 from text_verification.infrastructure.document_storage import (
+    ARTIFACT_NAMESPACE,
     InvalidUpload,
     UploadTooLarge,
     validate_artifact_identity,
@@ -36,6 +37,15 @@ class _FileSignature:
     size_bytes: int
     modified_ns: int
     changed_ns: int
+
+
+@dataclass(frozen=True)
+class ArtifactOrphanCandidate:
+    job_id: UUID
+    artifact_id: UUID
+    file_type: FileType
+    storage_key: str
+    path_storage_key: str
 
 
 class ArtifactVerificationHandle:
@@ -341,14 +351,55 @@ class ArtifactStorage:
         relative_path = validate_artifact_storage_key(job_id, storage_key)
         return self._delete_regular_file(relative_path)
 
-    def delete_stale_unreferenced(
+    def is_artifact_missing(
         self,
         job_id: UUID,
+        artifact_id: UUID,
         storage_key: str,
-        older_than: datetime,
+        file_type: FileType | str,
     ) -> bool:
-        relative_path = validate_artifact_storage_key(job_id, storage_key)
-        return self._delete_regular_file(relative_path, older_than=older_than)
+        resolved_file_type = file_type if isinstance(file_type, FileType) else FileType(file_type)
+        relative_path = validate_artifact_identity(
+            job_id,
+            artifact_id,
+            resolved_file_type,
+            storage_key,
+        )
+        try:
+            _, directory_fds, parent_fd = self._open_directory_chain(
+                relative_path,
+                create=False,
+            )
+        except ArtifactNotFoundError:
+            return True
+        try:
+            try:
+                stat_result = os.stat(
+                    relative_path.name,
+                    dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                return True
+            if not stat.S_ISREG(stat_result.st_mode):
+                raise InvalidUpload("Artifact is not a regular file.")
+            return False
+        finally:
+            for descriptor in reversed(directory_fds):
+                os.close(descriptor)
+
+    def delete_stale_candidate(
+        self,
+        candidate: ArtifactOrphanCandidate,
+        older_than: datetime,
+        *,
+        prune_empty_directories: bool,
+    ) -> bool:
+        relative_path = _orphan_candidate_relative_path(candidate)
+        deleted = self._delete_regular_file(relative_path, older_than=older_than)
+        if deleted and prune_empty_directories:
+            self._prune_empty_orphan_directories(relative_path)
+        return deleted
 
     def _delete_regular_file(
         self,
@@ -386,6 +437,49 @@ class ArtifactStorage:
                 return False
             os.unlink(relative_path.name, dir_fd=parent_fd)
             return True
+        finally:
+            for descriptor in reversed(directory_fds):
+                os.close(descriptor)
+
+    def _prune_empty_orphan_directories(
+        self,
+        relative_path: PurePosixPath,
+    ) -> None:
+        if os.rmdir not in os.supports_dir_fd:
+            return
+        try:
+            directory_links, directory_fds, _ = self._open_directory_chain(
+                relative_path,
+                create=False,
+            )
+        except ArtifactNotFoundError:
+            return
+        try:
+            artifact_links = directory_links[-len(relative_path.parts[:-1]) :]
+            if not artifact_links or artifact_links[0].name != ARTIFACT_NAMESPACE:
+                raise InvalidUpload("Artifact path has an unexpected namespace.")
+            for link in reversed(artifact_links[1:]):
+                child = os.fstat(link.child_fd)
+                try:
+                    named = os.stat(
+                        link.name,
+                        dir_fd=link.parent_fd,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    continue
+                if (
+                    not stat.S_ISDIR(child.st_mode)
+                    or not stat.S_ISDIR(named.st_mode)
+                    or (child.st_dev, child.st_ino) != (named.st_dev, named.st_ino)
+                ):
+                    raise InvalidUpload(
+                        "Artifact directory entry no longer names the verified directory."
+                    )
+                try:
+                    os.rmdir(link.name, dir_fd=link.parent_fd)
+                except OSError:
+                    break
         finally:
             for descriptor in reversed(directory_fds):
                 os.close(descriptor)
@@ -501,6 +595,42 @@ class ArtifactStorage:
             and os.link in os.supports_follow_symlinks
             and os.stat in os.supports_follow_symlinks
         )
+
+
+def _orphan_candidate_relative_path(
+    candidate: ArtifactOrphanCandidate,
+) -> PurePosixPath:
+    canonical_path = validate_artifact_identity(
+        candidate.job_id,
+        candidate.artifact_id,
+        candidate.file_type,
+        candidate.storage_key,
+    )
+    candidate_path = validate_artifact_storage_key(
+        candidate.job_id,
+        candidate.path_storage_key,
+    )
+    if candidate_path == canonical_path:
+        return candidate_path
+    temporary_prefix = f".{canonical_path.name}."
+    temporary_suffix = ".uploading"
+    if (
+        candidate_path.parts[:-1] != canonical_path.parts[:-1]
+        or not candidate_path.name.startswith(temporary_prefix)
+        or not candidate_path.name.endswith(temporary_suffix)
+    ):
+        raise InvalidUpload("Artifact orphan candidate does not have canonical identity.")
+    temporary_id = candidate_path.name[
+        len(temporary_prefix) : -len(temporary_suffix)
+    ]
+    try:
+        if UUID(temporary_id).hex != temporary_id:
+            raise ValueError("Artifact temporary upload ID is not canonical.")
+    except ValueError as error:
+        raise InvalidUpload(
+            "Artifact orphan candidate does not have canonical identity."
+        ) from error
+    return candidate_path
 
 
 def _hash_stable_file(
