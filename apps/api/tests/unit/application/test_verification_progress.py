@@ -1,0 +1,119 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from uuid import uuid4
+
+from text_verification.application.verification_pipeline import (
+    VerificationCommand,
+    VerificationPipeline,
+)
+from text_verification.checkers.registry import CheckerRegistry
+from text_verification.domain.documents import DocumentModel, FileType, TextBlock
+from text_verification.domain.ports import (
+    CheckContext,
+    CheckResult,
+    VerificationProgressObserver,
+    VerificationProgressStage,
+)
+from text_verification.domain.verification import (
+    VerificationExecutionMode,
+    VerificationOptions,
+)
+from text_verification.parsers.registry import ParserRegistry
+
+
+@dataclass
+class ProgressParser:
+    operations: list[str]
+    supported_type: FileType = FileType.TXT
+
+    def parse(self, source_path: Path) -> DocumentModel:
+        self.operations.append("parse")
+        return _document(source_path.name)
+
+
+@dataclass
+class ProgressChecker:
+    operations: list[str]
+    name: str = "progress"
+    version: str = "1"
+    supported_languages: set[str] | None = None
+
+    def check(
+        self,
+        document: DocumentModel,
+        context: CheckContext,
+        *,
+        progress_observer: VerificationProgressObserver | None = None,
+    ) -> CheckResult:
+        del document, context
+        self.operations.append("check")
+        assert progress_observer is not None
+        progress_observer(VerificationProgressStage.CHECKING_FORMAT)
+        return CheckResult(())
+
+
+def test_pipeline_emits_parsing_before_parser_and_passes_observer_to_checker(
+    tmp_path: Path,
+) -> None:
+    operations: list[str] = []
+    source_path = tmp_path / "source.txt"
+    source_path.write_text("clean", encoding="utf-8")
+    pipeline = VerificationPipeline(
+        parsers=ParserRegistry([ProgressParser(operations)]),
+        checkers=CheckerRegistry([ProgressChecker(operations)]),
+        reviewer=None,
+    )
+
+    pipeline.run(
+        VerificationCommand(
+            document_id=uuid4(),
+            source_path=source_path,
+            direct_text=None,
+            source_name="source.txt",
+            file_type=FileType.TXT,
+            options=VerificationOptions(),
+            execution_mode=VerificationExecutionMode.ASYNCHRONOUS,
+        ),
+        progress_observer=lambda stage: operations.append(f"stage:{stage.value}"),
+    )
+
+    assert operations == [
+        "stage:parsing",
+        "parse",
+        "check",
+        "stage:checking_format",
+    ]
+
+
+def _document(source_name: str) -> DocumentModel:
+    return DocumentModel(
+        document_id=uuid4(),
+        source_version="sha256:progress",
+        file_type=FileType.TXT,
+        source_name=source_name,
+        text="clean",
+        blocks=[
+            TextBlock(
+                block_id="p-0",
+                kind="paragraph",
+                text="clean",
+                global_start=0,
+                global_end=5,
+                block_start=0,
+                block_end=5,
+                page=None,
+                paragraph_index=0,
+                table_index=None,
+                row_index=None,
+                cell_index=None,
+                bbox=None,
+                parent_id=None,
+                style={},
+                source_locator={"paragraph_index": 0},
+            )
+        ],
+        parser_name="progress",
+        parser_version="1",
+    )

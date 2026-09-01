@@ -4,7 +4,12 @@ from collections.abc import Iterable
 
 from text_verification.domain.documents import DocumentModel
 from text_verification.domain.issues import Issue
-from text_verification.domain.ports import CheckContext, Checker, CheckResult
+from text_verification.domain.ports import (
+    CheckContext,
+    Checker,
+    CheckResult,
+    VerificationProgressObserver,
+)
 from text_verification.registry_errors import DuplicateCapabilityError, MissingCapabilityError
 
 _LAYER_ORDER = {
@@ -30,14 +35,27 @@ class CheckerRegistry:
         self._checkers.append(checker)
         self._names.add(checker.name)
 
-    def run(self, document: DocumentModel, context: CheckContext) -> CheckResult:
+    def run(
+        self,
+        document: DocumentModel,
+        context: CheckContext,
+        *,
+        progress_observer: VerificationProgressObserver | None = None,
+    ) -> CheckResult:
         if not self._checkers:
             raise MissingCapabilityError("checker", "run")
 
         issues_with_order: list[tuple[int, int, int, Issue]] = []
         dictionary_versions: dict[str, str] = {}
         for checker_index, checker in enumerate(self._checkers):
-            result = checker.check(document, context)
+            if progress_observer is None:
+                result = checker.check(document, context)
+            else:
+                result = checker.check(
+                    document,
+                    context,
+                    progress_observer=progress_observer,
+                )
             dictionary_versions.update(result.dictionary_versions)
             for issue_index, issue in enumerate(result.issues):
                 issues_with_order.append(

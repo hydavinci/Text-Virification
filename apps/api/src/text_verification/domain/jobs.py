@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -53,6 +55,29 @@ class TerminalJobStateError(RuntimeError):
         )
 
 
+class JobLeaseLostError(RuntimeError):
+    def __init__(self, job_id: UUID) -> None:
+        self.job_id = job_id
+        super().__init__(f"Job {job_id} is not owned by the active processing lease.")
+
+
+class JobStateConflictError(RuntimeError):
+    def __init__(
+        self,
+        *,
+        job_id: UUID,
+        expected_status: JobStatus,
+        current_status: JobStatus,
+    ) -> None:
+        self.job_id = job_id
+        self.expected_status = expected_status
+        self.current_status = current_status
+        super().__init__(
+            f"Job {job_id} expected status {expected_status.value}, "
+            f"found {current_status.value}."
+        )
+
+
 class JobRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -75,3 +100,16 @@ class JobEvent:
     progress: int
     message: str
     created_at: datetime
+
+
+class JobClaimDisposition(StrEnum):
+    ACQUIRED = "acquired"
+    MISSING = "missing"
+    TERMINAL = "terminal"
+    LEASED = "leased"
+
+
+@dataclass(frozen=True)
+class JobClaimResult:
+    disposition: JobClaimDisposition
+    job: JobRead | None

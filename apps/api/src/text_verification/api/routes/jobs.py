@@ -21,7 +21,6 @@ from text_verification.config import Settings, get_settings
 from text_verification.domain.capabilities import default_capability_manifest
 from text_verification.domain.documents import FileType
 from text_verification.domain.jobs import (
-    RESULT_READY_STATUSES,
     TERMINAL_STATUSES,
     JobEvent,
     JobRead,
@@ -37,7 +36,10 @@ from text_verification.infrastructure.storage import (
     UploadCleanupFailed,
     UploadTooLarge,
 )
-from text_verification.infrastructure.verification_repository import VerificationRepository
+from text_verification.infrastructure.verification_repository import (
+    JobResultState,
+    VerificationRepository,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -95,37 +97,35 @@ def get_job_result(
     job_id: UUID,
     session: Annotated[Session, Depends(get_db_session)],
 ) -> VerificationResult:
-    repository = REPOSITORY_FACTORY(session)
-    job = repository.get_job(job_id)
-    if job is None:
+    repository = VERIFICATION_REPOSITORY_FACTORY(session)
+    try:
+        snapshot = repository.read_result_snapshot(job_id)
+    finally:
+        repository.rollback()
+
+    if snapshot.state is JobResultState.MISSING:
         raise _http_error(status.HTTP_404_NOT_FOUND, JOB_NOT_FOUND_CODE, "Job was not found.")
-    if job.status == JobStatus.EXPIRED:
+    if snapshot.state is JobResultState.EXPIRED:
         raise _http_error(
             status.HTTP_410_GONE,
             JOB_RESULT_EXPIRED_CODE,
             "Job result has expired.",
         )
-    if job.status not in RESULT_READY_STATUSES:
-        if job.status in TERMINAL_STATUSES:
-            raise _http_error(
-                status.HTTP_409_CONFLICT,
-                JOB_RESULT_UNAVAILABLE_CODE,
-                "Job did not produce a result.",
-            )
+    if snapshot.state is JobResultState.PENDING:
         raise _http_error(
             status.HTTP_409_CONFLICT,
             JOB_RESULT_PENDING_CODE,
             "Job result is not available yet.",
         )
-
-    result = VERIFICATION_REPOSITORY_FACTORY(session).get_result_for_job(job_id)
-    if result is None:
+    if snapshot.state is JobResultState.UNAVAILABLE:
         raise _http_error(
             status.HTTP_409_CONFLICT,
             JOB_RESULT_UNAVAILABLE_CODE,
             "Job did not produce a result.",
         )
-    return result
+    if snapshot.result is None:
+        raise AssertionError("ready result snapshot must contain a result")
+    return snapshot.result
 
 
 @router.get("/jobs/{job_id}/events")

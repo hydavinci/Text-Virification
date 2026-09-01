@@ -3,8 +3,9 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from typing import Any, NoReturn, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from celery import Task  # type: ignore[import-untyped]
 from sqlalchemy.orm import Session, sessionmaker
@@ -17,16 +18,35 @@ from text_verification.application import (
 from text_verification.compatibility.storage import CompatibilityStorage
 from text_verification.config import get_settings
 from text_verification.domain.jobs import (
-    TERMINAL_STATUSES,
+    JobClaimDisposition,
+    JobClaimResult,
+    JobLeaseLostError,
+    JobRead,
+    JobStateConflictError,
     JobStatus,
     TerminalJobStateError,
 )
+from text_verification.domain.ports import (
+    VerificationProgressObserver,
+    VerificationProgressStage,
+)
+from text_verification.domain.verification import VerificationResult
 from text_verification.infrastructure.database import get_session_factory
 from text_verification.infrastructure.repositories import JobRepository
 from text_verification.infrastructure.storage import InvalidUpload, JobStorage
 from text_verification.infrastructure.verification_repository import VerificationRepository
 from text_verification.workers.celery_app import celery_app
-from text_verification.workers.pipeline import MISSING_UPLOAD_MESSAGE, PipelineRunner
+from text_verification.workers.pipeline import (
+    CHECKING_CHINESE_EVENT_MESSAGE,
+    CHECKING_ENGLISH_EVENT_MESSAGE,
+    CHECKING_FORMAT_EVENT_MESSAGE,
+    CHECKING_SENSITIVE_EVENT_MESSAGE,
+    COMPLETED_EVENT_MESSAGE,
+    MISSING_UPLOAD_MESSAGE,
+    PARSING_EVENT_MESSAGE,
+    UPLOAD_VALIDATED_EVENT_MESSAGE,
+    PipelineRunner,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,12 +60,42 @@ CompatibilityStorageFactory = Callable[[], CompatibilityStorage]
 RepositoryFactory = Callable[[Session], JobRepository]
 VerificationRepositoryFactory = Callable[[Session], VerificationRepository]
 PipelineFactory = Callable[[], VerificationPipeline]
-RunnerFactory = Callable[
-    [JobRepository, VerificationRepository, JobStorage, VerificationPipeline],
-    PipelineRunner,
-]
+RunnerFactory = Callable[[JobStorage, VerificationPipeline], PipelineRunner]
 PROCESS_JOB_MAX_RETRIES = 2
 PROCESS_JOB_RETRY_BACKOFF_CAP_SECONDS = 4
+
+_STATUS_ORDER = (
+    JobStatus.QUEUED,
+    JobStatus.UPLOAD_VALIDATED,
+    JobStatus.PARSING,
+    JobStatus.CHECKING_FORMAT,
+    JobStatus.CHECKING_SENSITIVE,
+    JobStatus.CHECKING_CHINESE,
+    JobStatus.CHECKING_ENGLISH,
+)
+_STATUS_EVENT_DETAILS = {
+    JobStatus.UPLOAD_VALIDATED: (10, UPLOAD_VALIDATED_EVENT_MESSAGE),
+    JobStatus.PARSING: (25, PARSING_EVENT_MESSAGE),
+    JobStatus.CHECKING_FORMAT: (50, CHECKING_FORMAT_EVENT_MESSAGE),
+    JobStatus.CHECKING_SENSITIVE: (65, CHECKING_SENSITIVE_EVENT_MESSAGE),
+    JobStatus.CHECKING_CHINESE: (80, CHECKING_CHINESE_EVENT_MESSAGE),
+    JobStatus.CHECKING_ENGLISH: (90, CHECKING_ENGLISH_EVENT_MESSAGE),
+}
+_STAGE_STATUSES = {
+    VerificationProgressStage.PARSING: JobStatus.PARSING,
+    VerificationProgressStage.CHECKING_FORMAT: JobStatus.CHECKING_FORMAT,
+    VerificationProgressStage.CHECKING_SENSITIVE: JobStatus.CHECKING_SENSITIVE,
+    VerificationProgressStage.CHECKING_CHINESE: JobStatus.CHECKING_CHINESE,
+    VerificationProgressStage.CHECKING_ENGLISH: JobStatus.CHECKING_ENGLISH,
+}
+
+
+class ProcessAttemptDisposition(StrEnum):
+    PROCESSED = "processed"
+    MISSING = "missing"
+    TERMINAL = "terminal"
+    DUPLICATE = "duplicate"
+    LEASE_LOST = "lease_lost"
 
 
 def _get_job_storage() -> JobStorage:
@@ -71,64 +121,192 @@ PIPELINE_FACTORY: PipelineFactory = _get_verification_pipeline
 RUNNER_FACTORY: RunnerFactory = PipelineRunner
 
 
-def _process_job(task: Task, job_id: str) -> None:
+class _LeaseProgressObserver(VerificationProgressObserver):
+    def __init__(
+        self,
+        *,
+        session_factory: sessionmaker[Session],
+        job_id: UUID,
+        owner_token: UUID,
+        current_status: JobStatus,
+        lease_seconds: int,
+    ) -> None:
+        self._session_factory = session_factory
+        self._job_id = job_id
+        self._owner_token = owner_token
+        self._lease_seconds = lease_seconds
+        self.current_status = current_status
+
+    def ensure_upload_validated(self) -> None:
+        self._advance(JobStatus.UPLOAD_VALIDATED)
+
+    def __call__(self, stage: VerificationProgressStage) -> None:
+        self._advance(_STAGE_STATUSES[stage])
+
+    def _advance(self, target_status: JobStatus) -> None:
+        current_index = _STATUS_ORDER.index(self.current_status)
+        target_index = _STATUS_ORDER.index(target_status)
+        if target_index <= current_index:
+            return
+        if target_index != current_index + 1:
+            raise JobStateConflictError(
+                job_id=self._job_id,
+                expected_status=_STATUS_ORDER[target_index - 1],
+                current_status=self.current_status,
+            )
+
+        progress, message = _STATUS_EVENT_DETAILS[target_status]
+        now = datetime.now(UTC)
+        job = _transition_claimed(
+            self._session_factory,
+            self._job_id,
+            owner_token=self._owner_token,
+            expected_status=self.current_status,
+            status=target_status,
+            progress=progress,
+            message=message,
+            now=now,
+            lease_expires_at=now + timedelta(seconds=self._lease_seconds),
+        )
+        self.current_status = job.status
+
+
+def _process_job(
+    task: Task,
+    job_id: str,
+    previous_lease_owner_token: str | None = None,
+) -> None:
     parsed_job_id = UUID(job_id)
+    previous_owner_token = (
+        UUID(previous_lease_owner_token)
+        if previous_lease_owner_token is not None
+        else None
+    )
+    owner_token = uuid4()
 
     try:
-        _run_process_job_attempt(parsed_job_id)
+        outcome = _run_process_job_attempt(
+            parsed_job_id,
+            owner_token,
+            previous_owner_token=previous_owner_token,
+        )
+        if outcome is ProcessAttemptDisposition.DUPLICATE:
+            logger.info(
+                "process_job_duplicate_delivery",
+                extra={"job_id": str(parsed_job_id)},
+            )
+        elif outcome is ProcessAttemptDisposition.LEASE_LOST:
+            logger.info(
+                "process_job_lease_lost",
+                extra={"job_id": str(parsed_job_id)},
+            )
     except Exception as error:
         if task.request.retries < PROCESS_JOB_MAX_RETRIES:
             raise task.retry(
                 exc=error,
                 countdown=_retry_countdown(task.request.retries),
+                kwargs={"previous_lease_owner_token": str(owner_token)},
             ) from error
-        _persist_exhausted_failure(parsed_job_id, error)
+        _persist_exhausted_failure(parsed_job_id, owner_token, error)
         _log_original_failure(parsed_job_id, error)
         _reraise(error)
 
 
-def _run_process_job_attempt(job_id: UUID) -> None:
-    session: Session | None = None
-    repository: JobRepository | None = None
-    try:
-        session_factory = SESSION_FACTORY_PROVIDER()
-        session = session_factory()
-        repository = REPOSITORY_FACTORY(session)
-        job = repository.get_job(job_id)
-        if job is None or job.status in TERMINAL_STATUSES:
-            return
+def _run_process_job_attempt(
+    job_id: UUID,
+    owner_token: UUID,
+    *,
+    previous_owner_token: UUID | None = None,
+) -> ProcessAttemptDisposition:
+    session_factory = SESSION_FACTORY_PROVIDER()
+    lease_seconds = get_settings().job_lease_seconds
+    claim = _acquire_claim(
+        session_factory,
+        job_id,
+        owner_token=owner_token,
+        previous_owner_token=previous_owner_token,
+        lease_seconds=lease_seconds,
+    )
+    if claim.disposition is JobClaimDisposition.MISSING:
+        return ProcessAttemptDisposition.MISSING
+    if claim.disposition is JobClaimDisposition.TERMINAL:
+        return ProcessAttemptDisposition.TERMINAL
+    if claim.disposition is JobClaimDisposition.LEASED:
+        return ProcessAttemptDisposition.DUPLICATE
+    job = claim.job
+    if job is None:
+        raise AssertionError("acquired claim must include the job")
 
-        verification_repository = VERIFICATION_REPOSITORY_FACTORY(session)
-        storage = STORAGE_FACTORY()
-        pipeline = PIPELINE_FACTORY()
-        runner = RUNNER_FACTORY(repository, verification_repository, storage, pipeline)
-        runner.run(job_id)
+    observer = _LeaseProgressObserver(
+        session_factory=session_factory,
+        job_id=job_id,
+        owner_token=owner_token,
+        current_status=job.status,
+        lease_seconds=lease_seconds,
+    )
+    try:
+        try:
+            existing_result = _get_claimed_result(
+                session_factory,
+                job_id,
+                owner_token=owner_token,
+            )
+            if existing_result is not None:
+                if observer.current_status is not JobStatus.CHECKING_ENGLISH:
+                    raise JobStateConflictError(
+                        job_id=job_id,
+                        expected_status=JobStatus.CHECKING_ENGLISH,
+                        current_status=observer.current_status,
+                    )
+                _complete_claimed_job(
+                    session_factory,
+                    job_id,
+                    owner_token=owner_token,
+                    expected_status=observer.current_status,
+                )
+                return ProcessAttemptDisposition.PROCESSED
+
+            observer.ensure_upload_validated()
+            runner = RUNNER_FACTORY(STORAGE_FACTORY(), PIPELINE_FACTORY())
+            result = runner.run(job, observer)
+            _save_claimed_result(
+                session_factory,
+                job_id,
+                result,
+                owner_token=owner_token,
+                expected_status=observer.current_status,
+            )
+            _complete_claimed_job(
+                session_factory,
+                job_id,
+                owner_token=owner_token,
+                expected_status=observer.current_status,
+            )
+            return ProcessAttemptDisposition.PROCESSED
+        except InvalidUpload as error:
+            return _persist_expected_failure(
+                session_factory,
+                job_id,
+                owner_token=owner_token,
+                expected_status=observer.current_status,
+                error=error,
+                error_message=MISSING_UPLOAD_MESSAGE,
+            )
+        except VerificationError as error:
+            if error.retryable:
+                raise
+            return _persist_expected_failure(
+                session_factory,
+                job_id,
+                owner_token=owner_token,
+                expected_status=observer.current_status,
+                error=error,
+                error_message=error.message,
+            )
+    except JobLeaseLostError:
+        return ProcessAttemptDisposition.LEASE_LOST
     except TerminalJobStateError:
-        if repository is not None:
-            repository.rollback()
-    except InvalidUpload as error:
-        if repository is None:
-            raise
-        _persist_expected_failure(
-            repository,
-            job_id,
-            error,
-            MISSING_UPLOAD_MESSAGE,
-        )
-    except VerificationError as error:
-        if repository is None:
-            raise
-        if error.retryable:
-            repository.rollback()
-            raise
-        _persist_expected_failure(repository, job_id, error, error.message)
-    except Exception:
-        if repository is not None:
-            repository.rollback()
-        raise
-    finally:
-        if session is not None:
-            session.close()
+        return ProcessAttemptDisposition.TERMINAL
 
 
 process_job = cast(
@@ -148,9 +326,11 @@ def _cleanup_expired_jobs() -> list[str]:
     session_factory = SESSION_FACTORY_PROVIDER()
     session = session_factory()
     repository = REPOSITORY_FACTORY(session)
+    verification_repository = VERIFICATION_REPOSITORY_FACTORY(session)
 
     try:
         expired_job_ids = repository.expire_jobs_before(now)
+        verification_repository.delete_results_for_jobs(expired_job_ids)
         persisted_job_ids = repository.list_job_ids()
         repository.commit()
     except Exception:
@@ -161,25 +341,28 @@ def _cleanup_expired_jobs() -> list[str]:
 
     storage = STORAGE_FACTORY()
     deleted_job_ids: list[str] = []
-    for job_id in expired_job_ids:
-        job_directory = storage.job_directory(job_id)
+    for expired_job_id in expired_job_ids:
+        job_directory = storage.job_directory(expired_job_id)
         had_directory = job_directory.exists() or job_directory.is_symlink()
         try:
-            storage.delete_job(job_id)
+            storage.delete_job(expired_job_id)
         except Exception as error:
             logger.warning(
                 "cleanup_expired_job_delete_failed",
                 extra={
-                    "job_id": str(job_id),
+                    "job_id": str(expired_job_id),
                     "error_type": type(error).__name__,
                 },
             )
             continue
         if had_directory:
-            deleted_job_ids.append(str(job_id))
+            deleted_job_ids.append(str(expired_job_id))
     deleted_job_ids.extend(
-        str(job_id)
-        for job_id in storage.delete_orphaned_directories(persisted_job_ids, orphan_cutoff)
+        str(orphan_id)
+        for orphan_id in storage.delete_orphaned_directories(
+            persisted_job_ids,
+            orphan_cutoff,
+        )
     )
     try:
         COMPATIBILITY_STORAGE_FACTORY().delete_stale_directories(orphan_cutoff)
@@ -201,65 +384,238 @@ def dispatch_process_job(job_id: str) -> None:
     process_job.delay(job_id)
 
 
-def _persist_expected_failure(
-    repository: JobRepository,
+def _acquire_claim(
+    session_factory: sessionmaker[Session],
     job_id: UUID,
+    *,
+    owner_token: UUID,
+    previous_owner_token: UUID | None = None,
+    lease_seconds: int,
+) -> JobClaimResult:
+    session = session_factory()
+    repository = REPOSITORY_FACTORY(session)
+    now = datetime.now(UTC)
+    try:
+        claim = repository.acquire_lease(
+            job_id,
+            owner_token=owner_token,
+            previous_owner_token=previous_owner_token,
+            now=now,
+            lease_expires_at=now + timedelta(seconds=lease_seconds),
+        )
+        repository.commit()
+        return claim
+    except Exception:
+        repository.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def _transition_claimed(
+    session_factory: sessionmaker[Session],
+    job_id: UUID,
+    *,
+    owner_token: UUID,
+    expected_status: JobStatus,
+    status: JobStatus,
+    progress: int,
+    message: str,
+    now: datetime,
+    lease_expires_at: datetime,
+) -> JobRead:
+    session = session_factory()
+    repository = REPOSITORY_FACTORY(session)
+    try:
+        job = repository.transition_claimed(
+            job_id,
+            owner_token=owner_token,
+            expected_status=expected_status,
+            status=status,
+            progress=progress,
+            message=message,
+            now=now,
+            lease_expires_at=lease_expires_at,
+        )
+        repository.commit()
+        return job
+    except Exception:
+        repository.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def _get_claimed_result(
+    session_factory: sessionmaker[Session],
+    job_id: UUID,
+    *,
+    owner_token: UUID,
+) -> VerificationResult | None:
+    session = session_factory()
+    repository = VERIFICATION_REPOSITORY_FACTORY(session)
+    try:
+        return repository.get_result_for_claimed_job(
+            job_id,
+            owner_token=owner_token,
+            now=datetime.now(UTC),
+        )
+    finally:
+        repository.rollback()
+        session.close()
+
+
+def _save_claimed_result(
+    session_factory: sessionmaker[Session],
+    job_id: UUID,
+    result: VerificationResult,
+    *,
+    owner_token: UUID,
+    expected_status: JobStatus,
+) -> None:
+    session = session_factory()
+    repository = VERIFICATION_REPOSITORY_FACTORY(session)
+    try:
+        repository.save_claimed_result(
+            job_id,
+            result,
+            owner_token=owner_token,
+            expected_status=expected_status,
+            now=datetime.now(UTC),
+        )
+        repository.commit()
+    except Exception:
+        repository.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def _complete_claimed_job(
+    session_factory: sessionmaker[Session],
+    job_id: UUID,
+    *,
+    owner_token: UUID,
+    expected_status: JobStatus,
+) -> None:
+    session = session_factory()
+    repository = REPOSITORY_FACTORY(session)
+    try:
+        repository.complete_claimed_job(
+            job_id,
+            owner_token=owner_token,
+            expected_status=expected_status,
+            progress=100,
+            message=COMPLETED_EVENT_MESSAGE,
+            now=datetime.now(UTC),
+        )
+        repository.commit()
+    except Exception:
+        repository.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def _persist_expected_failure(
+    session_factory: sessionmaker[Session],
+    job_id: UUID,
+    *,
+    owner_token: UUID,
+    expected_status: JobStatus,
     error: Exception,
     error_message: str,
-) -> None:
+) -> ProcessAttemptDisposition:
     try:
-        _mark_failed_job(repository, job_id, error_message)
-    except TerminalJobStateError:
-        repository.rollback()
-        return
+        failure_applied = _fail_claimed_job(
+            session_factory,
+            job_id,
+            owner_token=owner_token,
+            expected_status=expected_status,
+            error_message=error_message,
+        )
+        if not failure_applied:
+            _complete_claimed_job(
+                session_factory,
+                job_id,
+                owner_token=owner_token,
+                expected_status=expected_status,
+            )
+        return ProcessAttemptDisposition.PROCESSED
+    except (JobLeaseLostError, TerminalJobStateError):
+        raise
     except Exception as persist_error:
-        repository.rollback()
         _log_failure_persist_error(job_id, error, persist_error)
         raise
 
 
+def _fail_claimed_job(
+    session_factory: sessionmaker[Session],
+    job_id: UUID,
+    *,
+    owner_token: UUID,
+    expected_status: JobStatus,
+    error_message: str,
+) -> bool:
+    session = session_factory()
+    repository = REPOSITORY_FACTORY(session)
+    try:
+        job = repository.get_job(job_id)
+        progress = 0 if job is None else job.progress
+        applied = repository.fail_claimed_job(
+            job_id,
+            owner_token=owner_token,
+            expected_status=expected_status,
+            progress=progress,
+            message=FAILED_EVENT_MESSAGE,
+            error_code=PIPELINE_FAILURE_CODE,
+            error_message=error_message,
+            now=datetime.now(UTC),
+        )
+        repository.commit()
+        return applied
+    except Exception:
+        repository.rollback()
+        raise
+    finally:
+        session.close()
+
+
 def _persist_exhausted_failure(
     job_id: UUID,
+    owner_token: UUID,
     error: Exception,
 ) -> None:
-    session: Session | None = None
-    repository: JobRepository | None = None
     try:
         session_factory = SESSION_FACTORY_PROVIDER()
-        session = session_factory()
-        repository = REPOSITORY_FACTORY(session)
-        job = repository.get_job(job_id)
-        if job is None or job.status in TERMINAL_STATUSES:
+        failure_owner_token = uuid4()
+        claim = _acquire_claim(
+            session_factory,
+            job_id,
+            owner_token=failure_owner_token,
+            previous_owner_token=owner_token,
+            lease_seconds=get_settings().job_lease_seconds,
+        )
+        if claim.disposition is not JobClaimDisposition.ACQUIRED or claim.job is None:
             return
-        _mark_failed_job(repository, job_id, UNEXPECTED_FAILURE_MESSAGE)
-    except TerminalJobStateError:
-        if repository is not None:
-            repository.rollback()
+        failure_applied = _fail_claimed_job(
+            session_factory,
+            job_id,
+            owner_token=failure_owner_token,
+            expected_status=claim.job.status,
+            error_message=UNEXPECTED_FAILURE_MESSAGE,
+        )
+        if not failure_applied and claim.job.status is JobStatus.CHECKING_ENGLISH:
+            _complete_claimed_job(
+                session_factory,
+                job_id,
+                owner_token=failure_owner_token,
+                expected_status=claim.job.status,
+            )
+    except (JobLeaseLostError, JobStateConflictError, TerminalJobStateError):
+        return
     except Exception as persist_error:
-        if repository is not None:
-            repository.rollback()
         _log_failure_persist_error(job_id, error, persist_error)
-    finally:
-        if session is not None:
-            session.close()
-
-
-def _mark_failed_job(
-    repository: JobRepository,
-    job_id: UUID,
-    error_message: str,
-) -> None:
-    job = repository.get_job(job_id)
-    progress = 0 if job is None else job.progress
-    repository.transition(
-        job_id,
-        JobStatus.FAILED,
-        progress,
-        FAILED_EVENT_MESSAGE,
-        error_code=PIPELINE_FAILURE_CODE,
-        error_message=error_message,
-    )
-    repository.commit()
 
 
 def _log_failure_persist_error(

@@ -18,6 +18,10 @@ from text_verification.domain.jobs import (
 )
 from text_verification.domain.verification import VerificationResult
 from text_verification.infrastructure.storage import JobStorage
+from text_verification.infrastructure.verification_repository import (
+    JobResultSnapshot,
+    JobResultState,
+)
 from text_verification.workers.pipeline import PipelineRunner
 
 SAMPLE = "帐号包含 test@example.com。"
@@ -66,7 +70,8 @@ class EquivalenceJobRepository:
 
 
 class EquivalenceVerificationRepository:
-    def __init__(self) -> None:
+    def __init__(self, jobs: EquivalenceJobRepository) -> None:
+        self._jobs = jobs
         self._results: dict[UUID, VerificationResult] = {}
 
     def save_result(self, job_id: UUID, result: VerificationResult) -> None:
@@ -74,6 +79,15 @@ class EquivalenceVerificationRepository:
 
     def get_result_for_job(self, job_id: UUID) -> VerificationResult | None:
         return self._results.get(job_id)
+
+    def read_result_snapshot(self, job_id: UUID) -> JobResultSnapshot:
+        job = self._jobs.get_job(job_id)
+        if job is None:
+            return JobResultSnapshot(JobResultState.MISSING, None)
+        result = self._results.get(job_id)
+        if job.status is JobStatus.COMPLETED and result is not None:
+            return JobResultSnapshot(JobResultState.READY, result)
+        return JobResultSnapshot(JobResultState.PENDING, None)
 
     def commit(self) -> None:
         pass
@@ -109,15 +123,20 @@ def test_sync_and_async_results_have_equivalent_canonical_semantics(
             expires_at=created_at + timedelta(hours=24),
         )
     )
-    result_repository = EquivalenceVerificationRepository()
+    result_repository = EquivalenceVerificationRepository(job_repository)
     runner = PipelineRunner(
-        job_repository,
-        result_repository,
         storage,
         build_default_verification_pipeline(settings),
     )
 
-    runner.run(job_id)
+    async_result = runner.run(
+        job_repository.get_job(job_id),
+        lambda stage: None,
+    )
+    result_repository.save_result(job_id, async_result)
+    result_repository.commit()
+    job_repository.transition(job_id, JobStatus.COMPLETED, 100, "处理完成")
+    job_repository.commit()
     monkeypatch.setattr(job_routes, "REPOSITORY_FACTORY", lambda session: job_repository)
     monkeypatch.setattr(
         job_routes,

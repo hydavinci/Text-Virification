@@ -86,6 +86,14 @@ class InMemoryCleanupRepository:
         return None
 
 
+class InMemoryCleanupVerificationRepository:
+    def __init__(self) -> None:
+        self.deleted_job_ids: list[UUID] = []
+
+    def delete_results_for_jobs(self, job_ids: list[UUID]) -> None:
+        self.deleted_job_ids.extend(job_ids)
+
+
 @dataclass
 class FakeSession:
     closed: bool = False
@@ -131,8 +139,14 @@ def cleanup_dependencies(
     from text_verification.workers import tasks as worker_tasks
 
     session_factory = SessionFactorySpy([])
+    verification_repository = InMemoryCleanupVerificationRepository()
     monkeypatch.setattr(worker_tasks, "SESSION_FACTORY_PROVIDER", lambda: session_factory)
     monkeypatch.setattr(worker_tasks, "REPOSITORY_FACTORY", lambda session: repository)
+    monkeypatch.setattr(
+        worker_tasks,
+        "VERIFICATION_REPOSITORY_FACTORY",
+        lambda session: verification_repository,
+    )
     monkeypatch.setattr(worker_tasks, "STORAGE_FACTORY", lambda: storage)
     monkeypatch.setattr(
         worker_tasks,

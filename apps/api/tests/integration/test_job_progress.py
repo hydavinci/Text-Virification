@@ -8,7 +8,13 @@ import pytest
 from fastapi import FastAPI
 
 from text_verification.domain.documents import FileType
-from text_verification.domain.jobs import JobEvent, JobRead, JobStatus
+from text_verification.domain.jobs import (
+    RESULT_READY_STATUSES,
+    TERMINAL_STATUSES,
+    JobEvent,
+    JobRead,
+    JobStatus,
+)
 from text_verification.domain.verification import (
     Scenario,
     VerificationAnalysisMode,
@@ -17,6 +23,10 @@ from text_verification.domain.verification import (
     VerificationResult,
     VerificationStatistics,
     VerificationSummary,
+)
+from text_verification.infrastructure.verification_repository import (
+    JobResultSnapshot,
+    JobResultState,
 )
 
 
@@ -126,12 +136,39 @@ class RecordingJobRepository:
 class RecordingVerificationRepository:
     def __init__(self) -> None:
         self._results: dict[UUID, VerificationResult] = {}
+        self._jobs: RecordingJobRepository | None = None
+        self.snapshot_calls: list[UUID] = []
+        self.rollback_calls = 0
+
+    def bind_jobs(self, repository: RecordingJobRepository) -> None:
+        self._jobs = repository
 
     def set_result(self, job_id: UUID, result: VerificationResult) -> None:
         self._results[job_id] = result
 
-    def get_result_for_job(self, job_id: UUID) -> VerificationResult | None:
-        return self._results.get(job_id)
+    def read_result_snapshot(self, job_id: UUID) -> JobResultSnapshot:
+        self.snapshot_calls.append(job_id)
+        if self._jobs is None:
+            raise AssertionError("job repository is not bound")
+        job = self._jobs.get_job(job_id)
+        if job is None:
+            return JobResultSnapshot(JobResultState.MISSING, None)
+        if job.status is JobStatus.EXPIRED:
+            return JobResultSnapshot(JobResultState.EXPIRED, None)
+        if job.status not in RESULT_READY_STATUSES:
+            state = (
+                JobResultState.UNAVAILABLE
+                if job.status in TERMINAL_STATUSES
+                else JobResultState.PENDING
+            )
+            return JobResultSnapshot(state, None)
+        result = self._results.get(job_id)
+        if result is None:
+            return JobResultSnapshot(JobResultState.UNAVAILABLE, None)
+        return JobResultSnapshot(JobResultState.READY, result)
+
+    def rollback(self) -> None:
+        self.rollback_calls += 1
 
 
 @dataclass
@@ -178,6 +215,7 @@ def override_dependencies(
     from text_verification.api.routes import jobs as job_routes
 
     session_factory = SessionFactorySpy([])
+    result_repository.bind_jobs(repository)
     app.dependency_overrides[get_job_repository] = lambda: repository
     app.dependency_overrides[get_db_session] = lambda: FakeSession()
     monkeypatch.setattr(job_routes, "SESSION_FACTORY_PROVIDER", lambda: session_factory)
@@ -221,6 +259,8 @@ def test_get_job_result_returns_canonical_result(
     assert response.json()["execution_mode"] == "asynchronous"
     assert "success" not in response.json()
     assert "filename" not in response.json()
+    assert result_repository.snapshot_calls == [completed_job.job_id]
+    assert result_repository.rollback_calls == 1
 
 
 def test_get_job_result_returns_404_for_unknown_job(client) -> None:

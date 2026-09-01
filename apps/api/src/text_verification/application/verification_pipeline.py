@@ -12,7 +12,12 @@ from text_verification.compatibility.adapters import text_to_document_model
 from text_verification.compatibility.statistics import text_statistics
 from text_verification.domain.documents import DocumentModel, FileType
 from text_verification.domain.issues import Issue
-from text_verification.domain.ports import CheckContext, CheckResult
+from text_verification.domain.ports import (
+    CheckContext,
+    CheckResult,
+    VerificationProgressObserver,
+    VerificationProgressStage,
+)
 from text_verification.domain.verification import (
     VerificationAnalysisMode,
     VerificationDegradation,
@@ -61,10 +66,21 @@ class VerificationPipeline:
         self._checkers = checkers
         self._reviewer = reviewer
 
-    def run(self, command: VerificationCommand) -> VerificationResult:
+    def run(
+        self,
+        command: VerificationCommand,
+        *,
+        progress_observer: VerificationProgressObserver | None = None,
+    ) -> VerificationResult:
+        if command.source_path is not None and progress_observer is not None:
+            progress_observer(VerificationProgressStage.PARSING)
         document = self._load_document(command)
         context = CheckContext.from_options(command.options)
-        check_result = self._run_checks(document, context)
+        check_result = self._run_checks(
+            document,
+            context,
+            progress_observer=progress_observer,
+        )
         issues, review_metadata = self._review(document, check_result.issues)
 
         analysis_mode = VerificationAnalysisMode.LOCAL_ONLY
@@ -174,9 +190,15 @@ class VerificationPipeline:
         self,
         document: DocumentModel,
         context: CheckContext,
+        *,
+        progress_observer: VerificationProgressObserver | None,
     ) -> CheckResult:
         try:
-            return self._checkers.run(document, context)
+            return self._checkers.run(
+                document,
+                context,
+                progress_observer=progress_observer,
+            )
         except MissingCapabilityError as error:
             raise VerificationError(
                 "checker_unavailable",

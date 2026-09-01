@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
 from typing import Protocol
@@ -10,6 +11,18 @@ from uuid import UUID, uuid4
 from text_verification.domain.documents import DocumentModel, FileType
 from text_verification.domain.issues import Issue
 from text_verification.domain.verification import Scenario, VerificationOptions
+
+
+class VerificationProgressStage(StrEnum):
+    PARSING = "parsing"
+    CHECKING_FORMAT = "checking_format"
+    CHECKING_SENSITIVE = "checking_sensitive"
+    CHECKING_CHINESE = "checking_chinese"
+    CHECKING_ENGLISH = "checking_english"
+
+
+class VerificationProgressObserver(Protocol):
+    def __call__(self, stage: VerificationProgressStage) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -73,7 +86,13 @@ class Checker(Protocol):
     version: str
     supported_languages: set[str]
 
-    def check(self, document: DocumentModel, context: CheckContext) -> CheckResult: ...
+    def check(
+        self,
+        document: DocumentModel,
+        context: CheckContext,
+        *,
+        progress_observer: VerificationProgressObserver | None = None,
+    ) -> CheckResult: ...
 
 
 class Exporter(Protocol):

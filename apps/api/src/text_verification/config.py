@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     storage_root: Path = Path("./var/jobs")
     job_retention_hours: int = Field(default=24, ge=1)
+    job_lease_seconds: int = Field(default=1200, gt=900, le=3600)
     max_upload_bytes: int = Field(default=25 * 1024 * 1024, ge=1)
     cors_origins: str = "http://localhost:5173"
     llm_api_key: str = ""

@@ -1,15 +1,25 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from text_verification.domain.documents import FileType
 from text_verification.domain.issues import Issue, IssueSeverity
+from text_verification.domain.jobs import (
+    RESULT_READY_STATUSES,
+    TERMINAL_STATUSES,
+    JobLeaseLostError,
+    JobStateConflictError,
+    JobStatus,
+    TerminalJobStateError,
+)
 from text_verification.domain.verification import (
     Scenario,
     VerificationAnalysisMode,
@@ -29,12 +39,52 @@ from text_verification.infrastructure.orm import (
 )
 
 
+class JobResultState(StrEnum):
+    MISSING = "missing"
+    PENDING = "pending"
+    READY = "ready"
+    UNAVAILABLE = "unavailable"
+    EXPIRED = "expired"
+
+
+@dataclass(frozen=True)
+class JobResultSnapshot:
+    state: JobResultState
+    result: VerificationResult | None
+
+
 class VerificationRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
 
     def save_result(self, job_id: UUID, result: VerificationResult) -> None:
         job = self._lock_job(job_id)
+        self._save_result_for_job(job, result)
+
+    def save_claimed_result(
+        self,
+        job_id: UUID,
+        result: VerificationResult,
+        *,
+        owner_token: UUID,
+        expected_status: JobStatus,
+        now: datetime,
+    ) -> None:
+        if expected_status is not JobStatus.CHECKING_ENGLISH:
+            raise ValueError(
+                "Claimed results may only persist from checking_english."
+            )
+        job = self._lock_job(job_id)
+        self._assert_active_lease(job, owner_token, now)
+        self._assert_expected_status(job, expected_status)
+        self._save_result_for_job(job, result)
+
+    def _save_result_for_job(
+        self,
+        job: JobRow,
+        result: VerificationResult,
+    ) -> None:
+        job_id = job.job_id
         self._validate_job_source(job, result)
 
         existing = self._get_run_row_for_job(job_id)
@@ -66,6 +116,52 @@ class VerificationRepository:
         if row is None:
             return None
         return _map_rows_to_result(row.document, row)
+
+    def get_result_for_claimed_job(
+        self,
+        job_id: UUID,
+        *,
+        owner_token: UUID,
+        now: datetime,
+    ) -> VerificationResult | None:
+        job = self._lock_job(job_id)
+        self._assert_active_lease(job, owner_token, now)
+        return self.get_result_for_job(job_id)
+
+    def read_result_snapshot(self, job_id: UUID) -> JobResultSnapshot:
+        job = self._session.execute(
+            select(JobRow)
+            .where(JobRow.job_id == job_id)
+            .with_for_update(read=True)
+            .execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+        if job is None:
+            return JobResultSnapshot(JobResultState.MISSING, None)
+
+        job_status = JobStatus(job.status)
+        if job_status is JobStatus.EXPIRED:
+            return JobResultSnapshot(JobResultState.EXPIRED, None)
+        if job_status not in RESULT_READY_STATUSES:
+            state = (
+                JobResultState.UNAVAILABLE
+                if job_status in TERMINAL_STATUSES
+                else JobResultState.PENDING
+            )
+            return JobResultSnapshot(state, None)
+
+        result = self.get_result_for_job(job_id)
+        if result is None:
+            return JobResultSnapshot(JobResultState.UNAVAILABLE, None)
+        return JobResultSnapshot(JobResultState.READY, result)
+
+    def delete_results_for_jobs(self, job_ids: list[UUID]) -> None:
+        if not job_ids:
+            return
+        self._session.execute(
+            delete(DocumentRow)
+            .where(DocumentRow.job_id.in_(job_ids))
+            .execution_options(synchronize_session=False)
+        )
 
     def save_review_revision(
         self,
@@ -274,6 +370,38 @@ class VerificationRepository:
         if row is None:
             raise LookupError(f"Verification run {verification_run_id} does not exist.")
         return row
+
+    def _assert_active_lease(
+        self,
+        job: JobRow,
+        owner_token: UUID,
+        now: datetime,
+    ) -> None:
+        if (
+            job.lease_owner_token != owner_token
+            or job.lease_expires_at is None
+            or job.lease_expires_at <= now
+        ):
+            raise JobLeaseLostError(job.job_id)
+
+    def _assert_expected_status(
+        self,
+        job: JobRow,
+        expected_status: JobStatus,
+    ) -> None:
+        current_status = JobStatus(job.status)
+        if current_status in TERMINAL_STATUSES:
+            raise TerminalJobStateError(
+                job_id=job.job_id,
+                current_status=current_status,
+                target_status=expected_status,
+            )
+        if current_status is not expected_status:
+            raise JobStateConflictError(
+                job_id=job.job_id,
+                expected_status=expected_status,
+                current_status=current_status,
+            )
 
     def _validate_job_source(
         self,

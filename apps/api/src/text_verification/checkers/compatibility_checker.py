@@ -7,7 +7,11 @@ from text_verification.compatibility.adapters import legacy_issues_to_domain
 from text_verification.compatibility.analyzer import Issue as LegacyIssue
 from text_verification.compatibility.analyzer import TextAnalyzer
 from text_verification.domain.documents import DocumentModel
-from text_verification.domain.ports import CheckContext, CheckResult
+from text_verification.domain.ports import (
+    CheckContext,
+    CheckResult,
+    VerificationProgressObserver,
+)
 from text_verification.infrastructure.dictionary_loader import DictionaryLoader
 
 
@@ -24,6 +28,7 @@ class LegacyAnalyzer(Protocol):
         enable_security: bool = True,
         enable_sensitive: bool = True,
         enable_ad_extreme: bool = False,
+        progress_observer: VerificationProgressObserver | None = None,
     ) -> list[LegacyIssue]: ...
 
 
@@ -48,17 +53,35 @@ class CompatibilityChecker:
             TextAnalyzer(dictionary_loader=shared_dictionary_loader),
         )
 
-    def check(self, document: DocumentModel, context: CheckContext) -> CheckResult:
+    def check(
+        self,
+        document: DocumentModel,
+        context: CheckContext,
+        *,
+        progress_observer: VerificationProgressObserver | None = None,
+    ) -> CheckResult:
         analyzer = self._analyzer_factory()
-        issues = analyzer.analyze(
-            document.text,
-            scenario=context.scenario.value,
-            custom_glossary=list(context.custom_glossary),
-            banned_words=list(context.banned_words),
-            enable_security=context.enable_security,
-            enable_sensitive=context.enable_sensitive,
-            enable_ad_extreme=context.enable_ad_extreme,
-        )
+        if progress_observer is None:
+            issues = analyzer.analyze(
+                document.text,
+                scenario=context.scenario.value,
+                custom_glossary=list(context.custom_glossary),
+                banned_words=list(context.banned_words),
+                enable_security=context.enable_security,
+                enable_sensitive=context.enable_sensitive,
+                enable_ad_extreme=context.enable_ad_extreme,
+            )
+        else:
+            issues = analyzer.analyze(
+                document.text,
+                scenario=context.scenario.value,
+                custom_glossary=list(context.custom_glossary),
+                banned_words=list(context.banned_words),
+                enable_security=context.enable_security,
+                enable_sensitive=context.enable_sensitive,
+                enable_ad_extreme=context.enable_ad_extreme,
+                progress_observer=progress_observer,
+            )
         return CheckResult(
             issues=legacy_issues_to_domain(issues, document, context.verification_run_id),
             dictionary_versions=analyzer.dictionary_versions,

@@ -15,6 +15,10 @@ from text_verification.domain.dictionaries import (
     SensitiveRulesEntries,
 )
 from text_verification.infrastructure.dictionary_loader import DictionaryLoader
+from text_verification.domain.ports import (
+    VerificationProgressObserver,
+    VerificationProgressStage,
+)
 
 
 @dataclass
@@ -893,7 +897,8 @@ class TextAnalyzer:
                 banned_words: List[str] = None,
                 enable_security: bool = True,
                 enable_sensitive: bool = True,
-                enable_ad_extreme: bool = False) -> List[Issue]:
+                enable_ad_extreme: bool = False,
+                progress_observer: VerificationProgressObserver | None = None) -> List[Issue]:
         """分析文本，返回所有检测到的问题。
         scenario 控制不同文档类型的检查侧重。
         custom_glossary 为自定义术语表，每项 {'original': str, 'standard': str}。
@@ -910,51 +915,74 @@ class TextAnalyzer:
         skip_types = cfg['skip_types']
         downgrade_types = cfg['downgrade_types']
 
-        issues: List[Issue] = []
         self._dictionary_versions = {}
 
-        # === 字符层 ===
-        issues.extend(self._check_chinese_typos(text))
-        issues.extend(self._check_english_spelling(text))
-        issues.extend(self._check_variant_chars(text))
-        issues.extend(self._check_half_full_width(text))
+        if progress_observer is not None:
+            progress_observer(VerificationProgressStage.CHECKING_FORMAT)
+        punctuation_issues = self._check_punctuation(text)
+        bracket_issues = self._check_brackets_quotes(text)
+        spacing_issues = self._check_extra_spaces(text)
+        number_issues = self._check_number_format(text)
 
-        # === 词汇层 ===
-        issues.extend(self._check_missing_chars(text))
-        issues.extend(self._check_idiom_misuse(text))
-        issues.extend(self._check_term_consistency(text))
-        if custom_glossary:
-            issues.extend(self._check_custom_glossary(text, custom_glossary))
-
-        # === 句子层 ===
-        issues.extend(self._check_expression_issues(text))
-        issues.extend(self._check_grammar_patterns(text))
-
-        # === 标点/格式层 ===
-        issues.extend(self._check_punctuation(text))
-        issues.extend(self._check_brackets_quotes(text))
-        issues.extend(self._check_extra_spaces(text))
-        issues.extend(self._check_number_format(text))
-
-        # === 语篇/语体层 ===
-        issues.extend(self._check_repeated_words(text))
-        issues.extend(self._check_colloquial(text))
-        if banned_words:
-            issues.extend(self._check_banned_words(text, banned_words))
-
-        # === 合规/安全层 ===
-        if enable_security:
-            issues.extend(self._check_pii(text))
-        # 敏感内容（涉政/民族宗教/领土规范表述）独立于 PII，由各自开关控制
+        if progress_observer is not None:
+            progress_observer(VerificationProgressStage.CHECKING_SENSITIVE)
+        banned_word_issues = (
+            self._check_banned_words(text, banned_words) if banned_words else []
+        )
+        pii_issues = self._check_pii(text) if enable_security else []
+        sensitive_issues = []
         if enable_sensitive:
             sensitive_rules = self._dictionary_loader.load('sensitive_rules')
             self._dictionary_versions[sensitive_rules.name] = sensitive_rules.version
-            issues.extend(self._check_sensitive(text, sensitive_rules.entries))
-        # 广告法极限词（营销材料）检查，独立于 PII 与敏感词，由各自开关控制
+            sensitive_issues = self._check_sensitive(text, sensitive_rules.entries)
+        ad_extreme_issues = []
         if enable_ad_extreme:
             ad_extreme_words = self._dictionary_loader.load('ad_extreme_words')
             self._dictionary_versions[ad_extreme_words.name] = ad_extreme_words.version
-            issues.extend(self._check_ad_extreme(text, ad_extreme_words.entries))
+            ad_extreme_issues = self._check_ad_extreme(text, ad_extreme_words.entries)
+
+        if progress_observer is not None:
+            progress_observer(VerificationProgressStage.CHECKING_CHINESE)
+        chinese_typo_issues = self._check_chinese_typos(text)
+        variant_issues = self._check_variant_chars(text)
+        width_issues = self._check_half_full_width(text)
+        missing_char_issues = self._check_missing_chars(text)
+        idiom_issues = self._check_idiom_misuse(text)
+        term_issues = self._check_term_consistency(text)
+        glossary_issues = (
+            self._check_custom_glossary(text, custom_glossary) if custom_glossary else []
+        )
+        expression_issues = self._check_expression_issues(text)
+        grammar_issues = self._check_grammar_patterns(text)
+        repetition_issues = self._check_repeated_words(text)
+        colloquial_issues = self._check_colloquial(text)
+
+        if progress_observer is not None:
+            progress_observer(VerificationProgressStage.CHECKING_ENGLISH)
+        english_spelling_issues = self._check_english_spelling(text)
+
+        issues: List[Issue] = [
+            *chinese_typo_issues,
+            *english_spelling_issues,
+            *variant_issues,
+            *width_issues,
+            *missing_char_issues,
+            *idiom_issues,
+            *term_issues,
+            *glossary_issues,
+            *expression_issues,
+            *grammar_issues,
+            *punctuation_issues,
+            *bracket_issues,
+            *spacing_issues,
+            *number_issues,
+            *repetition_issues,
+            *colloquial_issues,
+            *banned_word_issues,
+            *pii_issues,
+            *sensitive_issues,
+            *ad_extreme_issues,
+        ]
 
         # 为每个 issue 赋予 layer
         for issue in issues:

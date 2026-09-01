@@ -28,6 +28,13 @@ class Base(DeclarativeBase):
 
 class JobRow(Base):
     __tablename__ = "jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "(lease_owner_token IS NULL AND lease_expires_at IS NULL) "
+            "OR (lease_owner_token IS NOT NULL AND lease_expires_at IS NOT NULL)",
+            name="ck_jobs_lease_pair",
+        ),
+    )
 
     job_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
     source_name: Mapped[str] = mapped_column(String(255))
@@ -41,6 +48,15 @@ class JobRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    lease_owner_token: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        nullable=True,
+    )
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
     events: Mapped[list[JobEventRow]] = relationship(
         back_populates="job",
         cascade="all, delete-orphan",
