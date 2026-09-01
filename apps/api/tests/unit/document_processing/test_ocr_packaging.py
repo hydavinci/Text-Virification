@@ -1,6 +1,8 @@
 import tomllib
 from pathlib import Path
 
+import pytest
+
 BACKEND_ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -22,3 +24,9 @@ def test_runtime_image_installs_ocr_extra_and_cv2_runtime_library() -> None:
     assert '".[dev,ocr]"' in dockerfile
     assert "libgl1" in dockerfile
     assert "opencv-python-headless" not in dockerfile
+
+
+def test_ocr_runtime_import_smoke_when_extras_are_installed() -> None:
+    pytest.importorskip("cv2")
+    pytest.importorskip("onnxruntime")
+    pytest.importorskip("rapidocr")

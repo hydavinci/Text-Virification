@@ -34,6 +34,10 @@ class _SupportsArrayProtocol(Protocol):
     def __array__(self) -> object: ...
 
 
+class _OnnxRuntimeExceptionTypes(Protocol):
+    def __iter__(self) -> object: ...
+
+
 class OcrTextBox(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -88,8 +92,12 @@ class OcrTextBox(BaseModel):
             y = _coerce_real_number(raw_point[1], field_name="bbox coordinate")
             points.append((x, y))
 
+        if len(set(points)) != 4:
+            raise ValueError("bbox must contain exactly four distinct points")
         if _polygon_area(points) <= 0.0:
             raise ValueError("bbox must be a non-degenerate quadrilateral")
+        if _has_self_intersection(points):
+            raise ValueError("bbox must not self-intersect")
 
         return cast(
             tuple[
@@ -146,6 +154,8 @@ class OcrProvider:
         params = {"Rec.lang_type": _rapidocr_language(module, language)}
         try:
             engine = constructor(params=params)
+        except tuple(_onnxruntime_exception_types()) as error:
+            raise OcrUnavailableError() from error
         except _EXPECTED_ENGINE_INIT_ERRORS as error:
             raise OcrUnavailableError() from error
 
@@ -245,3 +255,56 @@ def _polygon_area(points: Sequence[tuple[float, float]]) -> float:
         x2, y2 = points[(index + 1) % len(points)]
         area += (x1 * y2) - (x2 * y1)
     return abs(area) / 2.0
+
+
+def _has_self_intersection(points: Sequence[tuple[float, float]]) -> bool:
+    return _segments_intersect(points[0], points[1], points[2], points[3]) or _segments_intersect(
+        points[1], points[2], points[3], points[0]
+    )
+
+
+def _segments_intersect(
+    first_start: tuple[float, float],
+    first_end: tuple[float, float],
+    second_start: tuple[float, float],
+    second_end: tuple[float, float],
+) -> bool:
+    return (
+        _orientation(first_start, first_end, second_start)
+        * _orientation(first_start, first_end, second_end)
+        < 0
+        and _orientation(second_start, second_end, first_start)
+        * _orientation(second_start, second_end, first_end)
+        < 0
+    )
+
+
+def _orientation(
+    start: tuple[float, float],
+    end: tuple[float, float],
+    point: tuple[float, float],
+) -> float:
+    return (end[0] - start[0]) * (point[1] - start[1]) - (
+        end[1] - start[1]
+    ) * (point[0] - start[0])
+
+
+def _onnxruntime_exception_types() -> tuple[type[BaseException], ...]:
+    try:
+        module = importlib.import_module("onnxruntime")
+    except _EXPECTED_ENGINE_INIT_ERRORS:
+        return ()
+
+    candidates = tuple(
+        exception_type
+        for name in (
+            "OrtRuntimeError",
+            "SessionOptionsError",
+            "InvalidArgument",
+            "NoSuchFile",
+            "Fail",
+        )
+        if isinstance((exception_type := getattr(module, name, None)), type)
+        and issubclass(exception_type, BaseException)
+    )
+    return candidates

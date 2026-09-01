@@ -64,6 +64,31 @@ def test_ocr_text_box_rejects_degenerate_bbox() -> None:
         )
 
 
+def test_ocr_text_box_rejects_repeated_vertices() -> None:
+    with pytest.raises(ValidationError, match="distinct"):
+        OcrTextBox(
+            text="box",
+            confidence=0.5,
+            bbox=[[0, 0], [2, 0], [2, 0], [0, 1]],
+        )
+
+
+def test_ocr_text_box_accepts_clockwise_and_counterclockwise_quadrilaterals() -> None:
+    clockwise = OcrTextBox(
+        text="cw",
+        confidence=0.5,
+        bbox=[[0, 0], [3, 0], [3, 2], [0, 2]],
+    )
+    counterclockwise = OcrTextBox(
+        text="ccw",
+        confidence=0.5,
+        bbox=[[0, 0], [0, 2], [3, 2], [3, 0]],
+    )
+
+    assert clockwise.bbox == ((0.0, 0.0), (3.0, 0.0), (3.0, 2.0), (0.0, 2.0))
+    assert counterclockwise.bbox == ((0.0, 0.0), (0.0, 2.0), (3.0, 2.0), (3.0, 0.0))
+
+
 def test_provider_does_not_import_rapidocr_until_recognition(monkeypatch) -> None:
     imported: list[str] = []
 
@@ -240,6 +265,67 @@ def test_recognize_converts_expected_engine_initialization_failures(monkeypatch)
     assert "dlopen" not in raised.value.message.lower()
 
 
+def test_recognize_converts_onnxruntime_session_errors_to_capability_error(monkeypatch) -> None:
+    class FakeOrtModule:
+        class OrtRuntimeError(Exception):
+            pass
+
+        class SessionOptionsError(Exception):
+            pass
+
+    def fake_constructor(*, params: dict[str, object]) -> object:
+        raise FakeOrtModule.OrtRuntimeError("ORT session init failed with /private/model.onnx")
+
+    fake_module = SimpleNamespace(
+        RapidOCR=fake_constructor,
+        LangRec=SimpleNamespace(CH="ch", EN="en"),
+    )
+
+    def fake_import_module(name: str) -> object:
+        if name == "rapidocr":
+            return fake_module
+        if name == "onnxruntime":
+            return FakeOrtModule
+        raise AssertionError(name)
+
+    monkeypatch.setattr(importlib, "import_module", fake_import_module)
+
+    provider = OcrProvider()
+
+    with pytest.raises(OcrUnavailableError) as raised:
+        provider.recognize(object(), "zh")
+
+    assert raised.value.stage == "ocr"
+    assert raised.value.retryable is False
+    assert "private" not in raised.value.message.lower()
+
+
+def test_recognize_preserves_unrelated_runtime_errors_during_engine_creation(monkeypatch) -> None:
+    class UnexpectedRuntimeError(RuntimeError):
+        pass
+
+    def fake_constructor(*, params: dict[str, object]) -> object:
+        raise UnexpectedRuntimeError("constructor bug")
+
+    fake_module = SimpleNamespace(
+        RapidOCR=fake_constructor,
+        LangRec=SimpleNamespace(CH="ch", EN="en"),
+    )
+
+    def fake_import_module(name: str) -> object:
+        if name == "rapidocr":
+            return fake_module
+        if name == "onnxruntime":
+            return SimpleNamespace(InferenceSessionError=Exception)
+        raise AssertionError(name)
+
+    monkeypatch.setattr(importlib, "import_module", fake_import_module)
+    provider = OcrProvider()
+
+    with pytest.raises(UnexpectedRuntimeError, match="constructor bug"):
+        provider.recognize(object(), "zh")
+
+
 def test_recognize_keeps_module_contract_errors_as_output_error(monkeypatch) -> None:
     fake_module = SimpleNamespace(LangRec=SimpleNamespace(CH="ch", EN="en"))
     monkeypatch.setattr(importlib, "import_module", lambda name: fake_module)
@@ -304,6 +390,8 @@ def test_recognize_rejects_invalid_confidence_scalars(
         [[0, float("nan")], [2, 0], [2, 1], [0, 1]],
         [[0, float("inf")], [2, 0], [2, 1], [0, 1]],
         [[0, 0], [1, 0], [2, 0], [3, 0]],
+        [[0, 0], [2, 0], [2, 0], [0, 1]],
+        [[0, 0], [2, 2], [0, 2], [2, 0]],
     ],
 )
 def test_recognize_rejects_invalid_bbox_geometry(monkeypatch, bbox: object) -> None:
