@@ -236,6 +236,11 @@ def _run_pipeline(
 
 
 def _compatibility_http_error(error: VerificationError) -> HTTPException:
+    if error.code == "ocr_required":
+        return HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=error.message,
+        )
     if error.code == "dictionary_load_failed":
         return HTTPException(
             status.HTTP_500_INTERNAL_SERVER_ERROR,

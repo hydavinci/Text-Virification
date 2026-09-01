@@ -104,6 +104,63 @@ def _add_mixed_page(document: pymupdf.Document) -> None:
     )
 
 
+def _add_short_overlay_page(document: pymupdf.Document) -> None:
+    page = document.new_page(width=PAGE_WIDTH, height=PAGE_HEIGHT)
+    page.insert_image(page.rect, stream=_png(24, 24, (245, 230, 180)))
+    page.insert_text((24, 32), "OCR", fontsize=12, fontname="helv")
+
+
+def _add_layout_order_page(document: pymupdf.Document) -> None:
+    page = document.new_page(width=240, height=160)
+    page.insert_text((24, 128), "Bottom", fontsize=12, fontname="helv")
+    page.insert_text((24, 32), "Top", fontsize=12, fontname="helv")
+    page.insert_text((24, 80), "Alpha", fontsize=12, fontname="helv")
+    page.insert_text((54, 80), "Beta", fontsize=12, fontname="cour")
+
+
+def _add_table_structure_page(document: pymupdf.Document) -> None:
+    page = document.new_page(width=240, height=180)
+    x0, y0, cell_width, cell_height = 40, 50, 55, 30
+    for column in range(4):
+        x = x0 + column * cell_width
+        page.draw_line((x, y0), (x, y0 + cell_height * 3))
+    for row in range(4):
+        y = y0 + row * cell_height
+        page.draw_line((x0, y), (x0 + cell_width * 3, y))
+    page.insert_text((48, 67), "A1", fontsize=10, fontname="helv")
+    page.insert_text((48, 80), "A2", fontsize=10, fontname="helv")
+    page.insert_text((102, 67), "B1", fontsize=10, fontname="helv")
+    page.insert_text((10, 99), "B1", fontsize=10, fontname="helv")
+
+
+def _add_rotated_cropped_scan(document: pymupdf.Document, rotation: int) -> None:
+    page = document.new_page(width=300, height=200)
+    crop = pymupdf.Rect(20, 20, 220, 160)
+    page.insert_image(crop, stream=_png(24, 24, (220, 220, 220)))
+    page.set_cropbox(crop)
+    page.set_rotation(rotation)
+
+
+def _add_duplicate_text_page(document: pymupdf.Document) -> None:
+    page = document.new_page(width=240, height=160)
+    page.insert_text((24, 112), "Repeat", fontsize=12, fontname="helv")
+    page.insert_text((24, 32), "Repeat", fontsize=12, fontname="helv")
+
+
+def _add_two_images_page(document: pymupdf.Document) -> None:
+    page = document.new_page(width=240, height=160)
+    page.insert_text((24, 24), "Two images", fontsize=12, fontname="helv")
+    page.insert_image(pymupdf.Rect(24, 40, 64, 80), stream=_png(4, 4, (10, 20, 30)))
+    page.insert_image(pymupdf.Rect(80, 40, 120, 80), stream=_png(4, 4, (40, 50, 60)))
+
+
+def _add_repeated_image_page(document: pymupdf.Document) -> None:
+    page = document.new_page(width=240, height=160)
+    image = _png(4, 4, (10, 20, 30))
+    page.insert_image(pymupdf.Rect(24, 40, 64, 80), stream=image)
+    page.insert_image(pymupdf.Rect(80, 40, 120, 80), stream=image)
+
+
 def main() -> None:
     text_page = _document()
     _add_text_page(text_page)
@@ -121,6 +178,38 @@ def main() -> None:
     mixed_page = _document()
     _add_mixed_page(mixed_page)
     _save(mixed_page, "mixed-page.pdf")
+
+    short_overlay = _document()
+    _add_short_overlay_page(short_overlay)
+    _save(short_overlay, "short-overlay.pdf")
+
+    layout_order = _document()
+    _add_layout_order_page(layout_order)
+    _save(layout_order, "layout-order.pdf")
+
+    table_structure = _document()
+    _add_table_structure_page(table_structure)
+    _save(table_structure, "table-structure.pdf")
+
+    rotated_cropped_scan_90 = _document()
+    _add_rotated_cropped_scan(rotated_cropped_scan_90, 90)
+    _save(rotated_cropped_scan_90, "rotated-cropped-scan-90.pdf")
+
+    rotated_cropped_scan_270 = _document()
+    _add_rotated_cropped_scan(rotated_cropped_scan_270, 270)
+    _save(rotated_cropped_scan_270, "rotated-cropped-scan-270.pdf")
+
+    duplicate_text = _document()
+    _add_duplicate_text_page(duplicate_text)
+    _save(duplicate_text, "duplicate-text.pdf")
+
+    two_images = _document()
+    _add_two_images_page(two_images)
+    _save(two_images, "two-images.pdf")
+
+    repeated_image = _document()
+    _add_repeated_image_page(repeated_image)
+    _save(repeated_image, "repeated-image.pdf")
 
 
 if __name__ == "__main__":

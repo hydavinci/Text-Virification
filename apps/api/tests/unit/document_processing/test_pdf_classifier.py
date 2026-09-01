@@ -35,7 +35,7 @@ def test_classifies_each_page(
     assert classify_pages(pdf_fixture(fixture)) == expected
 
 
-def test_classifies_empty_and_vector_only_pages_as_scanned(tmp_path: Path) -> None:
+def test_classifies_empty_and_vector_only_pages_as_text(tmp_path: Path) -> None:
     document = pymupdf.open()
     document.new_page()
     vector_page = document.new_page()
@@ -44,13 +44,19 @@ def test_classifies_empty_and_vector_only_pages_as_scanned(tmp_path: Path) -> No
     document.save(source)
     document.close()
 
-    assert classify_pages(source) == [PdfPageKind.SCANNED, PdfPageKind.SCANNED]
+    assert classify_pages(source) == [PdfPageKind.TEXT, PdfPageKind.TEXT]
 
 
 def test_small_decorative_image_does_not_override_native_text(
     pdf_fixture: callable[[str], Path],
 ) -> None:
     assert classify_pages(pdf_fixture("text-page.pdf")) == [PdfPageKind.TEXT]
+
+
+def test_short_native_text_overlay_on_a_substantial_raster_is_mixed(
+    pdf_fixture: callable[[str], Path],
+) -> None:
+    assert classify_pages(pdf_fixture("short-overlay.pdf")) == [PdfPageKind.MIXED]
 
 
 def test_pdf_classification_does_not_import_the_ocr_provider() -> None:

@@ -16,6 +16,7 @@ from text_verification.compatibility.parser import (
     decode_rtf_with_spans,
     strip_html,
 )
+from text_verification.parsers.pdf_parser import PdfParser
 
 
 class ExportError(ValueError):
@@ -641,6 +642,9 @@ def _export_pdf_edits(
 
     document = fitz.open(source_path)
     try:
+        canonical_document = PdfParser().parse(source_path)
+        if canonical_document.text != original_text:
+            raise ExportError("The stored PDF no longer matches the analyzed document.")
         resolved: list[tuple[object, object, str, str, bool, bool]] = []
         for edit in edits:
             original = original_text[edit.start:edit.end]
@@ -652,15 +656,12 @@ def _export_pdf_edits(
                     "PDF original-format export does not support insertion-only edits; "
                     "replace existing text or export the edited text as TXT."
                 )
-            else:
-                occurrence = original_text[:edit.start].count(original)
-
-            matches: list[tuple[object, object]] = []
-            for page in document:
-                matches.extend((page, rectangle) for rectangle in page.search_for(search_text))
-            if occurrence >= len(matches):
-                raise ExportError("A PDF edit could not be mapped to its original occurrence.")
-            page, rectangle = matches[occurrence]
+            page, rectangle = _pdf_edit_location(
+                document,
+                canonical_document,
+                edit,
+                search_text,
+            )
             resolved.append(
                 (page, rectangle, original, edit.replacement, insertion, insert_after)
             )
@@ -711,6 +712,64 @@ def _export_pdf_edits(
         return document.tobytes(garbage=4, deflate=True)
     finally:
         document.close()
+
+
+def _pdf_edit_location(
+    pdf: object,
+    document: object,
+    edit: TextEdit,
+    search_text: str,
+) -> tuple[object, object]:
+    for block in document.blocks:  # type: ignore[attr-defined]
+        if not (block.global_start <= edit.start and edit.end <= block.global_end):
+            continue
+        locator = block.source_locator
+        page_number = locator.get("page")
+        segments = locator.get("segments")
+        if not isinstance(page_number, int) or not isinstance(segments, list):
+            break
+        local_start = edit.start - block.global_start
+        local_end = edit.end - block.global_start
+        for segment in segments:
+            if not isinstance(segment, dict):
+                continue
+            start, end = segment.get("start"), segment.get("end")
+            bbox = segment.get("bbox")
+            if not (
+                isinstance(start, int)
+                and isinstance(end, int)
+                and start <= local_start
+                and local_end <= end
+                and isinstance(bbox, list)
+                and len(bbox) == 4
+            ):
+                continue
+            page = pdf[page_number - 1]  # type: ignore[index]
+            matches = page.search_for(search_text)  # type: ignore[attr-defined]
+            if not matches:
+                break
+            expected = tuple(float(value) for value in bbox)
+            rectangle = min(
+                matches,
+                key=lambda candidate: _pdf_rect_distance(
+                    candidate * page.rotation_matrix,  # type: ignore[operator, union-attr]
+                    expected,
+                ),
+            )
+            return page, rectangle
+        break
+    raise ExportError("A PDF edit could not be mapped to canonical source text.")
+
+
+def _pdf_rect_distance(rectangle: object, expected: tuple[float, float, float, float]) -> float:
+    return sum(
+        abs(actual - target)
+        for actual, target in zip(
+            (rectangle.x0, rectangle.y0, rectangle.x1, rectangle.y1),  # type: ignore[attr-defined]
+            expected,
+            strict=True,
+        )
+    )
 
 
 def _replace_pdf_page(page: object, replacements: list[tuple[str, str]]) -> None:

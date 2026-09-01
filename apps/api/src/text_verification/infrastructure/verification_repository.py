@@ -16,7 +16,7 @@ from text_verification.domain.artifacts import (
     ArtifactReservation,
     ArtifactSnapshot,
 )
-from text_verification.domain.documents import FileType, TextBlock
+from text_verification.domain.documents import DocumentMetadata, FileType, TextBlock
 from text_verification.domain.issues import Issue, IssueSeverity
 from text_verification.domain.jobs import (
     RESULT_READY_STATUSES,
@@ -694,6 +694,7 @@ def _map_result_to_rows(
         text=result.text,
         parser_name=result.parser_name,
         parser_version=result.parser_version,
+        document_metadata=result.metadata.model_dump(mode="json"),
         created_at=persisted_at,
     )
     document_row.blocks = [
@@ -749,6 +750,10 @@ def _map_rows_to_result(
         blocks=tuple(_map_block_to_domain(row) for row in document_row.blocks),
         parser_name=document_row.parser_name,
         parser_version=document_row.parser_version,
+        metadata=DocumentMetadata.model_validate(document_row.document_metadata),
+        ocr_requirement=DocumentMetadata.model_validate(
+            document_row.document_metadata
+        ).pdf_ocr_requirement,
         stats=VerificationStatistics(
             char_count=run_row.stats_char_count,
             char_count_no_space=run_row.stats_char_count_no_space,

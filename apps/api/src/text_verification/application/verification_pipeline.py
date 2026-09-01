@@ -75,6 +75,15 @@ class VerificationPipeline:
         if command.source_path is not None and progress_observer is not None:
             progress_observer(VerificationProgressStage.PARSING)
         document = self._load_document(command)
+        ocr_requirement = document.metadata.pdf_ocr_requirement
+        if ocr_requirement is not None and ocr_requirement.mode == "required":
+            pages = ", ".join(str(page) for page in ocr_requirement.pages)
+            raise VerificationError(
+                "ocr_required",
+                "ocr",
+                f"OCR is required for scanned PDF pages: {pages}.",
+                False,
+            )
         context = CheckContext.from_options(command.options)
         check_result = self._run_checks(
             document,
@@ -84,7 +93,11 @@ class VerificationPipeline:
         issues, review_metadata = self._review(document, check_result.issues)
 
         analysis_mode = VerificationAnalysisMode.LOCAL_ONLY
-        degradation_reasons: tuple[str, ...] = ()
+        degradation_reasons: tuple[str, ...] = (
+            ("ocr_required_pages",)
+            if ocr_requirement is not None and ocr_requirement.mode == "partial"
+            else ()
+        )
         if review_metadata is not None:
             if review_metadata.get("failed"):
                 issues = check_result.issues
@@ -93,7 +106,7 @@ class VerificationPipeline:
                     "stage": "reviewing",
                     "retryable": bool(review_metadata.get("retryable", False)),
                 }
-                degradation_reasons = ("llm_review_failed",)
+                degradation_reasons = (*degradation_reasons, "llm_review_failed")
             elif review_metadata.get("performed"):
                 analysis_mode = VerificationAnalysisMode.LOCAL_PLUS_LLM
 
@@ -108,6 +121,8 @@ class VerificationPipeline:
             blocks=tuple(document.blocks),
             parser_name=document.parser_name,
             parser_version=document.parser_version,
+            metadata=document.metadata,
+            ocr_requirement=ocr_requirement,
             stats=VerificationStatistics.model_validate(text_statistics(document.text)),
             issues=issues,
             summary=_summarize(issues, review_metadata),

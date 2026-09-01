@@ -7,6 +7,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 from zipfile import BadZipFile, ZipFile
 
+import pytest
 from docx import Document
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -29,6 +30,8 @@ from text_verification.domain.verification import (
 )
 from text_verification.infrastructure.dictionary_loader import DictionaryLoadError
 from text_verification.parsers import compatibility_parser as compatibility_parser_module
+
+PDF_FIXTURE_DIRECTORY = Path(__file__).resolve().parents[1] / "fixtures" / "pdf"
 
 
 def override_storage(app: FastAPI, storage_root: Path) -> None:
@@ -868,6 +871,131 @@ def test_pdf_analysis_maps_uploaded_issue_to_page_block_offsets(
     assert issue["block_end"] == 9
 
 
+def test_scan_only_pdf_returns_an_explicit_ocr_capability_error(
+    app: FastAPI,
+    client: TestClient,
+    tmp_path: Path,
+) -> None:
+    override_storage(app, tmp_path)
+
+    response = client.post(
+        "/api/v1/analyze",
+        files={
+            "file": (
+                "scan.pdf",
+                PDF_FIXTURE_DIRECTORY.joinpath("scanned-page.pdf").read_bytes(),
+                "application/pdf",
+            )
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "detail": "OCR is required for scanned PDF pages: 1."
+    }
+
+
+def test_mixed_pdf_reports_partial_ocr_requirement_in_compatibility_response(
+    app: FastAPI,
+    client: TestClient,
+    tmp_path: Path,
+) -> None:
+    override_storage(app, tmp_path)
+
+    response = client.post(
+        "/api/v1/analyze",
+        files={
+            "file": (
+                "mixed.pdf",
+                PDF_FIXTURE_DIRECTORY.joinpath("mixed-page.pdf").read_bytes(),
+                "application/pdf",
+            )
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ocr_requirement"] == {"mode": "partial", "pages": [1]}
+    assert payload["degradation"] == {
+        "is_degraded": True,
+        "reasons": ["ocr_required_pages"],
+    }
+    assert payload["pdf_metadata"]["pages"][0]["kind"] == "mixed"
+
+
+def test_pdf_export_uses_the_same_canonical_visual_text_order_as_analysis(
+    app: FastAPI,
+    client: TestClient,
+    tmp_path: Path,
+) -> None:
+    override_storage(app, tmp_path)
+    source = PDF_FIXTURE_DIRECTORY.joinpath("layout-order.pdf").read_bytes()
+    analyzed = client.post(
+        "/api/v1/analyze",
+        files={"file": ("styled.pdf", source, "application/pdf")},
+    )
+
+    assert analyzed.status_code == 200
+    assert analyzed.json()["text"] == "Top\nAlphaBeta\nBottom"
+    exported = client.post(
+        "/api/v1/export-original",
+        json={
+            "file_id": analyzed.json()["file_id"],
+            "filename": "styled.pdf",
+            "modified_text": "Top\nAlphaBETA\nBottom",
+            "track_changes": False,
+        },
+    )
+
+    assert exported.status_code == 200
+    reparsed = client.post(
+        "/api/v1/analyze",
+        files={"file": ("styled.pdf", exported.content, "application/pdf")},
+    )
+    assert reparsed.status_code == 200
+    assert reparsed.json()["text"] == "Top\nAlphaBETA\nBottom"
+
+
+def test_pdf_export_maps_repeated_text_by_canonical_visual_position(
+    app: FastAPI,
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import pymupdf
+
+    override_storage(app, tmp_path)
+    source = PDF_FIXTURE_DIRECTORY.joinpath("duplicate-text.pdf").read_bytes()
+    analyzed = client.post(
+        "/api/v1/analyze",
+        files={"file": ("duplicate.pdf", source, "application/pdf")},
+    )
+    assert analyzed.status_code == 200
+    assert analyzed.json()["text"] == "Repeat\nRepeat"
+
+    original_search = pymupdf.Page.search_for
+
+    def reversed_search(page: pymupdf.Page, needle: str, *args: object, **kwargs: object):
+        return list(reversed(original_search(page, needle, *args, **kwargs)))
+
+    monkeypatch.setattr(pymupdf.Page, "search_for", reversed_search)
+    exported = client.post(
+        "/api/v1/export-original",
+        json={
+            "file_id": analyzed.json()["file_id"],
+            "filename": "duplicate.pdf",
+            "modified_text": "Repeat\nChanged",
+            "track_changes": False,
+        },
+    )
+
+    assert exported.status_code == 200
+    reparsed = client.post(
+        "/api/v1/analyze",
+        files={"file": ("duplicate.pdf", exported.content, "application/pdf")},
+    )
+    assert reparsed.status_code == 200
+    assert reparsed.json()["text"] == "Repeat\nChanged"
 def test_scenarios_and_formats_are_discoverable(client: TestClient) -> None:
     scenarios_response = client.get("/api/v1/scenarios")
     formats_response = client.get("/api/v1/formats")

@@ -123,6 +123,12 @@ class DocumentRow(Base):
     text: Mapped[str] = mapped_column(Text)
     parser_name: Mapped[str] = mapped_column(Text)
     parser_version: Mapped[str] = mapped_column(Text)
+    document_metadata: Mapped[dict[str, object]] = mapped_column(
+        "metadata",
+        JSONB,
+        nullable=False,
+        default=dict,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     blocks: Mapped[list[DocumentBlockRow]] = relationship(
         back_populates="document",

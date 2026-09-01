@@ -8,9 +8,8 @@ import pymupdf
 
 from text_verification.document_processing.pdf_models import PdfPageKind, PdfPageMetadata
 
-FULL_PAGE_IMAGE_COVERAGE = 0.5
-MIN_NATIVE_TEXT_CHARACTERS = 12
-MIN_NATIVE_TEXT_DENSITY = 0.0002
+SUBSTANTIAL_RASTER_COVERAGE = 0.5
+MIN_USABLE_NATIVE_TEXT_CHARACTERS = 1
 _PYMUPDF: Any = pymupdf
 
 
@@ -28,30 +27,29 @@ def classify_page(
     *,
     image_rectangles: Iterable[tuple[float, float, float, float]] | None = None,
 ) -> PdfPageMetadata:
-    page_area = max(float(page.rect.width * page.rect.height), 1.0)
+    page_bbox = _as_bbox(page.rect)
+    page_area = max((page_bbox[2] - page_bbox[0]) * (page_bbox[3] - page_bbox[1]), 1.0)
     text_length = len(_normalize_text(page.get_text("text")))
     rectangles = (
         tuple(image_rectangles)
         if image_rectangles is not None
         else tuple(_image_rectangles(page))
     )
-    image_coverage = _image_coverage(rectangles, page.rect)
+    image_coverage = _image_coverage(rectangles, page_bbox)
     text_density = text_length / page_area
 
-    if text_length == 0:
-        kind = PdfPageKind.SCANNED
-    elif image_coverage >= FULL_PAGE_IMAGE_COVERAGE and (
-        text_length < MIN_NATIVE_TEXT_CHARACTERS or text_density < MIN_NATIVE_TEXT_DENSITY
-    ):
-        kind = PdfPageKind.SCANNED
-    elif image_coverage >= FULL_PAGE_IMAGE_COVERAGE:
+    has_usable_text = text_length >= MIN_USABLE_NATIVE_TEXT_CHARACTERS
+    if image_coverage >= SUBSTANTIAL_RASTER_COVERAGE and has_usable_text:
         kind = PdfPageKind.MIXED
+    elif image_coverage >= SUBSTANTIAL_RASTER_COVERAGE:
+        kind = PdfPageKind.SCANNED
     else:
         kind = PdfPageKind.TEXT
 
     return PdfPageMetadata(
         page=page_number,
         kind=kind,
+        page_bbox=page_bbox,
         text_length=text_length,
         text_density=round(text_density, 6),
         image_coverage=round(image_coverage, 6),
@@ -72,7 +70,7 @@ def _image_rectangles(page: Any) -> list[tuple[float, float, float, float]]:
             continue
         seen_xrefs.add(xref)
         rectangles.extend(
-            _as_bbox(rectangle)
+            _normalized_bbox(page, rectangle)
             for rectangle in page.get_image_rects(xref)
             if not rectangle.is_empty
         )
@@ -81,15 +79,14 @@ def _image_rectangles(page: Any) -> list[tuple[float, float, float, float]]:
 
 def _image_coverage(
     rectangles: Iterable[tuple[float, float, float, float]],
-    page_rect: Any,
+    page_rect: tuple[float, float, float, float],
 ) -> float:
-    page_bbox = _as_bbox(page_rect)
     clipped = [
         intersection
         for rectangle in rectangles
-        if (intersection := _intersection(rectangle, page_bbox)) is not None
+        if (intersection := _intersection(rectangle, page_rect)) is not None
     ]
-    page_area = max((page_bbox[2] - page_bbox[0]) * (page_bbox[3] - page_bbox[1]), 1.0)
+    page_area = max((page_rect[2] - page_rect[0]) * (page_rect[3] - page_rect[1]), 1.0)
     return min(_union_area(clipped) / page_area, 1.0)
 
 
@@ -141,3 +138,8 @@ def _as_bbox(rectangle: Any) -> tuple[float, float, float, float]:
         float(rectangle.x1),
         float(rectangle.y1),
     )
+
+
+def _normalized_bbox(page: Any, rectangle: Any) -> tuple[float, float, float, float]:
+    normalized = _PYMUPDF.Rect(rectangle) * page.rotation_matrix
+    return _as_bbox(normalized)

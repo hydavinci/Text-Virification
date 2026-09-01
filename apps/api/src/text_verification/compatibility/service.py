@@ -37,6 +37,7 @@ from text_verification.domain.verification import (
     VerificationSummary,
 )
 from text_verification.infrastructure.dictionary_loader import DictionaryLoader
+from text_verification.parsers.pdf_parser import PdfParser
 
 _DICTIONARY_LOADER = DictionaryLoader()
 _GLOSSARY_ADAPTER = TypeAdapter(list[GlossaryTerm])
@@ -152,6 +153,8 @@ def analyze(
         blocks=tuple(document.blocks),
         parser_name=document.parser_name,
         parser_version=document.parser_version,
+        metadata=document.metadata,
+        ocr_requirement=document.metadata.pdf_ocr_requirement,
         stats=VerificationStatistics.model_validate(text_statistics(text)),
         issues=legacy_issues_to_domain(issues, document, verification_run_id),
         summary=VerificationSummary(
@@ -179,6 +182,8 @@ def parse_uploaded_document(
     source_name: str,
     document_id: UUID | None = None,
 ) -> DocumentModel:
+    if _file_type_for(extension) is FileType.PDF:
+        return PdfParser().parse(path)
     source_version = source_version_for_file(path)
     text, parsed_format, page_map = parse_file(str(path), extension, str(path.parent))
     if not text.strip():
@@ -195,6 +200,8 @@ def parse_uploaded_document(
 
 
 def parse_uploaded_file(path: Path, extension: str) -> str:
+    if _file_type_for(extension) is FileType.PDF:
+        return PdfParser().parse(path).text
     text, _, _ = parse_file(str(path), extension, str(path.parent))
     if not text.strip():
         raise AnalysisInputError("File content is empty or no text could be extracted.")

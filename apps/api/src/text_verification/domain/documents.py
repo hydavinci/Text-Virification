@@ -4,6 +4,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from text_verification.document_processing.pdf_models import OcrRequirement, PdfDocumentMetadata
+
 
 class FileType(StrEnum):
     DOCX = "docx"
@@ -50,6 +52,16 @@ class TextBlock(BaseModel):
         return self
 
 
+class DocumentMetadata(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    pdf: PdfDocumentMetadata | None = None
+
+    @property
+    def pdf_ocr_requirement(self) -> OcrRequirement | None:
+        return self.pdf.ocr_requirement if self.pdf is not None else None
+
+
 class DocumentModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -61,7 +73,7 @@ class DocumentModel(BaseModel):
     blocks: list[TextBlock]
     parser_name: str
     parser_version: str
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    metadata: DocumentMetadata = Field(default_factory=DocumentMetadata)
 
     @model_validator(mode="after")
     def validate_blocks(self) -> "DocumentModel":

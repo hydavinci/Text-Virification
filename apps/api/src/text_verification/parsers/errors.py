@@ -16,3 +16,15 @@ class ParserError(RuntimeError):
         super().__init__(message)
         self.compatibility_detail = compatibility_detail
         self.compatibility_detail_format = compatibility_detail_format
+
+
+class PdfResourceLimitError(ParserError):
+    def __init__(self, *, limit: str, maximum: int, actual: int) -> None:
+        super().__init__(
+            f"PDF exceeds the {limit} limit ({actual} > {maximum}).",
+            compatibility_detail=f"PDF exceeds the {limit} limit.",
+            compatibility_detail_format="direct",
+        )
+        self.limit = limit
+        self.maximum = maximum
+        self.actual = actual

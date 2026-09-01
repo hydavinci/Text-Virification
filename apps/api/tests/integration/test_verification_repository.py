@@ -23,7 +23,13 @@ from text_verification.application import (
     ArtifactPersistenceResult,
     ArtifactPersistenceService,
 )
-from text_verification.domain.documents import FileType, TextBlock
+from text_verification.document_processing.pdf_models import (
+    OcrRequirement,
+    PdfDocumentMetadata,
+    PdfPageKind,
+    PdfPageMetadata,
+)
+from text_verification.domain.documents import DocumentMetadata, FileType, TextBlock
 from text_verification.domain.issues import Issue, IssueSeverity
 from text_verification.domain.verification import (
     Scenario,
@@ -93,6 +99,34 @@ def test_result_row_mapping_round_trips_every_canonical_field_without_database()
     assert run_row.degradation_reasons == ["llm_review_failed", "provider_timeout"]
 
 
+def test_result_row_mapping_round_trips_typed_document_metadata() -> None:
+    requirement = OcrRequirement(mode="partial", pages=(1,))
+    result = _result().model_copy(
+        update={
+            "metadata": DocumentMetadata(
+                pdf=PdfDocumentMetadata(
+                    pages=(
+                        PdfPageMetadata(
+                            page=1,
+                            kind=PdfPageKind.MIXED,
+                            page_bbox=(0.0, 0.0, 100.0, 200.0),
+                            text_length=10,
+                            text_density=0.0005,
+                            image_coverage=0.8,
+                            ocr_required=True,
+                        ),
+                    ),
+                    ocr_requirement=requirement,
+                )
+            ),
+            "ocr_requirement": requirement,
+        }
+    )
+
+    document_row, run_row = _map_result_to_rows(JOB_ID, result, created_at=CREATED_AT)
+
+    assert document_row.document_metadata == result.metadata.model_dump(mode="json")
+    assert _map_rows_to_result(document_row, run_row) == result
 def test_result_row_mapping_round_trips_nested_document_blocks_exactly() -> None:
     result = _structured_result()
 

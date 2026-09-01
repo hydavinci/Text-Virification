@@ -8,7 +8,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
-from text_verification.domain.documents import DocumentModel, FileType, TextBlock
+from text_verification.document_processing.pdf_models import OcrRequirement
+from text_verification.domain.documents import DocumentMetadata, DocumentModel, FileType, TextBlock
 from text_verification.domain.issues import Issue
 
 SummaryCount = Annotated[int, Field(ge=0)]
@@ -140,6 +141,8 @@ class VerificationResult(BaseModel):
     blocks: tuple[TextBlock, ...]
     parser_name: str
     parser_version: str
+    metadata: DocumentMetadata = Field(default_factory=DocumentMetadata)
+    ocr_requirement: OcrRequirement | None = None
     stats: VerificationStatistics
     issues: tuple[Issue, ...]
     summary: VerificationSummary
@@ -159,7 +162,10 @@ class VerificationResult(BaseModel):
             blocks=list(self.blocks),
             parser_name=self.parser_name,
             parser_version=self.parser_version,
+            metadata=self.metadata,
         )
+        if self.ocr_requirement != self.metadata.pdf_ocr_requirement:
+            raise ValueError("OCR requirement must match document metadata")
         blocks_by_id = {block.block_id: block for block in self.blocks}
         for issue in self.issues:
             if issue.document_id != self.document_id:

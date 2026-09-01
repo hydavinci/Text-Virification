@@ -146,7 +146,7 @@ def legacy_issues_to_domain(
 
 
 def verification_result_to_legacy_response(result: VerificationResult) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "success": True,
         "filename": result.source_name,
         "source_name": result.source_name,
@@ -172,6 +172,11 @@ def verification_result_to_legacy_response(result: VerificationResult) -> dict[s
         "dictionary_versions": dict(result.dictionary_versions),
         "degradation": result.degradation.model_dump(mode="json"),
     }
+    if result.metadata.pdf is not None:
+        payload["pdf_metadata"] = result.metadata.pdf.model_dump(mode="json")
+    if result.ocr_requirement is not None:
+        payload["ocr_requirement"] = result.ocr_requirement.model_dump(mode="json")
+    return payload
 
 
 def _legacy_summary(result: VerificationResult) -> dict[str, object]:
