@@ -20,6 +20,7 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
         fonts-noto-cjk \
+        libgl1 \
         libreoffice-writer \
     && rm -rf /var/lib/apt/lists/*
 

@@ -3,10 +3,11 @@ from __future__ import annotations
 import importlib
 from collections.abc import Callable, Mapping, Sequence
 from math import isfinite
+from numbers import Real
 from threading import Lock
-from typing import Literal, cast
+from typing import Literal, Protocol, cast
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
 from text_verification.document_processing.errors import OcrOutputError, OcrUnavailableError
 
@@ -18,7 +19,6 @@ _EXPECTED_ENGINE_INIT_ERRORS = (
     ModuleNotFoundError,
     FileNotFoundError,
     OSError,
-    RuntimeError,
 )
 _LANGUAGE_CONFIG: dict[SupportedOcrLanguage, tuple[str, str]] = {
     "zh": ("CH", "ch"),
@@ -26,11 +26,19 @@ _LANGUAGE_CONFIG: dict[SupportedOcrLanguage, tuple[str, str]] = {
 }
 
 
+class _SupportsToList(Protocol):
+    def tolist(self) -> object: ...
+
+
+class _SupportsArrayProtocol(Protocol):
+    def __array__(self) -> object: ...
+
+
 class OcrTextBox(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     text: str
-    confidence: float = Field(ge=0.0, le=1.0)
+    confidence: float
     bbox: tuple[
         tuple[float, float],
         tuple[float, float],
@@ -48,6 +56,14 @@ class OcrTextBox(BaseModel):
             raise ValueError("text must not be empty")
         return normalized
 
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def normalize_confidence(cls, value: object) -> float:
+        confidence = _coerce_real_number(value, field_name="confidence")
+        if not 0.0 <= confidence <= 1.0:
+            raise ValueError("confidence must be between 0 and 1")
+        return confidence
+
     @field_validator("bbox", mode="before")
     @classmethod
     def normalize_bbox(
@@ -59,23 +75,21 @@ class OcrTextBox(BaseModel):
         tuple[float, float],
         tuple[float, float],
     ]:
-        if not isinstance(value, Sequence) or isinstance(value, str | bytes):
-            raise TypeError("bbox must be a sequence of four coordinate pairs")
+        raw_points = _as_supported_sequence(value, field_name="bbox")
+        if len(raw_points) != 4:
+            raise ValueError("bbox must contain exactly four points")
 
         points: list[tuple[float, float]] = []
-        for point in value:
-            if not isinstance(point, Sequence) or isinstance(point, str | bytes):
-                raise TypeError("bbox points must be coordinate pairs")
-            if len(point) != 2:
+        for point in raw_points:
+            raw_point = _as_supported_sequence(point, field_name="bbox point")
+            if len(raw_point) != 2:
                 raise ValueError("bbox points must contain exactly two coordinates")
-            x = float(point[0])
-            y = float(point[1])
-            if not isfinite(x) or not isfinite(y):
-                raise ValueError("bbox coordinates must be finite")
+            x = _coerce_real_number(raw_point[0], field_name="bbox coordinate")
+            y = _coerce_real_number(raw_point[1], field_name="bbox coordinate")
             points.append((x, y))
 
-        if len(points) != 4:
-            raise ValueError("bbox must contain exactly four points")
+        if _polygon_area(points) <= 0.0:
+            raise ValueError("bbox must be a non-degenerate quadrilateral")
 
         return cast(
             tuple[
@@ -96,13 +110,22 @@ class OcrProvider:
     ) -> None:
         self._supported_languages = frozenset(supported_languages)
         self._engines: dict[SupportedOcrLanguage, OcrEngine] = {}
-        self._engine_lock = Lock()
+        self._call_locks = {language: Lock() for language in supported_languages}
 
     def recognize(self, image: object, language: str) -> list[OcrTextBox]:
         normalized_language = self._normalize_language(language)
-        engine = self._get_engine(normalized_language)
-        result = engine(image)
-        return _normalize_ocr_output(result)
+        with self._call_locks[normalized_language]:
+            engine = self._engines.get(normalized_language)
+            if engine is None:
+                engine = self._create_engine(normalized_language)
+                self._engines[normalized_language] = engine
+            result = engine(image)
+        try:
+            return _normalize_ocr_output(result)
+        except OcrOutputError:
+            raise
+        except (ValidationError, TypeError, ValueError) as error:
+            raise OcrOutputError(str(error)) from error
 
     def _normalize_language(self, language: str) -> SupportedOcrLanguage:
         normalized = language.strip().lower()
@@ -110,31 +133,25 @@ class OcrProvider:
             raise ValueError(f"Unsupported OCR language: {language}")
         return normalized
 
-    def _get_engine(self, language: SupportedOcrLanguage) -> OcrEngine:
-        engine = self._engines.get(language)
-        if engine is not None:
-            return engine
-
-        with self._engine_lock:
-            engine = self._engines.get(language)
-            if engine is None:
-                engine = self._create_engine(language)
-                self._engines[language] = engine
-        return engine
-
     def _create_engine(self, language: SupportedOcrLanguage) -> OcrEngine:
         try:
             module = importlib.import_module("rapidocr")
-            constructor = getattr(module, "RapidOCR", None)
-            if not callable(constructor):
-                raise OcrOutputError("rapidocr module does not expose a callable RapidOCR")
-            params = {"Rec.lang_type": _rapidocr_language(module, language)}
-            engine = constructor(params=params)
-            if not callable(engine):
-                raise OcrOutputError("RapidOCR constructor returned a non-callable engine")
-            return cast(OcrEngine, engine)
         except _EXPECTED_ENGINE_INIT_ERRORS as error:
             raise OcrUnavailableError() from error
+
+        constructor = getattr(module, "RapidOCR", None)
+        if not callable(constructor):
+            raise OcrOutputError("rapidocr module does not expose a callable RapidOCR")
+
+        params = {"Rec.lang_type": _rapidocr_language(module, language)}
+        try:
+            engine = constructor(params=params)
+        except _EXPECTED_ENGINE_INIT_ERRORS as error:
+            raise OcrUnavailableError() from error
+
+        if not callable(engine):
+            raise OcrOutputError("RapidOCR constructor returned a non-callable engine")
+        return cast(OcrEngine, engine)
 
 
 def _rapidocr_language(module: object, language: SupportedOcrLanguage) -> object:
@@ -147,20 +164,16 @@ def _rapidocr_language(module: object, language: SupportedOcrLanguage) -> object
 
 def _normalize_ocr_output(result: object) -> list[OcrTextBox]:
     payload = _payload_view(result)
-    raw_boxes = payload.get("boxes")
-    raw_texts = payload.get("txts")
-    raw_scores = payload.get("scores")
+    boxes = _optional_supported_sequence(payload.get("boxes"), field_name="boxes")
+    texts = _optional_supported_sequence(payload.get("txts"), field_name="txts")
+    scores = _optional_supported_sequence(payload.get("scores"), field_name="scores")
 
-    if _is_empty_result(raw_boxes, raw_texts, raw_scores):
+    if boxes is None and texts is None and scores is None:
         return []
-
-    if raw_boxes is None or raw_texts is None or raw_scores is None:
+    if boxes is None or texts is None or scores is None:
         raise OcrOutputError("OCR provider output must include boxes, txts, and scores")
-
-    boxes = _as_sequence(raw_boxes, field_name="boxes")
-    texts = _as_sequence(raw_texts, field_name="txts")
-    scores = _as_sequence(raw_scores, field_name="scores")
-
+    if len(boxes) == len(texts) == len(scores) == 0:
+        return []
     if not (len(boxes) == len(texts) == len(scores)):
         raise OcrOutputError("OCR provider output lengths do not match")
 
@@ -180,23 +193,55 @@ def _payload_view(result: object) -> Mapping[str, object]:
     }
 
 
-def _is_empty_result(
-    boxes: object,
-    texts: object,
-    scores: object,
-) -> bool:
-    return all(_is_missing_or_empty(value) for value in (boxes, texts, scores))
-
-
-def _is_missing_or_empty(value: object) -> bool:
+def _optional_supported_sequence(
+    value: object | None,
+    *,
+    field_name: str,
+) -> Sequence[object] | None:
     if value is None:
-        return True
+        return None
+    return _as_supported_sequence(value, field_name=field_name)
+
+
+def _as_supported_sequence(value: object, *, field_name: str) -> Sequence[object]:
+    normalized = _coerce_supported_sequence(value)
+    if not isinstance(normalized, Sequence) or isinstance(normalized, str | bytes):
+        raise TypeError(
+            f"OCR provider output field {field_name} must be a sequence or array-like value"
+        )
+    return cast(Sequence[object], normalized)
+
+
+def _coerce_supported_sequence(value: object) -> object:
     if isinstance(value, Sequence) and not isinstance(value, str | bytes):
-        return len(value) == 0
-    return False
+        return value
+
+    tolist = getattr(value, "tolist", None)
+    if callable(tolist):
+        return cast(_SupportsToList, value).tolist()
+
+    array_protocol = getattr(value, "__array__", None)
+    if callable(array_protocol):
+        array_value = cast(_SupportsArrayProtocol, value).__array__()
+        nested_tolist = getattr(array_value, "tolist", None)
+        if callable(nested_tolist):
+            return cast(_SupportsToList, array_value).tolist()
+
+    return value
 
 
-def _as_sequence(value: object, *, field_name: str) -> Sequence[object]:
-    if not isinstance(value, Sequence) or isinstance(value, str | bytes):
-        raise OcrOutputError(f"OCR provider output field {field_name} must be a sequence")
-    return cast(Sequence[object], value)
+def _coerce_real_number(value: object, *, field_name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise TypeError(f"{field_name} must be a real numeric scalar")
+    number = float(value)
+    if not isfinite(number):
+        raise ValueError(f"{field_name} must be finite")
+    return number
+
+
+def _polygon_area(points: Sequence[tuple[float, float]]) -> float:
+    area = 0.0
+    for index, (x1, y1) in enumerate(points):
+        x2, y2 = points[(index + 1) % len(points)]
+        area += (x1 * y2) - (x2 * y1)
+    return abs(area) / 2.0
