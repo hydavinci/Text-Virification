@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -39,7 +40,11 @@ from text_verification.infrastructure.orm import (
     VerificationIssueRow,
     VerificationRunRow,
 )
-from text_verification.infrastructure.storage import PreparedArtifact
+from text_verification.infrastructure.storage import (
+    PublishedArtifact,
+    VerifiedArtifact,
+    validate_artifact_identity,
+)
 
 
 class JobResultState(StrEnum):
@@ -57,8 +62,14 @@ class JobResultSnapshot:
 
 
 class VerificationRepository:
-    def __init__(self, session: Session) -> None:
+    def __init__(
+        self,
+        session: Session,
+        *,
+        artifact_verifier: Callable[[PublishedArtifact], VerifiedArtifact] | None = None,
+    ) -> None:
         self._session = session
+        self._artifact_verifier = artifact_verifier
 
     def save_result(self, job_id: UUID, result: VerificationResult) -> None:
         job = self._lock_job(job_id)
@@ -180,6 +191,15 @@ class VerificationRepository:
             ).all()
         )
 
+    def list_all_artifact_storage_keys(self) -> tuple[str, ...]:
+        return tuple(
+            self._session.scalars(
+                select(ExportArtifactRow.storage_key).order_by(
+                    ExportArtifactRow.storage_key
+                )
+            ).all()
+        )
+
     def save_review_revision(
         self,
         *,
@@ -263,15 +283,26 @@ class VerificationRepository:
         source_version: str,
         file_name: str,
         media_type: str,
-        artifact: PreparedArtifact,
+        artifact: PublishedArtifact,
         created_at: datetime,
-    ) -> None:
-        if not isinstance(artifact, PreparedArtifact):
-            raise TypeError("artifact must be a validated PreparedArtifact.")
+    ) -> VerifiedArtifact:
+        if not isinstance(artifact, PublishedArtifact):
+            raise TypeError("artifact must be a storage-published PublishedArtifact.")
         run = self._lock_run(verification_run_id)
         job = self._lock_job(run.job_id)
         if JobStatus(job.status) is JobStatus.EXPIRED:
             raise ValueError(f"Job {job.job_id} has expired.")
+        if artifact.artifact_id != export_artifact_id:
+            raise ValueError(
+                f"Artifact reference {artifact.artifact_id} does not match "
+                f"export artifact {export_artifact_id}."
+            )
+        validate_artifact_identity(
+            job.job_id,
+            export_artifact_id,
+            artifact.file_type,
+            artifact.storage_key,
+        )
         if artifact.job_id != job.job_id:
             raise ValueError(
                 f"Artifact {artifact.storage_key!r} does not belong to job {job.job_id}."
@@ -291,9 +322,21 @@ class VerificationRepository:
                 f"{expected_source_version!r}."
             )
 
-        normalized_file_type = artifact.file_type.value
-        storage_key = artifact.storage_key
-        size_bytes = artifact.size_bytes
+        if self._artifact_verifier is None:
+            raise RuntimeError("Artifact persistence requires a storage verifier.")
+        verified = self._artifact_verifier(artifact)
+        _validate_verified_artifact_consistency(artifact, verified)
+        validate_artifact_identity(
+            job.job_id,
+            export_artifact_id,
+            verified.file_type,
+            verified.storage_key,
+        )
+        normalized_file_type = verified.file_type.value
+        storage_key = verified.storage_key
+        size_bytes = verified.size_bytes
+        content_sha256 = verified.content_sha256
+        _validate_sha256(content_sha256)
         values = (
             verification_run_id,
             review_revision_id,
@@ -303,6 +346,7 @@ class VerificationRepository:
             media_type,
             storage_key,
             size_bytes,
+            content_sha256,
             created_at,
         )
         existing = self._session.get(ExportArtifactRow, export_artifact_id)
@@ -316,6 +360,7 @@ class VerificationRepository:
                 existing.media_type,
                 existing.storage_key,
                 existing.size_bytes,
+                existing.content_sha256,
                 existing.created_at,
             )
             if persisted != values:
@@ -323,7 +368,7 @@ class VerificationRepository:
                     f"Export artifact {export_artifact_id} is already persisted "
                     "with different data."
                 )
-            return
+            return verified
 
         conflicting_storage_key = self._session.scalar(
             select(ExportArtifactRow.export_artifact_id).where(
@@ -346,6 +391,7 @@ class VerificationRepository:
                         media_type=media_type,
                         storage_key=storage_key,
                         size_bytes=size_bytes,
+                        content_sha256=content_sha256,
                         created_at=created_at,
                     )
                 )
@@ -354,6 +400,7 @@ class VerificationRepository:
             raise ValueError(
                 f"Export artifact {export_artifact_id} conflicts with existing data."
             ) from error
+        return verified
 
     def commit(self) -> None:
         self._session.commit()
@@ -686,3 +733,36 @@ def _map_issue_to_domain(row: VerificationIssueRow) -> Issue:
         review=row.review,
         review_reason=row.review_reason,
     )
+
+
+def _validate_sha256(value: str) -> None:
+    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+        raise ValueError("Artifact content SHA-256 must be 64 lowercase hexadecimal characters.")
+
+
+def _validate_verified_artifact_consistency(
+    published: PublishedArtifact,
+    verified: VerifiedArtifact,
+) -> None:
+    published_fingerprint = (
+        published.job_id,
+        published.artifact_id,
+        published.storage_key,
+        published.file_type,
+        published.size_bytes,
+        published.content_sha256,
+        published.created,
+    )
+    verified_fingerprint = (
+        verified.job_id,
+        verified.artifact_id,
+        verified.storage_key,
+        verified.file_type,
+        verified.size_bytes,
+        verified.content_sha256,
+        verified.created,
+    )
+    if verified_fingerprint != published_fingerprint:
+        raise ValueError(
+            "Storage-verified artifact does not match the published artifact."
+        )

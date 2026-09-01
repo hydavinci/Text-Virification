@@ -94,6 +94,13 @@ class InMemoryCleanupVerificationRepository:
     def list_artifact_storage_keys(self, job_id: UUID) -> tuple[str, ...]:
         return self.artifact_keys.get(job_id, ())
 
+    def list_all_artifact_storage_keys(self) -> tuple[str, ...]:
+        return tuple(
+            storage_key
+            for keys in self.artifact_keys.values()
+            for storage_key in keys
+        )
+
     def delete_results_for_jobs(self, job_ids: list[UUID]) -> None:
         self.deleted_job_ids.extend(job_ids)
         for job_id in job_ids:
@@ -398,6 +405,94 @@ def test_cleanup_sweeps_only_stale_unpersisted_directories(
     assert not storage.job_directory(stale_orphan).exists()
     assert storage.job_directory(fresh_orphan).exists()
     assert storage.job_directory(persisted.job_id).exists()
+
+
+def test_cleanup_sweeps_only_stale_unreferenced_artifacts(
+    repository: InMemoryCleanupRepository,
+    verification_repository: InMemoryCleanupVerificationRepository,
+    storage: JobStorage,
+) -> None:
+    from text_verification.workers.tasks import cleanup_expired_jobs
+
+    live_job = repository.create_job(
+        status=JobStatus.COMPLETED,
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+    referenced_id = uuid4()
+    orphan_job_id = uuid4()
+    orphan_id = uuid4()
+    recent_id = uuid4()
+    referenced = storage.publish_artifact(
+        live_job.job_id,
+        referenced_id,
+        f"artifacts/{live_job.job_id}/{referenced_id}.txt",
+        FileType.TXT,
+        b"referenced",
+    )
+    orphan = storage.publish_artifact(
+        orphan_job_id,
+        orphan_id,
+        f"artifacts/{orphan_job_id}/{orphan_id}.txt",
+        FileType.TXT,
+        b"orphan",
+    )
+    recent = storage.publish_artifact(
+        live_job.job_id,
+        recent_id,
+        f"artifacts/{live_job.job_id}/{recent_id}.txt",
+        FileType.TXT,
+        b"recent",
+    )
+    recent_temp = recent.path.with_name(f".{recent.path.name}.active.uploading")
+    recent_temp.write_bytes(b"in progress")
+    stale_timestamp = (datetime.now(UTC) - timedelta(hours=25)).timestamp()
+    os.utime(referenced.path, (stale_timestamp, stale_timestamp))
+    os.utime(orphan.path, (stale_timestamp, stale_timestamp))
+    os.utime(orphan.path.parent, (stale_timestamp, stale_timestamp))
+    verification_repository.artifact_keys[live_job.job_id] = (
+        referenced.storage_key,
+    )
+
+    cleanup_expired_jobs()
+
+    assert referenced.path.exists()
+    assert not orphan.path.exists()
+    assert not orphan.path.parent.exists()
+    assert recent.path.exists()
+    assert recent_temp.exists()
+
+
+def test_cleanup_rejects_symlink_in_artifact_orphan_sweep(
+    repository: InMemoryCleanupRepository,
+    storage: JobStorage,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from text_verification.workers.tasks import cleanup_expired_jobs
+
+    live_job = repository.create_job(
+        status=JobStatus.COMPLETED,
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+    outside = tmp_path / "outside-artifacts"
+    outside.mkdir()
+    outside_file = outside / "keep.txt"
+    outside_file.write_text("keep", encoding="utf-8")
+    link = storage._root / "artifacts" / str(live_job.job_id) / "link"
+    link.parent.mkdir(parents=True)
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"symlink creation unavailable: {error}")
+
+    with caplog.at_level(logging.WARNING, logger="text_verification.infrastructure.storage"):
+        cleanup_expired_jobs()
+
+    assert link.is_symlink()
+    assert outside_file.read_text(encoding="utf-8") == "keep"
+    assert [record.getMessage() for record in caplog.records] == [
+        "cleanup_orphaned_artifact_delete_failed"
+    ]
 
 
 def test_compatibility_cleanup_deletes_only_stale_canonical_uuid_directories(

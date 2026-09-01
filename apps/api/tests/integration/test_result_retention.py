@@ -11,6 +11,10 @@ from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.session import sessionmaker
 
+from text_verification.application import (
+    ArtifactPersistenceRequest,
+    ArtifactPersistenceService,
+)
 from text_verification.domain.documents import FileType, TextBlock
 from text_verification.domain.issues import Issue, IssueSeverity
 from text_verification.domain.jobs import JobStatus
@@ -128,7 +132,10 @@ def test_atomic_result_snapshot_blocks_expiry_until_result_is_materialized(
             session.execute(text("SET lock_timeout = '4s'"))
             cleanup_started.set()
             jobs = JobRepository(session)
-            results = VerificationRepository(session)
+            results = VerificationRepository(
+                session,
+                artifact_verifier=artifact_storage.verify_artifact,
+            )
             expired_ids = jobs.expire_jobs_before(now + timedelta(minutes=1))
             results.delete_results_for_jobs(expired_ids)
             results.commit()
@@ -294,23 +301,21 @@ def _seed_completed_aggregate(
     )
     artifact_id = uuid4()
     storage_key = build_artifact_storage_key(job_id, artifact_id, FileType.TXT)
-    prepared_artifact = artifact_storage.write_artifact(
-        job_id,
-        storage_key,
-        FileType.TXT,
-        result.text.encode(),
+    ArtifactPersistenceService(artifact_storage, results).persist(
+        ArtifactPersistenceRequest(
+            job_id=job_id,
+            export_artifact_id=artifact_id,
+            verification_run_id=run_id,
+            review_revision_id=revision_id,
+            source_version=result.source_version,
+            file_type=FileType.TXT,
+            file_name="sample.txt",
+            media_type="text/plain",
+            storage_key=storage_key,
+            data=result.text.encode(),
+            created_at=created_at,
+        )
     )
-    results.save_export_artifact(
-        export_artifact_id=artifact_id,
-        verification_run_id=run_id,
-        review_revision_id=revision_id,
-        source_version=result.source_version,
-        file_name="sample.txt",
-        media_type="text/plain",
-        artifact=prepared_artifact,
-        created_at=created_at,
-    )
-    results.commit()
     jobs.transition(job_id, JobStatus.COMPLETED, 100, "处理完成")
     jobs.commit()
 

@@ -523,6 +523,24 @@ def _cleanup_expired_jobs() -> list[str]:
         )
     )
     try:
+        referenced_artifact_keys = _all_artifact_storage_keys(session_factory)
+    except Exception as error:
+        logger.warning(
+            "cleanup_artifact_metadata_failed",
+            extra={"error_type": type(error).__name__},
+        )
+    else:
+        try:
+            storage.delete_orphaned_artifacts(
+                set(referenced_artifact_keys),
+                orphan_cutoff,
+            )
+        except Exception as error:
+            logger.warning(
+                "cleanup_orphaned_artifacts_failed",
+                extra={"error_type": type(error).__name__},
+            )
+    try:
         COMPATIBILITY_STORAGE_FACTORY().delete_stale_directories(orphan_cutoff)
     except Exception as error:
         logger.warning(
@@ -660,6 +678,18 @@ def _artifact_storage_keys(
     repository = VERIFICATION_REPOSITORY_FACTORY(session)
     try:
         return repository.list_artifact_storage_keys(job_id)
+    finally:
+        repository.rollback()
+        session.close()
+
+
+def _all_artifact_storage_keys(
+    session_factory: sessionmaker[Session],
+) -> tuple[str, ...]:
+    session = session_factory()
+    repository = VERIFICATION_REPOSITORY_FACTORY(session)
+    try:
+        return repository.list_all_artifact_storage_keys()
     finally:
         repository.rollback()
         session.close()

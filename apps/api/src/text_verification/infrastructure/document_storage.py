@@ -96,6 +96,21 @@ def validate_artifact_storage_key(job_id: UUID, storage_key: str) -> PurePosixPa
     return relative_path
 
 
+def validate_artifact_identity(
+    job_id: UUID,
+    artifact_id: UUID,
+    file_type: FileType | str,
+    storage_key: str,
+) -> PurePosixPath:
+    resolved_file_type = file_type if isinstance(file_type, FileType) else FileType(file_type)
+    relative_path = validate_artifact_storage_key(job_id, storage_key)
+    if relative_path.name != f"{artifact_id}.{resolved_file_type.value}":
+        raise InvalidUpload(
+            "Artifact storage key must match its artifact ID and file type."
+        )
+    return relative_path
+
+
 def preserve_original_name(original_name: str) -> str:
     return original_name
 

@@ -1,3 +1,8 @@
+from text_verification.application.artifact_service import (
+    ArtifactPersistenceRequest,
+    ArtifactPersistenceResult,
+    ArtifactPersistenceService,
+)
 from text_verification.application.errors import VerificationError
 from text_verification.application.factory import build_default_verification_pipeline
 from text_verification.application.verification_pipeline import (
@@ -6,6 +11,9 @@ from text_verification.application.verification_pipeline import (
 )
 
 __all__ = [
+    "ArtifactPersistenceRequest",
+    "ArtifactPersistenceResult",
+    "ArtifactPersistenceService",
     "VerificationCommand",
     "VerificationError",
     "VerificationPipeline",

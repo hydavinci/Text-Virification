@@ -414,6 +414,11 @@ class ExportArtifactRow(Base):
         ),
         UniqueConstraint("storage_key", name="uq_export_artifacts_storage_key"),
         CheckConstraint("size_bytes >= 0", name="ck_export_artifacts_size"),
+        CheckConstraint(
+            "content_sha256 IS NULL "
+            "OR content_sha256 ~ '^[0-9a-f]{64}$'",
+            name="ck_export_artifacts_sha256",
+        ),
     )
 
     export_artifact_id: Mapped[UUID] = mapped_column(
@@ -431,5 +436,6 @@ class ExportArtifactRow(Base):
     media_type: Mapped[str] = mapped_column(Text)
     storage_key: Mapped[str] = mapped_column(Text)
     size_bytes: Mapped[int] = mapped_column(BigInteger)
+    content_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     run: Mapped[VerificationRunRow] = relationship(back_populates="export_artifacts")
