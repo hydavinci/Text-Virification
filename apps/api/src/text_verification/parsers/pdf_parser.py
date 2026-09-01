@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from bisect import bisect_left
 from dataclasses import dataclass, field
 from math import isfinite
 from pathlib import Path
@@ -345,21 +346,22 @@ def _align_table_characters(
     *,
     limits: PdfResourceLimits,
 ) -> tuple[list[PdfTable], set[int]]:
+    candidate_index = _build_table_candidate_index(tables, spans)
     aligned_tables: list[PdfTable] = []
-    used_span_indices: set[int] = set()
-    for table in tables:
+    for table_position, table in enumerate(tables):
         aligned_rows: list[tuple[PdfTableCell, ...]] = []
-        for row in table.rows:
+        for row_position, row in enumerate(table.rows):
             aligned_cells: list[PdfTableCell] = []
-            for cell in row:
+            for cell_position, cell in enumerate(row):
                 if not cell.text or cell.bbox is None:
                     aligned_cells.append(cell)
                     continue
-                candidates = _table_cell_candidate_spans(cell.bbox, spans)
+                candidates = candidate_index.groups_by_cell.get(
+                    (table_position, row_position, cell_position),
+                    (),
+                )
                 candidate_count = sum(
-                    len(character.text)
-                    for candidate in candidates
-                    for character in candidate.characters
+                    len(candidate.character.text) for candidate in candidates
                 )
                 if candidate_count > limits.max_table_glyph_candidates_per_cell:
                     raise PdfResourceLimitError(
@@ -367,7 +369,6 @@ def _align_table_characters(
                         maximum=limits.max_table_glyph_candidates_per_cell,
                         actual=candidate_count,
                     )
-                used_span_indices.update(span.span_index for span in candidates)
                 aligned_cells.append(
                     cell.model_copy(
                         update={
@@ -375,7 +376,9 @@ def _align_table_characters(
                                 cell.text,
                                 cell.bbox,
                                 spans,
-                                candidates=candidates,
+                                candidate_groups=_ordered_table_candidate_groups(
+                                    candidates
+                                ),
                             )
                         }
                     )
@@ -384,7 +387,7 @@ def _align_table_characters(
         aligned_tables.append(
             table.model_copy(update={"rows": tuple(aligned_rows)})
         )
-    return aligned_tables, used_span_indices
+    return aligned_tables, set(candidate_index.used_span_indices)
 
 
 def _align_cell_characters(
@@ -392,31 +395,341 @@ def _align_cell_characters(
     bbox: tuple[float, float, float, float],
     spans: list[PdfTextSpan],
     *,
-    candidates: list[PdfTextSpan] | None = None,
+    candidate_groups: tuple[dict[str, object], ...] | None = None,
 ) -> tuple[PdfTextCharacter, ...]:
-    resolved_candidates = (
-        candidates
-        if candidates is not None
-        else _table_cell_candidate_spans(bbox, spans)
-    )
+    resolved_candidates = candidate_groups
+    if resolved_candidates is None:
+        direct_index = _build_candidate_index(
+            (
+                _TableCellCandidate(
+                    key=(0, 0, 0),
+                    bbox=bbox,
+                    order=0,
+                ),
+            ),
+            spans,
+        )
+        resolved_candidates = _ordered_table_candidate_groups(
+            direct_index.groups_by_cell.get((0, 0, 0), ())
+        )
     if not resolved_candidates:
         return _unmapped_character_models(text)
-    lines = _visual_lines(tuple(resolved_candidates))
-    _, _, candidate_groups = _lines_text_and_source_metadata(lines)
     target_units = _normalized_alignment_units(text)
     source_groups = [
         (candidate_group, units)
-        for candidate_group in candidate_groups
+        for candidate_group in resolved_candidates
         if isinstance(candidate_group.get("text"), str)
         and (units := _normalized_alignment_units(str(candidate_group["text"])))
     ]
+    source_tokens = [
+        unit[0]
+        for _, candidate_units in source_groups
+        for unit in candidate_units
+    ]
+    target_tokens = [unit[0] for unit in target_units]
+    exact_start = _alignment_pattern_start(source_tokens, target_tokens)
+    mapped: dict[int, PdfTextCharacter] = {}
+    if exact_start is not None:
+        target_index = exact_start
+        for candidate_group, candidate_units in source_groups:
+            target_start = target_units[target_index][1]
+            target_end = target_units[target_index + len(candidate_units) - 1][2]
+            aligned_character = _aligned_table_character(
+                text=text[target_start:target_end],
+                source_start=target_start,
+                source_end=target_end,
+                source_group=candidate_group,
+            )
+            if aligned_character is not None:
+                mapped[target_start] = aligned_character
+            target_index += len(candidate_units)
+    else:
+        _align_table_subsequence(
+            text=text,
+            source_groups=source_groups,
+            target_units=target_units,
+            mapped=mapped,
+        )
+    aligned: list[PdfTextCharacter] = []
+    cursor = 0
+    while cursor < len(text):
+        mapped_group = mapped.get(cursor)
+        if mapped_group is not None:
+            aligned.append(mapped_group)
+            cursor = mapped_group.source_end
+            continue
+        character = text[cursor]
+        mapping_state = (
+            PdfCharacterMappingState.SYNTHETIC_SPACE
+            if character.isspace()
+            else PdfCharacterMappingState.UNMAPPED
+        )
+        aligned.append(
+            PdfTextCharacter(
+                text=character,
+                bbox=None,
+                source_start=cursor,
+                source_end=cursor + 1,
+                mapping_state=mapping_state,
+                group_id=f"cell-unaligned-{cursor}",
+            )
+        )
+        cursor += 1
+    return tuple(aligned)
+
+
+@dataclass(frozen=True)
+class _TableCellCandidate:
+    key: tuple[int, int, int]
+    bbox: tuple[float, float, float, float]
+    order: int
+
+
+@dataclass(frozen=True)
+class _OwnedTableCandidate:
+    character: PdfTextCharacter
+    span_index: int
+    page_order: int
+    anchor_bbox: tuple[float, float, float, float]
+
+
+@dataclass(frozen=True)
+class _TableCandidateIndex:
+    groups_by_cell: dict[tuple[int, int, int], tuple[_OwnedTableCandidate, ...]]
+    used_span_indices: frozenset[int]
+
+
+@dataclass(frozen=True)
+class _TableCellSpatialIndex:
+    cells: tuple[_TableCellCandidate, ...]
+    left_edges: tuple[float, ...]
+
+    @classmethod
+    def build(
+        cls,
+        cells: tuple[_TableCellCandidate, ...],
+    ) -> _TableCellSpatialIndex:
+        ordered = tuple(sorted(cells, key=lambda cell: (cell.bbox[0], cell.order)))
+        return cls(
+            cells=ordered,
+            left_edges=tuple(cell.bbox[0] for cell in ordered),
+        )
+
+    def owner(
+        self,
+        bbox: tuple[float, float, float, float],
+    ) -> _TableCellCandidate | None:
+        candidate_end = bisect_left(self.left_edges, bbox[2])
+        center_x = (bbox[0] + bbox[2]) / 2
+        center_y = (bbox[1] + bbox[3]) / 2
+        best: _TableCellCandidate | None = None
+        best_score: tuple[bool, bool, float, int] | None = None
+        for index in range(candidate_end):
+            cell = self.cells[index]
+            overlap_width = min(cell.bbox[2], bbox[2]) - max(cell.bbox[0], bbox[0])
+            overlap_height = min(cell.bbox[3], bbox[3]) - max(cell.bbox[1], bbox[1])
+            if overlap_width <= 0.0 or overlap_height <= 0.0:
+                continue
+            contains = (
+                cell.bbox[0] <= bbox[0]
+                and cell.bbox[1] <= bbox[1]
+                and bbox[2] <= cell.bbox[2]
+                and bbox[3] <= cell.bbox[3]
+            )
+            contains_center = (
+                cell.bbox[0] <= center_x <= cell.bbox[2]
+                and cell.bbox[1] <= center_y <= cell.bbox[3]
+            )
+            score = (
+                contains,
+                contains_center,
+                overlap_width * overlap_height,
+                -cell.order,
+            )
+            if best_score is None or score > best_score:
+                best = cell
+                best_score = score
+        return best
+
+
+def _build_table_candidate_index(
+    tables: list[PdfTable],
+    spans: list[PdfTextSpan],
+) -> _TableCandidateIndex:
+    cells: list[_TableCellCandidate] = []
+    order = 0
+    for table_position, table in enumerate(tables):
+        for row_position, row in enumerate(table.rows):
+            for cell_position, cell in enumerate(row):
+                if cell.text and cell.bbox is not None:
+                    cells.append(
+                        _TableCellCandidate(
+                            key=(table_position, row_position, cell_position),
+                            bbox=cell.bbox,
+                            order=order,
+                        )
+                    )
+                order += 1
+    return _build_candidate_index(tuple(cells), spans)
+
+
+def _build_candidate_index(
+    cells: tuple[_TableCellCandidate, ...],
+    spans: list[PdfTextSpan],
+) -> _TableCandidateIndex:
+    groups_by_cell: dict[
+        tuple[int, int, int],
+        list[_OwnedTableCandidate],
+    ] = {cell.key: [] for cell in cells}
+    if not cells:
+        return _TableCandidateIndex(
+            groups_by_cell={},
+            used_span_indices=frozenset(),
+        )
+    spatial_index = _TableCellSpatialIndex.build(cells)
+    used_span_indices: set[int] = set()
+    seen_group_ids: set[str] = set()
+    page_order = 0
+    for span in spans:
+        for character in span.characters:
+            group_id = character.group_id
+            if group_id is not None:
+                if group_id in seen_group_ids:
+                    page_order += 1
+                    continue
+                seen_group_ids.add(group_id)
+            owner = spatial_index.owner(character.bbox or span.bbox)
+            if owner is not None:
+                groups_by_cell[owner.key].append(
+                    _OwnedTableCandidate(
+                        character=character,
+                        span_index=span.span_index,
+                        page_order=page_order,
+                        anchor_bbox=character.bbox or span.bbox,
+                    )
+                )
+                used_span_indices.add(span.span_index)
+            page_order += 1
+    return _TableCandidateIndex(
+        groups_by_cell={
+            key: tuple(candidates)
+            for key, candidates in groups_by_cell.items()
+        },
+        used_span_indices=frozenset(used_span_indices),
+    )
+
+
+@dataclass(frozen=True)
+class _TableCandidateLine:
+    candidates: tuple[_OwnedTableCandidate, ...]
+    bbox: tuple[float, float, float, float]
+    line_index: int
+    line_direction: tuple[float, float]
+    writing_mode: PdfWritingMode
+
+
+def _ordered_table_candidate_groups(
+    candidates: tuple[_OwnedTableCandidate, ...],
+) -> tuple[dict[str, object], ...]:
+    if not candidates:
+        return ()
+    grouped: dict[int, list[_OwnedTableCandidate]] = {}
+    for candidate in candidates:
+        grouped.setdefault(candidate.character.raw_line_index, []).append(candidate)
+    lines = [
+        _TableCandidateLine(
+            candidates=tuple(sorted(line, key=lambda candidate: candidate.page_order)),
+            bbox=_combined_bbox(candidate.anchor_bbox for candidate in line),
+            line_index=line_index,
+            line_direction=line[0].character.line_direction,
+            writing_mode=line[0].character.writing_mode,
+        )
+        for line_index, line in grouped.items()
+    ]
+    visual_order = sorted(
+        lines,
+        key=lambda line: (
+            line.bbox[1],
+            line.bbox[0],
+            line.line_index,
+        ),
+    )
+    directional = iter(
+        sorted(
+            (
+                line
+                for line in lines
+                if _candidate_line_preserves_raw_flow(line)
+            ),
+            key=lambda line: line.line_index,
+        )
+    )
+    ordered_lines = [
+        next(directional)
+        if _candidate_line_preserves_raw_flow(line)
+        else line
+        for line in visual_order
+    ]
+    source_groups: list[dict[str, object]] = []
+    for line_position, line in enumerate(ordered_lines):
+        if line_position:
+            source_groups.append(
+                _source_character(
+                    text="\n",
+                    bbox=None,
+                    source_start=0,
+                    mapping_state=PdfCharacterMappingState.SYNTHETIC_SPACE,
+                    line_index=line.line_index - 1,
+                    span_index=None,
+                    group_id=f"line-{line.line_index}-separator-before",
+                    line_direction=line.line_direction,
+                    writing_mode=line.writing_mode,
+                    raw_line_index=line.line_index,
+                    span_order=None,
+                )
+            )
+        source_groups.extend(
+            _source_character(
+                text=candidate.character.text,
+                bbox=candidate.character.bbox,
+                source_start=candidate.character.source_start,
+                mapping_state=candidate.character.mapping_state,
+                line_index=candidate.character.raw_line_index,
+                span_index=candidate.span_index,
+                group_id=candidate.character.group_id,
+                line_direction=candidate.character.line_direction,
+                writing_mode=candidate.character.writing_mode,
+                raw_line_index=candidate.character.raw_line_index,
+                span_order=candidate.character.span_order,
+            )
+            for candidate in line.candidates
+        )
+    return tuple(source_groups)
+
+
+def _candidate_line_preserves_raw_flow(line: _TableCandidateLine) -> bool:
+    return (
+        line.writing_mode is PdfWritingMode.VERTICAL
+        or line.line_direction[0] <= 0.0
+        or line.line_direction[1] != 0.0
+    )
+
+
+def _align_table_subsequence(
+    *,
+    text: str,
+    source_groups: list[
+        tuple[dict[str, object], list[tuple[str, int, int]]]
+    ],
+    target_units: list[tuple[str, int, int]],
+    mapped: dict[int, PdfTextCharacter],
+) -> None:
     source_positions = _AlignmentTokenPositions.from_tokens(
         [units[0][0] for _, units in source_groups]
     )
     target_positions = _AlignmentTokenPositions.from_tokens(
         [unit[0] for unit in target_units]
     )
-    mapped: dict[int, PdfTextCharacter] = {}
     source_index = 0
     target_index = 0
     while source_index < len(source_groups) and target_index < len(target_units):
@@ -452,53 +765,44 @@ def _align_cell_characters(
         next_target = target_positions.next_after(candidate_token, target_index + 1)
         if next_source is not None and (
             next_target is None
-            or next_source - source_index <= next_target - target_index
+            or next_source - source_index < next_target - target_index
         ):
             source_index = next_source
         elif next_target is not None:
             target_index = next_target
         else:
             source_index += 1
-    aligned: list[PdfTextCharacter] = []
-    cursor = 0
-    while cursor < len(text):
-        mapped_group = mapped.get(cursor)
-        if mapped_group is not None:
-            aligned.append(mapped_group)
-            cursor = mapped_group.source_end
-            continue
-        character = text[cursor]
-        mapping_state = (
-            PdfCharacterMappingState.SYNTHETIC_SPACE
-            if character.isspace()
-            else PdfCharacterMappingState.UNMAPPED
-        )
-        aligned.append(
-            PdfTextCharacter(
-                text=character,
-                bbox=None,
-                source_start=cursor,
-                source_end=cursor + 1,
-                mapping_state=mapping_state,
-                group_id=f"cell-unaligned-{cursor}",
-            )
-        )
-        cursor += 1
-    return tuple(aligned)
 
 
-def _table_cell_candidate_spans(
-    bbox: tuple[float, float, float, float],
-    spans: list[PdfTextSpan],
-) -> list[PdfTextSpan]:
-    return [
-        span
-        for span in spans
-        if (
-            bbox[0] <= (span.bbox[0] + span.bbox[2]) / 2 <= bbox[2]
-            and bbox[1] <= (span.bbox[1] + span.bbox[3]) / 2 <= bbox[3]
-        )
-    ]
+def _alignment_pattern_start(
+    pattern: list[str],
+    target: list[str],
+) -> int | None:
+    if not pattern:
+        return None
+    prefix = [0] * len(pattern)
+    for index in range(1, len(pattern)):
+        matched = prefix[index - 1]
+        while True:
+            if _alignment_tokens_match(pattern[index], pattern[matched]):
+                matched += 1
+                break
+            if matched == 0:
+                break
+            matched = prefix[matched - 1]
+        prefix[index] = matched
+    matched = 0
+    for index, token in enumerate(target):
+        while True:
+            if _alignment_tokens_match(token, pattern[matched]):
+                matched += 1
+                break
+            if matched == 0:
+                break
+            matched = prefix[matched - 1]
+        if matched == len(pattern):
+            return index - len(pattern) + 1
+    return None
 
 
 def _normalized_alignment_units(text: str) -> list[tuple[str, int, int]]:
@@ -673,17 +977,22 @@ def _unmapped_character_models(text: str) -> tuple[PdfTextCharacter, ...]:
 
 
 def _line_direction(value: object) -> tuple[float, float]:
-    if isinstance(value, tuple | list) and len(value) == 2:
-        x, y = value
-        if (
-            isinstance(x, int | float)
-            and not isinstance(x, bool)
-            and isinstance(y, int | float)
-            and not isinstance(y, bool)
-            and (float(x) != 0.0 or float(y) != 0.0)
-        ):
-            return float(x), float(y)
-    return 1.0, 0.0
+    if not isinstance(value, tuple | list) or len(value) != 2:
+        raise TypeError("PDF line direction must contain two finite coordinates")
+    x, y = value
+    if (
+        isinstance(x, bool)
+        or not isinstance(x, int | float)
+        or isinstance(y, bool)
+        or not isinstance(y, int | float)
+    ):
+        raise TypeError("PDF line direction must contain two finite coordinates")
+    normalized = float(x), float(y)
+    if not all(isfinite(coordinate) for coordinate in normalized):
+        raise ValueError("PDF line direction must contain two finite coordinates")
+    if normalized == (0.0, 0.0):
+        raise ValueError("PDF line direction must not be the zero vector")
+    return normalized
 
 
 def _writing_mode(value: object) -> PdfWritingMode:
@@ -1097,9 +1406,7 @@ def _visual_lines(spans: tuple[PdfTextSpan, ...]) -> list[_VisualLine]:
         )
         for line in grouped.values()
     ]
-    if any(_line_preserves_raw_flow(line) for line in lines):
-        return lines
-    return sorted(
+    visual_order = sorted(
         lines,
         key=lambda line: (
             line.bbox[1],
@@ -1107,6 +1414,16 @@ def _visual_lines(spans: tuple[PdfTextSpan, ...]) -> list[_VisualLine]:
             line.line_index,
         ),
     )
+    directional = iter(
+        sorted(
+            (line for line in lines if _line_preserves_raw_flow(line)),
+            key=lambda line: line.line_index,
+        )
+    )
+    return [
+        next(directional) if _line_preserves_raw_flow(line) else line
+        for line in visual_order
+    ]
 
 
 def _line_preserves_raw_flow(line: _VisualLine) -> bool:
@@ -1135,13 +1452,16 @@ class _ExtractedBlock:
 
 
 def _order_page_blocks(items: list[_ExtractedBlock]) -> list[_ExtractedBlock]:
-    directional = [item for item in items if item.preserve_raw_flow]
-    if not directional:
-        return sorted(items, key=_visual_block_order)
-    remaining = [item for item in items if not item.preserve_raw_flow]
+    visual_order = sorted(items, key=_visual_block_order)
+    directional = iter(
+        sorted(
+            (item for item in items if item.preserve_raw_flow),
+            key=lambda item: (item.ordinal, item.block_id),
+        )
+    )
     return [
-        *sorted(directional, key=lambda item: (item.ordinal, item.block_id)),
-        *sorted(remaining, key=_visual_block_order),
+        next(directional) if item.preserve_raw_flow else item
+        for item in visual_order
     ]
 
 
@@ -1201,7 +1521,7 @@ def _line_blocks(page: int, lines: list[_VisualLine]) -> list[_ExtractedBlock]:
                 text=line.text,
                 page=page,
                 bbox=line.bbox,
-                ordinal=line_index,
+                ordinal=line.line_index,
                 paragraph_index=line_index,
                 table_index=None,
                 row_index=None,
