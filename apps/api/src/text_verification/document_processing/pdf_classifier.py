@@ -59,17 +59,21 @@ def _classify_limited_page(
             maximum=limits.max_image_xrefs_per_page,
             actual=len(xrefs),
         )
-    rectangles = [
-        _normalized_bbox(page, rectangle)
-        for xref in xrefs
-        for rectangle in page.get_image_rects(xref)
-        if not rectangle.is_empty
-    ]
-    if len(rectangles) > limits.max_image_rectangles_per_page:
-        raise PdfResourceLimitError(
-            limit="max_image_rectangles_per_page",
-            maximum=limits.max_image_rectangles_per_page,
-            actual=len(rectangles),
+    rectangles: list[tuple[float, float, float, float]] = []
+    rectangle_count = 0
+    for xref in xrefs:
+        xref_rectangles = page.get_image_rects(xref)
+        rectangle_count += len(xref_rectangles)
+        if rectangle_count > limits.max_image_rectangles_per_page:
+            raise PdfResourceLimitError(
+                limit="max_image_rectangles_per_page",
+                maximum=limits.max_image_rectangles_per_page,
+                actual=rectangle_count,
+            )
+        rectangles.extend(
+            _normalized_bbox(page, rectangle)
+            for rectangle in xref_rectangles
+            if not rectangle.is_empty
         )
     return classify_page(page, page_number, image_rectangles=rectangles)
 

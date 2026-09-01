@@ -17,6 +17,29 @@ from text_verification.parsers.pdf_parser import PdfParser
 FIXTURE_DIRECTORY = Path(__file__).resolve().parents[1] / "fixtures" / "pdf"
 
 
+def _styled_boundary_pdf(
+    target: Path,
+    *,
+    left: str,
+    right: str,
+    gap: float,
+) -> Path:
+    document = pymupdf.open()
+    page = document.new_page(width=240, height=100)
+    x, y = 24.0, 40.0
+    page.insert_text((x, y), left, fontsize=12, fontname="helv")
+    left_width = pymupdf.get_text_length(left, fontname="helv", fontsize=12)
+    page.insert_text(
+        (x + left_width + gap, y),
+        right,
+        fontsize=12,
+        fontname="cour",
+    )
+    document.save(target)
+    document.close()
+    return target
+
+
 def test_parser_extracts_ordered_text_table_and_image_blocks() -> None:
     document = PdfParser().parse(FIXTURE_DIRECTORY / "text-page.pdf")
 
@@ -165,6 +188,105 @@ def test_parser_orders_visual_lines_and_keeps_styled_spans_on_one_line() -> None
     ]
     for block in document.blocks:
         assert document.text[block.global_start : block.global_end] == block.text
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "gap", "expected", "expected_segments"),
+    [
+        (
+            "Left ",
+            "Right",
+            0.0,
+            "Left Right",
+            [(0, 5, "Left "), (5, 10, "Right")],
+        ),
+        (
+            "Left",
+            " Right",
+            0.0,
+            "Left Right",
+            [(0, 5, "Left "), (5, 10, "Right")],
+        ),
+        (
+            "Left ",
+            " Right",
+            0.0,
+            "Left Right",
+            [(0, 5, "Left "), (5, 10, "Right")],
+        ),
+        (
+            "Left",
+            "Right",
+            1.5,
+            "Left Right",
+            [(0, 5, "Left "), (5, 10, "Right")],
+        ),
+        (
+            "Left",
+            "Right",
+            0.5,
+            "LeftRight",
+            [(0, 4, "Left"), (4, 9, "Right")],
+        ),
+        (
+            "Left  \t  ",
+            "Right",
+            0.0,
+            "Left Right",
+            [(0, 5, "Left "), (5, 10, "Right")],
+        ),
+    ],
+    ids=[
+        "trailing-only",
+        "leading-only",
+        "both-boundaries",
+        "measured-word-gap",
+        "contiguous-glyphs",
+        "tabs-and-multiple-whitespace",
+    ],
+)
+def test_parser_normalizes_styled_span_boundaries_with_exact_source_offsets(
+    tmp_path: Path,
+    left: str,
+    right: str,
+    gap: float,
+    expected: str,
+    expected_segments: list[tuple[int, int, str]],
+) -> None:
+    source = _styled_boundary_pdf(
+        tmp_path / "styled-boundary.pdf",
+        left=left,
+        right=right,
+        gap=gap,
+    )
+
+    document = PdfParser().parse(source)
+
+    assert document.text == expected
+    locator = document.blocks[0].source_locator
+    assert [
+        (segment["start"], segment["end"], segment["text"])
+        for segment in locator["segments"]
+    ] == expected_segments
+    assert [
+        (
+            character["source_start"],
+            character["source_end"],
+            character["text"],
+            character["mapping_state"],
+            character["bbox"] is None,
+        )
+        for character in locator["characters"]
+    ] == [
+        (
+            index,
+            index + 1,
+            character,
+            "synthetic_space" if character.isspace() else "glyph",
+            character.isspace(),
+        )
+        for index, character in enumerate(expected)
+    ]
 
 
 def test_parser_preserves_complete_table_structure_without_suppressing_outside_text() -> None:

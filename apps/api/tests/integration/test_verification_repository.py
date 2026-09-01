@@ -25,9 +25,12 @@ from text_verification.application import (
 )
 from text_verification.document_processing.pdf_models import (
     OcrRequirement,
+    PdfCharacterMappingState,
     PdfDocumentMetadata,
     PdfPageKind,
     PdfPageMetadata,
+    PdfTextCharacter,
+    PdfTextSpan,
 )
 from text_verification.domain.documents import DocumentMetadata, FileType, TextBlock
 from text_verification.domain.issues import Issue, IssueSeverity
@@ -114,6 +117,26 @@ def test_result_row_mapping_round_trips_typed_document_metadata() -> None:
                             text_density=0.0005,
                             image_coverage=0.8,
                             ocr_required=True,
+                            spans=(
+                                PdfTextSpan(
+                                    text="A",
+                                    bbox=(1.0, 2.0, 9.0, 12.0),
+                                    font_name="Helvetica",
+                                    font_size=10.0,
+                                    font_flags=0,
+                                    color=0,
+                                    span_index=0,
+                                    characters=(
+                                        PdfTextCharacter(
+                                            text="A",
+                                            bbox=(1.0, 2.0, 9.0, 12.0),
+                                            source_start=0,
+                                            source_end=1,
+                                            mapping_state=PdfCharacterMappingState.GLYPH,
+                                        ),
+                                    ),
+                                ),
+                            ),
                         ),
                     ),
                     ocr_requirement=requirement,

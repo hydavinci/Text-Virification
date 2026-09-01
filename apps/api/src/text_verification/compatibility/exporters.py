@@ -8,6 +8,7 @@ import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from difflib import SequenceMatcher
+from math import isfinite
 from pathlib import Path
 from uuid import uuid4
 
@@ -35,6 +36,20 @@ class TextEdit:
     start: int
     end: int
     replacement: str
+
+
+@dataclass(frozen=True)
+class _PdfGlyphRectangle:
+    rectangle: object
+    source_start: int
+    source_end: int
+    line_index: int
+
+
+_PDF_MAPPING_VALIDATION_ERROR = (
+    "PDF compatibility mapping validation failed: "
+    "character metadata is incomplete or invalid."
+)
 
 
 MEDIA_TYPES = {
@@ -90,9 +105,14 @@ def export_original(
         )
         return ExportedDocument(content, extension, MEDIA_TYPES[extension])
     if extension == "pdf":
+        pdf_edits = (
+            _coalesce_pdf_modified_text_edits(edits, original_text or "")
+            if edits is not None and modified_text is not None and not replacements
+            else edits
+        )
         content = (
-            _export_pdf_edits(source_path, original_text or "", edits, track_changes)
-            if edits is not None
+            _export_pdf_edits(source_path, original_text or "", pdf_edits, track_changes)
+            if pdf_edits is not None
             else _export_pdf(source_path, cleaned_replacements, track_changes)
         )
         return ExportedDocument(content, "pdf", MEDIA_TYPES["pdf"])
@@ -135,6 +155,40 @@ def _build_edits(
         for operation, start, end, new_start, new_end in matcher.get_opcodes()
         if operation != "equal"
     ]
+
+
+def _coalesce_pdf_modified_text_edits(
+    edits: list[TextEdit],
+    original_text: str,
+) -> list[TextEdit]:
+    if not edits:
+        return []
+    groups: list[list[TextEdit]] = [[edits[0]]]
+    for edit in edits[1:]:
+        if edit.start - groups[-1][-1].end <= 1:
+            groups[-1].append(edit)
+        else:
+            groups.append([edit])
+    coalesced: list[TextEdit] = []
+    for group in groups:
+        start = group[0].start
+        end = group[-1].end
+        local_edits = [
+            TextEdit(
+                edit.start - start,
+                edit.end - start,
+                edit.replacement,
+            )
+            for edit in group
+        ]
+        coalesced.append(
+            TextEdit(
+                start,
+                end,
+                _apply_text_edits(original_text[start:end], local_edits, False),
+            )
+        )
+    return coalesced
 
 
 def _document_text_paragraphs(document: object) -> list[object]:
@@ -645,13 +699,10 @@ def _export_pdf_edits(
         canonical_document = PdfParser().parse(source_path)
         if canonical_document.text != original_text:
             raise ExportError("The stored PDF no longer matches the analyzed document.")
-        resolved: list[tuple[object, list[object], object, str, str, bool, bool]] = []
+        resolved: list[tuple[object, list[object], object, str, str]] = []
         for edit in edits:
             original = original_text[edit.start:edit.end]
-            insertion = not original
-            search_text = original
-            insert_after = False
-            if insertion:
+            if not original:
                 raise ExportError(
                     "PDF original-format export does not support insertion-only edits; "
                     "replace existing text or export the edited text as TXT."
@@ -660,25 +711,19 @@ def _export_pdf_edits(
                 document,
                 canonical_document,
                 edit,
-                search_text,
             )
-            resolved.append(
-                (page, rectangles, anchor, original, edit.replacement, insertion, insert_after)
-            )
+            resolved.append((page, rectangles, anchor, original, edit.replacement))
 
         redactions: list[tuple[object, object, str, float]] = []
-        for page, rectangles, anchor, original, suggestion, insertion, _insert_after in resolved:
+        for page, rectangles, anchor, original, suggestion in resolved:
             if track_changes:
-                annotation = page.add_highlight_annot(anchor)
-                annotation.set_info(
-                    title="啄木鸟·中英文字智能检查",
-                    content=(
-                        f"插入: {suggestion}"
-                        if insertion
-                        else f"原文: {original}\n建议: {suggestion or '删除'}"
-                    ),
-                )
-                annotation.update()
+                for rectangle in rectangles:
+                    annotation = page.add_highlight_annot(rectangle)
+                    annotation.set_info(
+                        title="啄木鸟·中英文字智能检查",
+                        content=f"原文: {original}\n建议: {suggestion or '删除'}",
+                    )
+                    annotation.update()
                 continue
             blocks = page.get_text("dict").get("blocks", [])
             font_size = _font_size_at(blocks, anchor)
@@ -721,107 +766,190 @@ def _pdf_edit_location(
     pdf: object,
     document: object,
     edit: TextEdit,
-    search_text: str,
 ) -> tuple[object, list[object], object]:
     for block in document.blocks:  # type: ignore[attr-defined]
         if not (block.global_start <= edit.start and edit.end <= block.global_end):
             continue
         locator = block.source_locator
         page_number = locator.get("page")
-        segments = locator.get("segments")
-        if not isinstance(page_number, int) or not isinstance(segments, list):
-            break
+        characters = locator.get("characters")
+        if (
+            isinstance(page_number, bool)
+            or not isinstance(page_number, int)
+            or not isinstance(characters, list)
+        ):
+            raise ExportError(_PDF_MAPPING_VALIDATION_ERROR)
         local_start = edit.start - block.global_start
         local_end = edit.end - block.global_start
-        covered: list[tuple[dict[str, object], int, int]] = []
-        for segment in segments:
-            if not isinstance(segment, dict):
-                continue
-            start, end = segment.get("start"), segment.get("end")
-            bbox = segment.get("bbox")
-            if not (
-                isinstance(start, int)
-                and isinstance(end, int)
-                and start < local_end
-                and end > local_start
-                and isinstance(bbox, list)
-                and len(bbox) == 4
-            ):
-                continue
-            covered.append((segment, max(start, local_start), min(end, local_end)))
-        if covered:
+        try:
             page = pdf[page_number - 1]  # type: ignore[index]
-            rectangles: list[object] = []
-            for segment, start, end in covered:
-                bbox = segment["bbox"]
-                assert isinstance(bbox, list)
-                text = segment["text"]
-                assert isinstance(text, str)
-                expected = _pdf_sub_bbox(
-                    tuple(float(value) for value in bbox),
-                    start - int(segment["start"]),
-                    end - int(segment["start"]),
-                    len(text),
-                )
-                matches = page.search_for(text)  # type: ignore[attr-defined]
-                if not matches:
-                    matches = page.search_for(search_text)  # type: ignore[attr-defined]
-                if not matches:
-                    break
-                matched = min(
-                    matches,
-                    key=lambda candidate: _pdf_rect_distance(
-                        candidate * page.rotation_matrix,  # type: ignore[operator, union-attr]
-                        expected,
-                    ),
-                )
-                rectangles.append(
-                    _pdf_actual_sub_rect(
-                        matched,
-                        start - int(segment["start"]),
-                        end - int(segment["start"]),
-                        len(text),
-                    )
-                )
-            if rectangles:
-                return page, rectangles, rectangles[0]
-        break
-    raise ExportError("A PDF edit could not be mapped to canonical source text.")
-
-
-def _pdf_sub_bbox(
-    bbox: tuple[float, float, float, float],
-    start: int,
-    end: int,
-    text_length: int,
-) -> tuple[float, float, float, float]:
-    width = bbox[2] - bbox[0]
-    return (
-        bbox[0] + width * start / text_length,
-        bbox[1],
-        bbox[0] + width * end / text_length,
-        bbox[3],
-    )
-
-
-def _pdf_actual_sub_rect(rectangle: object, start: int, end: int, text_length: int) -> object:
-    width = rectangle.x1 - rectangle.x0  # type: ignore[attr-defined]
-    return type(rectangle)(
-        rectangle.x0 + width * start / text_length,  # type: ignore[attr-defined]
-        rectangle.y0,  # type: ignore[attr-defined]
-        rectangle.x0 + width * end / text_length,  # type: ignore[attr-defined]
-        rectangle.y1,  # type: ignore[attr-defined]
-    )
-
-
-def _pdf_rect_distance(rectangle: object, expected: tuple[float, float, float, float]) -> float:
-    return sum(
-        abs(actual - target)
-        for actual, target in zip(
-            (rectangle.x0, rectangle.y0, rectangle.x1, rectangle.y1),  # type: ignore[attr-defined]
-            expected,
-            strict=True,
+        except (IndexError, TypeError):
+            raise ExportError(_PDF_MAPPING_VALIDATION_ERROR) from None
+        glyphs = _validated_pdf_glyphs(
+            page,
+            block.text,
+            characters,
+            local_start,
+            local_end,
         )
+        rectangles = [
+            glyph.rectangle
+            for glyph in _coalesce_pdf_glyph_rectangles(glyphs)
+        ]
+        if not rectangles:
+            raise ExportError(_PDF_MAPPING_VALIDATION_ERROR)
+        return page, rectangles, rectangles[0]
+    raise ExportError(_PDF_MAPPING_VALIDATION_ERROR)
+
+
+def _validated_pdf_glyphs(
+    page: object,
+    block_text: str,
+    characters: list[object],
+    local_start: int,
+    local_end: int,
+) -> list[_PdfGlyphRectangle]:
+    if local_start < 0 or local_end > len(block_text) or local_end <= local_start:
+        raise ExportError(_PDF_MAPPING_VALIDATION_ERROR)
+
+    by_offset: dict[int, dict[str, object]] = {}
+    for value in characters:
+        if not isinstance(value, dict):
+            continue
+        source_start = value.get("source_start")
+        if (
+            isinstance(source_start, bool)
+            or not isinstance(source_start, int)
+            or not local_start <= source_start < local_end
+        ):
+            continue
+        if source_start in by_offset:
+            raise ExportError(_PDF_MAPPING_VALIDATION_ERROR)
+        by_offset[source_start] = value
+
+    glyphs: list[_PdfGlyphRectangle] = []
+    for source_start in range(local_start, local_end):
+        value = by_offset.get(source_start)
+        if value is None:
+            raise ExportError(_PDF_MAPPING_VALIDATION_ERROR)
+        source_end = value.get("source_end")
+        text = value.get("text")
+        mapping_state = value.get("mapping_state")
+        bbox_value = value.get("bbox")
+        line_index = value.get("line_index")
+        expected = block_text[source_start]
+        if (
+            isinstance(source_end, bool)
+            or source_end != source_start + 1
+            or not isinstance(text, str)
+            or len(text) != 1
+            or text != expected
+            or isinstance(line_index, bool)
+            or not isinstance(line_index, int)
+            or line_index < 0
+        ):
+            raise ExportError(_PDF_MAPPING_VALIDATION_ERROR)
+        if expected.isspace():
+            if mapping_state != "synthetic_space" or bbox_value is not None:
+                raise ExportError(_PDF_MAPPING_VALIDATION_ERROR)
+            continue
+        if mapping_state != "glyph":
+            raise ExportError(_PDF_MAPPING_VALIDATION_ERROR)
+        bbox = _validated_pdf_bbox(bbox_value)
+        glyphs.append(
+            _PdfGlyphRectangle(
+                rectangle=_pdf_page_rectangle(page, bbox),
+                source_start=source_start,
+                source_end=source_start + 1,
+                line_index=line_index,
+            )
+        )
+    return glyphs
+
+
+def _validated_pdf_bbox(value: object) -> tuple[float, float, float, float]:
+    if not isinstance(value, list | tuple) or len(value) != 4:
+        raise ExportError(_PDF_MAPPING_VALIDATION_ERROR)
+    coordinates: list[float] = []
+    for coordinate in value:
+        if (
+            isinstance(coordinate, bool)
+            or not isinstance(coordinate, int | float)
+            or not isfinite(float(coordinate))
+        ):
+            raise ExportError(_PDF_MAPPING_VALIDATION_ERROR)
+        coordinates.append(float(coordinate))
+    x0, y0, x1, y1 = coordinates
+    if x1 <= x0 or y1 <= y0:
+        raise ExportError(_PDF_MAPPING_VALIDATION_ERROR)
+    return x0, y0, x1, y1
+
+
+def _pdf_page_rectangle(
+    page: object,
+    bbox: tuple[float, float, float, float],
+) -> object:
+    import fitz
+
+    rectangle = fitz.Rect(bbox) * ~page.rotation_matrix  # type: ignore[operator, union-attr]
+    if rectangle.is_empty or rectangle.is_infinite:
+        raise ExportError(_PDF_MAPPING_VALIDATION_ERROR)
+    return rectangle
+
+
+def _coalesce_pdf_glyph_rectangles(
+    glyphs: list[_PdfGlyphRectangle],
+) -> list[_PdfGlyphRectangle]:
+    if not glyphs:
+        return []
+    coalesced = [glyphs[0]]
+    for glyph in glyphs[1:]:
+        previous = coalesced[-1]
+        if not _pdf_glyph_rectangles_are_adjacent(previous, glyph):
+            coalesced.append(glyph)
+            continue
+        import fitz
+
+        coalesced[-1] = _PdfGlyphRectangle(
+            rectangle=fitz.Rect(
+                min(previous.rectangle.x0, glyph.rectangle.x0),
+                min(previous.rectangle.y0, glyph.rectangle.y0),
+                max(previous.rectangle.x1, glyph.rectangle.x1),
+                max(previous.rectangle.y1, glyph.rectangle.y1),
+            ),
+            source_start=previous.source_start,
+            source_end=glyph.source_end,
+            line_index=previous.line_index,
+        )
+    return coalesced
+
+
+def _pdf_glyph_rectangles_are_adjacent(
+    previous: _PdfGlyphRectangle,
+    following: _PdfGlyphRectangle,
+) -> bool:
+    if (
+        previous.source_end != following.source_start
+        or previous.line_index != following.line_index
+    ):
+        return False
+    previous_rectangle = previous.rectangle
+    following_rectangle = following.rectangle
+    height = min(
+        previous_rectangle.y1 - previous_rectangle.y0,
+        following_rectangle.y1 - following_rectangle.y0,
+    )
+    overlap = min(previous_rectangle.y1, following_rectangle.y1) - max(
+        previous_rectangle.y0,
+        following_rectangle.y0,
+    )
+    tolerance = max(0.25, height * 0.05)
+    horizontal_gap = following_rectangle.x0 - previous_rectangle.x1
+    return (
+        height > 0
+        and overlap >= height * 0.5
+        and -tolerance <= horizontal_gap <= tolerance
+        and following_rectangle.x0 >= previous_rectangle.x0 - tolerance
     )
 
 

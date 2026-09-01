@@ -166,6 +166,19 @@ def _add_repeated_span_page(document: pymupdf.Document) -> None:
     page.insert_text((24, 40), "token token", fontsize=12, fontname="helv")
 
 
+def _add_proportional_span_page(document: pymupdf.Document) -> None:
+    page = document.new_page(width=240, height=120)
+    page.insert_text((24, 40), "WWWWi", fontsize=12, fontname="helv")
+
+
+def _add_styled_space_page(document: pymupdf.Document) -> None:
+    page = document.new_page(width=240, height=120)
+    text = "Alpha"
+    page.insert_text((24, 40), text, fontsize=12, fontname="helv")
+    next_x = 24 + pymupdf.get_text_length(text, fontname="helv", fontsize=12)
+    page.insert_text((next_x, 40), " Beta", fontsize=12, fontname="cour")
+
+
 def main() -> None:
     text_page = _document()
     _add_text_page(text_page)
@@ -219,6 +232,14 @@ def main() -> None:
     repeated_span = _document()
     _add_repeated_span_page(repeated_span)
     _save(repeated_span, "repeated-span.pdf")
+
+    proportional_span = _document()
+    _add_proportional_span_page(proportional_span)
+    _save(proportional_span, "proportional-span.pdf")
+
+    styled_space = _document()
+    _add_styled_space_page(styled_space)
+    _save(styled_space, "styled-space.pdf")
 
 
 if __name__ == "__main__":

@@ -6,9 +6,11 @@ import pytest
 from pydantic import ValidationError
 
 from text_verification.document_processing.pdf_models import (
+    PdfCharacterMappingState,
     PdfDocumentMetadata,
     PdfPageKind,
     PdfPageMetadata,
+    PdfTextCharacter,
     PdfTextSpan,
 )
 from text_verification.domain.documents import DocumentMetadata
@@ -60,6 +62,39 @@ def test_page_metadata_rejects_out_of_page_span_geometry() -> None:
                 ),
             )
         )
+
+
+def test_text_character_metadata_is_immutable_json_safe_and_offset_exact() -> None:
+    character = PdfTextCharacter(
+        text="W",
+        bbox=(1.0, 2.0, 9.0, 12.0),
+        source_start=0,
+        source_end=1,
+        mapping_state=PdfCharacterMappingState.GLYPH,
+    )
+    span = PdfTextSpan(
+        text="W",
+        bbox=(1.0, 2.0, 9.0, 12.0),
+        font_name="Helvetica",
+        font_size=10.0,
+        font_flags=0,
+        color=0,
+        span_index=0,
+        characters=(character,),
+    )
+
+    with pytest.raises(ValidationError):
+        character.source_start = 1
+
+    assert span.model_dump(mode="json")["characters"] == [
+        {
+            "text": "W",
+            "bbox": [1.0, 2.0, 9.0, 12.0],
+            "source_start": 0,
+            "source_end": 1,
+            "mapping_state": "glyph",
+        }
+    ]
 
 
 @pytest.mark.parametrize(

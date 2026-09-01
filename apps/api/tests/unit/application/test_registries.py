@@ -21,6 +21,7 @@ from text_verification.exporters.compatibility_exporter import CompatibilityExpo
 from text_verification.exporters.registry import ExporterRegistry
 from text_verification.parsers import compatibility_parser as compatibility_parser_module
 from text_verification.parsers.compatibility_parser import CompatibilityParser
+from text_verification.parsers.pdf_parser import PdfParser
 from text_verification.parsers.registry import ParserRegistry
 from text_verification.registry_errors import DuplicateCapabilityError, MissingCapabilityError
 
@@ -586,6 +587,86 @@ def test_compatibility_exporter_allows_explicit_deletion_suggestion(
         [_issue(suggestion="", auto_fixable=True)],
         tmp_path / "exported.txt",
     )
+
+
+def test_pdf_export_validates_every_segment_before_mutation_or_artifact_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pymupdf
+
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "fixtures"
+        / "pdf"
+        / "layout-order.pdf"
+    )
+    document = PdfParser().parse(source)
+    corrupted = document.model_copy(deep=True)
+    locator = corrupted.blocks[0].source_locator
+    locator["characters"] = [
+        character
+        for character in locator["characters"]
+        if not 9 <= character["source_start"] < 13
+    ]
+    locator["segments"][2]["text"] = "missing"
+
+    monkeypatch.setattr(PdfParser, "parse", lambda self, path: corrupted)
+    original_search = pymupdf.Page.search_for
+
+    def selective_search(
+        page: pymupdf.Page,
+        needle: str,
+        *args: object,
+        **kwargs: object,
+    ) -> list[pymupdf.Rect]:
+        if needle in {"AlphaBeta", "Beta", "missing"}:
+            return []
+        return original_search(page, needle, *args, **kwargs)
+
+    mutations: list[tuple[float, float, float, float]] = []
+    original_redact = pymupdf.Page.add_redact_annot
+
+    def recording_redact(
+        page: pymupdf.Page,
+        rectangle: pymupdf.Rect,
+        *args: object,
+        **kwargs: object,
+    ) -> pymupdf.Annot:
+        mutations.append(tuple(rectangle))
+        return original_redact(page, rectangle, *args, **kwargs)
+
+    monkeypatch.setattr(pymupdf.Page, "search_for", selective_search)
+    monkeypatch.setattr(pymupdf.Page, "add_redact_annot", recording_redact)
+    target = tmp_path / "must-not-exist.pdf"
+    exporter = CompatibilityExporter(
+        FileType.PDF,
+        source_path_resolver=StaticSourcePathResolver(source),
+    )
+
+    raised: ExportError | None = None
+    try:
+        exporter.export(
+            document,
+            [
+                _issue(
+                    start=4,
+                    end=13,
+                    original="AlphaBeta",
+                    suggestion="Merged",
+                )
+            ],
+            target,
+        )
+    except ExportError as error:
+        raised = error
+
+    assert str(raised) == (
+        "PDF compatibility mapping validation failed: "
+        "character metadata is incomplete or invalid."
+    )
+    assert mutations == []
+    assert not target.exists()
 
 
 @dataclass

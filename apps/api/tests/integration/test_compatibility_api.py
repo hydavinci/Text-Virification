@@ -1038,6 +1038,44 @@ def test_pdf_export_changes_only_the_second_occurrence_within_one_span(
     assert reparsed.json()["text"] == "token alter"
 
 
+def test_pdf_export_redacts_only_the_exact_glyph_in_a_proportional_span(
+    app: FastAPI,
+    client: TestClient,
+    tmp_path: Path,
+) -> None:
+    import pymupdf
+
+    override_storage(app, tmp_path)
+    source = PDF_FIXTURE_DIRECTORY.joinpath("proportional-span.pdf").read_bytes()
+    analyzed = client.post(
+        "/api/v1/analyze",
+        files={"file": ("proportional.pdf", source, "application/pdf")},
+    )
+    assert analyzed.status_code == 200
+    assert analyzed.json()["text"] == "WWWWi"
+
+    exported = client.post(
+        "/api/v1/export-original",
+        json={
+            "file_id": analyzed.json()["file_id"],
+            "filename": "proportional.pdf",
+            "replacements": [
+                {
+                    "original": "i",
+                    "suggestion": "X",
+                    "position": 4,
+                    "end_position": 5,
+                }
+            ],
+            "track_changes": False,
+        },
+    )
+
+    assert exported.status_code == 200
+    with pymupdf.open(stream=exported.content, filetype="pdf") as output:
+        assert output[0].get_text("text").strip() == "WWWWX"
+
+
 def test_pdf_export_replaces_a_range_crossing_styled_source_spans(
     app: FastAPI,
     client: TestClient,
@@ -1068,6 +1106,51 @@ def test_pdf_export_replaces_a_range_crossing_styled_source_spans(
     )
     assert reparsed.status_code == 200
     assert reparsed.json()["text"] == "Top\nMerged\nBottom"
+
+
+def test_pdf_track_changes_annotates_every_mapped_styled_piece(
+    app: FastAPI,
+    client: TestClient,
+    tmp_path: Path,
+) -> None:
+    import pymupdf
+
+    override_storage(app, tmp_path)
+    source = PDF_FIXTURE_DIRECTORY.joinpath("styled-space.pdf").read_bytes()
+    analyzed = client.post(
+        "/api/v1/analyze",
+        files={"file": ("styled-space.pdf", source, "application/pdf")},
+    )
+    assert analyzed.status_code == 200
+    assert analyzed.json()["text"] == "Alpha Beta"
+
+    exported = client.post(
+        "/api/v1/export-original",
+        json={
+            "file_id": analyzed.json()["file_id"],
+            "filename": "styled-space.pdf",
+            "replacements": [
+                {
+                    "original": "Alpha Beta",
+                    "suggestion": "Merged",
+                    "position": 0,
+                    "end_position": 10,
+                }
+            ],
+            "track_changes": True,
+        },
+    )
+
+    assert exported.status_code == 200
+    with pymupdf.open(stream=exported.content, filetype="pdf") as output:
+        annotations = list(output[0].annots() or ())
+        assert len(annotations) == 2
+        assert all(
+            annotation.info["content"] == "原文: Alpha Beta\n建议: Merged"
+            for annotation in annotations
+        )
+
+
 def test_scenarios_and_formats_are_discoverable(client: TestClient) -> None:
     scenarios_response = client.get("/api/v1/scenarios")
     formats_response = client.get("/api/v1/formats")

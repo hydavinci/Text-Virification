@@ -11,6 +11,7 @@ from text_verification.compatibility.adapters import source_version_for_file
 from text_verification.document_processing.pdf_classifier import classify_page
 from text_verification.document_processing.pdf_models import (
     OcrRequirement,
+    PdfCharacterMappingState,
     PdfDocumentMetadata,
     PdfExtractionWarning,
     PdfImage,
@@ -18,14 +19,18 @@ from text_verification.document_processing.pdf_models import (
     PdfResourceLimits,
     PdfTable,
     PdfTableCell,
+    PdfTextCharacter,
     PdfTextSpan,
 )
 from text_verification.domain.documents import DocumentMetadata, DocumentModel, FileType, TextBlock
 from text_verification.parsers.errors import ParserError, PdfResourceLimitError
 
 _PARSER_NAME = "pymupdf-pdf"
-_PARSER_VERSION = "2"
+_PARSER_VERSION = "3"
 _PYMUPDF: Any = pymupdf
+_MIN_VISUAL_GAP = 0.5
+_FONT_GAP_RATIO = 0.08
+_GLYPH_GAP_RATIO = 0.2
 
 
 @dataclass(frozen=True)
@@ -250,16 +255,22 @@ def _normalize_tables(
 
 def _extract_raw_spans(page: Any, geometry: _PageGeometry) -> list[_RawSpan]:
     raw_spans: list[_RawSpan] = []
-    for block in page.get_text("dict").get("blocks", []):
+    for block in page.get_text("rawdict").get("blocks", []):
         if block.get("type") != 0:
             continue
         for line in block.get("lines", []):
             for raw_span in line.get("spans", []):
-                text = _normalize_inline_text(str(raw_span.get("text", "")))
                 bbox = _normalized_bbox(raw_span["bbox"], geometry)
-                if not text or bbox is None:
+                characters = _raw_span_characters(raw_span, geometry)
+                if not characters or bbox is None:
                     continue
-                raw_spans.append(_RawSpan(text=text, bbox=bbox, raw=raw_span))
+                raw_spans.append(
+                    _RawSpan(
+                        bbox=bbox,
+                        raw=raw_span,
+                        characters=characters,
+                    )
+                )
     raw_spans.sort(
         key=lambda item: (
             item.bbox[1],
@@ -272,7 +283,7 @@ def _extract_raw_spans(page: Any, geometry: _PageGeometry) -> list[_RawSpan]:
 
 
 def _extract_spans(raw_spans: list[_RawSpan], tables: list[PdfTable]) -> list[PdfTextSpan]:
-    return [
+    spans = [
         PdfTextSpan(
             text=raw_span.text,
             bbox=raw_span.bbox,
@@ -281,10 +292,205 @@ def _extract_spans(raw_spans: list[_RawSpan], tables: list[PdfTable]) -> list[Pd
             font_flags=int(_as_any(raw_span.raw.get("flags", 0))),
             color=int(_as_any(raw_span.raw.get("color", 0))),
             span_index=index,
+            characters=raw_span.characters,
         )
         for index, raw_span in enumerate(raw_spans)
         if not _is_table_span(raw_span.text, raw_span.bbox, tables)
     ]
+    return _normalize_span_boundaries(spans)
+
+
+def _raw_span_characters(
+    raw_span: dict[str, object],
+    geometry: _PageGeometry,
+) -> tuple[PdfTextCharacter, ...]:
+    normalized: list[
+        tuple[
+            str,
+            tuple[float, float, float, float] | None,
+            PdfCharacterMappingState,
+        ]
+    ] = []
+    whitespace_pending = False
+    raw_characters = raw_span.get("chars", [])
+    if not isinstance(raw_characters, list):
+        return ()
+    for raw_character in raw_characters:
+        if not isinstance(raw_character, dict):
+            continue
+        raw_text = str(raw_character.get("c", ""))
+        for character in raw_text.replace("\r", " ").replace("\n", " "):
+            if character.isspace():
+                if not whitespace_pending:
+                    normalized.append(
+                        (
+                            " ",
+                            None,
+                            PdfCharacterMappingState.SYNTHETIC_SPACE,
+                        )
+                    )
+                whitespace_pending = True
+                continue
+            bbox_value = raw_character.get("bbox")
+            if bbox_value is None:
+                continue
+            bbox = _normalized_bbox(bbox_value, geometry)
+            if bbox is None:
+                continue
+            normalized.append((character, bbox, PdfCharacterMappingState.GLYPH))
+            whitespace_pending = False
+    return _characters_with_offsets(normalized)
+
+
+def _normalize_span_boundaries(spans: list[PdfTextSpan]) -> list[PdfTextSpan]:
+    normalized: list[PdfTextSpan] = []
+    for line in _visual_lines(tuple(spans)):
+        normalized.extend(_normalize_line_span_boundaries(line.spans))
+    return [
+        span.model_copy(update={"span_index": span_index})
+        for span_index, span in enumerate(normalized)
+    ]
+
+
+def _normalize_line_span_boundaries(
+    spans: tuple[PdfTextSpan, ...],
+) -> list[PdfTextSpan]:
+    normalized: list[tuple[PdfTextSpan, list[PdfTextCharacter]]] = []
+    pending_whitespace = False
+    for span in spans:
+        leading_whitespace, content, trailing_whitespace = _boundary_characters(
+            span.characters
+        )
+        if not content:
+            pending_whitespace = (
+                pending_whitespace or leading_whitespace or trailing_whitespace
+            )
+            continue
+        if not normalized:
+            if pending_whitespace or leading_whitespace:
+                content.insert(0, _synthetic_character())
+        else:
+            previous_span, previous_characters = normalized[-1]
+            if (
+                pending_whitespace
+                or leading_whitespace
+                or _has_visual_word_gap(
+                    previous_span,
+                    previous_characters,
+                    span,
+                    content,
+                )
+            ):
+                previous_characters.append(_synthetic_character())
+        normalized.append((span, content))
+        pending_whitespace = trailing_whitespace
+
+    if normalized and pending_whitespace:
+        normalized[-1][1].append(_synthetic_character())
+
+    return [
+        _span_with_characters(span, characters)
+        for span, characters in normalized
+    ]
+
+
+def _boundary_characters(
+    characters: tuple[PdfTextCharacter, ...],
+) -> tuple[bool, list[PdfTextCharacter], bool]:
+    first = 0
+    while first < len(characters) and characters[first].text.isspace():
+        first += 1
+    last = len(characters)
+    while last > first and characters[last - 1].text.isspace():
+        last -= 1
+    return first > 0, list(characters[first:last]), last < len(characters)
+
+
+def _has_visual_word_gap(
+    previous_span: PdfTextSpan,
+    previous_characters: list[PdfTextCharacter],
+    next_span: PdfTextSpan,
+    next_characters: list[PdfTextCharacter],
+) -> bool:
+    previous = next(
+        (
+            character
+            for character in reversed(previous_characters)
+            if character.bbox is not None
+        ),
+        None,
+    )
+    following = next(
+        (character for character in next_characters if character.bbox is not None),
+        None,
+    )
+    if previous is None or following is None:
+        return False
+    previous_bbox = previous.bbox
+    following_bbox = following.bbox
+    assert previous_bbox is not None
+    assert following_bbox is not None
+    gap = following_bbox[0] - previous_bbox[2]
+    if gap <= 0:
+        return False
+    glyph_width = min(
+        previous_bbox[2] - previous_bbox[0],
+        following_bbox[2] - following_bbox[0],
+    )
+    threshold = max(
+        _MIN_VISUAL_GAP,
+        min(previous_span.font_size, next_span.font_size) * _FONT_GAP_RATIO,
+        glyph_width * _GLYPH_GAP_RATIO,
+    )
+    return gap >= threshold
+
+
+def _span_with_characters(
+    span: PdfTextSpan,
+    characters: list[PdfTextCharacter],
+) -> PdfTextSpan:
+    values = [
+        (character.text, character.bbox, character.mapping_state)
+        for character in characters
+    ]
+    normalized_characters = _characters_with_offsets(values)
+    return span.model_copy(
+        update={
+            "text": "".join(character.text for character in normalized_characters),
+            "characters": normalized_characters,
+        }
+    )
+
+
+def _synthetic_character() -> PdfTextCharacter:
+    return PdfTextCharacter(
+        text=" ",
+        bbox=None,
+        source_start=0,
+        source_end=1,
+        mapping_state=PdfCharacterMappingState.SYNTHETIC_SPACE,
+    )
+
+
+def _characters_with_offsets(
+    values: list[
+        tuple[
+            str,
+            tuple[float, float, float, float] | None,
+            PdfCharacterMappingState,
+        ]
+    ],
+) -> tuple[PdfTextCharacter, ...]:
+    return tuple(
+        PdfTextCharacter(
+            text=text,
+            bbox=bbox,
+            source_start=offset,
+            source_end=offset + 1,
+            mapping_state=mapping_state,
+        )
+        for offset, (text, bbox, mapping_state) in enumerate(values)
+    )
 
 
 def _is_table_span(
@@ -372,9 +578,13 @@ class _VisualLine:
 
 @dataclass(frozen=True)
 class _RawSpan:
-    text: str
     bbox: tuple[float, float, float, float]
     raw: dict[str, object]
+    characters: tuple[PdfTextCharacter, ...]
+
+    @property
+    def text(self) -> str:
+        return "".join(character.text for character in self.characters)
 
 
 @dataclass(frozen=True)
@@ -429,7 +639,7 @@ class _ExtractedBlock:
 
 
 def _page_block(page: int, lines: list[_VisualLine]) -> _ExtractedBlock:
-    text, segments = _lines_text_and_segments(lines)
+    text, segments, characters = _lines_text_and_source_metadata(lines)
     first = lines[0].spans[0]
     return _ExtractedBlock(
         block_id=f"page-{page}",
@@ -450,36 +660,49 @@ def _page_block(page: int, lines: list[_VisualLine]) -> _ExtractedBlock:
                 for span in line.spans
             ],
         },
-        source_locator={"locator_kind": "page", "page": page, "segments": segments},
+        source_locator={
+            "locator_kind": "page",
+            "page": page,
+            "segments": segments,
+            "characters": characters,
+        },
     )
 
 
 def _line_blocks(page: int, lines: list[_VisualLine]) -> list[_ExtractedBlock]:
-    return [
-        _ExtractedBlock(
-            block_id=f"pdf-page-{page}-line-{line_index}",
-            kind="paragraph",
-            text=line.text,
-            page=page,
-            bbox=line.bbox,
-            ordinal=line_index,
-            paragraph_index=line_index,
-            table_index=None,
-            row_index=None,
-            cell_index=None,
-            style={
-                "font": _font_style(line.spans[0]),
-                "spans": [span.model_dump(mode="json") for span in line.spans],
-            },
-            source_locator={
-                "locator_kind": "pdf_line",
-                "page": page,
-                "line_index": line_index,
-                "segments": _line_segments(line.spans, 0),
-            },
+    blocks: list[_ExtractedBlock] = []
+    for line_index, line in enumerate(lines):
+        segments, characters, _ = _line_source_metadata(
+            line.spans,
+            start=0,
+            line_index=line_index,
         )
-        for line_index, line in enumerate(lines)
-    ]
+        blocks.append(
+            _ExtractedBlock(
+                block_id=f"pdf-page-{page}-line-{line_index}",
+                kind="paragraph",
+                text=line.text,
+                page=page,
+                bbox=line.bbox,
+                ordinal=line_index,
+                paragraph_index=line_index,
+                table_index=None,
+                row_index=None,
+                cell_index=None,
+                style={
+                    "font": _font_style(line.spans[0]),
+                    "spans": [span.model_dump(mode="json") for span in line.spans],
+                },
+                source_locator={
+                    "locator_kind": "pdf_line",
+                    "page": page,
+                    "line_index": line_index,
+                    "segments": segments,
+                    "characters": characters,
+                },
+            )
+        )
+    return blocks
 
 
 def _table_blocks(page: int, tables: tuple[PdfTable, ...]) -> list[_ExtractedBlock]:
@@ -504,6 +727,7 @@ def _table_blocks(page: int, tables: tuple[PdfTable, ...]) -> list[_ExtractedBlo
                 "cell_index": cell.cell_index,
                 "bbox": list(cell.bbox),
                 "segments": _line_segments_from_text(cell.text, cell.bbox),
+                "characters": _unmapped_text_characters(cell.text),
             },
         )
         for table in tables
@@ -539,27 +763,48 @@ def _image_blocks(page: int, images: tuple[PdfImage, ...]) -> list[_ExtractedBlo
     ]
 
 
-def _lines_text_and_segments(lines: list[_VisualLine]) -> tuple[str, list[dict[str, object]]]:
+def _lines_text_and_source_metadata(
+    lines: list[_VisualLine],
+) -> tuple[str, list[dict[str, object]], list[dict[str, object]]]:
     text_parts: list[str] = []
     segments: list[dict[str, object]] = []
+    characters: list[dict[str, object]] = []
     cursor = 0
     for line_index, line in enumerate(lines):
         if line_index:
             text_parts.append("\n")
+            characters.append(
+                _source_character(
+                    text="\n",
+                    bbox=None,
+                    source_start=cursor,
+                    mapping_state=PdfCharacterMappingState.SYNTHETIC_SPACE,
+                    line_index=line_index - 1,
+                    span_index=None,
+                )
+            )
             cursor += 1
         line_text = line.text
         text_parts.append(line_text)
-        segments.extend(_line_segments(line.spans, cursor))
-        cursor += len(line_text)
-    return "".join(text_parts), segments
+        line_segments, line_characters, cursor = _line_source_metadata(
+            line.spans,
+            start=cursor,
+            line_index=line_index,
+        )
+        segments.extend(line_segments)
+        characters.extend(line_characters)
+    return "".join(text_parts), segments, characters
 
 
-def _line_segments(
+def _line_source_metadata(
     spans: tuple[PdfTextSpan, ...],
+    *,
     start: int,
-) -> list[dict[str, object]]:
+    line_index: int,
+) -> tuple[list[dict[str, object]], list[dict[str, object]], int]:
     cursor = start
     segments: list[dict[str, object]] = []
+    characters: list[dict[str, object]] = []
     for span in spans:
         end = cursor + len(span.text)
         segments.append(
@@ -570,8 +815,19 @@ def _line_segments(
                 "bbox": list(span.bbox),
             }
         )
+        characters.extend(
+            _source_character(
+                text=character.text,
+                bbox=character.bbox,
+                source_start=cursor + character.source_start,
+                mapping_state=character.mapping_state,
+                line_index=line_index,
+                span_index=span.span_index,
+            )
+            for character in span.characters
+        )
         cursor = end
-    return segments
+    return segments, characters, cursor
 
 
 def _line_segments_from_text(
@@ -579,6 +835,50 @@ def _line_segments_from_text(
     bbox: tuple[float, float, float, float],
 ) -> list[dict[str, object]]:
     return [{"start": 0, "end": len(text), "text": text, "bbox": list(bbox)}]
+
+
+def _unmapped_text_characters(text: str) -> list[dict[str, object]]:
+    line_index = 0
+    characters: list[dict[str, object]] = []
+    for source_start, character in enumerate(text):
+        mapping_state = (
+            PdfCharacterMappingState.SYNTHETIC_SPACE
+            if character.isspace()
+            else PdfCharacterMappingState.UNMAPPED
+        )
+        characters.append(
+            _source_character(
+                text=character,
+                bbox=None,
+                source_start=source_start,
+                mapping_state=mapping_state,
+                line_index=line_index,
+                span_index=None,
+            )
+        )
+        if character == "\n":
+            line_index += 1
+    return characters
+
+
+def _source_character(
+    *,
+    text: str,
+    bbox: tuple[float, float, float, float] | None,
+    source_start: int,
+    mapping_state: PdfCharacterMappingState,
+    line_index: int,
+    span_index: int | None,
+) -> dict[str, object]:
+    return {
+        "text": text,
+        "bbox": list(bbox) if bbox is not None else None,
+        "source_start": source_start,
+        "source_end": source_start + 1,
+        "mapping_state": mapping_state.value,
+        "line_index": line_index,
+        "span_index": span_index,
+    }
 
 
 def _font_style(span: PdfTextSpan) -> dict[str, object]:
@@ -663,20 +963,6 @@ def _intersects(
         and first[2] > second[0]
         and first[1] < second[3]
         and first[3] > second[1]
-    )
-
-
-def _normalize_inline_text(text: str) -> str:
-    normalized = text.replace("\r", "").replace("\n", " ")
-    has_leading_space = bool(normalized[:1].isspace())
-    has_trailing_space = bool(normalized[-1:].isspace())
-    content = " ".join(normalized.split())
-    if not content:
-        return ""
-    return (
-        (" " if has_leading_space else "")
-        + content
-        + (" " if has_trailing_space else "")
     )
 
 
