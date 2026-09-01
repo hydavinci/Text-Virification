@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
+from itertools import groupby
 from math import isfinite
 from pathlib import Path
 from typing import Any, Literal
@@ -110,16 +111,12 @@ def _extract_page(
     tables, table_warnings = _extract_tables(page, page_number, limits)
     tables = _normalize_tables(tables, geometry)
     all_spans = _extract_spans(raw_spans, [])
-    tables, table_span_indices = _align_table_characters(
+    tables, table_character_groups = _align_table_characters(
         tables,
         all_spans,
         limits=limits,
     )
-    spans = [
-        span
-        for span in all_spans
-        if span.span_index not in table_span_indices
-    ]
+    spans = _residual_spans(all_spans, table_character_groups)
     return _ExtractedPage(
         metadata=PdfPageMetadata(
             page=page_number,
@@ -345,9 +342,10 @@ def _align_table_characters(
     spans: list[PdfTextSpan],
     *,
     limits: PdfResourceLimits,
-) -> tuple[list[PdfTable], set[int]]:
+) -> tuple[list[PdfTable], set[str]]:
     candidate_index = _build_table_candidate_index(tables, spans)
     aligned_tables: list[PdfTable] = []
+    owned_group_ids: set[str] = set()
     for table_position, table in enumerate(tables):
         aligned_rows: list[tuple[PdfTableCell, ...]] = []
         for row_position, row in enumerate(table.rows):
@@ -369,25 +367,56 @@ def _align_table_characters(
                         maximum=limits.max_table_glyph_candidates_per_cell,
                         actual=candidate_count,
                     )
+                characters = _align_cell_characters(
+                    cell.text,
+                    cell.bbox,
+                    spans,
+                    candidate_groups=_ordered_table_candidate_groups(candidates),
+                )
+                candidate_group_ids = {
+                    candidate.character.group_id for candidate in candidates
+                }
+                owned_group_ids.update(
+                    character.group_id
+                    for character in characters
+                    if character.group_id is not None
+                    and character.group_id in candidate_group_ids
+                )
                 aligned_cells.append(
-                    cell.model_copy(
-                        update={
-                            "characters": _align_cell_characters(
-                                cell.text,
-                                cell.bbox,
-                                spans,
-                                candidate_groups=_ordered_table_candidate_groups(
-                                    candidates
-                                ),
-                            )
-                        }
-                    )
+                    cell.model_copy(update={"characters": characters})
                 )
             aligned_rows.append(tuple(aligned_cells))
         aligned_tables.append(
             table.model_copy(update={"rows": tuple(aligned_rows)})
         )
-    return aligned_tables, set(candidate_index.used_span_indices)
+    return aligned_tables, owned_group_ids
+
+
+def _residual_spans(
+    spans: list[PdfTextSpan],
+    owned_group_ids: set[str],
+) -> list[PdfTextSpan]:
+    residual: list[PdfTextSpan] = []
+    for span in spans:
+        for owned, characters in groupby(
+            span.characters,
+            key=lambda character: character.group_id in owned_group_ids,
+        ):
+            if owned:
+                continue
+            retained = list(characters)
+            retained_bboxes = [
+                character.bbox
+                for character in retained
+                if character.bbox is not None
+            ]
+            residual_span = _span_with_characters(span, retained)
+            if retained_bboxes:
+                residual_span = residual_span.model_copy(
+                    update={"bbox": _combined_bbox(retained_bboxes)}
+                )
+            residual.append(residual_span)
+    return residual
 
 
 def _align_cell_characters(
@@ -496,59 +525,121 @@ class _OwnedTableCandidate:
 @dataclass(frozen=True)
 class _TableCandidateIndex:
     groups_by_cell: dict[tuple[int, int, int], tuple[_OwnedTableCandidate, ...]]
-    used_span_indices: frozenset[int]
+
+
+@dataclass(frozen=True)
+class _TableRowSpatialIndex:
+    bbox: tuple[float, float, float, float]
+    cells: tuple[_TableCellCandidate, ...]
+    left_edges: tuple[float, ...]
+    right_edges: tuple[float, ...]
+
+    @classmethod
+    def build(
+        cls,
+        cells: tuple[_TableCellCandidate, ...],
+    ) -> _TableRowSpatialIndex:
+        ordered = tuple(sorted(cells, key=lambda cell: (cell.bbox[0], cell.order)))
+        return cls(
+            bbox=_combined_bbox(cell.bbox for cell in ordered),
+            cells=ordered,
+            left_edges=tuple(cell.bbox[0] for cell in ordered),
+            right_edges=tuple(cell.bbox[2] for cell in ordered),
+        )
+
+
+@dataclass(frozen=True)
+class _TableSpatialIndex:
+    bbox: tuple[float, float, float, float]
+    rows: tuple[_TableRowSpatialIndex, ...]
+    top_edges: tuple[float, ...]
+    bottom_edges: tuple[float, ...]
 
 
 @dataclass(frozen=True)
 class _TableCellSpatialIndex:
-    cells: tuple[_TableCellCandidate, ...]
-    left_edges: tuple[float, ...]
+    tables: tuple[_TableSpatialIndex, ...]
 
     @classmethod
     def build(
         cls,
         cells: tuple[_TableCellCandidate, ...],
     ) -> _TableCellSpatialIndex:
-        ordered = tuple(sorted(cells, key=lambda cell: (cell.bbox[0], cell.order)))
-        return cls(
-            cells=ordered,
-            left_edges=tuple(cell.bbox[0] for cell in ordered),
-        )
+        grouped: dict[int, dict[int, list[_TableCellCandidate]]] = {}
+        for cell in cells:
+            table_index, row_index, _ = cell.key
+            grouped.setdefault(table_index, {}).setdefault(row_index, []).append(cell)
+        tables: list[_TableSpatialIndex] = []
+        for table_rows in grouped.values():
+            rows = tuple(
+                _TableRowSpatialIndex.build(tuple(row_cells))
+                for row_cells in table_rows.values()
+            )
+            ordered_rows = tuple(
+                sorted(rows, key=lambda row: (row.bbox[1], row.bbox[3]))
+            )
+            tables.append(
+                _TableSpatialIndex(
+                    bbox=_combined_bbox(row.bbox for row in ordered_rows),
+                    rows=ordered_rows,
+                    top_edges=tuple(row.bbox[1] for row in ordered_rows),
+                    bottom_edges=tuple(row.bbox[3] for row in ordered_rows),
+                )
+            )
+        return cls(tables=tuple(tables))
 
     def owner(
         self,
         bbox: tuple[float, float, float, float],
     ) -> _TableCellCandidate | None:
-        candidate_end = bisect_left(self.left_edges, bbox[2])
         center_x = (bbox[0] + bbox[2]) / 2
         center_y = (bbox[1] + bbox[3]) / 2
         best: _TableCellCandidate | None = None
         best_score: tuple[bool, bool, float, int] | None = None
-        for index in range(candidate_end):
-            cell = self.cells[index]
-            overlap_width = min(cell.bbox[2], bbox[2]) - max(cell.bbox[0], bbox[0])
-            overlap_height = min(cell.bbox[3], bbox[3]) - max(cell.bbox[1], bbox[1])
-            if overlap_width <= 0.0 or overlap_height <= 0.0:
+        for table in self.tables:
+            if (
+                table.bbox[0] >= bbox[2]
+                or table.bbox[1] >= bbox[3]
+                or table.bbox[2] <= bbox[0]
+                or table.bbox[3] <= bbox[1]
+            ):
                 continue
-            contains = (
-                cell.bbox[0] <= bbox[0]
-                and cell.bbox[1] <= bbox[1]
-                and bbox[2] <= cell.bbox[2]
-                and bbox[3] <= cell.bbox[3]
-            )
-            contains_center = (
-                cell.bbox[0] <= center_x <= cell.bbox[2]
-                and cell.bbox[1] <= center_y <= cell.bbox[3]
-            )
-            score = (
-                contains,
-                contains_center,
-                overlap_width * overlap_height,
-                -cell.order,
-            )
-            if best_score is None or score > best_score:
-                best = cell
-                best_score = score
+            row_start = bisect_right(table.bottom_edges, bbox[1])
+            row_end = bisect_left(table.top_edges, bbox[3])
+            for row in table.rows[row_start:row_end]:
+                cell_start = bisect_right(row.right_edges, bbox[0])
+                cell_end = bisect_left(row.left_edges, bbox[2])
+                for cell in row.cells[cell_start:cell_end]:
+                    cell_bbox = cell.bbox
+                    overlap_width = min(cell_bbox[2], bbox[2]) - max(
+                        cell_bbox[0],
+                        bbox[0],
+                    )
+                    overlap_height = min(cell_bbox[3], bbox[3]) - max(
+                        cell_bbox[1],
+                        bbox[1],
+                    )
+                    if overlap_width <= 0.0 or overlap_height <= 0.0:
+                        continue
+                    contains = (
+                        cell_bbox[0] <= bbox[0]
+                        and cell_bbox[1] <= bbox[1]
+                        and bbox[2] <= cell_bbox[2]
+                        and bbox[3] <= cell_bbox[3]
+                    )
+                    contains_center = (
+                        cell_bbox[0] <= center_x <= cell_bbox[2]
+                        and cell_bbox[1] <= center_y <= cell_bbox[3]
+                    )
+                    score = (
+                        contains,
+                        contains_center,
+                        overlap_width * overlap_height,
+                        -cell.order,
+                    )
+                    if best_score is None or score > best_score:
+                        best = cell
+                        best_score = score
         return best
 
 
@@ -582,12 +673,8 @@ def _build_candidate_index(
         list[_OwnedTableCandidate],
     ] = {cell.key: [] for cell in cells}
     if not cells:
-        return _TableCandidateIndex(
-            groups_by_cell={},
-            used_span_indices=frozenset(),
-        )
+        return _TableCandidateIndex(groups_by_cell={})
     spatial_index = _TableCellSpatialIndex.build(cells)
-    used_span_indices: set[int] = set()
     seen_group_ids: set[str] = set()
     page_order = 0
     for span in spans:
@@ -608,14 +695,12 @@ def _build_candidate_index(
                         anchor_bbox=character.bbox or span.bbox,
                     )
                 )
-                used_span_indices.add(span.span_index)
             page_order += 1
     return _TableCandidateIndex(
         groups_by_cell={
             key: tuple(candidates)
             for key, candidates in groups_by_cell.items()
         },
-        used_span_indices=frozenset(used_span_indices),
     )
 
 
@@ -654,22 +739,23 @@ def _ordered_table_candidate_groups(
             line.line_index,
         ),
     )
-    directional = iter(
-        sorted(
-            (
-                line
-                for line in lines
-                if _candidate_line_preserves_raw_flow(line)
-            ),
+    ordered_lines = visual_order.copy()
+    run_start = 0
+    while run_start < len(ordered_lines):
+        if not _candidate_line_preserves_raw_flow(ordered_lines[run_start]):
+            run_start += 1
+            continue
+        run_end = run_start + 1
+        while (
+            run_end < len(ordered_lines)
+            and _candidate_line_preserves_raw_flow(ordered_lines[run_end])
+        ):
+            run_end += 1
+        ordered_lines[run_start:run_end] = sorted(
+            ordered_lines[run_start:run_end],
             key=lambda line: line.line_index,
         )
-    )
-    ordered_lines = [
-        next(directional)
-        if _candidate_line_preserves_raw_flow(line)
-        else line
-        for line in visual_order
-    ]
+        run_start = run_end
     source_groups: list[dict[str, object]] = []
     for line_position, line in enumerate(ordered_lines):
         if line_position:
@@ -1414,16 +1500,23 @@ def _visual_lines(spans: tuple[PdfTextSpan, ...]) -> list[_VisualLine]:
             line.line_index,
         ),
     )
-    directional = iter(
-        sorted(
-            (line for line in lines if _line_preserves_raw_flow(line)),
+    run_start = 0
+    while run_start < len(visual_order):
+        if not _line_preserves_raw_flow(visual_order[run_start]):
+            run_start += 1
+            continue
+        run_end = run_start + 1
+        while (
+            run_end < len(visual_order)
+            and _line_preserves_raw_flow(visual_order[run_end])
+        ):
+            run_end += 1
+        visual_order[run_start:run_end] = sorted(
+            visual_order[run_start:run_end],
             key=lambda line: line.line_index,
         )
-    )
-    return [
-        next(directional) if _line_preserves_raw_flow(line) else line
-        for line in visual_order
-    ]
+        run_start = run_end
+    return visual_order
 
 
 def _line_preserves_raw_flow(line: _VisualLine) -> bool:
@@ -1452,17 +1545,25 @@ class _ExtractedBlock:
 
 
 def _order_page_blocks(items: list[_ExtractedBlock]) -> list[_ExtractedBlock]:
+    source_order = {id(item): index for index, item in enumerate(items)}
     visual_order = sorted(items, key=_visual_block_order)
-    directional = iter(
-        sorted(
-            (item for item in items if item.preserve_raw_flow),
-            key=lambda item: (item.ordinal, item.block_id),
+    run_start = 0
+    while run_start < len(visual_order):
+        if not visual_order[run_start].preserve_raw_flow:
+            run_start += 1
+            continue
+        run_end = run_start + 1
+        while (
+            run_end < len(visual_order)
+            and visual_order[run_end].preserve_raw_flow
+        ):
+            run_end += 1
+        visual_order[run_start:run_end] = sorted(
+            visual_order[run_start:run_end],
+            key=lambda item: (item.ordinal, source_order[id(item)]),
         )
-    )
-    return [
-        next(directional) if item.preserve_raw_flow else item
-        for item in visual_order
-    ]
+        run_start = run_end
+    return visual_order
 
 
 def _visual_block_order(item: _ExtractedBlock) -> tuple[float, float, int, int]:

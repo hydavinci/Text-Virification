@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pymupdf
@@ -9,6 +10,7 @@ import pytest
 from pydantic import ValidationError
 
 from text_verification.document_processing.pdf_models import (
+    PdfCharacterMappingState,
     PdfImage,
     PdfPageKind,
     PdfPageMetadata,
@@ -16,6 +18,7 @@ from text_verification.document_processing.pdf_models import (
     PdfTable,
     PdfTableCell,
     PdfTextSpan,
+    PdfWritingMode,
 )
 from text_verification.parsers import pdf_parser as pdf_parser_module
 from text_verification.parsers.errors import ParserError, PdfResourceLimitError
@@ -925,6 +928,101 @@ def test_horizontal_only_lines_keep_visual_order() -> None:
     assert text == "A\nB"
 
 
+def test_directional_runs_keep_local_raw_order_across_fixed_anchors() -> None:
+    def item(
+        text: str,
+        bbox: tuple[float, float, float, float],
+        line_index: int,
+        *,
+        block_id: str | None = None,
+        ordinal: int | None = None,
+        kind: str = "paragraph",
+        directional: bool = True,
+    ) -> SimpleNamespace:
+        direction = (-1.0, 0.0) if directional else (1.0, 0.0)
+        value = SimpleNamespace(
+            text=text,
+            bbox=bbox,
+            line_index=line_index,
+            line_direction=direction,
+            writing_mode=PdfWritingMode.HORIZONTAL,
+            block_id=block_id or text,
+            ordinal=line_index if ordinal is None else ordinal,
+            kind=kind,
+            preserve_raw_flow=directional,
+            source_start=0,
+            mapping_state=PdfCharacterMappingState.GLYPH,
+            group_id=f"group-{text}",
+            raw_line_index=line_index,
+            span_order=0,
+            span_index=line_index,
+            page_order=line_index,
+            anchor_bbox=bbox,
+        )
+        value.character = value
+        return value
+
+    source_items = (
+        item("D1A", (20.0, 50.0, 30.0, 60.0), 0, block_id="z-d1a", ordinal=0),
+        item("D1B", (10.0, 50.0, 20.0, 60.0), 1, block_id="a-d1b", ordinal=0),
+        item("H", (10.0, 30.0, 20.0, 40.0), 2, directional=False),
+        item("D2A", (20.0, 10.0, 30.0, 20.0), 3),
+        item("D2B", (10.0, 10.0, 20.0, 20.0), 4),
+    )
+
+    assert [line.text for line in pdf_parser_module._visual_lines(source_items)] == [
+        "D2A",
+        "D2B",
+        "H",
+        "D1A",
+        "D1B",
+    ]
+
+    source_blocks = [
+        source_items[0],
+        source_items[1],
+        source_items[2],
+        item(
+            "T",
+            (10.0, 35.0, 20.0, 45.0),
+            5,
+            block_id="table",
+            kind="table_cell",
+            directional=False,
+        ),
+        item(
+            "",
+            (10.0, 40.0, 20.0, 50.0),
+            6,
+            block_id="image",
+            kind="image",
+            directional=False,
+        ),
+        source_items[3],
+        source_items[4],
+    ]
+
+    assert [
+        item.block_id for item in pdf_parser_module._order_page_blocks(source_blocks)
+    ] == [
+        "D2A",
+        "D2B",
+        "H",
+        "table",
+        "image",
+        "z-d1a",
+        "a-d1b",
+    ]
+
+    assert [
+        group["text"]
+        for group in pdf_parser_module._ordered_table_candidate_groups(
+            source_items
+        )
+        if group["text"] != "\n"
+    ] == ["D2A", "D2B", "H", "D1A", "D1B"]
+
+
 @pytest.mark.parametrize(
     ("direction", "writing_mode"),
     [
@@ -1150,7 +1248,7 @@ class _CountingSpanList(list[PdfTextSpan]):
         return super().__iter__()
 
 
-def _aligned_boundary_table() -> tuple[list[PdfTable], _CountingSpanList, set[int]]:
+def _aligned_boundary_table() -> tuple[list[PdfTable], _CountingSpanList, set[str]]:
     rawdict = _rawdict_with_line(
         [
             _raw_span(
@@ -1197,19 +1295,19 @@ def _aligned_boundary_table() -> tuple[list[PdfTable], _CountingSpanList, set[in
         ),
     )
 
-    aligned, used_span_indices = pdf_parser_module._align_table_characters(
+    aligned, owned_group_ids = pdf_parser_module._align_table_characters(
         [table],
         spans,
         limits=PdfResourceLimits(),
     )
-    return aligned, spans, used_span_indices
+    return aligned, spans, owned_group_ids
 
 
 def test_table_boundary_glyph_is_owned_by_exactly_one_cell() -> None:
-    aligned, _, used_span_indices = _aligned_boundary_table()
+    aligned, _, owned_group_ids = _aligned_boundary_table()
 
     cells = aligned[0].rows[0]
-    assert used_span_indices == {0}
+    assert owned_group_ids == {"line-0-span-0-glyph-0"}
     assert [
         (character.mapping_state.value, character.group_id)
         for character in cells[0].characters
@@ -1229,6 +1327,93 @@ def test_table_candidate_index_scans_page_spans_once() -> None:
     _, spans, _ = _aligned_boundary_table()
 
     assert spans.iterations == 1
+
+
+def test_table_spatial_index_bounds_candidate_cell_inspections() -> None:
+    cell_count = 256
+    inspections = 0
+
+    class _CountingCell:
+        def __init__(self, index: int) -> None:
+            self.key = (0, 0, index)
+            self.order = index
+            self._bbox = (float(index), 0.0, float(index + 1), 1.0)
+
+        @property
+        def bbox(self) -> tuple[float, float, float, float]:
+            nonlocal inspections
+            inspections += 1
+            return self._bbox
+
+    cells = tuple(_CountingCell(index) for index in range(cell_count))
+    index = pdf_parser_module._TableCellSpatialIndex.build(cells)
+    inspections = 0
+
+    for cell_number, cell in enumerate(cells):
+        x = float(cell_number)
+        assert index.owner((x + 0.25, 0.25, x + 0.75, 0.75)) is cell
+
+    assert inspections <= cell_count * 2
+
+
+def test_partial_table_overlap_preserves_unowned_editable_glyph() -> None:
+    rawdict = _rawdict_with_line(
+        [
+            _raw_span(
+                bbox=(1.0, 1.0, 19.0, 9.0),
+                characters=[
+                    ("A", (1.0, 1.0, 9.0, 9.0)),
+                    ("B", (11.0, 1.0, 19.0, 9.0)),
+                ],
+            )
+        ],
+        direction=(1.0, 0.0),
+        writing_mode=0,
+    )
+    table = SimpleNamespace(
+        bbox=(0.0, 0.0, 10.0, 10.0),
+        rows=[SimpleNamespace(cells=[(0.0, 0.0, 10.0, 10.0)])],
+        extract=lambda: [["A"]],
+    )
+
+    page = SimpleNamespace(
+        rect=pymupdf.Rect(0.0, 0.0, 20.0, 20.0),
+        rotation_matrix=pymupdf.Matrix(1, 1),
+        get_text=lambda option, **_: rawdict if option == "rawdict" else "AB",
+        get_images=lambda **_: [],
+        find_tables=lambda: SimpleNamespace(tables=[table]),
+    )
+
+    extracted = pdf_parser_module._extract_page(
+        page,
+        1,
+        PdfResourceLimits(),
+    )
+    blocks, text = pdf_parser_module._canonical_blocks((extracted.metadata,))
+
+    assert text == "A\nB"
+    assert [(block.kind, block.text) for block in blocks if block.text] == [
+        ("table_cell", "A"),
+        ("paragraph", "B"),
+    ]
+    outside_character = blocks[1].source_locator["characters"][0]
+    assert (
+        outside_character["text"],
+        outside_character["mapping_state"],
+        outside_character["bbox"],
+        outside_character["source_start"],
+        outside_character["source_end"],
+        outside_character["span_index"],
+        outside_character["group_id"],
+    ) == (
+        "B",
+        "glyph",
+        [11.0, 1.0, 19.0, 9.0],
+        0,
+        1,
+        0,
+        "line-0-span-0-glyph-1",
+    )
 
 
 def test_table_alignment_maps_complete_multi_codepoint_groups_only() -> None:
