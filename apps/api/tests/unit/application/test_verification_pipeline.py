@@ -29,6 +29,7 @@ from text_verification.domain.verification import (
 )
 from text_verification.infrastructure.dictionary_loader import DictionaryLoadError
 from text_verification.parsers import compatibility_parser as compatibility_parser_module
+from text_verification.parsers import pdf_parser as pdf_parser_module
 from text_verification.parsers.registry import ParserRegistry
 
 
@@ -502,6 +503,7 @@ def test_default_factory_resolves_all_seven_parsers(
         )
 
     monkeypatch.setattr(compatibility_parser_module.CompatibilityParser, "parse", fake_parse)
+    monkeypatch.setattr(pdf_parser_module.PdfParser, "parse", fake_parse)
     pipeline = build_default_verification_pipeline(Settings(llm_api_key=""))
 
     resolved_types = {

@@ -19,7 +19,7 @@ class TextBlock(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     block_id: str
-    kind: Literal["paragraph", "heading", "table_cell", "header", "footer"]
+    kind: Literal["paragraph", "heading", "table_cell", "header", "footer", "image"]
     text: str
     global_start: int = Field(ge=0)
     global_end: int = Field(ge=0)
@@ -61,6 +61,7 @@ class DocumentModel(BaseModel):
     blocks: list[TextBlock]
     parser_name: str
     parser_version: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def validate_blocks(self) -> "DocumentModel":

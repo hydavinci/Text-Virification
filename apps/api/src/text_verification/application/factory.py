@@ -21,6 +21,7 @@ from text_verification.domain.documents import DocumentModel, FileType
 from text_verification.domain.issues import Issue, IssueSeverity
 from text_verification.domain.ports import Parser
 from text_verification.parsers.compatibility_parser import CompatibilityParser
+from text_verification.parsers.pdf_parser import PdfParser
 from text_verification.parsers.registry import ParserRegistry
 
 
@@ -68,7 +69,14 @@ def build_default_verification_pipeline(
     resolved_settings = settings or get_settings()
     return VerificationPipeline(
         parsers=ParserRegistry(
-            cast(Parser, CompatibilityParser(file_type)) for file_type in FileType
+            (
+                cast(Parser, PdfParser()),
+                *(
+                    cast(Parser, CompatibilityParser(file_type))
+                    for file_type in FileType
+                    if file_type is not FileType.PDF
+                ),
+            )
         ),
         checkers=CheckerRegistry([CompatibilityChecker()]),
         reviewer=CompatibilityIssueReviewer(resolved_settings),
