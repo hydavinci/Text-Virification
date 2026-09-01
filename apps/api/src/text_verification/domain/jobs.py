@@ -100,6 +100,8 @@ class JobRead(BaseModel):
     progress: int
     error_code: str | None = None
     error_message: str | None = None
+    error_stage: str | None = None
+    error_retryable: bool | None = None
     created_at: datetime
     expires_at: datetime
 

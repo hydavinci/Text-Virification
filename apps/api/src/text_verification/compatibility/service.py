@@ -183,7 +183,13 @@ def parse_uploaded_document(
     document_id: UUID | None = None,
 ) -> DocumentModel:
     if _file_type_for(extension) is FileType.PDF:
-        return PdfParser().parse(path)
+        parsed = PdfParser().parse(path)
+        return parsed.model_copy(
+            update={
+                "source_name": source_name,
+                "document_id": document_id or parsed.document_id,
+            }
+        )
     source_version = source_version_for_file(path)
     text, parsed_format, page_map = parse_file(str(path), extension, str(path.parent))
     if not text.strip():

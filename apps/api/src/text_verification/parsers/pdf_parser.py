@@ -157,7 +157,7 @@ def _extract_images(
             )
         for rectangle in rectangles:
             bbox = _normalized_bbox(rectangle, geometry)
-            if not _has_area(bbox):
+            if bbox is None:
                 continue
             images.append(PdfImage(image_index=len(images), xref=xref, bbox=bbox))
     return images, []
@@ -219,6 +219,9 @@ def _normalize_tables(
 ) -> list[PdfTable]:
     tables: list[PdfTable] = []
     for table_index, table_bbox, raw_rows in raw_tables:
+        normalized_table_bbox = _normalized_bbox(table_bbox, geometry)
+        if normalized_table_bbox is None:
+            continue
         rows: list[tuple[PdfTableCell, ...]] = []
         for row_index, raw_row in enumerate(raw_rows):
             rows.append(
@@ -236,7 +239,7 @@ def _normalize_tables(
         tables.append(
             PdfTable(
                 table_index=table_index,
-                bbox=_normalized_bbox(table_bbox, geometry),
+                bbox=normalized_table_bbox,
                 row_count=len(rows),
                 column_count=len(rows[0]),
                 rows=tuple(rows),
@@ -254,7 +257,7 @@ def _extract_raw_spans(page: Any, geometry: _PageGeometry) -> list[_RawSpan]:
             for raw_span in line.get("spans", []):
                 text = _normalize_inline_text(str(raw_span.get("text", "")))
                 bbox = _normalized_bbox(raw_span["bbox"], geometry)
-                if not text or not _has_area(bbox):
+                if not text or bbox is None:
                     continue
                 raw_spans.append(_RawSpan(text=text, bbox=bbox, raw=raw_span))
     raw_spans.sort(
@@ -617,8 +620,13 @@ def _warning(page: int, stage: Literal["table", "image"]) -> PdfExtractionWarnin
 def _normalized_bbox(
     rectangle: Any,
     geometry: _PageGeometry,
-) -> tuple[float, float, float, float]:
-    return _bbox(_PYMUPDF.Rect(rectangle) * geometry.rotation_matrix)
+) -> tuple[float, float, float, float] | None:
+    normalized = _bbox(_PYMUPDF.Rect(rectangle) * geometry.rotation_matrix)
+    x0 = max(normalized[0], geometry.page_bbox[0])
+    y0 = max(normalized[1], geometry.page_bbox[1])
+    x1 = min(normalized[2], geometry.page_bbox[2])
+    y1 = min(normalized[3], geometry.page_bbox[3])
+    return (x0, y0, x1, y1) if x1 > x0 and y1 > y0 else None
 
 
 def _bbox(rectangle: Any) -> tuple[float, float, float, float]:
@@ -659,7 +667,17 @@ def _intersects(
 
 
 def _normalize_inline_text(text: str) -> str:
-    return " ".join(text.replace("\r", "").replace("\n", " ").split())
+    normalized = text.replace("\r", "").replace("\n", " ")
+    has_leading_space = bool(normalized[:1].isspace())
+    has_trailing_space = bool(normalized[-1:].isspace())
+    content = " ".join(normalized.split())
+    if not content:
+        return ""
+    return (
+        (" " if has_leading_space else "")
+        + content
+        + (" " if has_trailing_space else "")
+    )
 
 
 def _normalize_block_text(text: str) -> str:

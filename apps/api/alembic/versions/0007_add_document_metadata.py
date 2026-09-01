@@ -28,7 +28,6 @@ def upgrade() -> None:
             server_default=sa.text("'{}'::jsonb"),
         ),
     )
-    op.alter_column("documents", "metadata", server_default=None)
 
 
 def downgrade() -> None:

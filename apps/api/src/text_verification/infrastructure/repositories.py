@@ -68,6 +68,8 @@ class JobRepository:
             progress=0,
             error_code=None,
             error_message=None,
+            error_stage=None,
+            error_retryable=None,
             created_at=created_at,
             updated_at=created_at,
             expires_at=expires_at,
@@ -376,6 +378,8 @@ class JobRepository:
         error_code: str,
         error_message: str,
         now: datetime,
+        error_stage: str | None = None,
+        error_retryable: bool | None = None,
     ) -> bool:
         _validate_max_length("message", message, MAX_EVENT_MESSAGE_LENGTH)
         _validate_max_length("error_code", error_code, MAX_ERROR_CODE_LENGTH)
@@ -392,6 +396,8 @@ class JobRepository:
             changed_at=now,
             error_code=error_code,
             error_message=error_message,
+            error_stage=error_stage,
+            error_retryable=error_retryable,
             clear_lease=True,
         )
         return True
@@ -555,6 +561,8 @@ class JobRepository:
         changed_at: datetime,
         error_code: str | None = None,
         error_message: str | None = None,
+        error_stage: str | None = None,
+        error_retryable: bool | None = None,
         lease_expires_at: datetime | None = None,
         clear_lease: bool = False,
     ) -> None:
@@ -562,6 +570,8 @@ class JobRepository:
         job.progress = progress
         job.error_code = error_code
         job.error_message = error_message
+        job.error_stage = error_stage
+        job.error_retryable = error_retryable
         job.updated_at = changed_at
         if clear_lease:
             job.lease_owner_token = None
@@ -593,6 +603,8 @@ class JobRepository:
             progress=row.progress,
             error_code=row.error_code,
             error_message=row.error_message,
+            error_stage=row.error_stage,
+            error_retryable=row.error_retryable,
             created_at=row.created_at,
             expires_at=row.expires_at,
         )

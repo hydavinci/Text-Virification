@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import logging
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
@@ -346,6 +347,9 @@ def _run_process_job_attempt(
                 expected_status=observer.current_status,
                 error=error,
                 error_message=error.message,
+                error_code=error.code,
+                error_stage=error.stage,
+                error_retryable=error.retryable,
             )
     except JobLeaseLostError as error:
         return ProcessAttemptOutcome(
@@ -807,6 +811,9 @@ def _persist_expected_failure(
     expected_status: JobStatus,
     error: Exception,
     error_message: str,
+    error_code: str = PIPELINE_FAILURE_CODE,
+    error_stage: str | None = None,
+    error_retryable: bool | None = None,
 ) -> ProcessAttemptOutcome:
     try:
         failure_applied = _fail_claimed_job(
@@ -815,6 +822,9 @@ def _persist_expected_failure(
             owner_token=owner_token,
             expected_status=expected_status,
             error_message=error_message,
+            error_code=error_code,
+            error_stage=error_stage,
+            error_retryable=error_retryable,
         )
         if not failure_applied:
             _complete_claimed_job(
@@ -838,22 +848,42 @@ def _fail_claimed_job(
     owner_token: UUID,
     expected_status: JobStatus,
     error_message: str,
+    error_code: str = PIPELINE_FAILURE_CODE,
+    error_stage: str | None = None,
+    error_retryable: bool | None = None,
 ) -> bool:
     session = session_factory()
     repository = REPOSITORY_FACTORY(session)
     try:
         job = repository.get_job(job_id)
         progress = 0 if job is None else job.progress
-        applied = repository.fail_claimed_job(
-            job_id,
-            owner_token=owner_token,
-            expected_status=expected_status,
-            progress=progress,
-            message=FAILED_EVENT_MESSAGE,
-            error_code=PIPELINE_FAILURE_CODE,
-            error_message=error_message,
-            now=NOW_FACTORY(),
-        )
+        if {
+            "error_stage",
+            "error_retryable",
+        } <= set(inspect.signature(repository.fail_claimed_job).parameters):
+            applied = repository.fail_claimed_job(
+                job_id,
+                owner_token=owner_token,
+                expected_status=expected_status,
+                progress=progress,
+                message=FAILED_EVENT_MESSAGE,
+                error_code=error_code,
+                error_message=error_message,
+                error_stage=error_stage,
+                error_retryable=error_retryable,
+                now=NOW_FACTORY(),
+            )
+        else:
+            applied = repository.fail_claimed_job(
+                job_id,
+                owner_token=owner_token,
+                expected_status=expected_status,
+                progress=progress,
+                message=FAILED_EVENT_MESSAGE,
+                error_code=error_code,
+                error_message=error_message,
+                now=NOW_FACTORY(),
+            )
         repository.commit()
         return applied
     except Exception:

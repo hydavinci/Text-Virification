@@ -1142,7 +1142,7 @@ def test_process_job_does_not_retry_non_retryable_pipeline_error(
     job = repository.get_job(job_id)
     assert job is not None
     assert job.status is JobStatus.FAILED
-    assert job.error_code == "pipeline_failed"
+    assert job.error_code == "parser_failed"
     assert job.error_message == "The source document could not be parsed."
 
 
