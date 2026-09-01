@@ -6,19 +6,72 @@ from typing import Any
 
 import pymupdf
 
-from text_verification.document_processing.pdf_models import PdfPageKind, PdfPageMetadata
+from text_verification.document_processing.pdf_models import (
+    PdfPageKind,
+    PdfPageMetadata,
+    PdfResourceLimits,
+)
 
 SUBSTANTIAL_RASTER_COVERAGE = 0.5
 MIN_USABLE_NATIVE_TEXT_CHARACTERS = 1
 _PYMUPDF: Any = pymupdf
 
 
-def classify_pages(source_path: Path) -> list[PdfPageKind]:
+def classify_pages(
+    source_path: Path,
+    *,
+    limits: PdfResourceLimits | None = None,
+) -> list[PdfPageKind]:
+    from text_verification.parsers.errors import PdfResourceLimitError
+
+    resolved_limits = limits or PdfResourceLimits()
     with _PYMUPDF.open(source_path) as document:
+        if document.page_count > resolved_limits.max_pages:
+            raise PdfResourceLimitError(
+                limit="max_pages",
+                maximum=resolved_limits.max_pages,
+                actual=document.page_count,
+            )
         return [
-            classify_page(page, page_number + 1).kind
+            _classify_limited_page(page, page_number + 1, resolved_limits).kind
             for page_number, page in enumerate(document)
         ]
+
+
+def _classify_limited_page(
+    page: Any,
+    page_number: int,
+    limits: PdfResourceLimits,
+) -> PdfPageMetadata:
+    from text_verification.parsers.errors import PdfResourceLimitError
+
+    raw_images = page.get_images(full=True)
+    if len(raw_images) > limits.max_images_per_page:
+        raise PdfResourceLimitError(
+            limit="max_images_per_page",
+            maximum=limits.max_images_per_page,
+            actual=len(raw_images),
+        )
+    xrefs = tuple(dict.fromkeys(int(image[0]) for image in raw_images))
+    if len(xrefs) > limits.max_image_xrefs_per_page:
+        raise PdfResourceLimitError(
+            limit="max_image_xrefs_per_page",
+            maximum=limits.max_image_xrefs_per_page,
+            actual=len(xrefs),
+        )
+    rectangles = [
+        _normalized_bbox(page, rectangle)
+        for xref in xrefs
+        for rectangle in page.get_image_rects(xref)
+        if not rectangle.is_empty
+    ]
+    if len(rectangles) > limits.max_image_rectangles_per_page:
+        raise PdfResourceLimitError(
+            limit="max_image_rectangles_per_page",
+            maximum=limits.max_image_rectangles_per_page,
+            actual=len(rectangles),
+        )
+    return classify_page(page, page_number, image_rectangles=rectangles)
 
 
 def classify_page(

@@ -161,6 +161,11 @@ def _add_repeated_image_page(document: pymupdf.Document) -> None:
     page.insert_image(pymupdf.Rect(80, 40, 120, 80), stream=image)
 
 
+def _add_repeated_span_page(document: pymupdf.Document) -> None:
+    page = document.new_page(width=240, height=120)
+    page.insert_text((24, 40), "token token", fontsize=12, fontname="helv")
+
+
 def main() -> None:
     text_page = _document()
     _add_text_page(text_page)
@@ -210,6 +215,10 @@ def main() -> None:
     repeated_image = _document()
     _add_repeated_image_page(repeated_image)
     _save(repeated_image, "repeated-image.pdf")
+
+    repeated_span = _document()
+    _add_repeated_span_page(repeated_span)
+    _save(repeated_span, "repeated-span.pdf")
 
 
 if __name__ == "__main__":

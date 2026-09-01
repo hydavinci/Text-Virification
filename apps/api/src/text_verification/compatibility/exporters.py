@@ -645,7 +645,7 @@ def _export_pdf_edits(
         canonical_document = PdfParser().parse(source_path)
         if canonical_document.text != original_text:
             raise ExportError("The stored PDF no longer matches the analyzed document.")
-        resolved: list[tuple[object, object, str, str, bool, bool]] = []
+        resolved: list[tuple[object, list[object], object, str, str, bool, bool]] = []
         for edit in edits:
             original = original_text[edit.start:edit.end]
             insertion = not original
@@ -656,27 +656,20 @@ def _export_pdf_edits(
                     "PDF original-format export does not support insertion-only edits; "
                     "replace existing text or export the edited text as TXT."
                 )
-            page, rectangle = _pdf_edit_location(
+            page, rectangles, anchor = _pdf_edit_location(
                 document,
                 canonical_document,
                 edit,
                 search_text,
             )
             resolved.append(
-                (page, rectangle, original, edit.replacement, insertion, insert_after)
+                (page, rectangles, anchor, original, edit.replacement, insertion, insert_after)
             )
 
         redactions: list[tuple[object, object, str, float]] = []
-        for page, rectangle, original, suggestion, insertion, insert_after in resolved:
+        for page, rectangles, anchor, original, suggestion, insertion, _insert_after in resolved:
             if track_changes:
-                annotation = (
-                    page.add_text_annot(
-                        (rectangle.x1 if insert_after else rectangle.x0, rectangle.y0),
-                        f"插入: {suggestion}",
-                    )
-                    if insertion
-                    else page.add_highlight_annot(rectangle)
-                )
+                annotation = page.add_highlight_annot(anchor)
                 annotation.set_info(
                     title="啄木鸟·中英文字智能检查",
                     content=(
@@ -688,10 +681,10 @@ def _export_pdf_edits(
                 annotation.update()
                 continue
             blocks = page.get_text("dict").get("blocks", [])
-            font_size = _font_size_at(blocks, rectangle)
-            page.add_redact_annot(rectangle)
-
-            redactions.append((page, rectangle, suggestion, font_size))
+            font_size = _font_size_at(blocks, anchor)
+            for rectangle in rectangles:
+                page.add_redact_annot(rectangle)
+            redactions.append((page, anchor, suggestion, font_size))
 
         if not track_changes:
             for page in document:
@@ -699,16 +692,26 @@ def _export_pdf_edits(
             for page, rectangle, suggestion, font_size in redactions:
                 if not suggestion:
                     continue
-                point = (rectangle.x0, rectangle.y1 - 2)
+                insertion_box = fitz.Rect(
+                    rectangle.x0,
+                    rectangle.y0,
+                    page.rect.x1 - 2,
+                    rectangle.y1 + font_size,
+                )
                 try:
-                    page.insert_text(
-                        point,
+                    page.insert_textbox(
+                        insertion_box,
                         suggestion,
                         fontsize=font_size,
                         fontname="china-s" if _has_cjk(suggestion) else "helv",
                     )
                 except Exception:
-                    page.insert_text(point, suggestion, fontsize=font_size, fontname="helv")
+                    page.insert_textbox(
+                        insertion_box,
+                        suggestion,
+                        fontsize=font_size,
+                        fontname="helv",
+                    )
         return document.tobytes(garbage=4, deflate=True)
     finally:
         document.close()
@@ -719,7 +722,7 @@ def _pdf_edit_location(
     document: object,
     edit: TextEdit,
     search_text: str,
-) -> tuple[object, object]:
+) -> tuple[object, list[object], object]:
     for block in document.blocks:  # type: ignore[attr-defined]
         if not (block.global_start <= edit.start and edit.end <= block.global_end):
             continue
@@ -730,6 +733,7 @@ def _pdf_edit_location(
             break
         local_start = edit.start - block.global_start
         local_end = edit.end - block.global_start
+        covered: list[tuple[dict[str, object], int, int]] = []
         for segment in segments:
             if not isinstance(segment, dict):
                 continue
@@ -738,27 +742,76 @@ def _pdf_edit_location(
             if not (
                 isinstance(start, int)
                 and isinstance(end, int)
-                and start <= local_start
-                and local_end <= end
+                and start < local_end
+                and end > local_start
                 and isinstance(bbox, list)
                 and len(bbox) == 4
             ):
                 continue
+            covered.append((segment, max(start, local_start), min(end, local_end)))
+        if covered:
             page = pdf[page_number - 1]  # type: ignore[index]
-            matches = page.search_for(search_text)  # type: ignore[attr-defined]
-            if not matches:
-                break
-            expected = tuple(float(value) for value in bbox)
-            rectangle = min(
-                matches,
-                key=lambda candidate: _pdf_rect_distance(
-                    candidate * page.rotation_matrix,  # type: ignore[operator, union-attr]
-                    expected,
-                ),
-            )
-            return page, rectangle
+            rectangles: list[object] = []
+            for segment, start, end in covered:
+                bbox = segment["bbox"]
+                assert isinstance(bbox, list)
+                text = segment["text"]
+                assert isinstance(text, str)
+                expected = _pdf_sub_bbox(
+                    tuple(float(value) for value in bbox),
+                    start - int(segment["start"]),
+                    end - int(segment["start"]),
+                    len(text),
+                )
+                matches = page.search_for(text)  # type: ignore[attr-defined]
+                if not matches:
+                    matches = page.search_for(search_text)  # type: ignore[attr-defined]
+                if not matches:
+                    break
+                matched = min(
+                    matches,
+                    key=lambda candidate: _pdf_rect_distance(
+                        candidate * page.rotation_matrix,  # type: ignore[operator, union-attr]
+                        expected,
+                    ),
+                )
+                rectangles.append(
+                    _pdf_actual_sub_rect(
+                        matched,
+                        start - int(segment["start"]),
+                        end - int(segment["start"]),
+                        len(text),
+                    )
+                )
+            if rectangles:
+                return page, rectangles, rectangles[0]
         break
     raise ExportError("A PDF edit could not be mapped to canonical source text.")
+
+
+def _pdf_sub_bbox(
+    bbox: tuple[float, float, float, float],
+    start: int,
+    end: int,
+    text_length: int,
+) -> tuple[float, float, float, float]:
+    width = bbox[2] - bbox[0]
+    return (
+        bbox[0] + width * start / text_length,
+        bbox[1],
+        bbox[0] + width * end / text_length,
+        bbox[3],
+    )
+
+
+def _pdf_actual_sub_rect(rectangle: object, start: int, end: int, text_length: int) -> object:
+    width = rectangle.x1 - rectangle.x0  # type: ignore[attr-defined]
+    return type(rectangle)(
+        rectangle.x0 + width * start / text_length,  # type: ignore[attr-defined]
+        rectangle.y0,  # type: ignore[attr-defined]
+        rectangle.x0 + width * end / text_length,  # type: ignore[attr-defined]
+        rectangle.y1,  # type: ignore[attr-defined]
+    )
 
 
 def _pdf_rect_distance(rectangle: object, expected: tuple[float, float, float, float]) -> float:

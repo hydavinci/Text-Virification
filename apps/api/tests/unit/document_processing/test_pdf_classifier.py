@@ -8,7 +8,8 @@ import pymupdf
 import pytest
 
 from text_verification.document_processing.pdf_classifier import classify_pages
-from text_verification.document_processing.pdf_models import PdfPageKind
+from text_verification.document_processing.pdf_models import PdfPageKind, PdfResourceLimits
+from text_verification.parsers.errors import PdfResourceLimitError
 
 FIXTURE_DIRECTORY = Path(__file__).resolve().parents[2] / "fixtures" / "pdf"
 
@@ -57,6 +58,19 @@ def test_short_native_text_overlay_on_a_substantial_raster_is_mixed(
     pdf_fixture: callable[[str], Path],
 ) -> None:
     assert classify_pages(pdf_fixture("short-overlay.pdf")) == [PdfPageKind.MIXED]
+
+
+def test_classify_pages_applies_the_shared_page_limit(
+    pdf_fixture: callable[[str], Path],
+) -> None:
+    source = pdf_fixture("mixed-pages.pdf")
+
+    assert classify_pages(source, limits=PdfResourceLimits(max_pages=2)) == [
+        PdfPageKind.TEXT,
+        PdfPageKind.SCANNED,
+    ]
+    with pytest.raises(PdfResourceLimitError, match="max_pages"):
+        classify_pages(source, limits=PdfResourceLimits(max_pages=1))
 
 
 def test_pdf_classification_does_not_import_the_ocr_provider() -> None:

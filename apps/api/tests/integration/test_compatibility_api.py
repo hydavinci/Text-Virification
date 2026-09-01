@@ -984,7 +984,7 @@ def test_pdf_export_maps_repeated_text_by_canonical_visual_position(
         json={
             "file_id": analyzed.json()["file_id"],
             "filename": "duplicate.pdf",
-            "modified_text": "Repeat\nChanged",
+            "modified_text": "Repeat\nX",
             "track_changes": False,
         },
     )
@@ -995,7 +995,79 @@ def test_pdf_export_maps_repeated_text_by_canonical_visual_position(
         files={"file": ("duplicate.pdf", exported.content, "application/pdf")},
     )
     assert reparsed.status_code == 200
-    assert reparsed.json()["text"] == "Repeat\nChanged"
+    assert reparsed.json()["text"] == "Repeat\nX"
+
+
+def test_pdf_export_changes_only_the_second_occurrence_within_one_span(
+    app: FastAPI,
+    client: TestClient,
+    tmp_path: Path,
+) -> None:
+    override_storage(app, tmp_path)
+    source = PDF_FIXTURE_DIRECTORY.joinpath("repeated-span.pdf").read_bytes()
+    analyzed = client.post(
+        "/api/v1/analyze",
+        files={"file": ("repeat.pdf", source, "application/pdf")},
+    )
+    assert analyzed.status_code == 200
+    assert analyzed.json()["text"] == "token token"
+
+    exported = client.post(
+        "/api/v1/export-original",
+        json={
+            "file_id": analyzed.json()["file_id"],
+            "filename": "repeat.pdf",
+            "replacements": [
+                {
+                    "original": "token",
+                    "suggestion": "alter",
+                    "position": 6,
+                    "end_position": 11,
+                }
+            ],
+            "track_changes": False,
+        },
+    )
+
+    assert exported.status_code == 200
+    reparsed = client.post(
+        "/api/v1/analyze",
+        files={"file": ("repeat.pdf", exported.content, "application/pdf")},
+    )
+    assert reparsed.status_code == 200
+    assert reparsed.json()["text"] == "token alter"
+
+
+def test_pdf_export_replaces_a_range_crossing_styled_source_spans(
+    app: FastAPI,
+    client: TestClient,
+    tmp_path: Path,
+) -> None:
+    override_storage(app, tmp_path)
+    source = PDF_FIXTURE_DIRECTORY.joinpath("layout-order.pdf").read_bytes()
+    analyzed = client.post(
+        "/api/v1/analyze",
+        files={"file": ("styled.pdf", source, "application/pdf")},
+    )
+    assert analyzed.status_code == 200
+
+    exported = client.post(
+        "/api/v1/export-original",
+        json={
+            "file_id": analyzed.json()["file_id"],
+            "filename": "styled.pdf",
+            "modified_text": "Top\nMerged\nBottom",
+            "track_changes": False,
+        },
+    )
+
+    assert exported.status_code == 200
+    reparsed = client.post(
+        "/api/v1/analyze",
+        files={"file": ("styled.pdf", exported.content, "application/pdf")},
+    )
+    assert reparsed.status_code == 200
+    assert reparsed.json()["text"] == "Top\nMerged\nBottom"
 def test_scenarios_and_formats_are_discoverable(client: TestClient) -> None:
     scenarios_response = client.get("/api/v1/scenarios")
     formats_response = client.get("/api/v1/formats")
