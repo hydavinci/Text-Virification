@@ -905,6 +905,43 @@ def test_duplicate_index_finds_near_duplicate_across_range_boundary() -> None:
 
     assert len(result) == 1
     assert result[0].confidence == 0.9
+
+
+def test_duplicate_shift_chain_does_not_transitively_overmerge() -> None:
+    boxes = tuple(
+        _layout_box(
+            "chain",
+            (index * 2.5, 10.0, 100.0 + index * 2.5, 30.0),
+            confidence=0.9,
+            index=index,
+        )
+        for index in range(20)
+    )
+    assert all(
+        pdf_parser_module._ocr_boxes_are_near_identical(first, second)
+        for first, second in zip(boxes, boxes[1:], strict=False)
+    )
+    assert not pdf_parser_module._ocr_boxes_are_near_identical(boxes[0], boxes[-1])
+    orders = (
+        boxes,
+        tuple(reversed(boxes)),
+        boxes[::2] + boxes[1::2],
+    )
+
+    results = [
+        pdf_parser_module._coalesce_ocr_boxes(
+            order,
+            limits=PdfResourceLimits(),
+        )
+        for order in orders
+    ]
+
+    assert len(results[0]) == 10
+    assert results[1:] == [results[0], results[0]]
+    assert [box.bbox[0] for box in results[0]] == [
+        float(index * 5)
+        for index in range(10)
+    ]
 def test_ocr_provider_capability_error_propagates_unchanged() -> None:
     class UnavailableOcr:
         def recognize(self, image: object, language: str) -> list[OcrTextBox]:

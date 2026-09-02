@@ -381,12 +381,20 @@ def _coalesce_ocr_boxes(
             for index, box in enumerate(boxes)
         )
 
-    ordered = tuple(sorted(boxes, key=_ocr_box_stable_order))
+    ordered = tuple(sorted(boxes, key=_ocr_box_preference_order))
     candidate_index = _OcrDuplicateCandidateIndex.build(ordered)
-    parents = list(range(len(ordered)))
+    clusters: list[_OcrDuplicateCluster] = []
+    cluster_by_box_index: dict[int, int] = {}
     inspection_count = 0
     for box_index, box in enumerate(ordered):
-        for candidate_index_value in candidate_index.query(box_index):
+        candidate_clusters = tuple(
+            dict.fromkeys(
+                cluster_by_box_index[candidate_index_value]
+                for candidate_index_value in candidate_index.query(box_index)
+            )
+        )
+        selected_cluster: int | None = None
+        for cluster_index in candidate_clusters:
             inspection_count += 1
             if inspection_count > limits.max_ocr_duplicate_candidate_inspections_per_page:
                 raise PdfResourceLimitError(
@@ -394,29 +402,28 @@ def _coalesce_ocr_boxes(
                     maximum=limits.max_ocr_duplicate_candidate_inspections_per_page,
                     actual=inspection_count,
                 )
-            if not _duplicate_features_may_match(
-                candidate_index.features[box_index],
-                candidate_index.features[candidate_index_value],
-            ):
-                continue
-            if _ocr_boxes_are_near_identical(
+            if _duplicate_cluster_accepts(
+                clusters[cluster_index],
                 box,
-                ordered[candidate_index_value],
+                candidate_index.features[box_index],
+                ordered,
+                candidate_index.features,
             ):
-                _union_duplicate_groups(
-                    parents,
-                    box_index,
-                    candidate_index_value,
+                selected_cluster = cluster_index
+                break
+        if selected_cluster is None:
+            selected_cluster = len(clusters)
+            clusters.append(
+                _OcrDuplicateCluster.from_feature(
+                    representative_index=box_index,
+                    feature=candidate_index.features[box_index],
                 )
+            )
+        else:
+            clusters[selected_cluster].add(candidate_index.features[box_index])
+        cluster_by_box_index[box_index] = selected_cluster
 
-    grouped: dict[int, list[OcrLayoutBox]] = {}
-    for box_index, box in enumerate(ordered):
-        root = _duplicate_group_root(parents, box_index)
-        grouped.setdefault(root, []).append(box)
-    winners = [
-        min(group, key=_ocr_box_preference_order)
-        for group in grouped.values()
-    ]
+    winners = [ordered[cluster.representative_index] for cluster in clusters]
     return tuple(
         box.model_copy(update={"box_index": index})
         for index, box in enumerate(sorted(winners, key=_ocr_box_stable_order))
@@ -431,6 +438,48 @@ class _OcrDuplicateFeature:
     center_y: float
     width: float
     height: float
+
+
+@dataclass
+class _OcrDuplicateCluster:
+    representative_index: int
+    min_center_x: float
+    max_center_x: float
+    min_center_y: float
+    max_center_y: float
+    min_width: float
+    max_width: float
+    min_height: float
+    max_height: float
+
+    @classmethod
+    def from_feature(
+        cls,
+        *,
+        representative_index: int,
+        feature: _OcrDuplicateFeature,
+    ) -> _OcrDuplicateCluster:
+        return cls(
+            representative_index=representative_index,
+            min_center_x=feature.center_x,
+            max_center_x=feature.center_x,
+            min_center_y=feature.center_y,
+            max_center_y=feature.center_y,
+            min_width=feature.width,
+            max_width=feature.width,
+            min_height=feature.height,
+            max_height=feature.height,
+        )
+
+    def add(self, feature: _OcrDuplicateFeature) -> None:
+        self.min_center_x = min(self.min_center_x, feature.center_x)
+        self.max_center_x = max(self.max_center_x, feature.center_x)
+        self.min_center_y = min(self.min_center_y, feature.center_y)
+        self.max_center_y = max(self.max_center_y, feature.center_y)
+        self.min_width = min(self.min_width, feature.width)
+        self.max_width = max(self.max_width, feature.width)
+        self.min_height = min(self.min_height, feature.height)
+        self.max_height = max(self.max_height, feature.height)
 
 
 @dataclass(frozen=True)
@@ -530,7 +579,7 @@ class _OcrDuplicateCandidateIndex:
         return tuple(
             candidate
             for candidate in sorted(candidates)
-            if candidate > box_index
+            if candidate < box_index
         )
 
 
@@ -601,24 +650,41 @@ def _ocr_duplicate_size_tolerance(size: float) -> float:
     return max(0.25, size * 0.05)
 
 
-def _duplicate_group_root(parents: list[int], value: int) -> int:
-    while parents[value] != value:
-        parents[value] = parents[parents[value]]
-        value = parents[value]
-    return value
-
-
-def _union_duplicate_groups(
-    parents: list[int],
-    first: int,
-    second: int,
-) -> None:
-    first_root = _duplicate_group_root(parents, first)
-    second_root = _duplicate_group_root(parents, second)
-    if first_root == second_root:
-        return
-    lower, higher = sorted((first_root, second_root))
-    parents[higher] = lower
+def _duplicate_cluster_accepts(
+    cluster: _OcrDuplicateCluster,
+    box: OcrLayoutBox,
+    feature: _OcrDuplicateFeature,
+    boxes: tuple[OcrLayoutBox, ...],
+    features: tuple[_OcrDuplicateFeature, ...],
+) -> bool:
+    representative = boxes[cluster.representative_index]
+    representative_feature = features[cluster.representative_index]
+    if not _duplicate_features_may_match(representative_feature, feature):
+        return False
+    if not _ocr_boxes_are_near_identical(representative, box):
+        return False
+    return (
+        max(cluster.max_center_x, feature.center_x)
+        - min(cluster.min_center_x, feature.center_x)
+        <= _ocr_duplicate_position_tolerance(
+            max(cluster.max_width, feature.width)
+        )
+        and max(cluster.max_center_y, feature.center_y)
+        - min(cluster.min_center_y, feature.center_y)
+        <= _ocr_duplicate_position_tolerance(
+            max(cluster.max_height, feature.height)
+        )
+        and max(cluster.max_width, feature.width)
+        - min(cluster.min_width, feature.width)
+        <= _ocr_duplicate_size_tolerance(
+            max(cluster.max_width, feature.width)
+        )
+        and max(cluster.max_height, feature.height)
+        - min(cluster.min_height, feature.height)
+        <= _ocr_duplicate_size_tolerance(
+            max(cluster.max_height, feature.height)
+        )
+    )
 
 
 def _ocr_boxes_are_near_identical(

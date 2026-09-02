@@ -30,14 +30,32 @@ _LINE_OVERLAP_RATIO = 0.45
 _BASELINE_RATIO = 0.45
 _HEADING_HEIGHT_RATIO = 1.35
 _BODY_CLUSTER_GAP_RATIO = 1.15
+_BODY_COVERAGE_DOMINANCE_RATIO = 1.5
 _PARAGRAPH_HEIGHT_RATIO = 1.25
 _MIN_TABLE_GAP_HEIGHT_RATIO = 1.5
 _MAX_TABLE_ROW_GAP_HEIGHT_RATIO = 4.0
-_LIST_MARKER = re.compile(
-    r"^(?:\((?P<parenthesized>[0-9A-Za-z一二三四五六七八九十百千]+)\)"
-    r"|(?P<suffixed>[0-9A-Za-z一二三四五六七八九十百千]+)[.)、])$"
+_NUMERIC_CJK_LIST_MARKER = re.compile(
+    r"^(?:\((?P<parenthesized>[0-9一二三四五六七八九十百千]+)\)"
+    r"|(?P<suffixed>[0-9一二三四五六七八九十百千]+)[.)、])$"
+)
+_ALPHABETIC_LIST_MARKER = re.compile(
+    r"^(?:\((?P<parenthesized>[A-Za-z])\)"
+    r"|(?P<lowercase>[a-z])[.)、]"
+    r"|(?P<uppercase_close>[A-Z])\))$"
 )
 _LIST_BULLETS = frozenset("•●▪◦‣⁃∙·○◆◇■□▲△※-–—")
+_CJK_NUMERAL_VALUES = {
+    "一": 1,
+    "二": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+    "十": 10,
+}
 
 
 class _LayoutModel(BaseModel):
@@ -538,14 +556,48 @@ def _is_marker_list(rows: list[OcrLayoutLine]) -> bool:
     ]
     if max(first_widths) > median(prose_widths) * 0.35:
         return False
-    return True
+    marker_values = [marker for marker in markers if marker is not None]
+    if all(marker[0] == "bullet" for marker in marker_values):
+        return True
+    if len({marker[0] for marker in marker_values}) != 1:
+        return False
+    values = [marker[1] for marker in marker_values if marker[1] is not None]
+    if len(values) != len(marker_values):
+        return False
+    return values == list(range(values[0], values[0] + len(values)))
 
 
-def _normalized_list_marker(text: str) -> str | None:
+def _normalized_list_marker(text: str) -> tuple[str, int | None] | None:
     normalized = unicodedata.normalize("NFKC", text).strip()
     if normalized in _LIST_BULLETS:
-        return normalized
-    return normalized if _LIST_MARKER.fullmatch(normalized) is not None else None
+        return "bullet", None
+    numeric_match = _NUMERIC_CJK_LIST_MARKER.fullmatch(normalized)
+    if numeric_match is not None:
+        token = numeric_match.group("parenthesized") or numeric_match.group("suffixed")
+        value = _list_sequence_value(token)
+        return ("numeric", value) if value is not None else None
+    alphabetic_match = _ALPHABETIC_LIST_MARKER.fullmatch(normalized)
+    if alphabetic_match is None:
+        return None
+    token = (
+        alphabetic_match.group("parenthesized")
+        or alphabetic_match.group("lowercase")
+        or alphabetic_match.group("uppercase_close")
+    )
+    return "alphabetic", ord(token.casefold()) - ord("a") + 1
+
+
+def _list_sequence_value(token: str) -> int | None:
+    if token.isdecimal():
+        return int(token)
+    if token in _CJK_NUMERAL_VALUES:
+        return _CJK_NUMERAL_VALUES[token]
+    if "十" not in token or token.count("十") != 1:
+        return None
+    left, right = token.split("十")
+    tens = _CJK_NUMERAL_VALUES.get(left, 1) if left else 1
+    ones = _CJK_NUMERAL_VALUES.get(right, 0) if right else 0
+    return tens * 10 + ones
 
 
 def _row_has_stable_baseline(
@@ -569,10 +621,9 @@ def _has_strong_two_row_evidence(rows: list[OcrLayoutLine]) -> bool:
         for first_gap, second_gap in zip(first_gaps, second_gaps, strict=True)
     ):
         return False
-    row_widths = [row.bbox[2] - row.bbox[0] for row in rows]
-    return max(row_widths) - min(row_widths) <= max(
-        typical_height * 2.0,
-        median(row_widths) * 0.25,
+    return all(
+        _looks_like_compact_table_value(row.boxes[0].text)
+        for row in rows
     )
 
 
@@ -593,7 +644,9 @@ def _looks_like_aligned_prose(rows: list[OcrLayoutLine]) -> bool:
         for text in first_column
     )
     second_is_prose = all(
-        any(character.isspace() for character in text) or len(text) >= 12
+        any(character.isspace() for character in text)
+        or text.replace(" ", "").isalpha()
+        or len(text) >= 12
         for text in second_column
     )
     return first_is_labels and second_is_prose
@@ -601,11 +654,31 @@ def _looks_like_aligned_prose(rows: list[OcrLayoutLine]) -> bool:
 
 def _looks_like_table_code(text: str) -> bool:
     normalized = unicodedata.normalize("NFKC", text).strip()
+    core = normalized[:-1] if normalized.endswith(".") else normalized
     return (
         1 <= len(normalized) <= 12
         and not any(character.isspace() for character in normalized)
-        and any(character.isdigit() for character in normalized)
-        and any(character.isalpha() for character in normalized)
+        and (
+            (any(character.isdigit() for character in core) and core.isalnum())
+            or (
+                normalized.endswith(".")
+                and len(core) == 1
+                and core.isalpha()
+                and core.isupper()
+            )
+        )
+    )
+
+
+def _looks_like_compact_table_value(text: str) -> bool:
+    normalized = unicodedata.normalize("NFKC", text).strip()
+    return (
+        _looks_like_table_code(normalized)
+        or (
+            1 <= len(normalized) <= 3
+            and not any(character.isspace() for character in normalized)
+            and _normalized_list_marker(normalized) is None
+        )
     )
 
 
@@ -714,15 +787,40 @@ def _body_line_height(lines: tuple[OcrLayoutLine, ...]) -> float:
             clusters.append([line])
         else:
             clusters[-1].append(line)
-    body_cluster = max(
-        clusters,
-        key=lambda cluster: (
-            len(cluster),
-            sum(len(line.boxes) for line in cluster),
-            -median(line.bbox[3] - line.bbox[1] for line in cluster),
-        ),
+    largest_population = max(len(cluster) for cluster in clusters)
+    contenders = [
+        cluster
+        for cluster in clusters
+        if len(cluster) == largest_population
+    ]
+    if len(contenders) == 1:
+        body_cluster = contenders[0]
+    elif largest_population == 1:
+        body_cluster = min(contenders, key=_cluster_height)
+    else:
+        by_coverage = sorted(
+            contenders,
+            key=_cluster_line_coverage,
+            reverse=True,
+        )
+        strongest_coverage = _cluster_line_coverage(by_coverage[0])
+        next_coverage = _cluster_line_coverage(by_coverage[1])
+        if strongest_coverage >= next_coverage * _BODY_COVERAGE_DOMINANCE_RATIO:
+            body_cluster = by_coverage[0]
+        else:
+            body_cluster = max(contenders, key=_cluster_height)
+    return _cluster_height(body_cluster)
+
+
+def _cluster_height(cluster: list[OcrLayoutLine]) -> float:
+    return median(line.bbox[3] - line.bbox[1] for line in cluster)
+
+
+def _cluster_line_coverage(cluster: list[OcrLayoutLine]) -> float:
+    return sum(
+        line.bbox[2] - line.bbox[0]
+        for line in cluster
     )
-    return median(line.bbox[3] - line.bbox[1] for line in body_cluster)
 
 
 def _table_element(cell: OcrTableCell, *, language: str) -> OcrLayoutElement:
