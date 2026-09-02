@@ -110,3 +110,66 @@ Ruling: `selectedSuggestions` records explicit user intent only, including expli
 Ruling: Overlapping canonical findings remain review-visible because backend ownership and range validation make each finding independently valid; overlap is an application-time concern only for accepted effective replacements — this preserves rule-level findings while preventing ambiguous text mutation; cost if wrong is requiring the UI to present a conflict-resolution state instead of silently selecting one rule.
 
 Ruling: Superseding the earlier client-sequence ruling, Task 6's minimal backend revision endpoint must allocate the positive per-run `revision_number` under database locking and return the persisted revision — the browser supplies the draft UUID, text, `verification_run_id`, and source metadata, but never supplies or invents a positive revision number; cost if wrong is an additional persistence round trip, required to prevent independent browser instances from colliding on the backend uniqueness constraint.
+
+## Task 1 fourth review wave fixes — 2026-09-02
+
+- `loadResult` now unwraps a Vue result proxy, creates an independent
+  `structuredClone`, recursively freezes the complete canonical result graph,
+  and validates and retains only that clone. Caller mutations after loading
+  cannot alter document text, blocks, issues, offsets, or replacements.
+- Canonical block validation now precedes issue validation. It enforces
+  non-empty unique string IDs, integer nonnegative global/local offsets,
+  code-point range lengths, zero-anchored local ranges, document slice
+  equality, valid containing parents, acyclic parent chains, and
+  ancestor/descendant-only range overlap.
+- Any malformed or ambiguous block graph yields a frozen empty canonical issue
+  array, independent of block input order. Valid nested blocks remain
+  reviewable, including astral text whose JavaScript UTF-16 width differs from
+  Python code-point offsets.
+- Returning accepted review text to the source text retains the source sentinel
+  only when the prior revision is source/null. If a different authored
+  revision already exists, undo or rejection creates a fresh review UUID draft
+  containing source text and parents it to that authored revision.
+- The canonical issue array is frozen, and the composable returns readonly Vue
+  views for the loaded result, issue-state map, suggestion overrides, current
+  revision, and re-verification flag. Explicit pending state now goes through
+  the public `setIssueState` method rather than mutating the exposed map.
+
+### Fourth review wave TDD and validation evidence
+
+- RED: `cd apps/web && npm test -- useVerificationWorkspace.spec.ts` failed
+  with 15 failed and 29 passed tests (44 total). The failures covered
+  duplicate block order, malformed block ranges/text/parents/cycles/overlap,
+  missing `setIssueState`, authored source-text revert drafts, caller-owned
+  mutation, and recursive freezing.
+- GREEN: the focused command passed all 44 tests.
+- Review regression RED: the focused suite failed with 1 failed and 46 passed
+  tests (47 total), reproducing `DataCloneError` for a Vue reactive result
+  proxy. Non-string block/parent ID cases were also added and passed after
+  runtime type validation.
+- Final focused GREEN: the focused command passed 47 tests in 1 file.
+- Full frontend suite: `cd apps/web && npm test -- --run` passed 78 tests
+  across 4 files. Node emitted the existing experimental `localStorage`
+  warning; all tests passed.
+- Production build: `cd apps/web && npm run build` passed `vue-tsc -b` and
+  Vite 6.4.3 with 22 modules transformed.
+- Scope check target: Task 1 composable/tests plus this ledger and
+  `task-1-report.md`; canonical public wire types did not require mutation.
+
+Ruling: Canonical result ownership begins with an immediate proxy unwrap,
+structured clone, and recursive freeze at `loadResult`; validation and all
+later review operations use only that internal value — this prevents
+time-of-check/time-of-use changes from caller-owned objects; cost if wrong is
+one full result clone per load, accepted for correctness at the workspace
+boundary.
+
+Ruling: A malformed block graph invalidates the issue set rather than selecting
+apparently valid issues from an ambiguous map — block identity and containment
+are prerequisites for trusting block-local issue offsets; cost if wrong is
+hiding otherwise global issues when any block is malformed, intentionally
+fail-closed until the backend returns a canonical result.
+
+Ruling: Source text does not imply a source sentinel after authored work exists;
+revision identity and ancestry must be preserved even when text content matches
+the original source — this keeps persistence history append-only; cost if wrong
+is an additional draft revision for an authored revert.

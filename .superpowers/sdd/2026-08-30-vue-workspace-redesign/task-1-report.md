@@ -44,10 +44,39 @@
 - Final behavior: overlapping findings remain visible/countable; accepted replacement conflicts expose both deterministic IDs and preserve the last valid text; non-overlapping code-point replacements remain descending and astral-safe; local review/manual revisions are UUID drafts with null revision numbers.
 - Task 6 persistence boundary: the browser sends draft UUID/text/run/source metadata, while the backend allocates the positive per-run number under database locking and returns the persisted revision.
 
+### Fourth review wave
+
+- Canonical block validation now runs before issue validation and mirrors the
+  backend document invariants with Python code-point semantics: unique
+  non-empty string IDs, valid integer ranges, code-point text lengths,
+  zero-anchored local ranges, document-slice equality, valid containing
+  parents, no cycles, and overlap only through ancestry.
+- Malformed or duplicate block graphs fail closed with a frozen empty issue
+  list in either block order. Valid ancestor/descendant overlap remains
+  reviewable, including astral block text.
+- Returning review decisions to source text creates a fresh UUID review draft
+  parented to the prior authored revision. The source sentinel remains only for
+  source/null ancestry.
+- `loadResult` unwraps Vue proxies, structured-clones the JSON-shaped result,
+  recursively freezes the complete clone, validates only the clone, and
+  retains no caller-owned issue or result references.
+- The composable exposes readonly Vue views for result/state/suggestions/current
+  revision/re-verification state. The canonical issue array is frozen, and
+  explicit pending state uses `setIssueState`.
+- RED: focused tests failed with 15 failures and 29 passes (44 total), then
+  passed all 44 after the implementation.
+- Review regression RED: the expanded focused suite failed with 1 failure and
+  46 passes (47 total) on Vue proxy cloning; final focused GREEN passed all 47.
+- Final `npm test -- --run`: 78 tests passed across 4 files; only the existing
+  Node experimental `localStorage` warning was emitted.
+- Final `npm run build`: `vue-tsc -b` and Vite 6.4.3 passed; 22 modules
+  transformed.
+
 ## Commit
 
 - Original subject: `feat: add stable verification workspace state`
 - Independent-review fix subject: `fix: align workspace state with canonical results`
 - Second scoped-review fix subject: `fix: preserve overlapping verification issues`
+- Fourth review-wave subject: `fix: harden canonical workspace state`
 - Scope: Task 1 tracked files and required SDD ledger/report only.
 - Attribution: required Copilot co-author and session trailers are included in this commit.

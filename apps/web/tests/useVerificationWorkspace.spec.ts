@@ -1,8 +1,10 @@
+import { reactive } from 'vue'
 import { describe, expect, it } from 'vitest'
 
 import { useVerificationWorkspace } from '../src/composables/useVerificationWorkspace'
 import type {
   PersistedDocumentRevision,
+  TextBlock,
   VerificationIssue,
   VerificationResult
 } from '../src/types/verification'
@@ -47,6 +49,28 @@ function buildIssue(overrides: Partial<VerificationIssue> = {}): VerificationIss
   }
 }
 
+function buildBlock(overrides: Partial<TextBlock> = {}): TextBlock {
+  return {
+    block_id: 'p-0',
+    kind: 'paragraph',
+    text: '甲乙丙丁',
+    global_start: 0,
+    global_end: 4,
+    block_start: 0,
+    block_end: 4,
+    page: null,
+    paragraph_index: 0,
+    table_index: null,
+    row_index: null,
+    cell_index: null,
+    bbox: null,
+    parent_id: null,
+    style: {},
+    source_locator: { paragraph_index: 0 },
+    ...overrides
+  }
+}
+
 function buildResult(
   issues: VerificationIssue[],
   overrides: Partial<VerificationResult> = {}
@@ -60,24 +84,13 @@ function buildResult(
     file_type: 'txt',
     text,
     blocks: [
-      {
-        block_id: 'p-0',
-        kind: 'paragraph',
+      buildBlock({
         text,
         global_start: 0,
         global_end: codePointLength,
         block_start: 0,
-        block_end: codePointLength,
-        page: null,
-        paragraph_index: 0,
-        table_index: null,
-        row_index: null,
-        cell_index: null,
-        bbox: null,
-        parent_id: null,
-        style: {},
-        source_locator: { paragraph_index: 0 }
-      }
+        block_end: codePointLength
+      })
     ],
     parser_name: 'compatibility-flat-text',
     parser_version: '1',
@@ -382,6 +395,180 @@ describe('useVerificationWorkspace', () => {
     expect(workspace.modifiedText.value).toBe('前😀块B后')
   })
 
+  it.each([
+    ['forward', false],
+    ['reversed', true]
+  ])('fails closed for duplicate block ids in %s input order', (_label, reversed) => {
+    const first = buildBlock({
+      block_id: 'duplicate',
+      text: '甲乙',
+      global_start: 0,
+      global_end: 2,
+      block_end: 2
+    })
+    const second = buildBlock({
+      block_id: 'duplicate',
+      text: '丙丁',
+      global_start: 2,
+      global_end: 4,
+      block_end: 2,
+      paragraph_index: 1,
+      source_locator: { paragraph_index: 1 }
+    })
+    const issue = buildIssue({
+      block_id: 'duplicate',
+      start: 2,
+      end: 3,
+      block_start: 0,
+      block_end: 1,
+      original: '丙'
+    })
+    const workspace = useVerificationWorkspace()
+
+    workspace.loadResult(buildResult([issue], {
+      blocks: reversed ? [second, first] : [first, second]
+    }))
+
+    expect(workspace.visibleIssues.value).toEqual([])
+  })
+
+  it.each([
+    ['non-string block ids', 'block_id'],
+    ['non-string parent ids', 'parent_id']
+  ] as const)('fails closed for %s', (_label, field) => {
+    const block = buildBlock()
+    Reflect.set(block, field, 7)
+    const workspace = useVerificationWorkspace()
+
+    workspace.loadResult(buildResult([buildIssue()], { blocks: [block] }))
+
+    expect(workspace.visibleIssues.value).toEqual([])
+  })
+
+  it.each([
+    {
+      label: 'an empty block id',
+      blocks: [buildBlock({ block_id: '' })],
+      issue: buildIssue({ block_id: '' })
+    },
+    {
+      label: 'a global range whose length differs from block text',
+      blocks: [buildBlock({ text: '甲乙', global_end: 4, block_end: 2 })],
+      issue: buildIssue()
+    },
+    {
+      label: 'a nonzero local block start',
+      blocks: [buildBlock({ block_start: 1, block_end: 5 })],
+      issue: buildIssue({ block_start: 2, block_end: 3 })
+    },
+    {
+      label: 'block text that differs from the document slice',
+      blocks: [buildBlock({ text: '甲乙丙错' })],
+      issue: buildIssue()
+    },
+    {
+      label: 'a missing parent',
+      blocks: [buildBlock({ parent_id: 'missing' })],
+      issue: buildIssue()
+    },
+    {
+      label: 'a self parent',
+      blocks: [buildBlock({ parent_id: 'p-0' })],
+      issue: buildIssue()
+    },
+    {
+      label: 'a parent that does not contain its child',
+      blocks: [
+        buildBlock({ parent_id: 'parent' }),
+        buildBlock({
+          block_id: 'parent',
+          text: '甲',
+          global_end: 1,
+          block_end: 1,
+          paragraph_index: 1,
+          source_locator: { paragraph_index: 1 }
+        })
+      ],
+      issue: buildIssue()
+    },
+    {
+      label: 'a parent cycle',
+      blocks: [
+        buildBlock({ parent_id: 'p-1' }),
+        buildBlock({
+          block_id: 'p-1',
+          parent_id: 'p-0',
+          paragraph_index: 1,
+          source_locator: { paragraph_index: 1 }
+        })
+      ],
+      issue: buildIssue()
+    },
+    {
+      label: 'overlapping sibling ranges',
+      blocks: [
+        buildBlock({ text: '甲乙丙', global_end: 3, block_end: 3 }),
+        buildBlock({
+          block_id: 'p-1',
+          text: '乙丙丁',
+          global_start: 1,
+          block_end: 3,
+          paragraph_index: 1,
+          source_locator: { paragraph_index: 1 }
+        })
+      ],
+      issue: buildIssue()
+    }
+  ])('fails closed for $label', ({ blocks, issue }) => {
+    const workspace = useVerificationWorkspace()
+
+    workspace.loadResult(buildResult([issue], { blocks }))
+
+    expect(workspace.visibleIssues.value).toEqual([])
+    expect(workspace.summary.value.total).toBe(0)
+  })
+
+  it('allows overlapping ancestor and descendant blocks with astral code-point ranges', () => {
+    const text = '前😀乙后'
+    const issue = buildIssue({
+      block_id: 'child',
+      start: 2,
+      end: 3,
+      block_start: 1,
+      block_end: 2,
+      original: '乙',
+      suggestion: 'B'
+    })
+    const workspace = useVerificationWorkspace()
+
+    workspace.loadResult(buildResult([issue], {
+      text,
+      blocks: [
+        buildBlock({
+          block_id: 'parent',
+          text: '😀乙',
+          global_start: 1,
+          global_end: 3,
+          block_end: 2
+        }),
+        buildBlock({
+          block_id: 'child',
+          text: '😀乙',
+          global_start: 1,
+          global_end: 3,
+          block_end: 2,
+          parent_id: 'parent',
+          paragraph_index: 1,
+          source_locator: { paragraph_index: 1 }
+        })
+      ]
+    }))
+    workspace.acceptIssue(issue.issue_id)
+
+    expect(workspace.visibleIssues.value).toEqual([issue])
+    expect(workspace.modifiedText.value).toBe('前😀B后')
+  })
+
   it('validates and replaces an astral original using canonical code-point offsets', () => {
     const issue = buildIssue({
       start: 1,
@@ -650,7 +837,7 @@ describe('useVerificationWorkspace', () => {
     })
     const workspace = useVerificationWorkspace()
     workspace.loadResult(buildResult([issueA, issueB]))
-    workspace.issueStates.value[issueB.issue_id] = 'pending'
+    workspace.setIssueState(issueB.issue_id, 'pending')
 
     workspace.acceptIssues([issueA.issue_id, issueB.issue_id])
     workspace.undoLastBatch()
@@ -690,6 +877,120 @@ describe('useVerificationWorkspace', () => {
       accepted: 0,
       rejected: 1
     })
+  })
+
+  it.each([
+    ['undo', 'undoIssue'],
+    ['reject', 'rejectIssue']
+  ] as const)(
+    'creates an authored source-text draft when %s returns accepted text to source',
+    (_label, returnToSource) => {
+      const issue = buildIssue()
+      const workspace = useVerificationWorkspace()
+      workspace.loadResult(buildResult([issue]))
+      workspace.acceptIssue(issue.issue_id)
+      const acceptedRevision = workspace.currentRevision.value
+
+      workspace[returnToSource](issue.issue_id)
+
+      expect(acceptedRevision).toMatchObject({
+        kind: 'review',
+        persistence_state: 'draft',
+        text: '甲B丙丁'
+      })
+      expect(workspace.currentRevision.value).toMatchObject({
+        kind: 'review',
+        persistence_state: 'draft',
+        revision_number: null,
+        parent_revision_id: acceptedRevision?.revision_id,
+        text: '甲乙丙丁'
+      })
+      expect(workspace.currentRevision.value?.revision_id).toMatch(uuidPattern)
+      expect(workspace.currentRevision.value?.revision_id).not.toBe(
+        acceptedRevision?.revision_id
+      )
+    }
+  )
+
+  it('clones loaded results so caller mutation cannot retarget accepted replacements', () => {
+    const issue = buildIssue()
+    const input = buildResult([issue])
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(input)
+
+    input.text = '篡改文本'
+    input.blocks[0].text = '篡改文本'
+    input.blocks[0].global_start = 2
+    issue.start = 0
+    issue.end = 1
+    issue.block_start = 0
+    issue.block_end = 1
+    issue.original = '甲'
+    issue.suggestion = '篡改替换'
+    input.issues.push(buildIssue({
+      issue_id: '55555555-5555-4555-8555-555555555555'
+    }))
+
+    workspace.acceptIssue(issue.issue_id)
+
+    expect(workspace.result.value?.text).toBe('甲乙丙丁')
+    expect(workspace.result.value?.blocks[0]).toMatchObject({
+      text: '甲乙丙丁',
+      global_start: 0
+    })
+    expect(workspace.visibleIssues.value).toHaveLength(1)
+    expect(workspace.visibleIssues.value[0]).toMatchObject({
+      start: 1,
+      end: 2,
+      original: '乙',
+      suggestion: 'B'
+    })
+    expect(workspace.modifiedText.value).toBe('甲B丙丁')
+  })
+
+  it('clones Vue reactive result proxies before freezing canonical state', () => {
+    const issue = buildIssue()
+    const input = buildResult([issue])
+    const reactiveInput = reactive(input)
+    const workspace = useVerificationWorkspace()
+
+    expect(() => workspace.loadResult(reactiveInput)).not.toThrow()
+    input.text = '篡改文本'
+    issue.suggestion = '篡改替换'
+    workspace.acceptIssue(issue.issue_id)
+
+    expect(workspace.result.value?.text).toBe('甲乙丙丁')
+    expect(workspace.modifiedText.value).toBe('甲B丙丁')
+  })
+
+  it('recursively freezes loaded results and canonical issue arrays', () => {
+    const issue = buildIssue()
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(buildResult([issue]))
+    const loaded = workspace.result.value
+    if (loaded === null) {
+      throw new Error('Expected a loaded result')
+    }
+    const visible = workspace.visibleIssues.value
+
+    expect(Object.isFrozen(loaded)).toBe(true)
+    expect(Object.isFrozen(loaded.blocks)).toBe(true)
+    expect(Object.isFrozen(loaded.blocks[0])).toBe(true)
+    expect(Object.isFrozen(loaded.blocks[0].source_locator)).toBe(true)
+    expect(Object.isFrozen(loaded.issues)).toBe(true)
+    expect(Object.isFrozen(loaded.issues[0])).toBe(true)
+    expect(Object.isFrozen(loaded.issues[0].alternatives)).toBe(true)
+    expect(Object.isFrozen(visible)).toBe(true)
+    expect(Reflect.set(loaded, 'text', '篡改文本')).toBe(false)
+    expect(Reflect.set(visible[0], 'suggestion', '篡改替换')).toBe(false)
+    expect(() =>
+      Reflect.apply(Array.prototype.push, loaded.issues, [buildIssue()])
+    ).toThrow(TypeError)
+    expect(() =>
+      Reflect.apply(Array.prototype.push, visible, [buildIssue()])
+    ).toThrow(TypeError)
+    expect(loaded.text).toBe('甲乙丙丁')
+    expect(visible).toEqual([issue])
   })
 
   it('creates immutable manual revisions and invalidates source-bound decisions', () => {

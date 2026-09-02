@@ -1,8 +1,9 @@
-import { computed, ref } from 'vue'
+import { computed, readonly, ref, shallowRef, toRaw } from 'vue'
 
 import type {
   DocumentRevision,
   IssueState,
+  TextBlock,
   VerificationIssue,
   VerificationResult,
   WorkspaceReviewSummary
@@ -36,6 +37,19 @@ function codePointLength(value: string): number {
   return Array.from(value).length
 }
 
+function freezeRecursively<T>(value: T): T {
+  if (
+    value === null ||
+    (typeof value !== 'object' && typeof value !== 'function')
+  ) {
+    return value
+  }
+  for (const key of Reflect.ownKeys(value)) {
+    freezeRecursively(Reflect.get(value, key))
+  }
+  return Object.freeze(value)
+}
+
 function utf16IndexAtCodePointOffset(
   value: string,
   codePointOffset: number
@@ -65,7 +79,7 @@ function utf16RangeForCodePointOffsets(
     !Number.isInteger(start) ||
     !Number.isInteger(end) ||
     start < 0 ||
-    end <= start
+    end < start
   ) {
     return null
   }
@@ -101,6 +115,111 @@ function replaceCodePointRange(
     return null
   }
   return `${value.slice(0, range.start)}${replacement}${value.slice(range.end)}`
+}
+
+function hasCanonicalBlocks(result: VerificationResult): boolean {
+  const blocksById = new Map<string, TextBlock>()
+  const documentLength = codePointLength(result.text)
+
+  for (const block of result.blocks) {
+    if (
+      typeof block.block_id !== 'string' ||
+      block.block_id.length === 0 ||
+      blocksById.has(block.block_id) ||
+      (block.parent_id !== null && typeof block.parent_id !== 'string')
+    ) {
+      return false
+    }
+    const offsets = [
+      block.global_start,
+      block.global_end,
+      block.block_start,
+      block.block_end
+    ]
+    if (
+      offsets.some((offset) => !Number.isInteger(offset) || offset < 0) ||
+      block.global_end < block.global_start ||
+      block.block_end < block.block_start
+    ) {
+      return false
+    }
+    const blockLength = codePointLength(block.text)
+    if (
+      block.global_end - block.global_start !== blockLength ||
+      block.block_end - block.block_start !== blockLength ||
+      block.block_start !== 0 ||
+      block.block_end !== blockLength ||
+      block.global_end > documentLength ||
+      sliceCodePointRange(
+        result.text,
+        block.global_start,
+        block.global_end
+      ) !== block.text
+    ) {
+      return false
+    }
+    blocksById.set(block.block_id, block)
+  }
+
+  for (const block of result.blocks) {
+    if (block.parent_id === null) {
+      continue
+    }
+    const parent = blocksById.get(block.parent_id)
+    if (
+      parent === undefined ||
+      parent.block_id === block.block_id ||
+      parent.global_start > block.global_start ||
+      block.global_end > parent.global_end
+    ) {
+      return false
+    }
+  }
+
+  const ancestorsById = new Map<string, ReadonlySet<string>>()
+  for (const block of result.blocks) {
+    const visited = new Set([block.block_id])
+    const ancestors = new Set<string>()
+    let parentId = block.parent_id
+    while (parentId !== null) {
+      if (visited.has(parentId)) {
+        return false
+      }
+      const parent = blocksById.get(parentId)
+      if (parent === undefined) {
+        return false
+      }
+      visited.add(parentId)
+      ancestors.add(parentId)
+      parentId = parent.parent_id
+    }
+    ancestorsById.set(block.block_id, ancestors)
+  }
+
+  for (let firstIndex = 0; firstIndex < result.blocks.length; firstIndex += 1) {
+    const first = result.blocks[firstIndex]
+    for (
+      let secondIndex = firstIndex + 1;
+      secondIndex < result.blocks.length;
+      secondIndex += 1
+    ) {
+      const second = result.blocks[secondIndex]
+      if (
+        first.global_start >= second.global_end ||
+        second.global_start >= first.global_end
+      ) {
+        continue
+      }
+      if (
+        ancestorsById.get(first.block_id)?.has(second.block_id) ||
+        ancestorsById.get(second.block_id)?.has(first.block_id)
+      ) {
+        continue
+      }
+      return false
+    }
+  }
+  return true
 }
 
 function isCanonicalIssue(
@@ -150,7 +269,12 @@ function isCanonicalIssue(
   )
 }
 
-function canonicalIssues(result: VerificationResult): VerificationIssue[] {
+function canonicalIssues(
+  result: VerificationResult
+): readonly VerificationIssue[] {
+  if (!hasCanonicalBlocks(result)) {
+    return Object.freeze([])
+  }
   const blocksById = new Map(result.blocks.map((block) => [block.block_id, block]))
   const candidates = result.issues
     .filter((issue) => isCanonicalIssue(issue, result, blocksById))
@@ -170,7 +294,7 @@ function canonicalIssues(result: VerificationResult): VerificationIssue[] {
     accepted.push(issue)
     seenIds.add(issue.issue_id)
   }
-  return accepted
+  return Object.freeze(accepted)
 }
 
 function sourceRevision(result: VerificationResult): Readonly<DocumentRevision> {
@@ -189,11 +313,11 @@ function sourceRevision(result: VerificationResult): Readonly<DocumentRevision> 
 }
 
 export function useVerificationWorkspace() {
-  const result = ref<VerificationResult | null>(null)
+  const result = shallowRef<VerificationResult | null>(null)
   const issueStates = ref<Record<string, IssueState>>({})
   const selectedSuggestions = ref<Record<string, string | null>>({})
-  const safeIssues = ref<VerificationIssue[]>([])
-  const currentRevision = ref<Readonly<DocumentRevision> | null>(null)
+  const safeIssues = shallowRef<readonly VerificationIssue[]>(Object.freeze([]))
+  const currentRevision = shallowRef<Readonly<DocumentRevision> | null>(null)
   const requiresReverification = ref(false)
   const batchHistory: BatchStateSnapshot[] = []
 
@@ -320,7 +444,10 @@ export function useVerificationWorkspace() {
     ) {
       return
     }
-    if (text === currentResult.text) {
+    if (
+      text === currentResult.text &&
+      (priorRevision === null || priorRevision.persistence_state === 'source')
+    ) {
       currentRevision.value = sourceRevision(currentResult)
       return
     }
@@ -339,14 +466,15 @@ export function useVerificationWorkspace() {
   }
 
   function loadResult(nextResult: VerificationResult): void {
+    const canonicalResult = freezeRecursively(structuredClone(toRaw(nextResult)))
     const priorResult = result.value
     const sameSourceRevision =
       !requiresReverification.value &&
       priorResult !== null &&
-      priorResult.document_id === nextResult.document_id &&
-      priorResult.source_version === nextResult.source_version &&
-      priorResult.verification_run_id === nextResult.verification_run_id
-    const nextIssues = canonicalIssues(nextResult)
+      priorResult.document_id === canonicalResult.document_id &&
+      priorResult.source_version === canonicalResult.source_version &&
+      priorResult.verification_run_id === canonicalResult.verification_run_id
+    const nextIssues = canonicalIssues(canonicalResult)
     const nextIds = new Set(nextIssues.map((issue) => issue.issue_id))
     const nextStates: Record<string, IssueState> = {}
     const nextSuggestions: Record<string, string | null> = {}
@@ -362,14 +490,14 @@ export function useVerificationWorkspace() {
       }
     }
 
-    result.value = nextResult
+    result.value = canonicalResult
     safeIssues.value = nextIssues
     issueStates.value = nextStates
     selectedSuggestions.value = nextSuggestions
     requiresReverification.value = false
     batchHistory.length = 0
     if (!sameSourceRevision) {
-      currentRevision.value = sourceRevision(nextResult)
+      currentRevision.value = sourceRevision(canonicalResult)
       return
     }
     createReviewRevision()
@@ -506,17 +634,18 @@ export function useVerificationWorkspace() {
   }
 
   return {
-    result,
-    issueStates,
-    selectedSuggestions,
-    currentRevision,
-    requiresReverification,
+    result: readonly(result),
+    issueStates: readonly(issueStates),
+    selectedSuggestions: readonly(selectedSuggestions),
+    currentRevision: readonly(currentRevision),
+    requiresReverification: readonly(requiresReverification),
     modifiedText,
     visibleIssues,
     summary,
     replacementConflictIssueIds,
     hasReplacementConflicts,
     loadResult,
+    setIssueState,
     acceptIssue,
     rejectIssue,
     undoIssue,
