@@ -74,12 +74,14 @@ docker compose -f infra/compose.yaml down
 ### Worker 滚动升级队列
 
 - 旧版 Worker 命令：`celery -A text_verification.workers.celery_app:celery_app worker --queues=celery`
-- 新版 Worker 命令：`celery -A text_verification.workers.celery_app:celery_app worker --queues=celery,verification-v2`
-- 维护 Worker 命令：`celery -A text_verification.workers.celery_app:celery_app worker --queues=maintenance-v2 --concurrency=1`
+- 新版 Worker 命令：设置 `TEXT_VERIFICATION_WORKER_ROLE=verification`、`TEXT_VERIFICATION_WORKER_QUEUES=celery,verification-v2`、`TEXT_VERIFICATION_WORKER_CONCURRENCY=2` 后运行 `text-verification-worker`。
+- 维护 Worker 命令：设置 `TEXT_VERIFICATION_WORKER_ROLE=maintenance`、`TEXT_VERIFICATION_WORKER_QUEUES=maintenance-v2`、`TEXT_VERIFICATION_WORKER_CONCURRENCY=1` 后运行 `text-verification-worker`。
 - 新 API 创建的七格式异步任务、任务重试和租约救援重新投递统一进入 `verification-v2`。
 - 新版 Worker 同时消费 `celery` 与 `verification-v2`，因此可排空升级前已发布的旧任务；旧版 Worker 只消费 `celery`，不会取得新版任务。
 - Beat 将清理与租约救援任务发布到 `maintenance-v2`，由单并发维护 Worker 处理，避免文档队列饥饿或旧 Worker 错误重投递。
 - 滚动顺序：先启动新版普通 Worker 和维护 Worker，再切换到新版 Beat，随后部署新版 API；确认旧 `celery` 队列排空后再停止旧版 Worker。滚动期间只保留一个 Beat 实例。
+- 新版 Worker 的角色、队列、并发数和预取数在启动前强制校验。缺失角色、未知角色、错误队列、维护 Worker 并发不为 1、autoscale 或直接运行含糊的 `celery ... worker` 命令都会在消费任务前退出。Beat 不执行 Worker 角色校验。
+- Redis broker 的“发布确认”表示 Redis 已接受入队命令，并非 AMQP publisher confirm。发布重试保持启用；如设置 `CELERY_BROKER_URL=amqp://...`，Celery 才启用 `confirm_publish`。
 
 ## 本地后端与前端开发、测试、构建
 

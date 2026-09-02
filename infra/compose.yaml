@@ -69,16 +69,12 @@ services:
 
   worker:
     <<: *backend-service
-    command:
-      [
-        "celery",
-        "-A",
-        "text_verification.workers.celery_app:celery_app",
-        "worker",
-        "--loglevel=INFO",
-        "--queues=celery,verification-v2",
-      ]
+    command: ["text-verification-worker"]
     restart: unless-stopped
+    environment:
+      TEXT_VERIFICATION_WORKER_ROLE: verification
+      TEXT_VERIFICATION_WORKER_QUEUES: celery,verification-v2
+      TEXT_VERIFICATION_WORKER_CONCURRENCY: "2"
     depends_on:
       postgres:
         condition: service_healthy
@@ -91,18 +87,12 @@ services:
 
   maintenance-worker:
     <<: *backend-service
-    command:
-      [
-        "celery",
-        "-A",
-        "text_verification.workers.celery_app:celery_app",
-        "worker",
-        "--loglevel=INFO",
-        "--queues=maintenance-v2",
-        "--concurrency=1",
-        "--hostname=maintenance@%h",
-      ]
+    command: ["text-verification-worker"]
     restart: unless-stopped
+    environment:
+      TEXT_VERIFICATION_WORKER_ROLE: maintenance
+      TEXT_VERIFICATION_WORKER_QUEUES: maintenance-v2
+      TEXT_VERIFICATION_WORKER_CONCURRENCY: "1"
     depends_on:
       postgres:
         condition: service_healthy

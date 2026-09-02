@@ -14,6 +14,7 @@ class Settings(BaseSettings):
         "@localhost:5432/text_verification"
     )
     redis_url: str = "redis://localhost:6379/0"
+    celery_broker_url: str = ""
     storage_root: Path = Path("./var/jobs")
     job_retention_hours: int = Field(default=24, ge=1)
     job_lease_seconds: int = Field(default=1200, gt=900, le=3600)

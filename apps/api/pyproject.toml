@@ -21,6 +21,9 @@ dependencies = [
   "uvicorn[standard]>=0.34,<1",
 ]
 
+[project.scripts]
+text-verification-worker = "text_verification.workers.worker_cli:main"
+
 [project.optional-dependencies]
 dev = [
   "httpx>=0.28,<1",

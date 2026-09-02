@@ -12,7 +12,6 @@ from text_verification.application.verification_pipeline import (
 )
 from text_verification.checkers.registry import CheckerRegistry
 from text_verification.document_processing.errors import (
-    OcrOutputError,
     OcrProcessingError,
 )
 from text_verification.document_processing.ocr_provider import OcrTextBox
@@ -179,7 +178,8 @@ def test_pdf_raster_resource_failure_emits_no_ocr_stage() -> None:
     ("error", "expected_type"),
     [
         (RuntimeError("render failed"), OcrProcessingError),
-        (ValueError("invalid page"), OcrOutputError),
+        (ValueError("invalid page"), OcrProcessingError),
+        (OSError("renderer unavailable"), OcrProcessingError),
         (MemoryError("allocation failed"), OcrProcessingError),
     ],
 )
@@ -237,13 +237,15 @@ def test_pixmap_encoding_failure_emits_no_ocr_stage_and_closes_pixmap(
         lambda page, **kwargs: pixmap,
     )
 
-    with pytest.raises(OcrOutputError):
+    with pytest.raises(OcrProcessingError) as raised:
         PdfParser(ocr=_FakeOcr()).parse_with_progress(
             fixtures / "scanned-page.pdf",
             progress_observer=stages.append,
         )
 
     assert stages == []
+    assert raised.value.code == "ocr_render_encoding_failed"
+    assert raised.value.retryable is True
     assert pixmap.closed is True
 
 

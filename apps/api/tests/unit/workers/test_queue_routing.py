@@ -1,3 +1,4 @@
+import tomllib
 from pathlib import Path
 
 from text_verification.workers.celery_app import (
@@ -5,6 +6,7 @@ from text_verification.workers.celery_app import (
     LEGACY_PROCESSING_QUEUE,
     MAINTENANCE_QUEUE,
     PROCESS_JOB_PUBLISH_RETRY_POLICY,
+    broker_transport_options_for,
     celery_app,
 )
 
@@ -31,7 +33,18 @@ def test_celery_routes_new_jobs_and_maintenance_to_versioned_queues() -> None:
     }
     assert celery_app.conf.task_publish_retry is True
     assert celery_app.conf.task_publish_retry_policy == PROCESS_JOB_PUBLISH_RETRY_POLICY
-    assert celery_app.conf.broker_transport_options["confirm_publish"] is True
+    assert "confirm_publish" not in celery_app.conf.broker_transport_options
+
+
+def test_publisher_confirm_option_is_transport_aware() -> None:
+    assert broker_transport_options_for("redis://redis:6379/0") == {}
+    assert broker_transport_options_for("rediss://redis:6379/0") == {}
+    assert broker_transport_options_for("amqp://guest:guest@rabbitmq//") == {
+        "confirm_publish": True
+    }
+    assert broker_transport_options_for("pyamqp://guest:guest@rabbitmq//") == {
+        "confirm_publish": True
+    }
 
 
 def test_periodic_tasks_have_one_non_processing_queue_owner() -> None:
@@ -48,10 +61,14 @@ def test_periodic_tasks_have_one_non_processing_queue_owner() -> None:
 def test_compose_new_worker_drains_legacy_and_v2_with_separate_maintenance() -> None:
     compose = (REPOSITORY_ROOT / "infra" / "compose.yaml").read_text(encoding="utf-8")
 
-    assert '"--queues=celery,verification-v2"' in compose
+    assert compose.count('"text-verification-worker"') == 2
+    assert "TEXT_VERIFICATION_WORKER_ROLE: verification" in compose
+    assert "TEXT_VERIFICATION_WORKER_QUEUES: celery,verification-v2" in compose
+    assert 'TEXT_VERIFICATION_WORKER_CONCURRENCY: "2"' in compose
     assert compose.count("maintenance-worker:") == 1
-    assert compose.count('"--queues=maintenance-v2"') == 1
-    assert '"--concurrency=1"' in compose
+    assert "TEXT_VERIFICATION_WORKER_ROLE: maintenance" in compose
+    assert "TEXT_VERIFICATION_WORKER_QUEUES: maintenance-v2" in compose
+    assert 'TEXT_VERIFICATION_WORKER_CONCURRENCY: "1"' in compose
 
 
 def test_rollout_documentation_keeps_pre_fix_worker_off_v2_queue() -> None:
@@ -62,5 +79,18 @@ def test_rollout_documentation_keeps_pre_fix_worker_off_v2_queue() -> None:
 
     assert "--queues=celery" in legacy_command
     assert ADVANCED_PROCESSING_QUEUE not in legacy_command
-    assert "--queues=celery,verification-v2" in readme
-    assert "--queues=maintenance-v2" in readme
+    assert "text-verification-worker" in readme
+    assert "TEXT_VERIFICATION_WORKER_ROLE=verification" in readme
+    assert "TEXT_VERIFICATION_WORKER_ROLE=maintenance" in readme
+
+
+def test_worker_console_entrypoint_is_packaged() -> None:
+    config = tomllib.loads(
+        (REPOSITORY_ROOT / "apps" / "api" / "pyproject.toml").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert config["project"]["scripts"]["text-verification-worker"] == (
+        "text_verification.workers.worker_cli:main"
+    )

@@ -1,4 +1,8 @@
+import os
+from urllib.parse import urlparse
+
 from celery import Celery  # type: ignore[import-untyped]
+from celery.signals import celeryd_init  # type: ignore[import-untyped]
 from kombu import Queue  # type: ignore[import-untyped]
 
 from text_verification.config import get_settings
@@ -13,11 +17,19 @@ PROCESS_JOB_PUBLISH_RETRY_POLICY = {
     "interval_max": 0.2,
 }
 
+
+def broker_transport_options_for(broker_url: str) -> dict[str, bool]:
+    if urlparse(broker_url).scheme.lower() in {"amqp", "pyamqp"}:
+        return {"confirm_publish": True}
+    return {}
+
+
 settings = get_settings()
+broker_url = settings.celery_broker_url or settings.redis_url
 
 celery_app = Celery(
     "text_verification",
-    broker=settings.redis_url,
+    broker=broker_url,
     backend=settings.redis_url,
     include=["text_verification.workers.tasks"],
 )
@@ -43,7 +55,7 @@ celery_app.conf.update(
     },
     task_publish_retry=True,
     task_publish_retry_policy=PROCESS_JOB_PUBLISH_RETRY_POLICY,
-    broker_transport_options={"confirm_publish": True},
+    broker_transport_options=broker_transport_options_for(broker_url),
     worker_prefetch_multiplier=1,
     task_time_limit=900,
     task_soft_time_limit=840,
@@ -61,3 +73,25 @@ celery_app.conf.update(
         },
     },
 )
+
+
+def validate_celeryd_startup(
+    sender: object,
+    instance: object,
+    conf: object,
+    options: dict[str, object],
+    **kwargs: object,
+) -> None:
+    del sender, instance, conf, kwargs
+    from text_verification.workers.worker_cli import (
+        WorkerStartupError,
+        guard_celery_worker_startup,
+    )
+
+    try:
+        guard_celery_worker_startup(os.environ, options)
+    except WorkerStartupError as error:
+        raise SystemExit(f"Unsafe Celery worker configuration: {error}") from error
+
+
+celeryd_init.connect(validate_celeryd_startup)
