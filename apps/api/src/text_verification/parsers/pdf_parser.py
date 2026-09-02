@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import unicodedata
 from bisect import bisect_left, bisect_right
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -702,8 +703,23 @@ def _ocr_boxes_are_near_identical(
 
 def _ocr_box_preference_order(
     box: OcrLayoutBox,
-) -> tuple[float, str, tuple[tuple[float, float], ...]]:
-    return -box.confidence, _normalized_ocr_identity(box.text), box.quad
+) -> tuple[
+    float,
+    str,
+    str,
+    str,
+    tuple[tuple[float, float], ...],
+    int,
+]:
+    normalized_text = unicodedata.normalize("NFKC", box.text)
+    return (
+        -box.confidence,
+        normalized_text.casefold(),
+        normalized_text,
+        box.text,
+        box.quad,
+        box.page,
+    )
 
 
 def _ocr_box_stable_order(

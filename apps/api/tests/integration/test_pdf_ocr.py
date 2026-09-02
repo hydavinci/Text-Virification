@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import math
+from itertools import permutations
 from pathlib import Path
+from random import Random
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -747,6 +749,51 @@ def test_same_geometry_conflicting_ocr_text_uses_stable_tie_order(
     )
 
     assert document.text == "Alpha"
+
+
+def test_casefold_equal_duplicate_winner_is_total_order_across_permutations() -> None:
+    variants = [
+        _ocr_box("ALPHA", (48.0, 48.0, 200.0, 76.0), confidence=0.9),
+        _ocr_box("Alpha", (48.0, 48.0, 200.0, 76.0), confidence=0.9),
+        _ocr_box("alpha", (48.0, 48.0, 200.0, 76.0), confidence=0.9),
+        _ocr_box("ＡＬＰＨＡ", (48.0, 48.0, 200.0, 76.0), confidence=0.9),
+    ]
+    orders = [list(order) for order in permutations(variants)]
+    randomizer = Random(20260902)
+    for _ in range(5):
+        shuffled = list(variants)
+        randomizer.shuffle(shuffled)
+        orders.append(shuffled)
+
+    documents = [
+        PdfParser(ocr=FakeOcr([order])).parse(FIXTURE_DIRECTORY / "scanned-page.pdf")
+        for order in orders
+    ]
+    layout_variants = [
+        _layout_box(
+            box.text,
+            (10.0, 10.0, 30.0, 20.0),
+            confidence=box.confidence,
+            index=index,
+        )
+        for index, box in enumerate(variants)
+    ]
+    direct_winners = {
+        pdf_parser_module._coalesce_ocr_boxes(
+            tuple(order),
+            limits=PdfResourceLimits(),
+        )[0].text
+        for order in permutations(layout_variants)
+    }
+
+    assert {document.text for document in documents} == {"ALPHA"}
+    assert direct_winners == {"ALPHA"}
+    assert len(
+        {
+            tuple(block.block_id for block in document.blocks)
+            for document in documents
+        }
+    ) == 1
 
 
 def test_duplicate_candidate_budget_accepts_exact_boundary(

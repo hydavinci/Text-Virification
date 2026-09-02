@@ -325,7 +325,7 @@ def test_layout_keeps_narrow_body_with_wide_footer_lines() -> None:
     assert result.elements[0].text == "Body one\nBody two"
 
 
-def test_layout_suppresses_false_headings_for_equal_count_height_ambiguity() -> None:
+def test_layout_classifies_equal_count_top_heading_lines_before_body() -> None:
     layout = _layout_module()
     result = layout.build_ocr_layout(
         (
@@ -333,6 +333,57 @@ def test_layout_suppresses_false_headings_for_equal_count_height_ambiguity() -> 
             _box(index=1, text="Large line two", bbox=(0.0, 34.0, 220.0, 54.0)),
             _box(index=2, text="Narrow body one", bbox=(60.0, 70.0, 130.0, 82.0)),
             _box(index=3, text="Narrow body two", bbox=(60.0, 85.0, 130.0, 97.0)),
+        ),
+        language="en",
+    )
+
+    assert [(element.kind, element.text) for element in result.elements] == [
+        ("heading", "Large line one"),
+        ("heading", "Large line two"),
+        ("paragraph", "Narrow body one\nNarrow body two"),
+    ]
+
+
+def test_layout_keeps_fragmented_bottom_footnotes_out_of_heading_class() -> None:
+    layout = _layout_module()
+    footnotes = tuple(
+        box
+        for line_index, y in enumerate((65.0, 74.0))
+        for fragment_index in range(4)
+        for box in (
+            _box(
+                index=2 + line_index * 4 + fragment_index,
+                text=f"f{fragment_index}",
+                bbox=(
+                    10.0 + fragment_index * 18.0,
+                    y,
+                    26.0 + fragment_index * 18.0,
+                    y + 6.0,
+                ),
+            ),
+        )
+    )
+    result = layout.build_ocr_layout(
+        (
+            _box(index=0, text="Body one", bbox=(60.0, 10.0, 130.0, 22.0)),
+            _box(index=1, text="Body two", bbox=(60.0, 25.0, 130.0, 37.0)),
+            *footnotes,
+        ),
+        language="en",
+    )
+
+    assert all(element.kind == "paragraph" for element in result.elements)
+    assert result.elements[0].text == "Body one\nBody two"
+
+
+def test_layout_uses_conservative_no_heading_choice_for_interleaved_clusters() -> None:
+    layout = _layout_module()
+    result = layout.build_ocr_layout(
+        (
+            _box(index=0, text="Large one", bbox=(10.0, 10.0, 130.0, 30.0)),
+            _box(index=1, text="Body one", bbox=(10.0, 35.0, 100.0, 47.0)),
+            _box(index=2, text="Large two", bbox=(10.0, 52.0, 130.0, 72.0)),
+            _box(index=3, text="Body two", bbox=(10.0, 77.0, 100.0, 89.0)),
         ),
         language="en",
     )

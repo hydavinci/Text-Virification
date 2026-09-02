@@ -797,12 +797,36 @@ def _body_line_height(lines: tuple[OcrLayoutLine, ...]) -> float:
     elif largest_population == 1:
         body_cluster = min(contenders, key=_cluster_height)
     else:
-        body_cluster = max(contenders, key=_cluster_height)
+        body_cluster = _tied_multiline_body_cluster(contenders)
     return _cluster_height(body_cluster)
 
 
 def _cluster_height(cluster: list[OcrLayoutLine]) -> float:
     return median(line.bbox[3] - line.bbox[1] for line in cluster)
+
+
+def _tied_multiline_body_cluster(
+    contenders: list[list[OcrLayoutLine]],
+) -> list[OcrLayoutLine]:
+    larger = max(contenders, key=_cluster_height)
+    if len(contenders) != 2:
+        return larger
+    smaller = min(contenders, key=_cluster_height)
+    larger_start, larger_end = _cluster_vertical_range(larger)
+    smaller_start, _ = _cluster_vertical_range(smaller)
+    if larger_end >= smaller_start:
+        return larger
+    separation = smaller_start - larger_end
+    if separation <= max(_cluster_height(larger), _cluster_height(smaller)):
+        return smaller
+    return larger
+
+
+def _cluster_vertical_range(cluster: list[OcrLayoutLine]) -> tuple[float, float]:
+    return (
+        min(line.bbox[1] for line in cluster),
+        max(line.bbox[3] for line in cluster),
+    )
 
 
 def _table_element(cell: OcrTableCell, *, language: str) -> OcrLayoutElement:
