@@ -52,6 +52,80 @@ def test_layout_groups_heading_and_paragraph_lines_by_relative_height() -> None:
     assert [element.paragraph_index for element in result.elements] == [0, 1]
 
 
+def test_layout_keeps_secondary_heading_separate_from_body() -> None:
+    layout = _layout_module()
+    result = layout.build_ocr_layout(
+        (
+            _box(index=0, text="Title", bbox=(10.0, 10.0, 150.0, 34.0)),
+            _box(index=1, text="Subhead", bbox=(10.0, 45.0, 130.0, 65.0)),
+            _box(index=2, text="Body", bbox=(10.0, 68.0, 100.0, 80.0)),
+        ),
+        language="en",
+    )
+
+    assert [(element.kind, element.text) for element in result.elements] == [
+        ("heading", "Title"),
+        ("heading", "Subhead"),
+        ("paragraph", "Body"),
+    ]
+
+
+def test_layout_treats_all_large_and_single_line_pages_as_body_text() -> None:
+    layout = _layout_module()
+    all_large = layout.build_ocr_layout(
+        (
+            _box(index=0, text="Line one", bbox=(10.0, 10.0, 130.0, 34.0)),
+            _box(index=1, text="Line two", bbox=(10.0, 38.0, 130.0, 62.0)),
+        ),
+        language="en",
+    )
+    single = layout.build_ocr_layout(
+        (_box(index=0, text="Only line", bbox=(10.0, 10.0, 130.0, 34.0)),),
+        language="en",
+    )
+
+    assert [(element.kind, element.text) for element in all_large.elements] == [
+        ("paragraph", "Line one\nLine two")
+    ]
+    assert [(element.kind, element.text) for element in single.elements] == [
+        ("paragraph", "Only line")
+    ]
+
+
+def test_layout_classifies_cjk_heading_and_body_deterministically() -> None:
+    layout = _layout_module()
+    boxes = (
+        _box(index=0, text="标题", bbox=(10.0, 10.0, 80.0, 34.0)),
+        _box(index=1, text="正文第一行", bbox=(10.0, 50.0, 100.0, 62.0)),
+        _box(index=2, text="正文第二行", bbox=(10.0, 65.0, 100.0, 77.0)),
+    )
+
+    first = layout.build_ocr_layout(boxes, language="zh")
+    second = layout.build_ocr_layout(tuple(reversed(boxes)), language="zh")
+
+    assert [(element.kind, element.text) for element in first.elements] == [
+        ("heading", "标题"),
+        ("paragraph", "正文第一行\n正文第二行"),
+    ]
+    assert second == first
+
+
+def test_layout_splits_materially_different_nonheading_line_heights() -> None:
+    layout = _layout_module()
+    result = layout.build_ocr_layout(
+        (
+            _box(index=0, text="Emphasized", bbox=(10.0, 10.0, 120.0, 26.0)),
+            _box(index=1, text="Body", bbox=(10.0, 29.0, 100.0, 41.0)),
+        ),
+        language="en",
+    )
+
+    assert [(element.kind, element.text) for element in result.elements] == [
+        ("paragraph", "Emphasized"),
+        ("paragraph", "Body"),
+    ]
+
+
 def test_layout_detects_stable_two_by_two_table_without_hallucinating_prose_lists() -> None:
     layout = _layout_module()
     table = layout.build_ocr_layout(
@@ -87,6 +161,101 @@ def test_layout_detects_stable_two_by_two_table_without_hallucinating_prose_list
     ]
     assert prose.tables == ()
     assert all(element.kind == "paragraph" for element in prose.elements)
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        (
+            ("1.", "First numbered item"),
+            ("2.", "Second numbered item"),
+        ),
+        (
+            ("•", "First bullet item"),
+            ("•", "Second bullet item"),
+        ),
+    ],
+)
+def test_layout_rejects_wide_gap_marker_lists_as_tables(
+    rows: tuple[tuple[str, str], tuple[str, str]],
+) -> None:
+    layout = _layout_module()
+    boxes = tuple(
+        box
+        for row_index, (marker, text) in enumerate(rows)
+        for box in (
+            _box(
+                index=row_index * 2,
+                text=marker,
+                bbox=(10.0, 10.0 + row_index * 25.0, 18.0, 22.0 + row_index * 25.0),
+            ),
+            _box(
+                index=row_index * 2 + 1,
+                text=text,
+                bbox=(80.0, 10.0 + row_index * 25.0, 190.0, 22.0 + row_index * 25.0),
+            ),
+        )
+    )
+
+    result = layout.build_ocr_layout(boxes, language="en")
+
+    assert result.tables == ()
+    assert all(element.kind == "paragraph" for element in result.elements)
+
+
+def test_layout_rejects_ragged_two_column_prose_as_table() -> None:
+    layout = _layout_module()
+    result = layout.build_ocr_layout(
+        (
+            _box(index=0, text="Label", bbox=(10.0, 10.0, 30.0, 22.0)),
+            _box(index=1, text="A much wider phrase", bbox=(100.0, 10.0, 180.0, 22.0)),
+            _box(index=2, text="Topic", bbox=(10.0, 35.0, 34.0, 47.0)),
+            _box(index=3, text="Short phrase", bbox=(100.0, 35.0, 150.0, 47.0)),
+        ),
+        language="en",
+    )
+
+    assert result.tables == ()
+
+
+def test_layout_preserves_valid_three_by_two_table() -> None:
+    layout = _layout_module()
+    result = layout.build_ocr_layout(
+        tuple(
+            box
+            for row_index, (left, right) in enumerate(
+                (("A1", "B1"), ("A2", "B2"), ("A3", "B3"))
+            )
+            for box in (
+                _box(
+                    index=row_index * 2,
+                    text=left,
+                    bbox=(10.0, 10.0 + row_index * 25.0, 30.0, 22.0 + row_index * 25.0),
+                ),
+                _box(
+                    index=row_index * 2 + 1,
+                    text=right,
+                    bbox=(100.0, 10.0 + row_index * 25.0, 124.0, 22.0 + row_index * 25.0),
+                ),
+            )
+        ),
+        language="en",
+    )
+
+    assert len(result.tables) == 1
+    assert result.tables[0].row_count == 3
+    assert result.tables[0].column_count == 2
+    assert [
+        (element.row_index, element.cell_index, element.text)
+        for element in result.elements
+    ] == [
+        (0, 0, "A1"),
+        (0, 1, "B1"),
+        (1, 0, "A2"),
+        (1, 1, "B2"),
+        (2, 0, "A3"),
+        (2, 1, "B3"),
+    ]
 
 
 @pytest.mark.parametrize(

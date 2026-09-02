@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from math import isfinite
@@ -27,8 +28,11 @@ DEFAULT_MAX_LAYOUT_CANDIDATE_CHECKS = 250_000
 _LINE_OVERLAP_RATIO = 0.45
 _BASELINE_RATIO = 0.45
 _HEADING_HEIGHT_RATIO = 1.35
+_BODY_CLUSTER_GAP_RATIO = 1.3
+_PARAGRAPH_HEIGHT_RATIO = 1.25
 _MIN_TABLE_GAP_HEIGHT_RATIO = 1.5
 _MAX_TABLE_ROW_GAP_HEIGHT_RATIO = 4.0
+_LIST_MARKER = re.compile(r"^(?:(\d+)[.)]|[•●▪◦*-])$")
 
 
 class _LayoutModel(BaseModel):
@@ -409,6 +413,8 @@ def _detect_tables(
     tables: list[OcrTable] = []
     consumed: set[int] = set()
     for rows in groups:
+        if not _rows_have_stable_columns(rows) or _is_marker_list(rows):
+            continue
         table_index = len(tables)
         column_count = len(rows[0].boxes)
         cells = tuple(
@@ -488,6 +494,49 @@ def _rows_align(first: OcrLayoutLine, second: OcrLayoutLine) -> bool:
     )
 
 
+def _rows_have_stable_columns(rows: list[OcrLayoutLine]) -> bool:
+    typical_height = median(
+        box.height
+        for row in rows
+        for box in row.boxes
+    )
+    for column_index in range(len(rows[0].boxes)):
+        widths = [
+            row.boxes[column_index].bbox[2] - row.boxes[column_index].bbox[0]
+            for row in rows
+        ]
+        if max(widths) - min(widths) > max(
+            typical_height * 0.75,
+            median(widths) * 0.25,
+        ):
+            return False
+    return True
+
+
+def _is_marker_list(rows: list[OcrLayoutLine]) -> bool:
+    markers = [_LIST_MARKER.fullmatch(row.boxes[0].text) for row in rows]
+    if any(marker is None for marker in markers):
+        return False
+    first_widths = [
+        row.boxes[0].bbox[2] - row.boxes[0].bbox[0]
+        for row in rows
+    ]
+    prose_widths = [
+        row.boxes[1].bbox[2] - row.boxes[1].bbox[0]
+        for row in rows
+    ]
+    if max(first_widths) > median(prose_widths) * 0.35:
+        return False
+    number_values = [
+        int(number)
+        for marker in markers
+        if marker is not None and (number := marker.group(1)) is not None
+    ]
+    return not number_values or number_values == list(
+        range(number_values[0], number_values[0] + len(number_values))
+    )
+
+
 def _text_elements(
     lines: tuple[OcrLayoutLine, ...],
     *,
@@ -495,8 +544,7 @@ def _text_elements(
 ) -> list[OcrLayoutElement]:
     if not lines:
         return []
-    heights = sorted(line.bbox[3] - line.bbox[1] for line in lines)
-    body_height = median(heights[: max(1, (len(heights) + 1) // 2)])
+    body_height = _body_line_height(lines)
     elements: list[OcrLayoutElement] = []
     paragraph_lines: list[OcrLayoutLine] = []
     paragraph_index = 0
@@ -557,10 +605,31 @@ def _same_paragraph(
 ) -> bool:
     vertical_gap = current.bbox[1] - previous.bbox[3]
     left_delta = abs(current.bbox[0] - previous.bbox[0])
+    previous_height = previous.bbox[3] - previous.bbox[1]
+    current_height = current.bbox[3] - current.bbox[1]
+    height_ratio = max(previous_height, current_height) / min(
+        previous_height,
+        current_height,
+    )
     return (
         0.0 <= vertical_gap <= max(4.0, body_height * 1.5)
         and left_delta <= max(10.0, body_height * 1.5)
+        and height_ratio <= _PARAGRAPH_HEIGHT_RATIO
     )
+
+
+def _body_line_height(lines: tuple[OcrLayoutLine, ...]) -> float:
+    heights = sorted(line.bbox[3] - line.bbox[1] for line in lines)
+    body_cluster = [heights[0]]
+    for height in heights[1:]:
+        cluster_height = median(body_cluster)
+        if (
+            height > cluster_height * _BODY_CLUSTER_GAP_RATIO
+            and height > cluster_height + 2.0
+        ):
+            break
+        body_cluster.append(height)
+    return median(body_cluster)
 
 
 def _table_element(cell: OcrTableCell, *, language: str) -> OcrLayoutElement:

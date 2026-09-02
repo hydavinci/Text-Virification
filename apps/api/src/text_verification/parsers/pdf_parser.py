@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from itertools import groupby
+from itertools import groupby, product
 from math import ceil, isfinite
 from pathlib import Path
 from typing import Any, Literal
@@ -53,7 +53,12 @@ _MAX_TABLE_SPATIAL_NODE_VISITS_PER_PAGE = (
 )
 OCR_RENDER_DPI = 144
 _OCR_RASTER_CHANNELS = 3
-_OCR_DEDUPE_OVERLAP_RATIO = 0.5
+_OCR_DEDUPE_IOU_THRESHOLD = 0.5
+_OCR_DEDUPE_COVERAGE_THRESHOLD = 0.9
+_OCR_DUPLICATE_GRID_SIZE = 2.0
+_OCR_DUPLICATE_IOU_THRESHOLD = 0.95
+_NATIVE_DEDUPE_GRID_SIZE = 64.0
+_MAX_NATIVE_GRID_CELLS_PER_REGION = 4_096
 
 
 @dataclass(frozen=True)
@@ -172,14 +177,16 @@ def _extract_page(
                 recognized_boxes,
                 spans=tuple(spans),
                 tables=tuple(tables),
+                limits=limits,
             )
-            ocr_elements = build_ocr_layout(
+            layout = build_ocr_layout(
                 unique_boxes,
                 language=ocr_language,
                 max_boxes=limits.max_ocr_boxes_per_page,
-            ).elements
-            ocr_resolved = True
-        else:
+            )
+            ocr_elements = layout.elements
+            ocr_resolved = bool(ocr_elements)
+        if not ocr_resolved:
             ocr_warnings = (_ocr_warning(page_number),)
     return _ExtractedPage(
         metadata=PdfPageMetadata(
@@ -343,7 +350,7 @@ def _normalize_ocr_boxes(
             item[2],
         )
     )
-    return tuple(
+    mapped = tuple(
         OcrLayoutBox(
             page=page_number,
             box_index=index,
@@ -353,6 +360,106 @@ def _normalize_ocr_boxes(
         )
         for index, (text, confidence, quad) in enumerate(normalized)
     )
+    return _coalesce_ocr_boxes(mapped)
+
+
+def _coalesce_ocr_boxes(
+    boxes: tuple[OcrLayoutBox, ...],
+) -> tuple[OcrLayoutBox, ...]:
+    if len(boxes) < 2:
+        return boxes
+
+    groups: list[OcrLayoutBox] = []
+    bucket_groups: dict[tuple[int, int, int, int], list[int]] = {}
+    for box in sorted(boxes, key=_ocr_box_stable_order):
+        candidate_groups = {
+            group_index
+            for key in _neighbor_geometry_keys(_ocr_duplicate_geometry_key(box))
+            for group_index in bucket_groups.get(key, ())
+        }
+        matching_groups = sorted(
+            group_index
+            for group_index in candidate_groups
+            if _ocr_boxes_are_near_identical(groups[group_index], box)
+        )
+        if not matching_groups:
+            group_index = len(groups)
+            groups.append(box)
+        else:
+            group_index = matching_groups[0]
+            groups[group_index] = min(
+                (groups[group_index], box),
+                key=_ocr_box_preference_order,
+            )
+        key = _ocr_duplicate_geometry_key(groups[group_index])
+        entries = bucket_groups.setdefault(key, [])
+        if group_index not in entries:
+            entries.append(group_index)
+
+    ordered = sorted(groups, key=_ocr_box_stable_order)
+    return tuple(
+        box.model_copy(update={"box_index": index})
+        for index, box in enumerate(ordered)
+    )
+
+
+def _ocr_duplicate_geometry_key(
+    box: OcrLayoutBox,
+) -> tuple[int, int, int, int]:
+    x0, y0, x1, y1 = box.bbox
+    return (
+        round(((x0 + x1) / 2.0) / _OCR_DUPLICATE_GRID_SIZE),
+        round(((y0 + y1) / 2.0) / _OCR_DUPLICATE_GRID_SIZE),
+        round((x1 - x0) / _OCR_DUPLICATE_GRID_SIZE),
+        round((y1 - y0) / _OCR_DUPLICATE_GRID_SIZE),
+    )
+
+
+def _neighbor_geometry_keys(
+    key: tuple[int, int, int, int],
+) -> tuple[tuple[int, int, int, int], ...]:
+    return tuple(
+        (
+            key[0] + delta_x,
+            key[1] + delta_y,
+            key[2] + delta_width,
+            key[3] + delta_height,
+        )
+        for delta_x, delta_y, delta_width, delta_height in product(
+            (-1, 0, 1),
+            repeat=4,
+        )
+    )
+
+
+def _ocr_boxes_are_near_identical(
+    first: OcrLayoutBox,
+    second: OcrLayoutBox,
+) -> bool:
+    overlap = _bbox_overlap_area(first.bbox, second.bbox)
+    union = _bbox_area(first.bbox) + _bbox_area(second.bbox) - overlap
+    return overlap / max(union, 1e-9) >= _OCR_DUPLICATE_IOU_THRESHOLD
+
+
+def _ocr_box_preference_order(
+    box: OcrLayoutBox,
+) -> tuple[float, str, tuple[tuple[float, float], ...]]:
+    return -box.confidence, _normalized_ocr_identity(box.text), box.quad
+
+
+def _ocr_box_stable_order(
+    box: OcrLayoutBox,
+) -> tuple[float, float, float, float, float, str, tuple[tuple[float, float], ...]]:
+    x0, y0, x1, y1 = box.bbox
+    return (
+        y0,
+        x0,
+        y1,
+        x1,
+        -box.confidence,
+        _normalized_ocr_identity(box.text),
+        box.quad,
+    )
 
 
 def _deduplicate_ocr_boxes(
@@ -360,30 +467,121 @@ def _deduplicate_ocr_boxes(
     *,
     spans: tuple[PdfTextSpan, ...],
     tables: tuple[PdfTable, ...],
+    limits: PdfResourceLimits,
 ) -> tuple[OcrLayoutBox, ...]:
-    regions = sorted(
-        (
-            (text, bbox)
-            for text, bbox in _native_text_regions(spans, tables)
-            if text and bbox is not None
-        ),
-        key=lambda region: (region[1][1], region[1][0]),
+    spatial_index = _NativeTextSpatialIndex.build(
+        _native_text_regions(spans, tables)
     )
-    if not regions:
+    if not spatial_index.has_regions:
         return boxes
 
-    active: list[tuple[str, tuple[float, float, float, float]]] = []
-    region_index = 0
+    inspection_count = 0
     unique: list[OcrLayoutBox] = []
     for box in sorted(boxes, key=lambda value: (value.bbox[1], value.bbox[0])):
-        while region_index < len(regions) and regions[region_index][1][1] < box.bbox[3]:
-            active.append(regions[region_index])
-            region_index += 1
-        active = [region for region in active if region[1][3] > box.bbox[1]]
-        if any(_ocr_box_duplicates_native(box, text, bbox) for text, bbox in active):
+        duplicate = False
+        for region in spatial_index.query(box):
+            inspection_count += 1
+            if inspection_count > limits.max_ocr_dedupe_candidate_inspections_per_page:
+                raise PdfResourceLimitError(
+                    limit="max_ocr_dedupe_candidate_inspections_per_page",
+                    maximum=limits.max_ocr_dedupe_candidate_inspections_per_page,
+                    actual=inspection_count,
+                )
+            if _ocr_box_duplicates_native(box, region.text, region.bbox):
+                duplicate = True
+                break
+        if duplicate:
             continue
         unique.append(box)
     return tuple(unique)
+
+
+@dataclass(frozen=True)
+class _NativeTextRegion:
+    region_index: int
+    text: str
+    identity: str
+    bbox: tuple[float, float, float, float]
+
+
+@dataclass(frozen=True)
+class _NativeTextSpatialIndex:
+    buckets: dict[tuple[str, int, int], tuple[_NativeTextRegion, ...]]
+    oversized: dict[str, tuple[_NativeTextRegion, ...]]
+
+    @property
+    def has_regions(self) -> bool:
+        return bool(self.buckets or self.oversized)
+
+    @classmethod
+    def build(
+        cls,
+        raw_regions: list[
+            tuple[str, tuple[float, float, float, float] | None]
+        ],
+    ) -> _NativeTextSpatialIndex:
+        mutable_buckets: dict[
+            tuple[str, int, int],
+            list[_NativeTextRegion],
+        ] = {}
+        mutable_oversized: dict[str, list[_NativeTextRegion]] = {}
+        for region_index, (text, bbox) in enumerate(raw_regions):
+            identity = _normalized_ocr_identity(text)
+            if not identity or bbox is None:
+                continue
+            region = _NativeTextRegion(
+                region_index=region_index,
+                text=text,
+                identity=identity,
+                bbox=bbox,
+            )
+            cells = _native_grid_cells(bbox)
+            if len(cells) > _MAX_NATIVE_GRID_CELLS_PER_REGION:
+                mutable_oversized.setdefault(identity, []).append(region)
+                continue
+            for cell_x, cell_y in cells:
+                mutable_buckets.setdefault(
+                    (identity, cell_x, cell_y),
+                    [],
+                ).append(region)
+        return cls(
+            buckets={
+                key: tuple(sorted(values, key=lambda value: value.region_index))
+                for key, values in mutable_buckets.items()
+            },
+            oversized={
+                key: tuple(sorted(values, key=lambda value: value.region_index))
+                for key, values in mutable_oversized.items()
+            },
+        )
+
+    def query(self, box: OcrLayoutBox) -> tuple[_NativeTextRegion, ...]:
+        identity = _normalized_ocr_identity(box.text)
+        candidates = {
+            region.region_index: region
+            for cell_x, cell_y in _native_grid_cells(box.bbox)
+            for region in self.buckets.get((identity, cell_x, cell_y), ())
+        }
+        candidates.update(
+            (region.region_index, region)
+            for region in self.oversized.get(identity, ())
+        )
+        return tuple(candidates[index] for index in sorted(candidates))
+
+
+def _native_grid_cells(
+    bbox: tuple[float, float, float, float],
+) -> tuple[tuple[int, int], ...]:
+    x0, y0, x1, y1 = bbox
+    first_x = int(x0 // _NATIVE_DEDUPE_GRID_SIZE)
+    last_x = int((x1 - 1e-9) // _NATIVE_DEDUPE_GRID_SIZE)
+    first_y = int(y0 // _NATIVE_DEDUPE_GRID_SIZE)
+    last_y = int((y1 - 1e-9) // _NATIVE_DEDUPE_GRID_SIZE)
+    return tuple(
+        (cell_x, cell_y)
+        for cell_x in range(first_x, last_x + 1)
+        for cell_y in range(first_y, last_y + 1)
+    )
 
 
 def _native_text_regions(
@@ -419,15 +617,22 @@ def _ocr_box_duplicates_native(
     native_text: str,
     native_bbox: tuple[float, float, float, float],
 ) -> bool:
-    ocr_text = _comparison_text(box.text).casefold()
-    comparison = _comparison_text(native_text).casefold()
-    if not ocr_text or not comparison or (
-        ocr_text not in comparison and comparison not in ocr_text
-    ):
+    if _normalized_ocr_identity(box.text) != _normalized_ocr_identity(native_text):
         return False
     overlap = _bbox_overlap_area(box.bbox, native_bbox)
-    minimum_area = min(_bbox_area(box.bbox), _bbox_area(native_bbox))
-    return overlap / max(minimum_area, 1e-9) >= _OCR_DEDUPE_OVERLAP_RATIO
+    first_area = _bbox_area(box.bbox)
+    second_area = _bbox_area(native_bbox)
+    union = first_area + second_area - overlap
+    coverage = overlap / max(min(first_area, second_area), 1e-9)
+    iou = overlap / max(union, 1e-9)
+    return (
+        iou >= _OCR_DEDUPE_IOU_THRESHOLD
+        or coverage >= _OCR_DEDUPE_COVERAGE_THRESHOLD
+    )
+
+
+def _normalized_ocr_identity(text: str) -> str:
+    return "".join(text.split()).casefold()
 
 
 def _extract_images(
@@ -1856,7 +2061,15 @@ def _canonical_blocks(
             extracted.extend(_line_blocks(page.page, visual_lines))
         extracted.extend(_table_blocks(page.page, page.tables))
         extracted.extend(_image_blocks(page.page, page.images))
-        extracted.extend(_ocr_blocks(ocr_by_page.get(page.page, ())))
+        extracted.extend(
+            _ocr_blocks(
+                _offset_ocr_element_indices(
+                    ocr_by_page.get(page.page, ()),
+                    native_blocks=tuple(extracted),
+                    native_tables=page.tables,
+                )
+            )
+        )
         ordered.extend(_order_page_blocks(extracted))
     text_parts: list[str] = []
     blocks: list[TextBlock] = []
@@ -2225,6 +2438,43 @@ def _ocr_blocks(elements: tuple[OcrLayoutElement, ...]) -> list[_ExtractedBlock]
             )
         )
     return blocks
+
+
+def _offset_ocr_element_indices(
+    elements: tuple[OcrLayoutElement, ...],
+    *,
+    native_blocks: tuple[_ExtractedBlock, ...],
+    native_tables: tuple[PdfTable, ...],
+) -> tuple[OcrLayoutElement, ...]:
+    paragraph_offset = 1 + max(
+        (
+            block.paragraph_index
+            for block in native_blocks
+            if block.paragraph_index is not None
+        ),
+        default=-1,
+    )
+    native_table_indices = tuple(
+        block.table_index
+        for block in native_blocks
+        if block.table_index is not None
+    ) + tuple(table.table_index for table in native_tables)
+    table_offset = 1 + max(
+        native_table_indices,
+        default=-1,
+    )
+    return tuple(
+        element.model_copy(
+            update=(
+                {"table_index": element.table_index + table_offset}
+                if element.table_index is not None
+                else {"paragraph_index": element.paragraph_index + paragraph_offset}
+                if element.paragraph_index is not None
+                else {}
+            )
+        )
+        for element in elements
+    )
 
 
 def _lines_text_and_source_metadata(

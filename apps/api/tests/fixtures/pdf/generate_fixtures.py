@@ -254,6 +254,14 @@ def main() -> None:
     _add_rotated_cropped_scan(rotated_cropped_scan_90, 90)
     _save(rotated_cropped_scan_90, "rotated-cropped-scan-90.pdf")
 
+    rotated_cropped_scan_0 = _document()
+    _add_rotated_cropped_scan(rotated_cropped_scan_0, 0)
+    _save(rotated_cropped_scan_0, "rotated-cropped-scan-0.pdf")
+
+    rotated_cropped_scan_180 = _document()
+    _add_rotated_cropped_scan(rotated_cropped_scan_180, 180)
+    _save(rotated_cropped_scan_180, "rotated-cropped-scan-180.pdf")
+
     rotated_cropped_scan_270 = _document()
     _add_rotated_cropped_scan(rotated_cropped_scan_270, 270)
     _save(rotated_cropped_scan_270, "rotated-cropped-scan-270.pdf")
