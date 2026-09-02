@@ -34,6 +34,42 @@ def _box(
     )
 
 
+def _two_column_boxes(
+    rows: tuple[tuple[str, str], ...],
+    *,
+    left_widths: tuple[float, ...] | None = None,
+    right_widths: tuple[float, ...] | None = None,
+) -> tuple[object, ...]:
+    resolved_left_widths = left_widths or tuple(20.0 for _ in rows)
+    resolved_right_widths = right_widths or tuple(60.0 for _ in rows)
+    return tuple(
+        box
+        for row_index, (left, right) in enumerate(rows)
+        for box in (
+            _box(
+                index=row_index * 2,
+                text=left,
+                bbox=(
+                    10.0,
+                    10.0 + row_index * 25.0,
+                    10.0 + resolved_left_widths[row_index],
+                    22.0 + row_index * 25.0,
+                ),
+            ),
+            _box(
+                index=row_index * 2 + 1,
+                text=right,
+                bbox=(
+                    100.0,
+                    10.0 + row_index * 25.0,
+                    100.0 + resolved_right_widths[row_index],
+                    22.0 + row_index * 25.0,
+                ),
+            ),
+        )
+    )
+
+
 def test_layout_groups_heading_and_paragraph_lines_by_relative_height() -> None:
     layout = _layout_module()
     result = layout.build_ocr_layout(
@@ -123,6 +159,77 @@ def test_layout_splits_materially_different_nonheading_line_heights() -> None:
     assert [(element.kind, element.text) for element in result.elements] == [
         ("paragraph", "Emphasized"),
         ("paragraph", "Body"),
+    ]
+
+
+def test_layout_uses_two_body_lines_over_single_small_footnote() -> None:
+    layout = _layout_module()
+    result = layout.build_ocr_layout(
+        (
+            _box(index=0, text="Footnote", bbox=(10.0, 10.0, 60.0, 16.0)),
+            _box(index=1, text="Body one", bbox=(10.0, 30.0, 100.0, 42.0)),
+            _box(index=2, text="Body two", bbox=(10.0, 45.0, 100.0, 57.0)),
+        ),
+        language="en",
+    )
+
+    assert [(element.kind, element.text) for element in result.elements] == [
+        ("paragraph", "Footnote"),
+        ("paragraph", "Body one\nBody two"),
+    ]
+
+
+def test_layout_uses_dominant_body_cluster_over_multiple_footnotes() -> None:
+    layout = _layout_module()
+    result = layout.build_ocr_layout(
+        (
+            _box(index=0, text="Foot one", bbox=(10.0, 10.0, 60.0, 16.0)),
+            _box(index=1, text="Foot two", bbox=(10.0, 19.0, 60.0, 25.0)),
+            _box(index=2, text="Body one", bbox=(10.0, 40.0, 100.0, 52.0)),
+            _box(index=3, text="Body two", bbox=(10.0, 55.0, 100.0, 67.0)),
+            _box(index=4, text="Body three", bbox=(10.0, 70.0, 100.0, 82.0)),
+        ),
+        language="en",
+    )
+
+    assert all(element.kind == "paragraph" for element in result.elements)
+    assert result.elements[-1].text == "Body one\nBody two\nBody three"
+
+
+def test_layout_uses_box_coverage_to_break_equal_line_count_cluster_tie() -> None:
+    layout = _layout_module()
+    result = layout.build_ocr_layout(
+        (
+            _box(index=0, text="Foot one", bbox=(10.0, 10.0, 60.0, 16.0)),
+            _box(index=1, text="Foot two", bbox=(10.0, 19.0, 60.0, 25.0)),
+            _box(index=2, text="Body", bbox=(10.0, 40.0, 40.0, 52.0)),
+            _box(index=3, text="one", bbox=(42.0, 40.0, 65.0, 52.0)),
+            _box(index=4, text="Body", bbox=(10.0, 55.0, 40.0, 67.0)),
+            _box(index=5, text="two", bbox=(42.0, 55.0, 65.0, 67.0)),
+        ),
+        language="en",
+    )
+
+    assert all(element.kind == "paragraph" for element in result.elements)
+    assert result.elements[-1].text == "Body one\nBody two"
+
+
+def test_layout_uses_smaller_height_only_for_exact_cluster_tie() -> None:
+    layout = _layout_module()
+    result = layout.build_ocr_layout(
+        (
+            _box(index=0, text="Small one", bbox=(10.0, 10.0, 60.0, 16.0)),
+            _box(index=1, text="Small two", bbox=(10.0, 19.0, 60.0, 25.0)),
+            _box(index=2, text="Large one", bbox=(10.0, 40.0, 100.0, 52.0)),
+            _box(index=3, text="Large two", bbox=(10.0, 55.0, 100.0, 67.0)),
+        ),
+        language="en",
+    )
+
+    assert [element.kind for element in result.elements] == [
+        "paragraph",
+        "heading",
+        "heading",
     ]
 
 
@@ -256,6 +363,107 @@ def test_layout_preserves_valid_three_by_two_table() -> None:
         (2, 0, "A3"),
         (2, 1, "B3"),
     ]
+
+
+def test_layout_accepts_varied_width_three_by_two_table_with_stable_anchors() -> None:
+    layout = _layout_module()
+    result = layout.build_ocr_layout(
+        _two_column_boxes(
+            (("A1", "Brief"), ("Long code", "Medium"), ("Z", "Long value")),
+            left_widths=(20.0, 30.0, 40.0),
+            right_widths=(30.0, 60.0, 90.0),
+        ),
+        language="en",
+    )
+
+    assert len(result.tables) == 1
+    assert result.tables[0].row_count == 3
+    assert result.tables[0].column_count == 2
+
+
+@pytest.mark.parametrize(
+    "widths",
+    [
+        ((20.0, 20.0), (40.0, 40.0)),
+        ((20.0, 35.0), (30.0, 60.0)),
+    ],
+)
+def test_layout_accepts_equal_and_varied_width_two_by_two_tables(
+    widths: tuple[tuple[float, float], tuple[float, float]],
+) -> None:
+    layout = _layout_module()
+    result = layout.build_ocr_layout(
+        _two_column_boxes(
+            (("A1", "B1"), ("A2", "B2")),
+            left_widths=widths[0],
+            right_widths=widths[1],
+        ),
+        language="en",
+    )
+
+    assert len(result.tables) == 1
+    assert result.tables[0].row_count == 2
+
+
+def test_layout_rejects_aligned_two_column_prose() -> None:
+    layout = _layout_module()
+    result = layout.build_ocr_layout(
+        _two_column_boxes(
+            (
+                ("Overview", "This is the first prose line"),
+                ("Details", "This is another prose line"),
+            ),
+            left_widths=(48.0, 48.0),
+            right_widths=(150.0, 150.0),
+        ),
+        language="en",
+    )
+
+    assert result.tables == ()
+
+
+@pytest.mark.parametrize(
+    "markers",
+    [
+        ("一、", "二、"),
+        ("1、", "2、"),
+        ("a.", "b."),
+        ("A)", "B)"),
+        ("(a)", "(b)"),
+        ("１、", "２、"),
+        ("—", "—"),
+        ("–", "–"),
+        ("‣", "‣"),
+    ],
+)
+def test_layout_rejects_locale_and_unicode_marker_lists(
+    markers: tuple[str, str],
+) -> None:
+    layout = _layout_module()
+    result = layout.build_ocr_layout(
+        _two_column_boxes(
+            ((markers[0], "First list item"), (markers[1], "Second list item")),
+            left_widths=(12.0, 12.0),
+            right_widths=(100.0, 100.0),
+        ),
+        language="en",
+    )
+
+    assert result.tables == ()
+
+
+def test_layout_keeps_non_list_code_column_as_table() -> None:
+    layout = _layout_module()
+    result = layout.build_ocr_layout(
+        _two_column_boxes(
+            (("A01", "First description"), ("B02", "Second description")),
+            left_widths=(24.0, 24.0),
+            right_widths=(110.0, 110.0),
+        ),
+        language="en",
+    )
+
+    assert len(result.tables) == 1
 
 
 @pytest.mark.parametrize(

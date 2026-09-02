@@ -502,6 +502,86 @@ def test_nonempty_provider_output_with_empty_layout_stays_required(
     assert document.metadata.pdf.warnings[-1].code == "pdf_ocr_no_text"
 
 
+def test_zero_confidence_scan_stays_required_and_emits_warning() -> None:
+    document = PdfParser(
+        ocr=FakeOcr(
+            [[_ocr_box("Unusable", (48.0, 48.0, 200.0, 76.0), confidence=0.0)]]
+        )
+    ).parse(FIXTURE_DIRECTORY / "scanned-page.pdf")
+
+    assert document.text == ""
+    assert document.metadata.pdf is not None
+    assert document.metadata.pdf.ocr_requirement is not None
+    assert document.metadata.pdf.ocr_requirement.mode == "required"
+    assert document.metadata.pdf.pages[0].ocr_required is True
+    assert document.metadata.pdf.warnings[-1].code == "pdf_ocr_no_text"
+
+
+def test_zero_confidence_mixed_page_stays_partial() -> None:
+    document = PdfParser(
+        ocr=FakeOcr(
+            [[_ocr_box("Unique but unusable", (48.0, 340.0, 260.0, 370.0), confidence=0.0)]]
+        )
+    ).parse(FIXTURE_DIRECTORY / "mixed-page.pdf")
+
+    assert document.text == "Readable overlay text\nThis native text must not trigger OCR."
+    assert document.metadata.pdf is not None
+    assert document.metadata.pdf.ocr_requirement is not None
+    assert document.metadata.pdf.ocr_requirement.mode == "partial"
+    assert document.metadata.pdf.warnings[-1].code == "pdf_ocr_no_text"
+
+
+def test_mixed_usable_and_zero_confidence_keeps_only_usable_confidence() -> None:
+    document = PdfParser(
+        ocr=FakeOcr(
+            [[
+                _ocr_box("Usable", (48.0, 340.0, 160.0, 370.0), confidence=0.4),
+                _ocr_box("Discard", (48.0, 380.0, 180.0, 410.0), confidence=0.0),
+            ]]
+        )
+    ).parse(FIXTURE_DIRECTORY / "mixed-page.pdf")
+    ocr_blocks = [
+        block
+        for block in document.blocks
+        if block.source_locator.get("source") == "ocr"
+    ]
+
+    assert [block.text for block in ocr_blocks] == ["Usable"]
+    assert ocr_blocks[0].source_locator["confidence"] == 0.4
+    assert len(ocr_blocks[0].source_locator["boxes"]) == 1
+    assert document.metadata.pdf is not None
+    assert document.metadata.pdf.ocr_requirement is None
+
+
+def test_minimum_usable_confidence_policy_is_named_and_exact() -> None:
+    threshold = pdf_parser_module.MIN_USABLE_OCR_CONFIDENCE
+
+    assert 0.0 < threshold <= 0.05
+    accepted = PdfParser(
+        ocr=FakeOcr(
+            [[_ocr_box("Accepted", (48.0, 48.0, 200.0, 76.0), confidence=threshold)]]
+        )
+    ).parse(FIXTURE_DIRECTORY / "scanned-page.pdf")
+    rejected = PdfParser(
+        ocr=FakeOcr(
+            [[
+                _ocr_box(
+                    "Rejected",
+                    (48.0, 48.0, 200.0, 76.0),
+                    confidence=math.nextafter(threshold, 0.0),
+                )
+            ]]
+        )
+    ).parse(FIXTURE_DIRECTORY / "scanned-page.pdf")
+
+    assert accepted.text == "Accepted"
+    assert accepted.metadata.pdf is not None
+    assert accepted.metadata.pdf.ocr_requirement is None
+    assert rejected.text == ""
+    assert rejected.metadata.pdf is not None
+    assert rejected.metadata.pdf.ocr_requirement is not None
+
+
 @pytest.mark.parametrize(
     ("ocr_text", "native_text", "deduplicated"),
     [
@@ -667,6 +747,164 @@ def test_same_geometry_conflicting_ocr_text_uses_stable_tie_order(
     )
 
     assert document.text == "Alpha"
+
+
+def test_duplicate_candidate_budget_accepts_exact_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    boxes = tuple(
+        _layout_box(
+            f"text-{index}",
+            (10.0, 10.0, 30.0, 20.0),
+            index=index,
+        )
+        for index in range(3)
+    )
+    inspections = 0
+
+    def distinct(first: OcrLayoutBox, second: OcrLayoutBox) -> bool:
+        nonlocal inspections
+        del first, second
+        inspections += 1
+        return False
+
+    monkeypatch.setattr(pdf_parser_module, "_ocr_boxes_are_near_identical", distinct)
+
+    result = pdf_parser_module._coalesce_ocr_boxes(
+        boxes,
+        limits=PdfResourceLimits(max_ocr_duplicate_candidate_inspections_per_page=3),
+    )
+
+    assert result == boxes
+    assert inspections == 3
+
+
+def test_duplicate_candidate_budget_rejects_one_over_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    boxes = tuple(
+        _layout_box(
+            f"text-{index}",
+            (10.0, 10.0, 30.0, 20.0),
+            index=index,
+        )
+        for index in range(3)
+    )
+    monkeypatch.setattr(
+        pdf_parser_module,
+        "_ocr_boxes_are_near_identical",
+        lambda first, second: False,
+    )
+
+    with pytest.raises(PdfResourceLimitError) as raised:
+        pdf_parser_module._coalesce_ocr_boxes(
+            boxes,
+            limits=PdfResourceLimits(max_ocr_duplicate_candidate_inspections_per_page=2),
+        )
+
+    assert raised.value.limit == "max_ocr_duplicate_candidate_inspections_per_page"
+    assert raised.value.actual == 3
+
+
+def test_duplicate_index_supports_500_same_coarse_bucket_nonduplicates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    boxes = tuple(
+        _layout_box(
+            "same",
+            (100.0, float(index * 3), 110.0, float(index * 3 + 1)),
+            index=index,
+        )
+        for index in range(500)
+    )
+    original = pdf_parser_module._ocr_boxes_are_near_identical
+    original_filter = pdf_parser_module._duplicate_features_may_match
+    inspections = 0
+    candidate_checks = 0
+
+    def counted(first: OcrLayoutBox, second: OcrLayoutBox) -> bool:
+        nonlocal inspections
+        inspections += 1
+        return original(first, second)
+
+    def counted_filter(first: object, second: object) -> bool:
+        nonlocal candidate_checks
+        candidate_checks += 1
+        return original_filter(first, second)
+
+    monkeypatch.setattr(pdf_parser_module, "_ocr_boxes_are_near_identical", counted)
+    monkeypatch.setattr(pdf_parser_module, "_duplicate_features_may_match", counted_filter)
+
+    result = pdf_parser_module._coalesce_ocr_boxes(
+        boxes,
+        limits=PdfResourceLimits(),
+    )
+
+    assert len(result) == 500
+    assert inspections < 500
+    assert candidate_checks < 500
+
+
+def test_duplicate_index_fails_closed_for_5000_adversarial_boxes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    boxes = tuple(
+        _layout_box(
+            f"conflict-{index}",
+            (10.0, 10.0, 30.0, 20.0),
+            index=index,
+        )
+        for index in range(5_000)
+    )
+    original_filter = pdf_parser_module._duplicate_features_may_match
+    candidate_checks = 0
+
+    def counted_filter(first: object, second: object) -> bool:
+        nonlocal candidate_checks
+        candidate_checks += 1
+        return original_filter(first, second)
+
+    monkeypatch.setattr(
+        pdf_parser_module,
+        "_ocr_boxes_are_near_identical",
+        lambda first, second: False,
+    )
+    monkeypatch.setattr(pdf_parser_module, "_duplicate_features_may_match", counted_filter)
+
+    with pytest.raises(PdfResourceLimitError) as raised:
+        pdf_parser_module._coalesce_ocr_boxes(
+            boxes,
+            limits=PdfResourceLimits(
+                max_ocr_duplicate_candidate_inspections_per_page=1_000
+            ),
+        )
+
+    assert raised.value.limit == "max_ocr_duplicate_candidate_inspections_per_page"
+    assert raised.value.actual == 1_001
+    assert candidate_checks == 1_000
+
+
+def test_duplicate_index_finds_near_duplicate_across_range_boundary() -> None:
+    lower = _layout_box(
+        "same",
+        (9.95, 10.0, 29.95, 20.0),
+        confidence=0.7,
+        index=0,
+    )
+    upper = _layout_box(
+        "same",
+        (10.05, 10.0, 30.05, 20.0),
+        confidence=0.9,
+        index=1,
+    )
+
+    result = pdf_parser_module._coalesce_ocr_boxes(
+        (lower, upper),
+        limits=PdfResourceLimits(),
+    )
+
+    assert len(result) == 1
+    assert result[0].confidence == 0.9
 def test_ocr_provider_capability_error_propagates_unchanged() -> None:
     class UnavailableOcr:
         def recognize(self, image: object, language: str) -> list[OcrTextBox]:

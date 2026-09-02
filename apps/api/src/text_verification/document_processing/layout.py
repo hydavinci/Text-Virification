@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
 from math import isfinite
@@ -28,11 +29,15 @@ DEFAULT_MAX_LAYOUT_CANDIDATE_CHECKS = 250_000
 _LINE_OVERLAP_RATIO = 0.45
 _BASELINE_RATIO = 0.45
 _HEADING_HEIGHT_RATIO = 1.35
-_BODY_CLUSTER_GAP_RATIO = 1.3
+_BODY_CLUSTER_GAP_RATIO = 1.15
 _PARAGRAPH_HEIGHT_RATIO = 1.25
 _MIN_TABLE_GAP_HEIGHT_RATIO = 1.5
 _MAX_TABLE_ROW_GAP_HEIGHT_RATIO = 4.0
-_LIST_MARKER = re.compile(r"^(?:(\d+)[.)]|[•●▪◦*-])$")
+_LIST_MARKER = re.compile(
+    r"^(?:\((?P<parenthesized>[0-9A-Za-z一二三四五六七八九十百千]+)\)"
+    r"|(?P<suffixed>[0-9A-Za-z一二三四五六七八九十百千]+)[.)、])$"
+)
+_LIST_BULLETS = frozenset("•●▪◦‣⁃∙·○◆◇■□▲△※-–—")
 
 
 class _LayoutModel(BaseModel):
@@ -413,7 +418,12 @@ def _detect_tables(
     tables: list[OcrTable] = []
     consumed: set[int] = set()
     for rows in groups:
-        if not _rows_have_stable_columns(rows) or _is_marker_list(rows):
+        if (
+            not _rows_have_stable_columns(rows)
+            or _is_marker_list(rows)
+            or _looks_like_aligned_prose(rows)
+            or (len(rows) == 2 and not _has_strong_two_row_evidence(rows))
+        ):
             continue
         table_index = len(tables)
         column_count = len(rows[0].boxes)
@@ -476,21 +486,17 @@ def _rows_align(first: OcrLayoutLine, second: OcrLayoutLine) -> bool:
         return False
     alignment_tolerance = max(4.0, typical_height * 0.75)
     if any(
-        abs(first_box.bbox[0] - second_box.bbox[0]) > alignment_tolerance
+        min(
+            abs(first_box.bbox[0] - second_box.bbox[0]),
+            abs(_bbox_center_x(first_box.bbox) - _bbox_center_x(second_box.bbox)),
+        )
+        > alignment_tolerance
         for first_box, second_box in zip(first.boxes, second.boxes, strict=True)
     ):
         return False
-    first_gaps = [
-        right.bbox[0] - left.bbox[2]
-        for left, right in zip(first.boxes, first.boxes[1:], strict=False)
-    ]
-    second_gaps = [
-        right.bbox[0] - left.bbox[2]
-        for left, right in zip(second.boxes, second.boxes[1:], strict=False)
-    ]
-    return all(
-        abs(first_gap - second_gap) <= max(typical_height, max(first_gap, second_gap) * 0.25)
-        for first_gap, second_gap in zip(first_gaps, second_gaps, strict=True)
+    return _row_has_stable_baseline(first, typical_height) and _row_has_stable_baseline(
+        second,
+        typical_height,
     )
 
 
@@ -500,21 +506,26 @@ def _rows_have_stable_columns(rows: list[OcrLayoutLine]) -> bool:
         for row in rows
         for box in row.boxes
     )
+    alignment_tolerance = max(4.0, typical_height * 0.75)
     for column_index in range(len(rows[0].boxes)):
-        widths = [
-            row.boxes[column_index].bbox[2] - row.boxes[column_index].bbox[0]
+        left_anchors = [
+            row.boxes[column_index].bbox[0]
             for row in rows
         ]
-        if max(widths) - min(widths) > max(
-            typical_height * 0.75,
-            median(widths) * 0.25,
-        ):
+        center_anchors = [
+            _bbox_center_x(row.boxes[column_index].bbox)
+            for row in rows
+        ]
+        if min(
+            max(left_anchors) - min(left_anchors),
+            max(center_anchors) - min(center_anchors),
+        ) > alignment_tolerance:
             return False
-    return True
+    return all(_row_has_stable_baseline(row, typical_height) for row in rows)
 
 
 def _is_marker_list(rows: list[OcrLayoutLine]) -> bool:
-    markers = [_LIST_MARKER.fullmatch(row.boxes[0].text) for row in rows]
+    markers = [_normalized_list_marker(row.boxes[0].text) for row in rows]
     if any(marker is None for marker in markers):
         return False
     first_widths = [
@@ -527,14 +538,79 @@ def _is_marker_list(rows: list[OcrLayoutLine]) -> bool:
     ]
     if max(first_widths) > median(prose_widths) * 0.35:
         return False
-    number_values = [
-        int(number)
-        for marker in markers
-        if marker is not None and (number := marker.group(1)) is not None
-    ]
-    return not number_values or number_values == list(
-        range(number_values[0], number_values[0] + len(number_values))
+    return True
+
+
+def _normalized_list_marker(text: str) -> str | None:
+    normalized = unicodedata.normalize("NFKC", text).strip()
+    if normalized in _LIST_BULLETS:
+        return normalized
+    return normalized if _LIST_MARKER.fullmatch(normalized) is not None else None
+
+
+def _row_has_stable_baseline(
+    row: OcrLayoutLine,
+    typical_height: float,
+) -> bool:
+    baselines = [box.baseline for box in row.boxes]
+    return max(baselines) - min(baselines) <= max(2.0, typical_height * 0.35)
+
+
+def _has_strong_two_row_evidence(rows: list[OcrLayoutLine]) -> bool:
+    typical_height = median(box.height for row in rows for box in row.boxes)
+    row_heights = [row.bbox[3] - row.bbox[1] for row in rows]
+    if max(row_heights) - min(row_heights) > max(2.0, typical_height * 0.25):
+        return False
+    first_gaps = _row_gaps(rows[0])
+    second_gaps = _row_gaps(rows[1])
+    if any(
+        abs(first_gap - second_gap)
+        > max(typical_height * 1.5, median((first_gap, second_gap)) * 0.35)
+        for first_gap, second_gap in zip(first_gaps, second_gaps, strict=True)
+    ):
+        return False
+    row_widths = [row.bbox[2] - row.bbox[0] for row in rows]
+    return max(row_widths) - min(row_widths) <= max(
+        typical_height * 2.0,
+        median(row_widths) * 0.25,
     )
+
+
+def _row_gaps(row: OcrLayoutLine) -> tuple[float, ...]:
+    return tuple(
+        right.bbox[0] - left.bbox[2]
+        for left, right in zip(row.boxes, row.boxes[1:], strict=False)
+    )
+
+
+def _looks_like_aligned_prose(rows: list[OcrLayoutLine]) -> bool:
+    first_column = [row.boxes[0].text.strip() for row in rows]
+    second_column = [row.boxes[1].text.strip() for row in rows]
+    if all(_looks_like_table_code(text) for text in first_column):
+        return False
+    first_is_labels = all(
+        text.replace(" ", "").isalpha() and len(text.replace(" ", "")) >= 2
+        for text in first_column
+    )
+    second_is_prose = all(
+        any(character.isspace() for character in text) or len(text) >= 12
+        for text in second_column
+    )
+    return first_is_labels and second_is_prose
+
+
+def _looks_like_table_code(text: str) -> bool:
+    normalized = unicodedata.normalize("NFKC", text).strip()
+    return (
+        1 <= len(normalized) <= 12
+        and not any(character.isspace() for character in normalized)
+        and any(character.isdigit() for character in normalized)
+        and any(character.isalpha() for character in normalized)
+    )
+
+
+def _bbox_center_x(bbox: BBox) -> float:
+    return (bbox[0] + bbox[2]) / 2.0
 
 
 def _text_elements(
@@ -619,17 +695,34 @@ def _same_paragraph(
 
 
 def _body_line_height(lines: tuple[OcrLayoutLine, ...]) -> float:
-    heights = sorted(line.bbox[3] - line.bbox[1] for line in lines)
-    body_cluster = [heights[0]]
-    for height in heights[1:]:
-        cluster_height = median(body_cluster)
+    ordered = sorted(
+        lines,
+        key=lambda line: (line.bbox[3] - line.bbox[1], line.line_index),
+    )
+    clusters: list[list[OcrLayoutLine]] = [[ordered[0]]]
+    for line in ordered[1:]:
+        height = line.bbox[3] - line.bbox[1]
+        cluster_heights = [
+            member.bbox[3] - member.bbox[1]
+            for member in clusters[-1]
+        ]
+        cluster_height = median(cluster_heights)
         if (
             height > cluster_height * _BODY_CLUSTER_GAP_RATIO
             and height > cluster_height + 2.0
         ):
-            break
-        body_cluster.append(height)
-    return median(body_cluster)
+            clusters.append([line])
+        else:
+            clusters[-1].append(line)
+    body_cluster = max(
+        clusters,
+        key=lambda cluster: (
+            len(cluster),
+            sum(len(line.boxes) for line in cluster),
+            -median(line.bbox[3] - line.bbox[1] for line in cluster),
+        ),
+    )
+    return median(line.bbox[3] - line.bbox[1] for line in body_cluster)
 
 
 def _table_element(cell: OcrTableCell, *, language: str) -> OcrLayoutElement:

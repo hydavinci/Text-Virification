@@ -346,6 +346,7 @@ class PdfResourceLimits(_PdfModel):
     max_ocr_raster_bytes: PositiveInt = 60_000_000
     max_ocr_boxes_per_page: PositiveInt = 5_000
     max_ocr_text_chars_per_page: PositiveInt = 1_000_000
+    max_ocr_duplicate_candidate_inspections_per_page: PositiveInt = 250_000
     max_ocr_dedupe_candidate_inspections_per_page: PositiveInt = 100_000
 
 

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
-from itertools import groupby, product
+from itertools import groupby
 from math import ceil, isfinite
 from pathlib import Path
 from typing import Any, Literal
@@ -52,10 +53,11 @@ _MAX_TABLE_SPATIAL_NODE_VISITS_PER_PAGE = (
     PdfResourceLimits().max_table_spatial_node_visits_per_page
 )
 OCR_RENDER_DPI = 144
+# A 1% floor removes effectively empty signals without discarding low-confidence text.
+MIN_USABLE_OCR_CONFIDENCE = 0.01
 _OCR_RASTER_CHANNELS = 3
 _OCR_DEDUPE_IOU_THRESHOLD = 0.5
 _OCR_DEDUPE_COVERAGE_THRESHOLD = 0.9
-_OCR_DUPLICATE_GRID_SIZE = 2.0
 _OCR_DUPLICATE_IOU_THRESHOLD = 0.95
 _NATIVE_DEDUPE_GRID_SIZE = 64.0
 _MAX_NATIVE_GRID_CELLS_PER_REGION = 4_096
@@ -360,76 +362,263 @@ def _normalize_ocr_boxes(
         )
         for index, (text, confidence, quad) in enumerate(normalized)
     )
-    return _coalesce_ocr_boxes(mapped)
+    usable = tuple(
+        box
+        for box in mapped
+        if box.confidence >= MIN_USABLE_OCR_CONFIDENCE
+    )
+    return _coalesce_ocr_boxes(usable, limits=limits)
 
 
 def _coalesce_ocr_boxes(
     boxes: tuple[OcrLayoutBox, ...],
+    *,
+    limits: PdfResourceLimits,
 ) -> tuple[OcrLayoutBox, ...]:
     if len(boxes) < 2:
-        return boxes
-
-    groups: list[OcrLayoutBox] = []
-    bucket_groups: dict[tuple[int, int, int, int], list[int]] = {}
-    for box in sorted(boxes, key=_ocr_box_stable_order):
-        candidate_groups = {
-            group_index
-            for key in _neighbor_geometry_keys(_ocr_duplicate_geometry_key(box))
-            for group_index in bucket_groups.get(key, ())
-        }
-        matching_groups = sorted(
-            group_index
-            for group_index in candidate_groups
-            if _ocr_boxes_are_near_identical(groups[group_index], box)
+        return tuple(
+            box.model_copy(update={"box_index": index})
+            for index, box in enumerate(boxes)
         )
-        if not matching_groups:
-            group_index = len(groups)
-            groups.append(box)
-        else:
-            group_index = matching_groups[0]
-            groups[group_index] = min(
-                (groups[group_index], box),
-                key=_ocr_box_preference_order,
-            )
-        key = _ocr_duplicate_geometry_key(groups[group_index])
-        entries = bucket_groups.setdefault(key, [])
-        if group_index not in entries:
-            entries.append(group_index)
 
-    ordered = sorted(groups, key=_ocr_box_stable_order)
+    ordered = tuple(sorted(boxes, key=_ocr_box_stable_order))
+    candidate_index = _OcrDuplicateCandidateIndex.build(ordered)
+    parents = list(range(len(ordered)))
+    inspection_count = 0
+    for box_index, box in enumerate(ordered):
+        for candidate_index_value in candidate_index.query(box_index):
+            inspection_count += 1
+            if inspection_count > limits.max_ocr_duplicate_candidate_inspections_per_page:
+                raise PdfResourceLimitError(
+                    limit="max_ocr_duplicate_candidate_inspections_per_page",
+                    maximum=limits.max_ocr_duplicate_candidate_inspections_per_page,
+                    actual=inspection_count,
+                )
+            if not _duplicate_features_may_match(
+                candidate_index.features[box_index],
+                candidate_index.features[candidate_index_value],
+            ):
+                continue
+            if _ocr_boxes_are_near_identical(
+                box,
+                ordered[candidate_index_value],
+            ):
+                _union_duplicate_groups(
+                    parents,
+                    box_index,
+                    candidate_index_value,
+                )
+
+    grouped: dict[int, list[OcrLayoutBox]] = {}
+    for box_index, box in enumerate(ordered):
+        root = _duplicate_group_root(parents, box_index)
+        grouped.setdefault(root, []).append(box)
+    winners = [
+        min(group, key=_ocr_box_preference_order)
+        for group in grouped.values()
+    ]
     return tuple(
         box.model_copy(update={"box_index": index})
-        for index, box in enumerate(ordered)
+        for index, box in enumerate(sorted(winners, key=_ocr_box_stable_order))
     )
 
 
-def _ocr_duplicate_geometry_key(
+@dataclass(frozen=True)
+class _OcrDuplicateFeature:
+    box_index: int
+    identity: str
+    center_x: float
+    center_y: float
+    width: float
+    height: float
+
+
+@dataclass(frozen=True)
+class _OcrDuplicateCandidateIndex:
+    features: tuple[_OcrDuplicateFeature, ...]
+    all_by_x: tuple[tuple[float, int], ...]
+    all_x_values: tuple[float, ...]
+    all_by_y: tuple[tuple[float, int], ...]
+    all_y_values: tuple[float, ...]
+    by_text_x: dict[str, tuple[tuple[float, int], ...]]
+    by_text_x_values: dict[str, tuple[float, ...]]
+    by_text_y: dict[str, tuple[tuple[float, int], ...]]
+    by_text_y_values: dict[str, tuple[float, ...]]
+
+    @classmethod
+    def build(
+        cls,
+        boxes: tuple[OcrLayoutBox, ...],
+    ) -> _OcrDuplicateCandidateIndex:
+        features = tuple(
+            _ocr_duplicate_feature(box_index, box)
+            for box_index, box in enumerate(boxes)
+        )
+        all_by_x = tuple(
+            sorted((feature.center_x, feature.box_index) for feature in features)
+        )
+        all_by_y = tuple(
+            sorted((feature.center_y, feature.box_index) for feature in features)
+        )
+        mutable_by_text: dict[str, list[tuple[float, int]]] = {}
+        mutable_by_text_y: dict[str, list[tuple[float, int]]] = {}
+        for feature in features:
+            mutable_by_text.setdefault(feature.identity, []).append(
+                (feature.center_x, feature.box_index)
+            )
+            mutable_by_text_y.setdefault(feature.identity, []).append(
+                (feature.center_y, feature.box_index)
+            )
+        by_text_x = {
+            identity: tuple(sorted(values))
+            for identity, values in mutable_by_text.items()
+        }
+        by_text_y = {
+            identity: tuple(sorted(values))
+            for identity, values in mutable_by_text_y.items()
+        }
+        return cls(
+            features=features,
+            all_by_x=all_by_x,
+            all_x_values=tuple(value[0] for value in all_by_x),
+            all_by_y=all_by_y,
+            all_y_values=tuple(value[0] for value in all_by_y),
+            by_text_x=by_text_x,
+            by_text_x_values={
+                identity: tuple(value[0] for value in values)
+                for identity, values in by_text_x.items()
+            },
+            by_text_y=by_text_y,
+            by_text_y_values={
+                identity: tuple(value[0] for value in values)
+                for identity, values in by_text_y.items()
+            },
+        )
+
+    def query(self, box_index: int) -> tuple[int, ...]:
+        feature = self.features[box_index]
+        tolerance_x = _ocr_duplicate_position_tolerance(feature.width)
+        tolerance_y = _ocr_duplicate_position_tolerance(feature.height)
+        candidates = set(
+            _duplicate_xy_range(
+                self.by_text_x.get(feature.identity, ()),
+                self.by_text_x_values.get(feature.identity, ()),
+                self.by_text_y.get(feature.identity, ()),
+                self.by_text_y_values.get(feature.identity, ()),
+                self.features,
+                feature.center_x,
+                tolerance_x,
+                feature.center_y,
+                tolerance_y,
+            )
+        )
+        candidates.update(
+            candidate
+            for candidate in _duplicate_xy_range(
+                self.all_by_x,
+                self.all_x_values,
+                self.all_by_y,
+                self.all_y_values,
+                self.features,
+                feature.center_x,
+                tolerance_x,
+                feature.center_y,
+                tolerance_y,
+            )
+            if self.features[candidate].identity != feature.identity
+        )
+        return tuple(
+            candidate
+            for candidate in sorted(candidates)
+            if candidate > box_index
+        )
+
+
+def _ocr_duplicate_feature(
+    box_index: int,
     box: OcrLayoutBox,
-) -> tuple[int, int, int, int]:
+) -> _OcrDuplicateFeature:
     x0, y0, x1, y1 = box.bbox
-    return (
-        round(((x0 + x1) / 2.0) / _OCR_DUPLICATE_GRID_SIZE),
-        round(((y0 + y1) / 2.0) / _OCR_DUPLICATE_GRID_SIZE),
-        round((x1 - x0) / _OCR_DUPLICATE_GRID_SIZE),
-        round((y1 - y0) / _OCR_DUPLICATE_GRID_SIZE),
+    return _OcrDuplicateFeature(
+        box_index=box_index,
+        identity=_normalized_ocr_identity(box.text),
+        center_x=(x0 + x1) / 2.0,
+        center_y=(y0 + y1) / 2.0,
+        width=x1 - x0,
+        height=y1 - y0,
     )
 
 
-def _neighbor_geometry_keys(
-    key: tuple[int, int, int, int],
-) -> tuple[tuple[int, int, int, int], ...]:
+def _duplicate_xy_range(
+    x_entries: tuple[tuple[float, int], ...],
+    x_values: tuple[float, ...],
+    y_entries: tuple[tuple[float, int], ...],
+    y_values: tuple[float, ...],
+    features: tuple[_OcrDuplicateFeature, ...],
+    center_x: float,
+    tolerance_x: float,
+    center_y: float,
+    tolerance_y: float,
+) -> tuple[int, ...]:
+    x_start = bisect_left(x_values, center_x - tolerance_x)
+    x_end = bisect_right(x_values, center_x + tolerance_x)
+    y_start = bisect_left(y_values, center_y - tolerance_y)
+    y_end = bisect_right(y_values, center_y + tolerance_y)
+    x_slice = x_entries[x_start:x_end]
+    y_slice = y_entries[y_start:y_end]
+    if len(x_slice) <= len(y_slice):
+        return tuple(
+            entry[1]
+            for entry in x_slice
+            if abs(features[entry[1]].center_y - center_y) <= tolerance_y
+        )
     return tuple(
-        (
-            key[0] + delta_x,
-            key[1] + delta_y,
-            key[2] + delta_width,
-            key[3] + delta_height,
-        )
-        for delta_x, delta_y, delta_width, delta_height in product(
-            (-1, 0, 1),
-            repeat=4,
-        )
+        entry[1]
+        for entry in y_slice
+        if abs(features[entry[1]].center_x - center_x) <= tolerance_x
     )
+
+
+def _duplicate_features_may_match(
+    first: _OcrDuplicateFeature,
+    second: _OcrDuplicateFeature,
+) -> bool:
+    return (
+        abs(first.center_y - second.center_y)
+        <= _ocr_duplicate_position_tolerance(max(first.height, second.height))
+        and abs(first.width - second.width)
+        <= _ocr_duplicate_size_tolerance(max(first.width, second.width))
+        and abs(first.height - second.height)
+        <= _ocr_duplicate_size_tolerance(max(first.height, second.height))
+    )
+
+
+def _ocr_duplicate_position_tolerance(size: float) -> float:
+    return max(0.25, size * 0.03)
+
+
+def _ocr_duplicate_size_tolerance(size: float) -> float:
+    return max(0.25, size * 0.05)
+
+
+def _duplicate_group_root(parents: list[int], value: int) -> int:
+    while parents[value] != value:
+        parents[value] = parents[parents[value]]
+        value = parents[value]
+    return value
+
+
+def _union_duplicate_groups(
+    parents: list[int],
+    first: int,
+    second: int,
+) -> None:
+    first_root = _duplicate_group_root(parents, first)
+    second_root = _duplicate_group_root(parents, second)
+    if first_root == second_root:
+        return
+    lower, higher = sorted((first_root, second_root))
+    parents[higher] = lower
 
 
 def _ocr_boxes_are_near_identical(
