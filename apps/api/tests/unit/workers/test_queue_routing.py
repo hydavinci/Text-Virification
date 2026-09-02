@@ -42,9 +42,13 @@ def test_publisher_confirm_option_is_transport_aware() -> None:
     assert broker_transport_options_for("amqp://guest:guest@rabbitmq//") == {
         "confirm_publish": True
     }
+    assert broker_transport_options_for("amqps://guest:guest@rabbitmq//") == {
+        "confirm_publish": True
+    }
     assert broker_transport_options_for("pyamqp://guest:guest@rabbitmq//") == {
         "confirm_publish": True
     }
+    assert broker_transport_options_for("pyamqps://guest:guest@rabbitmq//") == {}
 
 
 def test_periodic_tasks_have_one_non_processing_queue_owner() -> None:

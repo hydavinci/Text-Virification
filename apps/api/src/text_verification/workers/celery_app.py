@@ -19,7 +19,7 @@ PROCESS_JOB_PUBLISH_RETRY_POLICY = {
 
 
 def broker_transport_options_for(broker_url: str) -> dict[str, bool]:
-    if urlparse(broker_url).scheme.lower() in {"amqp", "pyamqp"}:
+    if urlparse(broker_url).scheme.lower() in {"amqp", "amqps", "pyamqp"}:
         return {"confirm_publish": True}
     return {}
 
