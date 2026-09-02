@@ -138,6 +138,26 @@ class ArtifactVerificationHandle:
                 "Artifact directory entry no longer names the verified file."
             )
 
+    def read_bytes(self) -> bytes:
+        self.assert_current()
+        os.lseek(self._file_fd, 0, os.SEEK_SET)
+        chunks: list[bytes] = []
+        remaining = self.size_bytes + 1
+        while remaining > 0:
+            chunk = os.read(self._file_fd, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        content = b"".join(chunks)
+        if (
+            len(content) != self.size_bytes
+            or hashlib.sha256(content).hexdigest() != self.content_sha256
+        ):
+            raise InvalidUpload("Artifact content no longer matches its verified digest.")
+        self.assert_current()
+        return content
+
     def unlink_created_if_current(self) -> bool:
         if not self.created or self._unlinked:
             return False

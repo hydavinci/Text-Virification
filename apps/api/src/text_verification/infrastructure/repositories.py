@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from text_verification.domain.documents import FileType
 from text_verification.domain.jobs import (
+    RESULT_READY_STATUSES,
     TERMINAL_STATUSES,
     JobClaimDisposition,
     JobClaimResult,
@@ -30,13 +31,15 @@ EXPIRED_EVENT_MESSAGE = "作业已过期"
 MAX_SOURCE_NAME_LENGTH = 255
 MAX_ERROR_CODE_LENGTH = 64
 MAX_EVENT_MESSAGE_LENGTH = 255
-CLAIMED_NEXT_STATUS = {
-    JobStatus.QUEUED: JobStatus.UPLOAD_VALIDATED,
-    JobStatus.UPLOAD_VALIDATED: JobStatus.PARSING,
-    JobStatus.PARSING: JobStatus.CHECKING_FORMAT,
-    JobStatus.CHECKING_FORMAT: JobStatus.CHECKING_SENSITIVE,
-    JobStatus.CHECKING_SENSITIVE: JobStatus.CHECKING_CHINESE,
-    JobStatus.CHECKING_CHINESE: JobStatus.CHECKING_ENGLISH,
+CLAIMED_NEXT_STATUSES = {
+    JobStatus.QUEUED: frozenset({JobStatus.UPLOAD_VALIDATED}),
+    JobStatus.UPLOAD_VALIDATED: frozenset({JobStatus.PARSING}),
+    JobStatus.PARSING: frozenset({JobStatus.OCR, JobStatus.CHECKING_FORMAT}),
+    JobStatus.OCR: frozenset({JobStatus.CHECKING_FORMAT}),
+    JobStatus.CHECKING_FORMAT: frozenset({JobStatus.CHECKING_SENSITIVE}),
+    JobStatus.CHECKING_SENSITIVE: frozenset({JobStatus.CHECKING_CHINESE}),
+    JobStatus.CHECKING_CHINESE: frozenset({JobStatus.CHECKING_ENGLISH}),
+    JobStatus.CHECKING_ENGLISH: frozenset({JobStatus.FINALIZING}),
 }
 INITIAL_DISPATCH_RECOVERY_DELAY = timedelta(minutes=2)
 
@@ -344,7 +347,7 @@ class JobRepository:
         _validate_max_length("error_code", error_code, MAX_ERROR_CODE_LENGTH)
         if status in TERMINAL_STATUSES:
             raise ValueError("Use a terminal claimed-job operation for terminal states.")
-        if CLAIMED_NEXT_STATUS.get(expected_status) is not status:
+        if status not in CLAIMED_NEXT_STATUSES.get(expected_status, ()):
             raise ValueError(
                 "Invalid claimed job transition "
                 f"{expected_status.value} -> {status.value}."
@@ -365,6 +368,27 @@ class JobRepository:
             error_message=error_message,
             lease_expires_at=lease_expires_at,
         )
+        return self._to_job_read(job)
+
+    def renew_claimed_lease(
+        self,
+        job_id: UUID,
+        *,
+        owner_token: UUID,
+        expected_status: JobStatus,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> JobRead:
+        if lease_expires_at <= now:
+            raise ValueError("lease_expires_at must be later than now.")
+        job = self._lock_job(job_id)
+        self._assert_active_lease(job, owner_token, now)
+        self._assert_expected_status(job, expected_status)
+        job.lease_expires_at = lease_expires_at
+        job.rescue_due_at = lease_expires_at
+        job.rescue_last_published_at = None
+        job.updated_at = now
+        self._session.flush()
         return self._to_job_read(job)
 
     def fail_claimed_job(
@@ -413,8 +437,8 @@ class JobRepository:
         now: datetime,
     ) -> JobRead:
         _validate_max_length("message", message, MAX_EVENT_MESSAGE_LENGTH)
-        if expected_status is not JobStatus.CHECKING_ENGLISH:
-            raise ValueError("Completed jobs must advance from checking_english.")
+        if expected_status is not JobStatus.FINALIZING:
+            raise ValueError("Completed jobs must advance from finalizing.")
         job = self._lock_job(job_id)
         self._assert_active_lease(job, owner_token, now)
         self._assert_expected_status(job, expected_status)
@@ -440,6 +464,36 @@ class JobRepository:
             .order_by(JobEventRow.sequence)
         ).all()
         return [self._to_job_event(row) for row in rows]
+
+    def append_stage_event(
+        self,
+        job_id: UUID,
+        stage: JobStatus,
+        message: str,
+        *,
+        changed_at: datetime,
+    ) -> JobEvent:
+        if stage not in {JobStatus.EXPORTING, JobStatus.FINALIZING}:
+            raise ValueError("Only export lifecycle stages may be appended.")
+        _validate_max_length("message", message, MAX_EVENT_MESSAGE_LENGTH)
+        job = self._lock_job(job_id)
+        if JobStatus(job.status) not in RESULT_READY_STATUSES:
+            raise JobStateConflictError(
+                job_id=job_id,
+                expected_status=JobStatus.COMPLETED,
+                current_status=JobStatus(job.status),
+            )
+        event = JobEventRow(
+            job_id=job_id,
+            sequence=self._next_sequence(job_id),
+            status=stage.value,
+            progress=job.progress,
+            message=message,
+            created_at=changed_at,
+        )
+        self._session.add(event)
+        self._session.flush()
+        return self._to_job_event(event)
 
     def expire_jobs_before(self, cutoff: datetime) -> list[UUID]:
         rows = self._session.scalars(
@@ -566,6 +620,10 @@ class JobRepository:
         lease_expires_at: datetime | None = None,
         clear_lease: bool = False,
     ) -> None:
+        if not 0 <= progress <= 100:
+            raise ValueError("Job progress must be between 0 and 100.")
+        if progress < job.progress:
+            raise ValueError("Job progress must be monotonic.")
         job.status = status.value
         job.progress = progress
         job.error_code = error_code

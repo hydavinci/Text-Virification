@@ -1,14 +1,21 @@
 from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Annotated, cast
 
 from fastapi import Depends, Request
 from sqlalchemy.orm import Session
 
+from text_verification.application.factory import build_default_exporter_registry
+from text_verification.application.reconstruction_export import (
+    ReconstructionExportService,
+    ReconstructionRepositoryFactory,
+)
 from text_verification.application.verification_pipeline import VerificationPipeline
 from text_verification.config import Settings, get_settings
 from text_verification.infrastructure.database import get_session_factory
 from text_verification.infrastructure.repositories import JobRepository
 from text_verification.infrastructure.storage import JobStorage
+from text_verification.infrastructure.verification_repository import VerificationRepository
 
 
 def get_session() -> Iterator[Session]:
@@ -33,6 +40,29 @@ def get_job_storage(
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> JobStorage:
     return JobStorage(settings.storage_root, settings.max_upload_bytes)
+
+
+def get_reconstruction_export_service(
+    storage: Annotated[JobStorage, Depends(get_job_storage)],
+) -> ReconstructionExportService:
+    session_factory = get_session_factory()
+
+    @contextmanager
+    def repository_factory() -> Iterator[VerificationRepository]:
+        session = session_factory()
+        try:
+            yield VerificationRepository(session)
+        finally:
+            session.close()
+
+    return ReconstructionExportService(
+        storage,
+        cast(ReconstructionRepositoryFactory, repository_factory),
+        exporter_registry_factory=lambda resolver: build_default_exporter_registry(
+            anchored_source_resolver=resolver,
+            max_output_bytes=storage.max_document_bytes,
+        ),
+    )
 
 
 def get_verification_pipeline(request: Request) -> VerificationPipeline:

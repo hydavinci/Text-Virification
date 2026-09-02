@@ -12,11 +12,13 @@ from text_verification.domain.verification import (
 from text_verification.infrastructure.storage import InvalidUpload, JobStorage
 
 COMPLETED_EVENT_MESSAGE = "处理完成"
+FINALIZING_EVENT_MESSAGE = "正在保存结果"
 CHECKING_ENGLISH_EVENT_MESSAGE = "正在检查英文"
 CHECKING_CHINESE_EVENT_MESSAGE = "正在检查中文"
 CHECKING_SENSITIVE_EVENT_MESSAGE = "正在检查敏感词"
 CHECKING_FORMAT_EVENT_MESSAGE = "正在检查格式"
 PARSING_EVENT_MESSAGE = "开始解析"
+OCR_EVENT_MESSAGE = "正在进行 OCR"
 UPLOAD_VALIDATED_EVENT_MESSAGE = "上传校验完成"
 MISSING_UPLOAD_MESSAGE = "Stored upload is unavailable."
 

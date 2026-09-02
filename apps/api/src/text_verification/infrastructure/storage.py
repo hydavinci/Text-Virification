@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
 
 from text_verification.domain.capabilities import CapabilityProfile
-from text_verification.domain.documents import FileType
+from text_verification.domain.documents import DocumentModel, FileType
+from text_verification.domain.ports import ResolvedSourcePath
 from text_verification.infrastructure import document_storage
 from text_verification.infrastructure.artifact_storage import (
     ArtifactOrphanCandidate,
@@ -44,6 +46,10 @@ class JobStorage(DocumentStorage):
             strict_cleanup_failures=True,
         )
         self._artifact_storage = ArtifactStorage(self._root, max_upload_bytes)
+
+    @property
+    def max_document_bytes(self) -> int:
+        return self._max_upload_bytes
 
     def document_directory(self, document_id: UUID) -> Path:
         return self.job_directory(document_id)
@@ -297,3 +303,21 @@ class JobStorage(DocumentStorage):
 
     def _delete_job_directory(self, job_directory: Path) -> None:
         super()._delete_directory(job_directory)
+
+
+@dataclass(frozen=True)
+class JobOwnedSourcePathResolver:
+    storage: JobStorage
+    job_id: UUID
+    file_type: FileType
+
+    def resolve_anchored(self, document: DocumentModel) -> ResolvedSourcePath:
+        if document.document_id != self.job_id:
+            raise ValueError("Canonical document does not belong to the requested job.")
+        if document.file_type is not self.file_type:
+            raise ValueError("Canonical document file type does not match the job source.")
+        source_path = self.storage.source_path(self.job_id, self.file_type)
+        expected_parent = self.storage.job_directory(self.job_id).resolve(strict=False)
+        if source_path.parent.resolve(strict=False) != expected_parent:
+            raise InvalidUpload("Stored source is outside the job-owned namespace.")
+        return ResolvedSourcePath.from_path(source_path)

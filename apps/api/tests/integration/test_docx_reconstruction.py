@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import struct
+import time
 import zlib
 from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
@@ -353,6 +354,22 @@ def test_reconstruction_has_deterministic_semantic_roundtrip(tmp_path: Path) -> 
         ("paragraph", "正文"),
         ("table", (("单元格",),)),
     ]
+
+
+def test_reconstruction_bytes_are_deterministic_across_zip_timestamps(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document = _document([_Block("paragraph", "正文", page=1, y=10)])
+    current = [time.struct_time((2024, 1, 1, 0, 0, 0, 0, 1, -1))]
+    monkeypatch.setattr(time, "localtime", lambda *_args: current[0])
+    exporter = DocxReconstructionExporter()
+
+    first = exporter.export(document, tmp_path / "first-bytes.docx").read_bytes()
+    current[0] = time.struct_time((2026, 9, 2, 12, 0, 0, 2, 245, -1))
+    second = exporter.export(document, tmp_path / "second-bytes.docx").read_bytes()
+
+    assert first == second
 
 
 def test_reconstructs_real_parser_image_after_json_roundtrip(

@@ -14,7 +14,11 @@ import pymupdf
 from pydantic import ValidationError
 
 from text_verification.compatibility.adapters import source_version_for_file
-from text_verification.document_processing.errors import OcrOutputError
+from text_verification.document_processing.errors import (
+    OcrOutputError,
+    OcrProcessingError,
+    OcrUnavailableError,
+)
 from text_verification.document_processing.layout import (
     OcrLayoutBox,
     OcrLayoutElement,
@@ -41,6 +45,10 @@ from text_verification.document_processing.pdf_models import (
     PdfWritingMode,
 )
 from text_verification.domain.documents import DocumentMetadata, DocumentModel, FileType, TextBlock
+from text_verification.domain.ports import (
+    VerificationProgressObserver,
+    VerificationProgressStage,
+)
 from text_verification.parsers.errors import ParserError, PdfResourceLimitError
 
 _PARSER_NAME = "pymupdf-pdf"
@@ -73,6 +81,29 @@ class PdfParser:
     supported_type: FileType = field(default=FileType.PDF, init=False)
 
     def parse(self, source_path: Path) -> DocumentModel:
+        return self._parse(source_path, progress_observer=None)
+
+    def parse_with_progress(
+        self,
+        source_path: Path,
+        *,
+        progress_observer: VerificationProgressObserver,
+    ) -> DocumentModel:
+        return self._parse(source_path, progress_observer=progress_observer)
+
+    def parse_without_ocr(self, source_path: Path) -> DocumentModel:
+        return PdfParser(
+            ocr=None,
+            limits=self.limits,
+            ocr_language=self.ocr_language,
+        ).parse(source_path)
+
+    def _parse(
+        self,
+        source_path: Path,
+        *,
+        progress_observer: VerificationProgressObserver | None,
+    ) -> DocumentModel:
         source_version = source_version_for_file(source_path)
         try:
             pdf: Any = _PYMUPDF.open(source_path)
@@ -94,6 +125,7 @@ class PdfParser:
                     self.limits,
                     ocr=self.ocr,
                     ocr_language=self.ocr_language,
+                    progress_observer=progress_observer,
                 )
                 for page_number, page in enumerate(pdf, start=1)
             )
@@ -141,6 +173,7 @@ def _extract_page(
     *,
     ocr: OcrRecognizer | None = None,
     ocr_language: SupportedOcrLanguage = "zh",
+    progress_observer: VerificationProgressObserver | None = None,
 ) -> _ExtractedPage:
     geometry = _PageGeometry(
         page_bbox=_bbox(page.rect),
@@ -155,6 +188,8 @@ def _extract_page(
     )
     recognized_boxes: tuple[OcrLayoutBox, ...] | None = None
     if classification.ocr_required and ocr is not None:
+        if progress_observer is not None:
+            progress_observer(VerificationProgressStage.OCR)
         recognized_boxes = _recognize_page(
             page,
             page_number=page_number,
@@ -220,7 +255,12 @@ def _recognize_page(
     limits: PdfResourceLimits,
 ) -> tuple[OcrLayoutBox, ...]:
     payload, raster_width, raster_height = _render_page_for_ocr(page, limits)
-    raw_boxes = ocr.recognize(payload, language)
+    try:
+        raw_boxes = ocr.recognize(payload, language)
+    except (OcrOutputError, OcrUnavailableError):
+        raise
+    except Exception as error:
+        raise OcrProcessingError() from error
     return _normalize_ocr_boxes(
         raw_boxes,
         page_number=page_number,

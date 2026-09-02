@@ -7,6 +7,7 @@ if TYPE_CHECKING:
     from text_verification.document_processing.errors import (
         OcrLayoutError,
         OcrOutputError,
+        OcrProcessingError,
         OcrUnavailableError,
     )
     from text_verification.document_processing.ocr_provider import (
@@ -18,6 +19,7 @@ if TYPE_CHECKING:
 __all__ = [
     "OcrLayoutError",
     "OcrOutputError",
+    "OcrProcessingError",
     "OcrProvider",
     "OcrRecognizer",
     "OcrTextBox",
@@ -27,7 +29,12 @@ __all__ = [
 
 
 def __getattr__(name: str) -> Any:
-    if name in {"OcrLayoutError", "OcrOutputError", "OcrUnavailableError"}:
+    if name in {
+        "OcrLayoutError",
+        "OcrOutputError",
+        "OcrProcessingError",
+        "OcrUnavailableError",
+    }:
         module = import_module("text_verification.document_processing.errors")
     elif name in {"OcrProvider", "OcrRecognizer", "OcrTextBox"}:
         module = import_module("text_verification.document_processing.ocr_provider")

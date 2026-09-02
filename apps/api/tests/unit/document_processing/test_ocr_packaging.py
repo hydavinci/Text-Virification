@@ -7,7 +7,7 @@ import pytest
 
 BACKEND_ROOT = Path(__file__).resolve().parents[3]
 OCR_RUNTIME_DISTRIBUTIONS = {
-    "opencv-python": "cv2",
+    "opencv-python-headless": "cv2",
     "onnxruntime": "onnxruntime",
     "rapidocr": "rapidocr",
 }
@@ -37,9 +37,13 @@ def test_ocr_extra_declares_required_cpu_runtime_dependencies() -> None:
     assert set(config["project"]["optional-dependencies"]["ocr"]) == {
         "numpy>=2,<3",
         "onnxruntime>=1.20,<2",
-        "opencv-python>=4.10,<5",
+        "opencv-python-headless>=4.10,<5",
         "rapidocr>=3,<4",
     }
+    assert all(
+        not dependency.startswith("opencv-python>=")
+        for dependency in config["project"]["optional-dependencies"]["ocr"]
+    )
 
 
 def test_runtime_image_installs_ocr_extra_and_cv2_runtime_library() -> None:
@@ -48,20 +52,20 @@ def test_runtime_image_installs_ocr_extra_and_cv2_runtime_library() -> None:
     assert '"text-verification[dev,ocr]"' in dockerfile
     assert '".[dev,ocr]"' in dockerfile
     assert "libgl1" in dockerfile
-    assert "opencv-python-headless" not in dockerfile
+    assert dockerfile.count("[dev,ocr]") == 2
 
 
 def test_missing_ocr_runtime_distribution_helper_reports_absent_distributions(
     monkeypatch,
 ) -> None:
     def fake_distribution(name: str) -> object:
-        if name == "opencv-python":
+        if name == "opencv-python-headless":
             raise importlib.metadata.PackageNotFoundError(name)
         return object()
 
     monkeypatch.setattr(importlib.metadata, "distribution", fake_distribution)
 
-    assert _missing_ocr_runtime_distributions() == ("opencv-python",)
+    assert _missing_ocr_runtime_distributions() == ("opencv-python-headless",)
 
 
 def test_runtime_smoke_helper_skips_when_distribution_metadata_is_absent(
@@ -72,7 +76,7 @@ def test_runtime_smoke_helper_skips_when_distribution_metadata_is_absent(
 
     monkeypatch.setattr(importlib.metadata, "distribution", fake_distribution)
 
-    with pytest.raises(pytest.skip.Exception, match="opencv-python"):
+    with pytest.raises(pytest.skip.Exception, match="opencv-python-headless"):
         _import_installed_ocr_runtime_modules()
 
 

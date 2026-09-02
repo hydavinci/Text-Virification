@@ -49,7 +49,9 @@ from text_verification.workers.pipeline import (
     CHECKING_FORMAT_EVENT_MESSAGE,
     CHECKING_SENSITIVE_EVENT_MESSAGE,
     COMPLETED_EVENT_MESSAGE,
+    FINALIZING_EVENT_MESSAGE,
     MISSING_UPLOAD_MESSAGE,
+    OCR_EVENT_MESSAGE,
     PARSING_EVENT_MESSAGE,
     UPLOAD_VALIDATED_EVENT_MESSAGE,
     PipelineRunner,
@@ -79,25 +81,41 @@ _STATUS_ORDER = (
     JobStatus.QUEUED,
     JobStatus.UPLOAD_VALIDATED,
     JobStatus.PARSING,
+    JobStatus.OCR,
     JobStatus.CHECKING_FORMAT,
     JobStatus.CHECKING_SENSITIVE,
     JobStatus.CHECKING_CHINESE,
     JobStatus.CHECKING_ENGLISH,
+    JobStatus.FINALIZING,
 )
 _STATUS_EVENT_DETAILS = {
     JobStatus.UPLOAD_VALIDATED: (10, UPLOAD_VALIDATED_EVENT_MESSAGE),
     JobStatus.PARSING: (25, PARSING_EVENT_MESSAGE),
+    JobStatus.OCR: (40, OCR_EVENT_MESSAGE),
     JobStatus.CHECKING_FORMAT: (50, CHECKING_FORMAT_EVENT_MESSAGE),
     JobStatus.CHECKING_SENSITIVE: (65, CHECKING_SENSITIVE_EVENT_MESSAGE),
     JobStatus.CHECKING_CHINESE: (80, CHECKING_CHINESE_EVENT_MESSAGE),
     JobStatus.CHECKING_ENGLISH: (90, CHECKING_ENGLISH_EVENT_MESSAGE),
+    JobStatus.FINALIZING: (95, FINALIZING_EVENT_MESSAGE),
 }
 _STAGE_STATUSES = {
     VerificationProgressStage.PARSING: JobStatus.PARSING,
+    VerificationProgressStage.OCR: JobStatus.OCR,
     VerificationProgressStage.CHECKING_FORMAT: JobStatus.CHECKING_FORMAT,
     VerificationProgressStage.CHECKING_SENSITIVE: JobStatus.CHECKING_SENSITIVE,
     VerificationProgressStage.CHECKING_CHINESE: JobStatus.CHECKING_CHINESE,
     VerificationProgressStage.CHECKING_ENGLISH: JobStatus.CHECKING_ENGLISH,
+}
+_ALLOWED_PROGRESS_TRANSITIONS = {
+    (JobStatus.QUEUED, JobStatus.UPLOAD_VALIDATED),
+    (JobStatus.UPLOAD_VALIDATED, JobStatus.PARSING),
+    (JobStatus.PARSING, JobStatus.OCR),
+    (JobStatus.PARSING, JobStatus.CHECKING_FORMAT),
+    (JobStatus.OCR, JobStatus.CHECKING_FORMAT),
+    (JobStatus.CHECKING_FORMAT, JobStatus.CHECKING_SENSITIVE),
+    (JobStatus.CHECKING_SENSITIVE, JobStatus.CHECKING_CHINESE),
+    (JobStatus.CHECKING_CHINESE, JobStatus.CHECKING_ENGLISH),
+    (JobStatus.CHECKING_ENGLISH, JobStatus.FINALIZING),
 }
 
 
@@ -164,18 +182,32 @@ class _LeaseProgressObserver(VerificationProgressObserver):
     def ensure_upload_validated(self) -> None:
         self._advance(JobStatus.UPLOAD_VALIDATED)
 
+    def ensure_finalizing(self) -> None:
+        self._advance(JobStatus.FINALIZING)
+
     def __call__(self, stage: VerificationProgressStage) -> None:
         self._advance(_STAGE_STATUSES[stage])
 
     def _advance(self, target_status: JobStatus) -> None:
         current_index = _STATUS_ORDER.index(self.current_status)
         target_index = _STATUS_ORDER.index(target_status)
-        if target_index <= current_index:
+        if target_index < current_index:
             return
-        if target_index != current_index + 1:
+        if target_status is self.current_status:
+            now = NOW_FACTORY()
+            _renew_claimed(
+                self._session_factory,
+                self._job_id,
+                owner_token=self._owner_token,
+                expected_status=self.current_status,
+                now=now,
+                lease_expires_at=now + timedelta(seconds=self._lease_seconds),
+            )
+            return
+        if (self.current_status, target_status) not in _ALLOWED_PROGRESS_TRANSITIONS:
             raise JobStateConflictError(
                 job_id=self._job_id,
-                expected_status=_STATUS_ORDER[target_index - 1],
+                expected_status=target_status,
                 current_status=self.current_status,
             )
 
@@ -297,10 +329,12 @@ def _run_process_job_attempt(
                 owner_token=owner_token,
             )
             if existing_result is not None:
-                if observer.current_status is not JobStatus.CHECKING_ENGLISH:
+                if observer.current_status is JobStatus.CHECKING_ENGLISH:
+                    observer.ensure_finalizing()
+                if observer.current_status is not JobStatus.FINALIZING:
                     raise JobStateConflictError(
                         job_id=job_id,
-                        expected_status=JobStatus.CHECKING_ENGLISH,
+                        expected_status=JobStatus.FINALIZING,
                         current_status=observer.current_status,
                     )
                 _complete_claimed_job(
@@ -314,6 +348,7 @@ def _run_process_job_attempt(
             observer.ensure_upload_validated()
             runner = RUNNER_FACTORY(STORAGE_FACTORY(), PIPELINE_FACTORY())
             result = runner.run(job, observer)
+            observer.ensure_finalizing()
             _save_claimed_result(
                 session_factory,
                 job_id,
@@ -641,6 +676,33 @@ def _transition_claimed(
         session.close()
 
 
+def _renew_claimed(
+    session_factory: sessionmaker[Session],
+    job_id: UUID,
+    *,
+    owner_token: UUID,
+    expected_status: JobStatus,
+    now: datetime,
+    lease_expires_at: datetime,
+) -> None:
+    session = session_factory()
+    repository = REPOSITORY_FACTORY(session)
+    try:
+        repository.renew_claimed_lease(
+            job_id,
+            owner_token=owner_token,
+            expected_status=expected_status,
+            now=now,
+            lease_expires_at=lease_expires_at,
+        )
+        repository.commit()
+    except Exception:
+        repository.rollback()
+        raise
+    finally:
+        session.close()
+
+
 def _mark_recovery_published(
     session_factory: sessionmaker[Session],
     job_id: UUID,
@@ -917,7 +979,7 @@ def _persist_exhausted_failure(
             expected_status=claim.job.status,
             error_message=UNEXPECTED_FAILURE_MESSAGE,
         )
-        if not failure_applied and claim.job.status is JobStatus.CHECKING_ENGLISH:
+        if not failure_applied and claim.job.status is JobStatus.FINALIZING:
             _complete_claimed_job(
                 session_factory,
                 job_id,

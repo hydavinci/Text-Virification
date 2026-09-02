@@ -10,11 +10,19 @@ from text_verification.application.errors import ReviewerError, VerificationErro
 from text_verification.checkers.registry import CheckerRegistry
 from text_verification.compatibility.adapters import text_to_document_model
 from text_verification.compatibility.statistics import text_statistics
+from text_verification.document_processing.errors import (
+    OcrLayoutError,
+    OcrOutputError,
+    OcrProcessingError,
+    OcrUnavailableError,
+)
 from text_verification.domain.documents import DocumentModel, FileType
 from text_verification.domain.issues import Issue
 from text_verification.domain.ports import (
     CheckContext,
     CheckResult,
+    OcrDeferrableParser,
+    ProgressAwareParser,
     VerificationProgressObserver,
     VerificationProgressStage,
 )
@@ -28,7 +36,7 @@ from text_verification.domain.verification import (
     VerificationSummary,
 )
 from text_verification.infrastructure.dictionary_loader import DictionaryLoadError
-from text_verification.parsers.errors import ParserError
+from text_verification.parsers.errors import ParserError, PdfResourceLimitError
 from text_verification.parsers.registry import ParserRegistry
 from text_verification.registry_errors import MissingCapabilityError
 
@@ -61,10 +69,12 @@ class VerificationPipeline:
         parsers: ParserRegistry,
         checkers: CheckerRegistry,
         reviewer: IssueReviewer | None,
+        ocr_in_synchronous_mode: bool = True,
     ) -> None:
         self._parsers = parsers
         self._checkers = checkers
         self._reviewer = reviewer
+        self._ocr_in_synchronous_mode = ocr_in_synchronous_mode
 
     def run(
         self,
@@ -74,7 +84,10 @@ class VerificationPipeline:
     ) -> VerificationResult:
         if command.source_path is not None and progress_observer is not None:
             progress_observer(VerificationProgressStage.PARSING)
-        document = self._load_document(command)
+        document = self._load_document(
+            command,
+            progress_observer=progress_observer,
+        )
         ocr_requirement = document.metadata.pdf_ocr_requirement
         if ocr_requirement is not None and ocr_requirement.mode == "required":
             pages = ", ".join(str(page) for page in ocr_requirement.pages)
@@ -135,7 +148,12 @@ class VerificationPipeline:
             ),
         )
 
-    def _load_document(self, command: VerificationCommand) -> DocumentModel:
+    def _load_document(
+        self,
+        command: VerificationCommand,
+        *,
+        progress_observer: VerificationProgressObserver | None,
+    ) -> DocumentModel:
         if (command.source_path is None) == (command.direct_text is None):
             raise VerificationError(
                 "invalid_verification_input",
@@ -166,7 +184,19 @@ class VerificationPipeline:
         if source_path is None:
             raise AssertionError("source_path must be set for stored input")
         try:
-            parsed = parser.parse(source_path)
+            if (
+                command.execution_mode is VerificationExecutionMode.SYNCHRONOUS
+                and not self._ocr_in_synchronous_mode
+                and isinstance(parser, OcrDeferrableParser)
+            ):
+                parsed = parser.parse_without_ocr(source_path)
+            elif progress_observer is not None and isinstance(parser, ProgressAwareParser):
+                parsed = parser.parse_with_progress(
+                    source_path,
+                    progress_observer=progress_observer,
+                )
+            else:
+                parsed = parser.parse(source_path)
         except FileNotFoundError as error:
             raise VerificationError(
                 "source_not_found",
@@ -180,6 +210,39 @@ class VerificationPipeline:
                 "parsing",
                 "The stored source document could not be read.",
                 True,
+            ) from error
+        except OcrUnavailableError as error:
+            raise VerificationError(
+                error.code,
+                error.stage,
+                error.message,
+                error.retryable,
+            ) from error
+        except OcrProcessingError as error:
+            raise VerificationError(
+                error.code,
+                error.stage,
+                error.message,
+                error.retryable,
+            ) from error
+        except (OcrLayoutError, OcrOutputError) as error:
+            raise VerificationError(
+                "ocr_output_invalid",
+                "ocr",
+                "The OCR provider returned invalid output.",
+                False,
+            ) from error
+        except PdfResourceLimitError as error:
+            is_ocr_limit = error.limit.startswith("max_ocr")
+            raise VerificationError(
+                "ocr_resource_limit" if is_ocr_limit else "parser_resource_limit",
+                "ocr" if is_ocr_limit else "parsing",
+                (
+                    "OCR resource limits were exceeded."
+                    if is_ocr_limit
+                    else "Document parsing resource limits were exceeded."
+                ),
+                False,
             ) from error
         except ParserError as error:
             raise VerificationError(

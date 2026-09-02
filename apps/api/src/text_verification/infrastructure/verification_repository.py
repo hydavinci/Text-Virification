@@ -82,9 +82,9 @@ class VerificationRepository:
         expected_status: JobStatus,
         now: datetime,
     ) -> None:
-        if expected_status is not JobStatus.CHECKING_ENGLISH:
+        if expected_status is not JobStatus.FINALIZING:
             raise ValueError(
-                "Claimed results may only persist from checking_english."
+                "Claimed results may only persist from finalizing."
             )
         job = self._lock_job(job_id)
         self._assert_active_lease(job, owner_token, now)

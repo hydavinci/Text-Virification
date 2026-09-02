@@ -50,6 +50,7 @@ def test_analyzer_notifies_real_check_boundaries_in_job_status_order(
     ]
     assert [stage.value for stage in VerificationProgressStage] == [
         "parsing",
+        "ocr",
         "checking_format",
         "checking_sensitive",
         "checking_chinese",

@@ -11,7 +11,6 @@ from text_verification.domain.documents import FileType
 from text_verification.infrastructure.document_storage import (
     DocumentStorage,
     InvalidUpload,
-    UnsupportedFileType,
 )
 
 
@@ -110,12 +109,11 @@ def test_document_storage_returns_safe_basename_for_path_like_name(
     assert stored.path.name == "source.txt"
 
 
-def test_document_storage_respects_async_profile_membership(tmp_path) -> None:
+def test_document_storage_async_profile_accepts_all_canonical_formats(tmp_path) -> None:
     storage = DocumentStorage(
         tmp_path,
         max_upload_bytes=25 * 1024 * 1024,
         profile=CapabilityProfile.ASYNCHRONOUS_JOB,
     )
 
-    with pytest.raises(UnsupportedFileType):
-        storage.save_bytes(uuid4(), "sample.doc", make_doc_bytes())
+    assert storage.save_bytes(uuid4(), "sample.doc", make_doc_bytes()).file_type is FileType.DOC

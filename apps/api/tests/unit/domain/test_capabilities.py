@@ -34,8 +34,12 @@ def test_manifest_declares_distinct_sync_and_async_format_profiles() -> None:
     )
     assert manifest.file_types_for_profile(CapabilityProfile.ASYNCHRONOUS_JOB) == (
         FileType.DOCX,
+        FileType.DOC,
         FileType.PDF,
         FileType.TXT,
+        FileType.RTF,
+        FileType.MARKDOWN,
+        FileType.CSV,
     )
 
 

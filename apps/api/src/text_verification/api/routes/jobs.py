@@ -10,21 +10,35 @@ from datetime import UTC, datetime, timedelta
 from importlib import import_module
 from time import monotonic
 from typing import Annotated, BinaryIO, NoReturn
+from urllib.parse import quote
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Request, UploadFile, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session, sessionmaker
 
-from text_verification.api.dependencies import get_db_session, get_job_repository, get_job_storage
+from text_verification.api.dependencies import (
+    get_db_session,
+    get_job_repository,
+    get_job_storage,
+    get_reconstruction_export_service,
+)
+from text_verification.application.errors import VerificationError
+from text_verification.application.reconstruction_export import (
+    ReconstructionExportService,
+)
 from text_verification.config import Settings, get_settings
+from text_verification.domain.artifacts import ExportArtifactReference
 from text_verification.domain.capabilities import default_capability_manifest
-from text_verification.domain.documents import FileType
+from text_verification.domain.documents import ExportFormat, FileType
 from text_verification.domain.jobs import (
+    RESULT_READY_STATUSES,
     TERMINAL_STATUSES,
     JobEvent,
     JobRead,
     JobStatus,
+    TerminalJobStateError,
 )
 from text_verification.domain.verification import VerificationResult
 from text_verification.infrastructure.database import get_session_factory
@@ -58,6 +72,8 @@ UNSUPPORTED_FILE_TYPE_CODE = "unsupported_file_type"
 UPLOAD_TOO_LARGE_CODE = "upload_too_large"
 SSE_KEEPALIVE_SECONDS = 15.0
 SSE_POLL_SECONDS = 0.5
+EXPORTING_EVENT_MESSAGE = "正在重建文档"
+FINALIZING_EXPORT_EVENT_MESSAGE = "正在保存导出文件"
 
 
 router = APIRouter(tags=["jobs"])
@@ -73,6 +89,12 @@ VERIFICATION_REPOSITORY_FACTORY: VerificationRepositoryFactory = VerificationRep
 
 class JobCleanupFailed(RuntimeError):
     pass
+
+
+class JobExportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    format: ExportFormat
 
 
 def dispatch_process_job(job_id: str) -> None:
@@ -126,6 +148,97 @@ def get_job_result(
     if snapshot.result is None:
         raise AssertionError("ready result snapshot must contain a result")
     return snapshot.result
+
+
+@router.post(
+    "/jobs/{job_id}/exports",
+    response_model=ExportArtifactReference,
+)
+def create_job_export(
+    job_id: UUID,
+    payload: JobExportRequest,
+    repository: Annotated[JobRepository, Depends(get_job_repository)],
+    service: Annotated[
+        ReconstructionExportService,
+        Depends(get_reconstruction_export_service),
+    ],
+) -> ExportArtifactReference:
+    job = repository.get_job(job_id)
+    if job is None:
+        raise _http_error(status.HTTP_404_NOT_FOUND, JOB_NOT_FOUND_CODE, "Job was not found.")
+    if job.status is JobStatus.EXPIRED:
+        raise _http_error(
+            status.HTTP_410_GONE,
+            JOB_RESULT_EXPIRED_CODE,
+            "Job result has expired.",
+        )
+    if job.status not in RESULT_READY_STATUSES:
+        raise _http_error(
+            status.HTTP_409_CONFLICT,
+            JOB_RESULT_PENDING_CODE,
+            "Job result is not available yet.",
+        )
+
+    def record(stage: JobStatus) -> None:
+        message = (
+            EXPORTING_EVENT_MESSAGE
+            if stage is JobStatus.EXPORTING
+            else FINALIZING_EXPORT_EVENT_MESSAGE
+        )
+        try:
+            repository.append_stage_event(
+                job_id,
+                stage,
+                message,
+                changed_at=datetime.now(UTC),
+            )
+            repository.commit()
+        except Exception:
+            repository.rollback()
+            raise
+
+    try:
+        return service.export(
+            job,
+            payload.format,
+            progress_observer=record,
+        )
+    except TerminalJobStateError as error:
+        raise _typed_http_error(
+            status.HTTP_410_GONE,
+            "job_result_expired",
+            "exporting",
+            "Job result has expired.",
+            False,
+        ) from error
+    except VerificationError as error:
+        raise _export_http_error(error) from error
+
+
+@router.get("/jobs/{job_id}/exports/{export_artifact_id}")
+def download_job_export(
+    job_id: UUID,
+    export_artifact_id: UUID,
+    service: Annotated[
+        ReconstructionExportService,
+        Depends(get_reconstruction_export_service),
+    ],
+) -> Response:
+    try:
+        download = service.download(job_id, export_artifact_id)
+    except VerificationError as error:
+        raise _export_http_error(error) from error
+    with download.handle:
+        content = download.handle.read_bytes()
+    return Response(
+        content=content,
+        media_type=download.media_type,
+        headers={
+            "Content-Disposition": (
+                f"attachment; filename*=UTF-8''{quote(download.file_name, safe='')}"
+            )
+        },
+    )
 
 
 @router.get("/jobs/{job_id}/events")
@@ -388,6 +501,7 @@ def _format_progress_event(event: JobEvent) -> str:
     payload = json.dumps(
         {
             "status": event.status.value,
+            "stage": event.status.value,
             "progress": event.progress,
             "message": event.message,
             "created_at": event.created_at.isoformat(),
@@ -418,6 +532,47 @@ def _file_type_hint(file_name: str) -> str | None:
 
 def _http_error(status_code: int, code: str, message: str) -> HTTPException:
     return HTTPException(status_code=status_code, detail={"code": code, "message": message})
+
+
+def _typed_http_error(
+    status_code: int,
+    code: str,
+    stage: str,
+    message: str,
+    retryable: bool,
+) -> HTTPException:
+    return HTTPException(
+        status_code=status_code,
+        detail={
+            "code": code,
+            "stage": stage,
+            "message": message,
+            "retryable": retryable,
+        },
+    )
+
+
+def _export_http_error(error: VerificationError) -> HTTPException:
+    status_code = {
+        "export_artifact_not_found": status.HTTP_404_NOT_FOUND,
+        "export_artifact_pending": status.HTTP_409_CONFLICT,
+        "export_artifact_unavailable": status.HTTP_409_CONFLICT,
+        "job_result_unavailable": status.HTTP_409_CONFLICT,
+        "document_not_reconstructable": status.HTTP_422_UNPROCESSABLE_CONTENT,
+        "unsupported_export_format": status.HTTP_422_UNPROCESSABLE_CONTENT,
+        "document_reconstruction_failed": status.HTTP_422_UNPROCESSABLE_CONTENT,
+        "export_artifact_conflict": status.HTTP_409_CONFLICT,
+        "export_finalization_uncertain": status.HTTP_503_SERVICE_UNAVAILABLE,
+        "export_persistence_failed": status.HTTP_503_SERVICE_UNAVAILABLE,
+        "export_workspace_cleanup_failed": status.HTTP_503_SERVICE_UNAVAILABLE,
+    }.get(error.code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+    return _typed_http_error(
+        status_code,
+        error.code,
+        error.stage,
+        error.message,
+        error.retryable,
+    )
 
 
 def _raise_failure_after_cleanup(

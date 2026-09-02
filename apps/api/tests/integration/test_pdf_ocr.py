@@ -10,6 +10,7 @@ from uuid import uuid4
 import pymupdf
 import pytest
 
+from text_verification.application.errors import VerificationError
 from text_verification.application.verification_pipeline import (
     VerificationCommand,
     VerificationPipeline,
@@ -1084,6 +1085,36 @@ def test_ocr_provider_capability_error_propagates_unchanged() -> None:
 
     assert raised.value.code == "ocr_unavailable"
     assert raised.value.stage == "ocr"
+
+
+def test_untyped_ocr_runtime_failure_becomes_retryable_verification_error() -> None:
+    class FailingOcr:
+        def recognize(self, image: object, language: str) -> list[OcrTextBox]:
+            del image, language
+            raise RuntimeError("provider transport failed")
+
+    pipeline = VerificationPipeline(
+        parsers=ParserRegistry([PdfParser(ocr=FailingOcr())]),
+        checkers=CheckerRegistry([CompatibilityChecker()]),
+        reviewer=None,
+    )
+
+    with pytest.raises(VerificationError) as raised:
+        pipeline.run(
+            VerificationCommand(
+                document_id=uuid4(),
+                source_path=FIXTURE_DIRECTORY / "scanned-page.pdf",
+                direct_text=None,
+                source_name="scanned-page.pdf",
+                file_type=FileType.PDF,
+                options=VerificationOptions(),
+                execution_mode=VerificationExecutionMode.ASYNCHRONOUS,
+            )
+        )
+
+    assert raised.value.code == "ocr_failed"
+    assert raised.value.stage == "ocr"
+    assert raised.value.retryable is True
 
 
 def test_malformed_fake_ocr_boxes_are_output_errors_not_unavailable() -> None:

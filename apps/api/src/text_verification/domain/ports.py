@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
-from typing import ParamSpec, Protocol
+from typing import ParamSpec, Protocol, runtime_checkable
 from uuid import UUID, uuid4
 
 from text_verification.domain.documents import DocumentModel, ExportFormat, FileType
@@ -17,6 +17,7 @@ _ExportParameters = ParamSpec("_ExportParameters")
 
 class VerificationProgressStage(StrEnum):
     PARSING = "parsing"
+    OCR = "ocr"
     CHECKING_FORMAT = "checking_format"
     CHECKING_SENSITIVE = "checking_sensitive"
     CHECKING_CHINESE = "checking_chinese"
@@ -81,6 +82,21 @@ class Parser(Protocol):
     supported_type: FileType
 
     def parse(self, source_path: Path) -> DocumentModel: ...
+
+
+@runtime_checkable
+class ProgressAwareParser(Protocol):
+    def parse_with_progress(
+        self,
+        source_path: Path,
+        *,
+        progress_observer: VerificationProgressObserver,
+    ) -> DocumentModel: ...
+
+
+@runtime_checkable
+class OcrDeferrableParser(Protocol):
+    def parse_without_ocr(self, source_path: Path) -> DocumentModel: ...
 
 
 @dataclass(frozen=True)

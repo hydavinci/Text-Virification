@@ -9,6 +9,7 @@ from text_verification.application.verification_pipeline import (
     VerificationPipeline,
 )
 from text_verification.checkers.registry import CheckerRegistry
+from text_verification.document_processing.ocr_provider import OcrTextBox
 from text_verification.domain.documents import DocumentModel, FileType, TextBlock
 from text_verification.domain.ports import (
     CheckContext,
@@ -20,6 +21,7 @@ from text_verification.domain.verification import (
     VerificationExecutionMode,
     VerificationOptions,
 )
+from text_verification.parsers.pdf_parser import PdfParser
 from text_verification.parsers.registry import ParserRegistry
 
 
@@ -85,6 +87,37 @@ def test_pipeline_emits_parsing_before_parser_and_passes_observer_to_checker(
         "check",
         "stage:checking_format",
     ]
+
+
+class _FakeOcr:
+    def recognize(self, image: object, language: str) -> list[OcrTextBox]:
+        del image, language
+        return [
+            OcrTextBox(
+                text="test@example.com",
+                confidence=0.99,
+                bbox=((40.0, 40.0), (300.0, 40.0), (300.0, 80.0), (40.0, 80.0)),
+            )
+        ]
+
+
+def test_pdf_parser_emits_ocr_only_when_a_page_enters_ocr_work() -> None:
+    fixtures = Path(__file__).resolve().parents[2] / "fixtures" / "pdf"
+    parser = PdfParser(ocr=_FakeOcr())
+    text_stages: list[VerificationProgressStage] = []
+    scan_stages: list[VerificationProgressStage] = []
+
+    parser.parse_with_progress(
+        fixtures / "text-page.pdf",
+        progress_observer=text_stages.append,
+    )
+    parser.parse_with_progress(
+        fixtures / "scanned-page.pdf",
+        progress_observer=scan_stages.append,
+    )
+
+    assert VerificationProgressStage.OCR not in text_stages
+    assert scan_stages == [VerificationProgressStage.OCR]
 
 
 def _document(source_name: str) -> DocumentModel:

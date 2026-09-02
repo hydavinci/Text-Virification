@@ -5,7 +5,9 @@ from datetime import datetime
 from enum import StrEnum
 from uuid import UUID
 
-from text_verification.domain.documents import FileType
+from pydantic import BaseModel, ConfigDict
+
+from text_verification.domain.documents import ExportFormat, FileType
 
 
 class ArtifactLifecycleStatus(StrEnum):
@@ -47,4 +49,20 @@ class ArtifactSnapshot:
     status: ArtifactLifecycleStatus
     reserved_at: datetime
     ready_at: datetime | None
+    created_at: datetime
+
+
+class ExportArtifactReference(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    export_artifact_id: UUID
+    job_id: UUID
+    verification_run_id: UUID
+    format: ExportFormat
+    file_type: FileType
+    file_name: str
+    media_type: str
+    size_bytes: int
+    content_sha256: str
+    status: ArtifactLifecycleStatus
     created_at: datetime

@@ -17,9 +17,15 @@ from text_verification.compatibility.llm_review import (
     review_issues,
 )
 from text_verification.config import Settings, get_settings
-from text_verification.domain.documents import DocumentModel, FileType
+from text_verification.document_processing.ocr_provider import OcrProvider
+from text_verification.domain.documents import DocumentModel, ExportFormat, FileType
 from text_verification.domain.issues import Issue, IssueSeverity
-from text_verification.domain.ports import Parser
+from text_verification.domain.ports import AnchoredSourcePathResolver, Parser
+from text_verification.exporters.docx_reconstruction import (
+    DocxReconstructionExporter,
+    DocxReconstructionLimits,
+)
+from text_verification.exporters.registry import ExporterRegistry
 from text_verification.parsers.compatibility_parser import CompatibilityParser
 from text_verification.parsers.pdf_parser import PdfParser
 from text_verification.parsers.registry import ParserRegistry
@@ -70,7 +76,7 @@ def build_default_verification_pipeline(
     return VerificationPipeline(
         parsers=ParserRegistry(
             (
-                cast(Parser, PdfParser()),
+                cast(Parser, PdfParser(ocr=OcrProvider())),
                 *(
                     cast(Parser, CompatibilityParser(file_type))
                     for file_type in FileType
@@ -80,6 +86,23 @@ def build_default_verification_pipeline(
         ),
         checkers=CheckerRegistry([CompatibilityChecker()]),
         reviewer=CompatibilityIssueReviewer(resolved_settings),
+        ocr_in_synchronous_mode=False,
+    )
+
+
+def build_default_exporter_registry(
+    *,
+    anchored_source_resolver: AnchoredSourcePathResolver,
+    max_output_bytes: int,
+) -> ExporterRegistry:
+    return ExporterRegistry(
+        (
+            DocxReconstructionExporter(
+                limits=DocxReconstructionLimits(max_output_bytes=max_output_bytes),
+                anchored_source_resolver=anchored_source_resolver,
+                file_type=ExportFormat.DOCX_RECONSTRUCTION,
+            ),
+        )
     )
 
 

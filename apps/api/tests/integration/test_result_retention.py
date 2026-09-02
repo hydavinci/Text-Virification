@@ -190,7 +190,7 @@ def test_committed_result_prevents_claimed_failure_in_two_session_race(
             lease_expires_at=now + timedelta(minutes=20),
         )
         jobs.commit()
-        _advance_to_checking_english(jobs, job_id, owner, now)
+        _advance_to_finalizing(jobs, job_id, owner, now)
     finally:
         seed_session.close()
 
@@ -208,7 +208,7 @@ def test_committed_result_prevents_claimed_failure_in_two_session_race(
                 job_id,
                 _result(job_id, run_id),
                 owner_token=owner,
-                expected_status=JobStatus.CHECKING_ENGLISH,
+                expected_status=JobStatus.FINALIZING,
                 now=now + timedelta(minutes=1),
             )
             result_saved.set()
@@ -230,8 +230,8 @@ def test_committed_result_prevents_claimed_failure_in_two_session_race(
             applied = repository.fail_claimed_job(
                 job_id,
                 owner_token=owner,
-                expected_status=JobStatus.CHECKING_ENGLISH,
-                progress=90,
+                expected_status=JobStatus.FINALIZING,
+                progress=95,
                 message="处理失败",
                 error_code="pipeline_failed",
                 error_message="Processing failed.",
@@ -342,7 +342,7 @@ def _artifact_repository_factory(
     return factory
 
 
-def _advance_to_checking_english(
+def _advance_to_finalizing(
     repository: JobRepository,
     job_id: UUID,
     owner: UUID,
@@ -369,6 +369,12 @@ def _advance_to_checking_english(
             JobStatus.CHECKING_ENGLISH,
             90,
             "正在检查英文",
+        ),
+        (
+            JobStatus.CHECKING_ENGLISH,
+            JobStatus.FINALIZING,
+            95,
+            "正在保存结果",
         ),
     )
     for index, (expected, target, progress, message) in enumerate(transitions, start=1):

@@ -15,7 +15,6 @@ from text_verification.infrastructure import storage as storage_module
 from text_verification.infrastructure.storage import (
     InvalidUpload,
     JobStorage,
-    UnsupportedFileType,
     UploadTooLarge,
 )
 
@@ -32,7 +31,15 @@ def test_job_storage_uses_manifest_async_profile(tmp_path):
     storage = JobStorage(tmp_path, max_upload_bytes=1024)
 
     assert storage.supported_file_types == frozenset(
-        {FileType.DOCX, FileType.PDF, FileType.TXT}
+        {
+            FileType.DOCX,
+            FileType.DOC,
+            FileType.PDF,
+            FileType.TXT,
+            FileType.RTF,
+            FileType.MARKDOWN,
+            FileType.CSV,
+        }
     )
 
 
@@ -90,12 +97,24 @@ def test_rejects_big5_text_to_preserve_async_job_contract(tmp_path):
         storage.save_bytes(uuid4(), "legacy-big5.txt", "體入".encode("big5"))
 
 
-@pytest.mark.parametrize("name", ["legacy.doc", "legacy.rtf", "notes.md", "rows.csv"])
-def test_rejects_non_baseline_extensions_even_if_domain_enum_includes_them(tmp_path, name):
+@pytest.mark.parametrize(
+    ("name", "payload", "expected"),
+    [
+        ("legacy.doc", bytes.fromhex("D0CF11E0A1B11AE1") + b"\x00" * 16, FileType.DOC),
+        ("legacy.rtf", br"{\rtf1 legacy}", FileType.RTF),
+        ("notes.md", b"# notes", FileType.MARKDOWN),
+        ("rows.csv", b"name,value\nalpha,1\n", FileType.CSV),
+    ],
+)
+def test_accepts_extended_async_job_formats(
+    tmp_path,
+    name: str,
+    payload: bytes,
+    expected: FileType,
+):
     storage = JobStorage(tmp_path, max_upload_bytes=1024)
 
-    with pytest.raises(UnsupportedFileType):
-        storage.save_bytes(uuid4(), name, b"plain text")
+    assert storage.save_bytes(uuid4(), name, payload).file_type is expected
 
 
 def test_source_path_returns_existing_expected_source_file(tmp_path):
@@ -107,6 +126,26 @@ def test_source_path_returns_existing_expected_source_file(tmp_path):
 
     assert source_path == stored.path
     assert source_path.read_bytes() == b"hello"
+
+
+def test_verified_artifact_handle_reads_the_verified_inode(tmp_path):
+    storage = JobStorage(tmp_path, max_upload_bytes=1024)
+    job_id = uuid4()
+    artifact_id = uuid4()
+    storage_key = storage_module.build_artifact_storage_key(
+        job_id,
+        artifact_id,
+        FileType.DOCX,
+    )
+    data = make_docx_bytes()
+    with storage.publish_verified_artifact(
+        job_id,
+        artifact_id,
+        storage_key,
+        FileType.DOCX,
+        data,
+    ) as handle:
+        assert handle.read_bytes() == data
 
 
 def test_source_path_rejects_job_directory_outside_storage_root(tmp_path, monkeypatch):

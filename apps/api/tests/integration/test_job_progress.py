@@ -7,7 +7,11 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi import FastAPI
 
-from text_verification.domain.documents import FileType, TextBlock
+from text_verification.domain.artifacts import (
+    ArtifactLifecycleStatus,
+    ExportArtifactReference,
+)
+from text_verification.domain.documents import ExportFormat, FileType, TextBlock
 from text_verification.domain.jobs import (
     RESULT_READY_STATUSES,
     TERMINAL_STATUSES,
@@ -75,34 +79,48 @@ class RecordingJobRepository:
             ),
             JobEvent(
                 sequence=4,
+                status=JobStatus.OCR,
+                progress=40,
+                message="正在进行 OCR",
+                created_at=created_at,
+            ),
+            JobEvent(
+                sequence=5,
                 status=JobStatus.CHECKING_FORMAT,
                 progress=50,
                 message="正在检查格式",
                 created_at=created_at,
             ),
             JobEvent(
-                sequence=5,
+                sequence=6,
                 status=JobStatus.CHECKING_SENSITIVE,
                 progress=65,
                 message="正在检查敏感词",
                 created_at=created_at,
             ),
             JobEvent(
-                sequence=6,
+                sequence=7,
                 status=JobStatus.CHECKING_CHINESE,
                 progress=80,
                 message="正在检查中文",
                 created_at=created_at,
             ),
             JobEvent(
-                sequence=7,
+                sequence=8,
                 status=JobStatus.CHECKING_ENGLISH,
                 progress=90,
                 message="正在检查英文",
                 created_at=created_at,
             ),
             JobEvent(
-                sequence=8,
+                sequence=9,
+                status=JobStatus.FINALIZING,
+                progress=95,
+                message="正在保存结果",
+                created_at=created_at,
+            ),
+            JobEvent(
+                sequence=10,
                 status=JobStatus.COMPLETED,
                 progress=100,
                 message="处理完成",
@@ -131,6 +149,31 @@ class RecordingJobRepository:
         return [
             event for event in self._events.get(job_id, []) if event.sequence > after_sequence
         ]
+
+    def append_stage_event(
+        self,
+        job_id: UUID,
+        stage: JobStatus,
+        message: str,
+        *,
+        changed_at: datetime,
+    ) -> JobEvent:
+        job = self._jobs[job_id]
+        event = JobEvent(
+            sequence=len(self._events[job_id]) + 1,
+            status=stage,
+            progress=job.progress,
+            message=message,
+            created_at=changed_at,
+        )
+        self._events[job_id].append(event)
+        return event
+
+    def commit(self) -> None:
+        return None
+
+    def rollback(self) -> None:
+        return None
 
 
 class RecordingVerificationRepository:
@@ -363,10 +406,89 @@ def test_sse_replays_events_after_last_event_id(client, completed_job: JobRead) 
     assert response.headers["content-type"].startswith("text/event-stream")
     assert "id: 2" in response.text
     assert '"status":"upload_validated"' in response.text
+    assert '"stage":"ocr"' in response.text
+    assert '"stage":"finalizing"' in response.text
     assert '"status":"completed"' in response.text
     assert "event: done" in response.text
     assert completed_job.source_name not in response.text
     assert client_path not in response.text
+
+
+def test_job_reconstruction_export_route_returns_stable_artifact_reference(
+    client,
+    app: FastAPI,
+    completed_job: JobRead,
+) -> None:
+    from text_verification.api.dependencies import get_reconstruction_export_service
+
+    artifact = ExportArtifactReference(
+        export_artifact_id=uuid4(),
+        job_id=completed_job.job_id,
+        verification_run_id=uuid4(),
+        format=ExportFormat.DOCX_RECONSTRUCTION,
+        file_type=FileType.DOCX,
+        file_name="sample-reconstructed.docx",
+        media_type=(
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        ),
+        size_bytes=42,
+        content_sha256="a" * 64,
+        status=ArtifactLifecycleStatus.READY,
+        created_at=completed_job.created_at,
+    )
+    calls: list[tuple[JobRead, ExportFormat]] = []
+
+    class FakeService:
+        def export(self, job, export_format, *, progress_observer=None):
+            calls.append((job, export_format))
+            assert progress_observer is not None
+            progress_observer(JobStatus.EXPORTING)
+            progress_observer(JobStatus.FINALIZING)
+            return artifact
+
+    app.dependency_overrides[get_reconstruction_export_service] = FakeService
+
+    response = client.post(
+        f"/api/v1/jobs/{completed_job.job_id}/exports",
+        json={"format": "docx_reconstruction"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == artifact.model_dump(mode="json")
+    assert calls == [(completed_job, ExportFormat.DOCX_RECONSTRUCTION)]
+
+
+def test_job_export_download_rejects_cross_job_artifact(
+    client,
+    app: FastAPI,
+    completed_job: JobRead,
+) -> None:
+    from text_verification.api.dependencies import get_reconstruction_export_service
+    from text_verification.application.errors import VerificationError
+
+    class FakeService:
+        def download(self, job_id: UUID, artifact_id: UUID):
+            del job_id, artifact_id
+            raise VerificationError(
+                "export_artifact_not_found",
+                "exporting",
+                "The export artifact was not found.",
+                False,
+            )
+
+    app.dependency_overrides[get_reconstruction_export_service] = FakeService
+
+    response = client.get(
+        f"/api/v1/jobs/{completed_job.job_id}/exports/{uuid4()}"
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == {
+        "code": "export_artifact_not_found",
+        "stage": "exporting",
+        "message": "The export artifact was not found.",
+        "retryable": False,
+    }
 
 
 def test_sse_closes_missing_jobs_as_expired_without_path_leakage(client) -> None:

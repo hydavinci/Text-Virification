@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
@@ -13,6 +14,8 @@ from text_verification.application import (
     build_default_verification_pipeline,
 )
 from text_verification.config import Settings
+from text_verification.document_processing.errors import OcrUnavailableError
+from text_verification.document_processing.ocr_provider import OcrTextBox
 from text_verification.domain.documents import FileType
 from text_verification.domain.jobs import (
     TERMINAL_STATUSES,
@@ -46,6 +49,19 @@ COMPLETED_STATUS_SEQUENCE = [
     JobStatus.CHECKING_SENSITIVE,
     JobStatus.CHECKING_CHINESE,
     JobStatus.CHECKING_ENGLISH,
+    JobStatus.FINALIZING,
+    JobStatus.COMPLETED,
+]
+OCR_COMPLETED_STATUS_SEQUENCE = [
+    JobStatus.QUEUED,
+    JobStatus.UPLOAD_VALIDATED,
+    JobStatus.PARSING,
+    JobStatus.OCR,
+    JobStatus.CHECKING_FORMAT,
+    JobStatus.CHECKING_SENSITIVE,
+    JobStatus.CHECKING_CHINESE,
+    JobStatus.CHECKING_ENGLISH,
+    JobStatus.FINALIZING,
     JobStatus.COMPLETED,
 ]
 
@@ -284,14 +300,16 @@ class InMemoryJobRepository:
         error_message: str | None = None,
     ) -> JobRead:
         expected_next = {
-            JobStatus.QUEUED: JobStatus.UPLOAD_VALIDATED,
-            JobStatus.UPLOAD_VALIDATED: JobStatus.PARSING,
-            JobStatus.PARSING: JobStatus.CHECKING_FORMAT,
-            JobStatus.CHECKING_FORMAT: JobStatus.CHECKING_SENSITIVE,
-            JobStatus.CHECKING_SENSITIVE: JobStatus.CHECKING_CHINESE,
-            JobStatus.CHECKING_CHINESE: JobStatus.CHECKING_ENGLISH,
+            JobStatus.QUEUED: {JobStatus.UPLOAD_VALIDATED},
+            JobStatus.UPLOAD_VALIDATED: {JobStatus.PARSING},
+            JobStatus.PARSING: {JobStatus.OCR, JobStatus.CHECKING_FORMAT},
+            JobStatus.OCR: {JobStatus.CHECKING_FORMAT},
+            JobStatus.CHECKING_FORMAT: {JobStatus.CHECKING_SENSITIVE},
+            JobStatus.CHECKING_SENSITIVE: {JobStatus.CHECKING_CHINESE},
+            JobStatus.CHECKING_CHINESE: {JobStatus.CHECKING_ENGLISH},
+            JobStatus.CHECKING_ENGLISH: {JobStatus.FINALIZING},
         }
-        if expected_next.get(expected_status) is not status:
+        if status not in expected_next.get(expected_status, set()):
             raise ValueError("Invalid claimed job transition")
         self._assert_claim(job_id, owner_token, now)
         self._assert_status(job_id, expected_status)
@@ -319,6 +337,8 @@ class InMemoryJobRepository:
         error_code: str,
         error_message: str,
         now: datetime,
+        error_stage: str | None = None,
+        error_retryable: bool | None = None,
     ) -> bool:
         self._assert_claim(job_id, owner_token, now)
         self._assert_status(job_id, expected_status)
@@ -332,7 +352,29 @@ class InMemoryJobRepository:
             error_code=error_code,
             error_message=error_message,
         )
+        self._working_jobs[job_id] = self._working_jobs[job_id].model_copy(
+            update={
+                "error_stage": error_stage,
+                "error_retryable": error_retryable,
+            }
+        )
         return True
+
+    def renew_claimed_lease(
+        self,
+        job_id: UUID,
+        *,
+        owner_token: UUID,
+        expected_status: JobStatus,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> JobRead:
+        self._assert_claim(job_id, owner_token, now)
+        self._assert_status(job_id, expected_status)
+        self._working_leases[job_id] = (owner_token, lease_expires_at)
+        self._working_rescue_due_at[job_id] = lease_expires_at
+        self._working_rescue_last_published_at[job_id] = None
+        return self._working_jobs[job_id]
 
     def complete_claimed_job(
         self,
@@ -344,8 +386,8 @@ class InMemoryJobRepository:
         message: str,
         now: datetime,
     ) -> JobRead:
-        if expected_status is not JobStatus.CHECKING_ENGLISH:
-            raise ValueError("completed jobs must advance from checking_english")
+        if expected_status is not JobStatus.FINALIZING:
+            raise ValueError("completed jobs must advance from finalizing")
         self._assert_claim(job_id, owner_token, now)
         self._assert_status(job_id, expected_status)
         if not self._has_result(job_id):
@@ -475,8 +517,8 @@ class InMemoryVerificationRepository:
         expected_status: JobStatus,
         now: datetime,
     ) -> None:
-        if expected_status is not JobStatus.CHECKING_ENGLISH:
-            raise ValueError("claimed results require checking_english")
+        if expected_status is not JobStatus.FINALIZING:
+            raise ValueError("claimed results require finalizing")
         self._assert_claim(job_id, owner_token, now)
         if self._jobs is None:
             raise AssertionError("job repository is not bound")
@@ -876,6 +918,28 @@ def _seed_txt_job(
     return job_id
 
 
+def _seed_pdf_job(
+    repository: InMemoryJobRepository,
+    storage: JobStorage,
+    fixture_name: str,
+) -> UUID:
+    fixture = Path(__file__).resolve().parents[1] / "fixtures" / "pdf" / fixture_name
+    job_id = uuid4()
+    stored = storage.save_bytes(job_id, fixture_name, fixture.read_bytes())
+    created_at = datetime.now(UTC)
+    repository.create_job(
+        job_id=job_id,
+        source_name=fixture_name,
+        file_type=FileType.PDF.value,
+        size_bytes=stored.size_bytes,
+        storage_key=str(job_id),
+        created_at=created_at,
+        expires_at=created_at + timedelta(hours=24),
+    )
+    repository.commit()
+    return job_id
+
+
 def _configure_worker_dependencies(
     monkeypatch: pytest.MonkeyPatch,
     repository: InMemoryJobRepository,
@@ -927,6 +991,157 @@ def test_process_job_eager_task_completes_job(monkeypatch, worker_storage, celer
     ] == COMPLETED_STATUS_SEQUENCE
     assert len(session_factory.sessions) > 1
     assert all(session.closed for session in session_factory.sessions)
+
+
+def test_text_pdf_job_has_no_ocr_event(
+    monkeypatch: pytest.MonkeyPatch,
+    worker_storage: JobStorage,
+) -> None:
+    from text_verification.workers.tasks import _run_process_job_attempt
+
+    repository = InMemoryJobRepository()
+    job_id = _seed_pdf_job(repository, worker_storage, "text-page.pdf")
+    _configure_worker_dependencies(monkeypatch, repository, worker_storage)
+
+    _run_process_job_attempt(job_id, uuid4())
+
+    statuses = [
+        event.status for event in repository.list_events_after(job_id, 0)
+    ]
+    assert statuses == COMPLETED_STATUS_SEQUENCE
+    assert JobStatus.OCR not in statuses
+
+
+@pytest.mark.parametrize("fixture_name", ["scanned-page.pdf", "mixed-pages.pdf"])
+def test_scanned_and_mixed_pdf_jobs_persist_real_ocr_event(
+    monkeypatch: pytest.MonkeyPatch,
+    worker_storage: JobStorage,
+    fixture_name: str,
+) -> None:
+    from text_verification.application import factory as application_factory
+    from text_verification.workers.tasks import _run_process_job_attempt
+
+    class FakeOcr:
+        def recognize(self, image: object, language: str) -> list[OcrTextBox]:
+            del image, language
+            return [
+                OcrTextBox(
+                    text="test@example.com",
+                    confidence=0.99,
+                    bbox=(
+                        (40.0, 40.0),
+                        (300.0, 40.0),
+                        (300.0, 80.0),
+                        (40.0, 80.0),
+                    ),
+                )
+            ]
+
+    monkeypatch.setattr(application_factory, "OcrProvider", FakeOcr)
+    repository = InMemoryJobRepository()
+    job_id = _seed_pdf_job(repository, worker_storage, fixture_name)
+    pipeline = build_default_verification_pipeline(Settings(llm_api_key=""))
+    verification_repository = InMemoryVerificationRepository()
+    _configure_worker_dependencies(
+        monkeypatch,
+        repository,
+        worker_storage,
+        verification_repository=verification_repository,
+        pipeline=pipeline,
+    )
+
+    _run_process_job_attempt(job_id, uuid4())
+
+    assert [
+        event.status for event in repository.list_events_after(job_id, 0)
+    ] == OCR_COMPLETED_STATUS_SEQUENCE
+    result = verification_repository.get_result_for_job(job_id)
+    assert result is not None
+    assert "test@example.com" in result.text
+    assert result.issues
+
+
+def test_ocr_unavailable_persists_typed_nonretryable_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    worker_storage: JobStorage,
+) -> None:
+    from text_verification.application import factory as application_factory
+    from text_verification.workers.tasks import _run_process_job_attempt
+
+    class UnavailableOcr:
+        def recognize(self, image: object, language: str) -> list[OcrTextBox]:
+            del image, language
+            raise OcrUnavailableError()
+
+    monkeypatch.setattr(application_factory, "OcrProvider", UnavailableOcr)
+    repository = InMemoryJobRepository()
+    job_id = _seed_pdf_job(repository, worker_storage, "scanned-page.pdf")
+    _configure_worker_dependencies(
+        monkeypatch,
+        repository,
+        worker_storage,
+        pipeline=build_default_verification_pipeline(Settings(llm_api_key="")),
+    )
+
+    _run_process_job_attempt(job_id, uuid4())
+
+    job = repository.get_job(job_id)
+    assert job is not None
+    assert job.status is JobStatus.FAILED
+    assert job.error_code == "ocr_unavailable"
+    assert job.error_stage == "ocr"
+    assert job.error_retryable is False
+    assert [
+        event.status for event in repository.list_events_after(job_id, 0)
+    ] == [
+        JobStatus.QUEUED,
+        JobStatus.UPLOAD_VALIDATED,
+        JobStatus.PARSING,
+        JobStatus.OCR,
+        JobStatus.FAILED,
+    ]
+
+
+def test_repeated_ocr_page_progress_renews_lease_without_duplicate_event(
+    monkeypatch: pytest.MonkeyPatch,
+    worker_storage: JobStorage,
+) -> None:
+    from text_verification.domain.ports import VerificationProgressStage
+    from text_verification.workers import tasks as worker_tasks
+
+    repository = InMemoryJobRepository()
+    job_id = _seed_txt_job(repository, worker_storage)
+    owner = uuid4()
+    now = datetime(2026, 9, 2, 4, 0, tzinfo=UTC)
+    repository.acquire_lease(
+        job_id,
+        owner_token=owner,
+        now=now,
+        lease_expires_at=now + timedelta(minutes=20),
+    )
+    repository.commit()
+    _configure_worker_dependencies(monkeypatch, repository, worker_storage)
+    clock = MutableClock(now)
+    monkeypatch.setattr(worker_tasks, "NOW_FACTORY", clock)
+    observer = worker_tasks._LeaseProgressObserver(
+        session_factory=worker_tasks.SESSION_FACTORY_PROVIDER(),
+        job_id=job_id,
+        owner_token=owner,
+        current_status=JobStatus.QUEUED,
+        lease_seconds=1200,
+    )
+    observer.ensure_upload_validated()
+    observer(VerificationProgressStage.PARSING)
+    observer(VerificationProgressStage.OCR)
+    first_expiry = repository._leases[job_id][1]
+    clock.current += timedelta(minutes=10)
+
+    observer(VerificationProgressStage.OCR)
+
+    assert repository._leases[job_id][1] > first_expiry
+    assert [
+        event.status for event in repository.list_events_after(job_id, 0)
+    ].count(JobStatus.OCR) == 1
 
 
 def test_process_job_persists_pipeline_result_before_completing_job(
@@ -1046,7 +1261,7 @@ def test_process_job_redelivery_from_upload_validated_only_advances_remaining_st
 
     assert result.successful()
     assert [event.sequence for event in repository.list_events_after(job_id, 0)] == list(
-        range(1, 9)
+        range(1, 10)
     )
     assert [
         event.status for event in repository.list_events_after(job_id, 0)
@@ -1071,7 +1286,7 @@ def test_process_job_redelivery_from_parsing_only_completes_job(
 
     assert result.successful()
     assert [event.sequence for event in repository.list_events_after(job_id, 0)] == list(
-        range(1, 9)
+        range(1, 10)
     )
     assert [
         event.status for event in repository.list_events_after(job_id, 0)

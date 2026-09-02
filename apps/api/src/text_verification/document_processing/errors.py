@@ -21,5 +21,21 @@ class OcrOutputError(ValueError):
     pass
 
 
+class OcrProcessingError(RuntimeError):
+    def __init__(
+        self,
+        message: str = "OCR processing failed.",
+        *,
+        code: str = "ocr_failed",
+        stage: str = "ocr",
+        retryable: bool = True,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.stage = stage
+        self.message = message
+        self.retryable = retryable
+
+
 class OcrLayoutError(ValueError):
     pass

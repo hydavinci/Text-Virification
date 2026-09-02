@@ -263,6 +263,46 @@ def test_create_txt_job_persists_and_enqueues(client, repository, task_spy) -> N
 
 
 @pytest.mark.parametrize(
+    ("name", "payload", "declared_mime", "expected_type"),
+    [
+        ("sample.txt", b"text", "text/plain", "txt"),
+        ("sample.docx", make_docx_bytes(), (
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        ), "docx"),
+        (
+            "sample.doc",
+            bytes.fromhex("D0CF11E0A1B11AE1") + b"\x00" * 16,
+            "application/msword",
+            "doc",
+        ),
+        ("sample.pdf", b"%PDF-1.7\n%%EOF", "application/pdf", "pdf"),
+        ("sample.rtf", br"{\rtf1 sample}", "application/rtf", "rtf"),
+        ("sample.md", b"# sample", "text/markdown", "md"),
+        ("sample.csv", b"name,value\nsample,1\n", "text/csv", "csv"),
+    ],
+)
+def test_create_job_accepts_all_seven_strictly_validated_formats(
+    client,
+    repository,
+    task_spy,
+    name: str,
+    payload: bytes,
+    declared_mime: str,
+    expected_type: str,
+) -> None:
+    response = client.post(
+        "/api/v1/jobs",
+        files={"file": (name, payload, declared_mime)},
+    )
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["file_type"] == expected_type
+    assert task_spy.calls == [body["job_id"]]
+    assert repository.get_job(UUID(body["job_id"])) is not None
+
+
+@pytest.mark.parametrize(
     ("name", "payload", "declared_mime"),
     [
         ("sample.txt", b"text", "application/pdf"),
