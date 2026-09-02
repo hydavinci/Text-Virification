@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from bisect import bisect_left, bisect_right
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from itertools import groupby
 from math import ceil, isfinite
@@ -381,33 +382,36 @@ def _coalesce_ocr_boxes(
             for index, box in enumerate(boxes)
         )
 
-    ordered = tuple(sorted(boxes, key=_ocr_box_preference_order))
-    candidate_index = _OcrDuplicateCandidateIndex.build(ordered)
-    clusters: list[_OcrDuplicateCluster] = []
-    cluster_by_box_index: dict[int, int] = {}
-    inspection_count = 0
-    for box_index, box in enumerate(ordered):
-        candidate_clusters = tuple(
-            dict.fromkeys(
-                cluster_by_box_index[candidate_index_value]
-                for candidate_index_value in candidate_index.query(box_index)
-            )
+    ordered = tuple(
+        sorted(
+            _preconsolidate_exact_ocr_boxes(boxes),
+            key=_ocr_box_preference_order,
         )
+    )
+    if len(ordered) < 2:
+        return tuple(
+            box.model_copy(update={"box_index": index})
+            for index, box in enumerate(ordered)
+        )
+    ordered_features = tuple(
+        _ocr_duplicate_feature(box_index, box)
+        for box_index, box in enumerate(ordered)
+    )
+    candidate_index = _OcrDuplicateCandidateIndex()
+    budget = _DuplicateInspectionBudget(
+        maximum=limits.max_ocr_duplicate_candidate_inspections_per_page
+    )
+    clusters: list[_OcrDuplicateCluster] = []
+    for box_index, box in enumerate(ordered):
+        feature = ordered_features[box_index]
         selected_cluster: int | None = None
-        for cluster_index in candidate_clusters:
-            inspection_count += 1
-            if inspection_count > limits.max_ocr_duplicate_candidate_inspections_per_page:
-                raise PdfResourceLimitError(
-                    limit="max_ocr_duplicate_candidate_inspections_per_page",
-                    maximum=limits.max_ocr_duplicate_candidate_inspections_per_page,
-                    actual=inspection_count,
-                )
+        for cluster_index in candidate_index.query(feature, budget=budget):
             if _duplicate_cluster_accepts(
                 clusters[cluster_index],
                 box,
-                candidate_index.features[box_index],
+                feature,
                 ordered,
-                candidate_index.features,
+                ordered_features,
             ):
                 selected_cluster = cluster_index
                 break
@@ -416,12 +420,15 @@ def _coalesce_ocr_boxes(
             clusters.append(
                 _OcrDuplicateCluster.from_feature(
                     representative_index=box_index,
-                    feature=candidate_index.features[box_index],
+                    feature=feature,
                 )
             )
+            candidate_index.add(
+                selected_cluster,
+                _ocr_duplicate_feature(selected_cluster, box),
+            )
         else:
-            clusters[selected_cluster].add(candidate_index.features[box_index])
-        cluster_by_box_index[box_index] = selected_cluster
+            clusters[selected_cluster].add(feature)
 
     winners = [ordered[cluster.representative_index] for cluster in clusters]
     return tuple(
@@ -438,6 +445,21 @@ class _OcrDuplicateFeature:
     center_y: float
     width: float
     height: float
+
+
+@dataclass
+class _DuplicateInspectionBudget:
+    maximum: int
+    count: int = 0
+
+    def visit(self) -> None:
+        self.count += 1
+        if self.count > self.maximum:
+            raise PdfResourceLimitError(
+                limit="max_ocr_duplicate_candidate_inspections_per_page",
+                maximum=self.maximum,
+                actual=self.count,
+            )
 
 
 @dataclass
@@ -482,105 +504,85 @@ class _OcrDuplicateCluster:
         self.max_height = max(self.max_height, feature.height)
 
 
-@dataclass(frozen=True)
+@dataclass
 class _OcrDuplicateCandidateIndex:
-    features: tuple[_OcrDuplicateFeature, ...]
-    all_by_x: tuple[tuple[float, int], ...]
-    all_x_values: tuple[float, ...]
-    all_by_y: tuple[tuple[float, int], ...]
-    all_y_values: tuple[float, ...]
-    by_text_x: dict[str, tuple[tuple[float, int], ...]]
-    by_text_x_values: dict[str, tuple[float, ...]]
-    by_text_y: dict[str, tuple[tuple[float, int], ...]]
-    by_text_y_values: dict[str, tuple[float, ...]]
+    all_by_x: list[tuple[float, int]] = field(default_factory=list)
+    all_x_values: list[float] = field(default_factory=list)
+    all_by_y: list[tuple[float, int]] = field(default_factory=list)
+    all_y_values: list[float] = field(default_factory=list)
+    center_x_by_cluster: dict[int, float] = field(default_factory=dict)
+    center_y_by_cluster: dict[int, float] = field(default_factory=dict)
 
-    @classmethod
-    def build(
-        cls,
-        boxes: tuple[OcrLayoutBox, ...],
-    ) -> _OcrDuplicateCandidateIndex:
-        features = tuple(
-            _ocr_duplicate_feature(box_index, box)
-            for box_index, box in enumerate(boxes)
-        )
-        all_by_x = tuple(
-            sorted((feature.center_x, feature.box_index) for feature in features)
-        )
-        all_by_y = tuple(
-            sorted((feature.center_y, feature.box_index) for feature in features)
-        )
-        mutable_by_text: dict[str, list[tuple[float, int]]] = {}
-        mutable_by_text_y: dict[str, list[tuple[float, int]]] = {}
-        for feature in features:
-            mutable_by_text.setdefault(feature.identity, []).append(
-                (feature.center_x, feature.box_index)
-            )
-            mutable_by_text_y.setdefault(feature.identity, []).append(
-                (feature.center_y, feature.box_index)
-            )
-        by_text_x = {
-            identity: tuple(sorted(values))
-            for identity, values in mutable_by_text.items()
-        }
-        by_text_y = {
-            identity: tuple(sorted(values))
-            for identity, values in mutable_by_text_y.items()
-        }
-        return cls(
-            features=features,
-            all_by_x=all_by_x,
-            all_x_values=tuple(value[0] for value in all_by_x),
-            all_by_y=all_by_y,
-            all_y_values=tuple(value[0] for value in all_by_y),
-            by_text_x=by_text_x,
-            by_text_x_values={
-                identity: tuple(value[0] for value in values)
-                for identity, values in by_text_x.items()
-            },
-            by_text_y=by_text_y,
-            by_text_y_values={
-                identity: tuple(value[0] for value in values)
-                for identity, values in by_text_y.items()
-            },
-        )
+    def add(self, cluster_index: int, feature: _OcrDuplicateFeature) -> None:
+        x_position = bisect_right(self.all_x_values, feature.center_x)
+        self.all_x_values.insert(x_position, feature.center_x)
+        self.all_by_x.insert(x_position, (feature.center_x, cluster_index))
+        y_position = bisect_right(self.all_y_values, feature.center_y)
+        self.all_y_values.insert(y_position, feature.center_y)
+        self.all_by_y.insert(y_position, (feature.center_y, cluster_index))
+        self.center_x_by_cluster[cluster_index] = feature.center_x
+        self.center_y_by_cluster[cluster_index] = feature.center_y
 
-    def query(self, box_index: int) -> tuple[int, ...]:
-        feature = self.features[box_index]
+    def query(
+        self,
+        feature: _OcrDuplicateFeature,
+        *,
+        budget: _DuplicateInspectionBudget,
+    ) -> Iterator[int]:
         tolerance_x = _ocr_duplicate_position_tolerance(feature.width)
         tolerance_y = _ocr_duplicate_position_tolerance(feature.height)
-        candidates = set(
-            _duplicate_xy_range(
-                self.by_text_x.get(feature.identity, ()),
-                self.by_text_x_values.get(feature.identity, ()),
-                self.by_text_y.get(feature.identity, ()),
-                self.by_text_y_values.get(feature.identity, ()),
-                self.features,
-                feature.center_x,
-                tolerance_x,
-                feature.center_y,
-                tolerance_y,
-            )
+        yield from _duplicate_xy_range(
+            self.all_by_x,
+            self.all_x_values,
+            self.all_by_y,
+            self.all_y_values,
+            self.center_x_by_cluster,
+            self.center_y_by_cluster,
+            feature.center_x,
+            tolerance_x,
+            feature.center_y,
+            tolerance_y,
+            budget=budget,
         )
-        candidates.update(
-            candidate
-            for candidate in _duplicate_xy_range(
-                self.all_by_x,
-                self.all_x_values,
-                self.all_by_y,
-                self.all_y_values,
-                self.features,
-                feature.center_x,
-                tolerance_x,
-                feature.center_y,
-                tolerance_y,
-            )
-            if self.features[candidate].identity != feature.identity
+
+
+def _preconsolidate_exact_ocr_boxes(
+    boxes: tuple[OcrLayoutBox, ...],
+) -> tuple[OcrLayoutBox, ...]:
+    by_text_geometry: dict[
+        tuple[str, tuple[int, ...]],
+        OcrLayoutBox,
+    ] = {}
+    for box in boxes:
+        text_geometry_key = (
+            _normalized_ocr_identity(box.text),
+            _exact_ocr_geometry_key(box),
         )
-        return tuple(
-            candidate
-            for candidate in sorted(candidates)
-            if candidate < box_index
+        existing = by_text_geometry.get(text_geometry_key)
+        by_text_geometry[text_geometry_key] = (
+            box
+            if existing is None
+            else min((existing, box), key=_ocr_box_preference_order)
         )
+
+    by_geometry: dict[tuple[int, ...], OcrLayoutBox] = {}
+    for box in by_text_geometry.values():
+        geometry_key = _exact_ocr_geometry_key(box)
+        existing = by_geometry.get(geometry_key)
+        by_geometry[geometry_key] = (
+            box
+            if existing is None
+            else min((existing, box), key=_ocr_box_preference_order)
+        )
+    return tuple(by_geometry.values())
+
+
+def _exact_ocr_geometry_key(box: OcrLayoutBox) -> tuple[int, ...]:
+    return tuple(
+        round(coordinate * 1_000_000)
+        for point in box.quad
+        for coordinate in point
+    )
 
 
 def _ocr_duplicate_feature(
@@ -599,33 +601,35 @@ def _ocr_duplicate_feature(
 
 
 def _duplicate_xy_range(
-    x_entries: tuple[tuple[float, int], ...],
-    x_values: tuple[float, ...],
-    y_entries: tuple[tuple[float, int], ...],
-    y_values: tuple[float, ...],
-    features: tuple[_OcrDuplicateFeature, ...],
+    x_entries: list[tuple[float, int]],
+    x_values: list[float],
+    y_entries: list[tuple[float, int]],
+    y_values: list[float],
+    center_x_by_cluster: dict[int, float],
+    center_y_by_cluster: dict[int, float],
     center_x: float,
     tolerance_x: float,
     center_y: float,
     tolerance_y: float,
-) -> tuple[int, ...]:
+    *,
+    budget: _DuplicateInspectionBudget,
+) -> Iterator[int]:
     x_start = bisect_left(x_values, center_x - tolerance_x)
     x_end = bisect_right(x_values, center_x + tolerance_x)
     y_start = bisect_left(y_values, center_y - tolerance_y)
     y_end = bisect_right(y_values, center_y + tolerance_y)
-    x_slice = x_entries[x_start:x_end]
-    y_slice = y_entries[y_start:y_end]
-    if len(x_slice) <= len(y_slice):
-        return tuple(
-            entry[1]
-            for entry in x_slice
-            if abs(features[entry[1]].center_y - center_y) <= tolerance_y
-        )
-    return tuple(
-        entry[1]
-        for entry in y_slice
-        if abs(features[entry[1]].center_x - center_x) <= tolerance_x
-    )
+    if x_end - x_start <= y_end - y_start:
+        for entry_index in range(x_start, x_end):
+            budget.visit()
+            entry = x_entries[entry_index]
+            if abs(center_y_by_cluster[entry[1]] - center_y) <= tolerance_y:
+                yield entry[1]
+        return
+    for entry_index in range(y_start, y_end):
+        budget.visit()
+        entry = y_entries[entry_index]
+        if abs(center_x_by_cluster[entry[1]] - center_x) <= tolerance_x:
+            yield entry[1]
 
 
 def _duplicate_features_may_match(

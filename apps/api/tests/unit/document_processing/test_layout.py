@@ -196,7 +196,7 @@ def test_layout_uses_dominant_body_cluster_over_multiple_footnotes() -> None:
     assert result.elements[-1].text == "Body one\nBody two\nBody three"
 
 
-def test_layout_uses_box_coverage_to_break_equal_line_count_cluster_tie() -> None:
+def test_layout_ignores_box_fragmentation_in_equal_line_count_cluster_tie() -> None:
     layout = _layout_module()
     result = layout.build_ocr_layout(
         (
@@ -277,7 +277,7 @@ def test_layout_uses_smaller_height_for_single_line_cluster_tie() -> None:
     ]
 
 
-def test_layout_uses_stronger_line_coverage_in_multiline_cluster_tie() -> None:
+def test_layout_does_not_use_visual_width_in_multiline_cluster_tie() -> None:
     layout = _layout_module()
     result = layout.build_ocr_layout(
         (
@@ -289,11 +289,55 @@ def test_layout_uses_stronger_line_coverage_in_multiline_cluster_tie() -> None:
         language="en",
     )
 
-    assert [element.kind for element in result.elements] == [
-        "paragraph",
-        "heading",
-        "heading",
-    ]
+    assert all(element.kind == "paragraph" for element in result.elements)
+    assert result.elements[-1].text == "Body one\nBody two"
+
+
+def test_layout_keeps_narrow_body_with_wide_top_captions() -> None:
+    layout = _layout_module()
+    result = layout.build_ocr_layout(
+        (
+            _box(index=0, text="Top caption one", bbox=(0.0, 10.0, 220.0, 18.0)),
+            _box(index=1, text="Top caption two", bbox=(0.0, 21.0, 220.0, 29.0)),
+            _box(index=2, text="Body one", bbox=(60.0, 50.0, 130.0, 62.0)),
+            _box(index=3, text="Body two", bbox=(60.0, 65.0, 130.0, 77.0)),
+        ),
+        language="en",
+    )
+
+    assert all(element.kind == "paragraph" for element in result.elements)
+    assert result.elements[-1].text == "Body one\nBody two"
+
+
+def test_layout_keeps_narrow_body_with_wide_footer_lines() -> None:
+    layout = _layout_module()
+    result = layout.build_ocr_layout(
+        (
+            _box(index=0, text="Body one", bbox=(60.0, 10.0, 130.0, 22.0)),
+            _box(index=1, text="Body two", bbox=(60.0, 25.0, 130.0, 37.0)),
+            _box(index=2, text="Footer one", bbox=(0.0, 60.0, 220.0, 68.0)),
+            _box(index=3, text="Footer two", bbox=(0.0, 71.0, 220.0, 79.0)),
+        ),
+        language="en",
+    )
+
+    assert all(element.kind == "paragraph" for element in result.elements)
+    assert result.elements[0].text == "Body one\nBody two"
+
+
+def test_layout_suppresses_false_headings_for_equal_count_height_ambiguity() -> None:
+    layout = _layout_module()
+    result = layout.build_ocr_layout(
+        (
+            _box(index=0, text="Large line one", bbox=(0.0, 10.0, 220.0, 30.0)),
+            _box(index=1, text="Large line two", bbox=(0.0, 34.0, 220.0, 54.0)),
+            _box(index=2, text="Narrow body one", bbox=(60.0, 70.0, 130.0, 82.0)),
+            _box(index=3, text="Narrow body two", bbox=(60.0, 85.0, 130.0, 97.0)),
+        ),
+        language="en",
+    )
+
+    assert all(element.kind == "paragraph" for element in result.elements)
 
 
 def test_layout_detects_stable_two_by_two_table_without_hallucinating_prose_lists() -> None:

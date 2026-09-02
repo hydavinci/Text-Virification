@@ -755,7 +755,7 @@ def test_duplicate_candidate_budget_accepts_exact_boundary(
     boxes = tuple(
         _layout_box(
             f"text-{index}",
-            (10.0, 10.0, 30.0, 20.0),
+            (10.0 + index / 10, 10.0, 30.0 + index / 10, 20.0),
             index=index,
         )
         for index in range(3)
@@ -785,7 +785,7 @@ def test_duplicate_candidate_budget_rejects_one_over_boundary(
     boxes = tuple(
         _layout_box(
             f"text-{index}",
-            (10.0, 10.0, 30.0, 20.0),
+            (10.0 + index / 10, 10.0, 30.0 + index / 10, 20.0),
             index=index,
         )
         for index in range(3)
@@ -845,13 +845,97 @@ def test_duplicate_index_supports_500_same_coarse_bucket_nonduplicates(
     assert candidate_checks < 500
 
 
+def test_exact_duplicate_preconsolidation_avoids_quadratic_range_traversal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    boxes = tuple(
+        _layout_box(
+            "same",
+            (10.0, 10.0, 30.0, 20.0),
+            confidence=0.5 + index / 2_000,
+            index=index,
+        )
+        for index in range(500)
+    )
+    original = pdf_parser_module._duplicate_xy_range
+    traversed_entries = 0
+
+    def counted_range(*args: object, **kwargs: object) -> tuple[int, ...]:
+        nonlocal traversed_entries
+        result = original(*args, **kwargs)
+        traversed_entries += len(result)
+        return result
+
+    monkeypatch.setattr(pdf_parser_module, "_duplicate_xy_range", counted_range)
+
+    result = pdf_parser_module._coalesce_ocr_boxes(
+        boxes,
+        limits=PdfResourceLimits(
+            max_ocr_duplicate_candidate_inspections_per_page=500
+        ),
+    )
+
+    assert len(result) == 1
+    assert result[0].confidence == pytest.approx(0.7495)
+    assert traversed_entries <= 500
+
+
+def test_500_near_duplicates_stay_within_streaming_candidate_budget() -> None:
+    boxes = tuple(
+        _layout_box(
+            "same",
+            (10.0 + index / 1_000, 10.0, 30.0 + index / 1_000, 20.0),
+            confidence=0.9,
+            index=index,
+        )
+        for index in range(500)
+    )
+
+    result = pdf_parser_module._coalesce_ocr_boxes(
+        boxes,
+        limits=PdfResourceLimits(
+            max_ocr_duplicate_candidate_inspections_per_page=500
+        ),
+    )
+
+    assert len(result) == 1
+
+
+def test_near_duplicate_streaming_budget_rejects_one_over_boundary() -> None:
+    boxes = tuple(
+        _layout_box(
+            "same",
+            (10.0 + index / 1_000, 10.0, 30.0 + index / 1_000, 20.0),
+            confidence=0.9,
+            index=index,
+        )
+        for index in range(500)
+    )
+
+    with pytest.raises(PdfResourceLimitError) as raised:
+        pdf_parser_module._coalesce_ocr_boxes(
+            boxes,
+            limits=PdfResourceLimits(
+                max_ocr_duplicate_candidate_inspections_per_page=498
+            ),
+        )
+
+    assert raised.value.limit == "max_ocr_duplicate_candidate_inspections_per_page"
+    assert raised.value.actual == 499
+
+
 def test_duplicate_index_fails_closed_for_5000_adversarial_boxes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     boxes = tuple(
         _layout_box(
             f"conflict-{index}",
-            (10.0, 10.0, 30.0, 20.0),
+            (
+                10.0 + index / 10_000,
+                10.0,
+                30.0 + index / 10_000,
+                20.0,
+            ),
             index=index,
         )
         for index in range(5_000)

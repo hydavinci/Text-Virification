@@ -30,7 +30,6 @@ _LINE_OVERLAP_RATIO = 0.45
 _BASELINE_RATIO = 0.45
 _HEADING_HEIGHT_RATIO = 1.35
 _BODY_CLUSTER_GAP_RATIO = 1.15
-_BODY_COVERAGE_DOMINANCE_RATIO = 1.5
 _PARAGRAPH_HEIGHT_RATIO = 1.25
 _MIN_TABLE_GAP_HEIGHT_RATIO = 1.5
 _MAX_TABLE_ROW_GAP_HEIGHT_RATIO = 4.0
@@ -798,29 +797,12 @@ def _body_line_height(lines: tuple[OcrLayoutLine, ...]) -> float:
     elif largest_population == 1:
         body_cluster = min(contenders, key=_cluster_height)
     else:
-        by_coverage = sorted(
-            contenders,
-            key=_cluster_line_coverage,
-            reverse=True,
-        )
-        strongest_coverage = _cluster_line_coverage(by_coverage[0])
-        next_coverage = _cluster_line_coverage(by_coverage[1])
-        if strongest_coverage >= next_coverage * _BODY_COVERAGE_DOMINANCE_RATIO:
-            body_cluster = by_coverage[0]
-        else:
-            body_cluster = max(contenders, key=_cluster_height)
+        body_cluster = max(contenders, key=_cluster_height)
     return _cluster_height(body_cluster)
 
 
 def _cluster_height(cluster: list[OcrLayoutLine]) -> float:
     return median(line.bbox[3] - line.bbox[1] for line in cluster)
-
-
-def _cluster_line_coverage(cluster: list[OcrLayoutLine]) -> float:
-    return sum(
-        line.bbox[2] - line.bbox[0]
-        for line in cluster
-    )
 
 
 def _table_element(cell: OcrTableCell, *, language: str) -> OcrLayoutElement:
