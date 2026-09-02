@@ -1,4 +1,4 @@
-import { computed, readonly, ref, shallowRef, toRaw } from 'vue'
+import { computed, ref, shallowRef, toRaw } from 'vue'
 
 import type {
   DocumentRevision,
@@ -124,7 +124,6 @@ function hasCanonicalBlocks(result: VerificationResult): boolean {
   for (const block of result.blocks) {
     if (
       typeof block.block_id !== 'string' ||
-      block.block_id.length === 0 ||
       blocksById.has(block.block_id) ||
       (block.parent_id !== null && typeof block.parent_id !== 'string')
     ) {
@@ -321,8 +320,8 @@ export function useVerificationWorkspace() {
   const requiresReverification = ref(false)
   const batchHistory: BatchStateSnapshot[] = []
 
-  const visibleIssues = computed(() =>
-    requiresReverification.value ? [] : safeIssues.value
+  const visibleIssues = computed<readonly VerificationIssue[]>(() =>
+    requiresReverification.value ? Object.freeze([]) : safeIssues.value
   )
 
   function issueIds(): Set<string> {
@@ -390,9 +389,11 @@ export function useVerificationWorkspace() {
       }
     }
 
-    return acceptedIssues
-      .filter((issue) => conflictingIds.has(issue.issue_id))
-      .map((issue) => issue.issue_id)
+    return Object.freeze(
+      acceptedIssues
+        .filter((issue) => conflictingIds.has(issue.issue_id))
+        .map((issue) => issue.issue_id)
+    )
   })
 
   const hasReplacementConflicts = computed(
@@ -420,7 +421,7 @@ export function useVerificationWorkspace() {
       const state = issueStates.value[issue.issue_id] ?? 'pending'
       counts[state] += 1
     }
-    return counts
+    return Object.freeze(counts)
   })
 
   function createReviewRevision(): void {
@@ -633,12 +634,24 @@ export function useVerificationWorkspace() {
     return revision
   }
 
+  const publicResult = computed(() => result.value)
+  const publicIssueStates = computed(() =>
+    Object.freeze({ ...issueStates.value })
+  )
+  const publicSelectedSuggestions = computed(() =>
+    Object.freeze({ ...selectedSuggestions.value })
+  )
+  const publicCurrentRevision = computed(() => currentRevision.value)
+  const publicRequiresReverification = computed(
+    () => requiresReverification.value
+  )
+
   return {
-    result: readonly(result),
-    issueStates: readonly(issueStates),
-    selectedSuggestions: readonly(selectedSuggestions),
-    currentRevision: readonly(currentRevision),
-    requiresReverification: readonly(requiresReverification),
+    result: publicResult,
+    issueStates: publicIssueStates,
+    selectedSuggestions: publicSelectedSuggestions,
+    currentRevision: publicCurrentRevision,
+    requiresReverification: publicRequiresReverification,
     modifiedText,
     visibleIssues,
     summary,

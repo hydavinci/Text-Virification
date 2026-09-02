@@ -47,8 +47,8 @@
 ### Fourth review wave
 
 - Canonical block validation now runs before issue validation and mirrors the
-  backend document invariants with Python code-point semantics: unique
-  non-empty string IDs, valid integer ranges, code-point text lengths,
+  backend document invariants with Python code-point semantics: unique string
+  IDs, valid integer ranges, code-point text lengths,
   zero-anchored local ranges, document-slice equality, valid containing
   parents, no cycles, and overlap only through ancestry.
 - Malformed or duplicate block graphs fail closed with a frozen empty issue
@@ -78,5 +78,29 @@
 - Independent-review fix subject: `fix: align workspace state with canonical results`
 - Second scoped-review fix subject: `fix: preserve overlapping verification issues`
 - Fourth review-wave subject: `fix: harden canonical workspace state`
+- Final allowed fix-wave subject: `fix: seal workspace state boundaries`
 - Scope: Task 1 tracked files and required SDD ledger/report only.
 - Attribution: required Copilot co-author and session trailers are included in this commit.
+
+### Final allowed fix wave
+
+- Public result, revision, decision, suggestion, and re-verification state now
+  uses readonly computed accessors rather than `readonly(ref)` wrappers, so
+  Vue `toRaw` cannot recover any internal writable ref.
+- Result/revision values remain deeply frozen. Decisions and selected
+  suggestions are frozen snapshots. Summary, replacement-conflict IDs, and
+  visible-issue arrays are frozen computed containers, and visible issue
+  objects remain deeply frozen. Attempted replacement or mutation cannot alter
+  workspace state or retarget computed modified text.
+- Empty string `block_id` values now match the backend string contract. One
+  empty ID validates and applies its issue; duplicate empty IDs fail closed in
+  either input order.
+- RED:
+  `cd apps/web && npm test -- --run tests/useVerificationWorkspace.spec.ts`
+  failed with 3 failures and 48 passes (51 total).
+- Focused GREEN: the same command passed 51 tests in 1 file.
+- Full frontend suite: `cd apps/web && npm test -- --run` passed 82 tests
+  across 4 files, with only the existing Node experimental `localStorage`
+  warning.
+- Production build: `cd apps/web && npm run build` passed `vue-tsc -b` and
+  Vite 6.4.3 with 22 modules transformed.

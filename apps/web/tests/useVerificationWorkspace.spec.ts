@@ -1,5 +1,5 @@
-import { reactive } from 'vue'
-import { describe, expect, it } from 'vitest'
+import { reactive, toRaw } from 'vue'
+import { describe, expect, it, vi } from 'vitest'
 
 import { useVerificationWorkspace } from '../src/composables/useVerificationWorkspace'
 import type {
@@ -125,6 +125,18 @@ function buildResult(
     },
     scenario: 'general',
     ...overrides
+  }
+}
+
+function attemptAccessorReplacement<T extends object>(
+  accessor: T,
+  value: object | string | boolean | null
+): void {
+  const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  try {
+    Reflect.set(toRaw(accessor), 'value', value)
+  } finally {
+    warning.mockRestore()
   }
 }
 
@@ -432,6 +444,59 @@ describe('useVerificationWorkspace', () => {
     expect(workspace.visibleIssues.value).toEqual([])
   })
 
+  it('accepts one empty block id using the backend canonical contract', () => {
+    const issue = buildIssue({ block_id: '' })
+    const workspace = useVerificationWorkspace()
+
+    workspace.loadResult(buildResult([issue], {
+      blocks: [buildBlock({ block_id: '' })]
+    }))
+    workspace.acceptIssue(issue.issue_id)
+
+    expect(workspace.visibleIssues.value).toEqual([issue])
+    expect(workspace.modifiedText.value).toBe('甲B丙丁')
+  })
+
+  it.each([
+    ['forward', false],
+    ['reversed', true]
+  ])('fails closed for duplicate empty block ids in %s input order', (
+    _label,
+    reversed
+  ) => {
+    const first = buildBlock({
+      block_id: '',
+      text: '甲乙',
+      global_start: 0,
+      global_end: 2,
+      block_end: 2
+    })
+    const second = buildBlock({
+      block_id: '',
+      text: '丙丁',
+      global_start: 2,
+      global_end: 4,
+      block_end: 2,
+      paragraph_index: 1,
+      source_locator: { paragraph_index: 1 }
+    })
+    const issue = buildIssue({
+      block_id: '',
+      start: 2,
+      end: 3,
+      block_start: 0,
+      block_end: 1,
+      original: '丙'
+    })
+    const workspace = useVerificationWorkspace()
+
+    workspace.loadResult(buildResult([issue], {
+      blocks: reversed ? [second, first] : [first, second]
+    }))
+
+    expect(workspace.visibleIssues.value).toEqual([])
+  })
+
   it.each([
     ['non-string block ids', 'block_id'],
     ['non-string parent ids', 'parent_id']
@@ -446,11 +511,6 @@ describe('useVerificationWorkspace', () => {
   })
 
   it.each([
-    {
-      label: 'an empty block id',
-      blocks: [buildBlock({ block_id: '' })],
-      issue: buildIssue({ block_id: '' })
-    },
     {
       label: 'a global range whose length differs from block text',
       blocks: [buildBlock({ text: '甲乙', global_end: 4, block_end: 2 })],
@@ -991,6 +1051,149 @@ describe('useVerificationWorkspace', () => {
     ).toThrow(TypeError)
     expect(loaded.text).toBe('甲乙丙丁')
     expect(visible).toEqual([issue])
+  })
+
+  it('does not expose internal refs through Vue toRaw or allow public accessors to be retargeted', () => {
+    const issue = buildIssue()
+
+    const resultWorkspace = useVerificationWorkspace()
+    resultWorkspace.loadResult(buildResult([issue]))
+    const loadedResult = resultWorkspace.result.value
+    attemptAccessorReplacement(resultWorkspace.result, buildResult([]))
+    expect(resultWorkspace.result.value).toBe(loadedResult)
+
+    const revisionWorkspace = useVerificationWorkspace()
+    revisionWorkspace.loadResult(buildResult([issue]))
+    const loadedRevision = revisionWorkspace.currentRevision.value
+    attemptAccessorReplacement(revisionWorkspace.currentRevision, null)
+    expect(revisionWorkspace.currentRevision.value).toBe(loadedRevision)
+
+    const decisionWorkspace = useVerificationWorkspace()
+    decisionWorkspace.loadResult(buildResult([issue]))
+    decisionWorkspace.acceptIssue(issue.issue_id)
+    attemptAccessorReplacement(decisionWorkspace.issueStates, {
+      [issue.issue_id]: 'rejected'
+    })
+    expect(decisionWorkspace.issueStates.value).toEqual({
+      [issue.issue_id]: 'accepted'
+    })
+
+    const suggestionWorkspace = useVerificationWorkspace()
+    suggestionWorkspace.loadResult(buildResult([issue]))
+    suggestionWorkspace.selectSuggestion(issue.issue_id, '用户选择')
+    attemptAccessorReplacement(suggestionWorkspace.selectedSuggestions, {
+      [issue.issue_id]: '篡改替换'
+    })
+    expect(suggestionWorkspace.selectedSuggestions.value).toEqual({
+      [issue.issue_id]: '用户选择'
+    })
+
+    const reverificationWorkspace = useVerificationWorkspace()
+    reverificationWorkspace.loadResult(buildResult([issue]))
+    attemptAccessorReplacement(
+      reverificationWorkspace.requiresReverification,
+      true
+    )
+    expect(reverificationWorkspace.requiresReverification.value).toBe(false)
+
+    const textWorkspace = useVerificationWorkspace()
+    textWorkspace.loadResult(buildResult([issue]))
+    attemptAccessorReplacement(textWorkspace.modifiedText, '篡改文本')
+    textWorkspace.acceptIssue(issue.issue_id)
+    expect(textWorkspace.modifiedText.value).toBe('甲B丙丁')
+  })
+
+  it('returns frozen public snapshots and computed containers', () => {
+    const earlier = buildIssue({
+      issue_id: '40000000-0000-0000-0000-000000000001',
+      start: 1,
+      end: 4,
+      block_start: 1,
+      block_end: 4,
+      original: 'bcd',
+      suggestion: 'X',
+      context: 'abcdef'
+    })
+    const later = buildIssue({
+      issue_id: '40000000-0000-0000-0000-000000000002',
+      start: 2,
+      end: 5,
+      block_start: 2,
+      block_end: 5,
+      original: 'cde',
+      suggestion: 'Y',
+      context: 'abcdef'
+    })
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(buildResult([later, earlier], { text: 'abcdef' }))
+    workspace.selectSuggestion(earlier.issue_id, 'SAFE')
+    workspace.acceptIssues([earlier.issue_id, later.issue_id])
+
+    const loaded = workspace.result.value
+    const revision = workspace.currentRevision.value
+    const decisions = workspace.issueStates.value
+    const suggestions = workspace.selectedSuggestions.value
+    const reviewSummary = workspace.summary.value
+    const conflictIds = workspace.replacementConflictIssueIds.value
+    const visible = workspace.visibleIssues.value
+
+    attemptAccessorReplacement(workspace.summary, {
+      total: 0,
+      pending: 0,
+      accepted: 0,
+      rejected: 0
+    })
+    attemptAccessorReplacement(workspace.replacementConflictIssueIds, [])
+    attemptAccessorReplacement(workspace.visibleIssues, [])
+
+    expect(workspace.summary.value).toBe(reviewSummary)
+    expect(workspace.replacementConflictIssueIds.value).toBe(conflictIds)
+    expect(workspace.visibleIssues.value).toBe(visible)
+    expect(Object.isFrozen(loaded)).toBe(true)
+    expect(Object.isFrozen(revision)).toBe(true)
+    expect(Object.isFrozen(decisions)).toBe(true)
+    expect(Object.isFrozen(suggestions)).toBe(true)
+    expect(Object.isFrozen(reviewSummary)).toBe(true)
+    expect(Object.isFrozen(conflictIds)).toBe(true)
+    expect(Object.isFrozen(visible)).toBe(true)
+    expect(Object.isFrozen(visible[0])).toBe(true)
+
+    if (loaded === null || revision === null) {
+      throw new Error('Expected loaded immutable workspace values')
+    }
+    expect(Reflect.set(loaded, 'text', '篡改文本')).toBe(false)
+    expect(Reflect.set(revision, 'text', '篡改修订')).toBe(false)
+    expect(Reflect.set(decisions, earlier.issue_id, 'rejected')).toBe(false)
+    expect(Reflect.set(suggestions, earlier.issue_id, '篡改替换')).toBe(false)
+    expect(Reflect.set(reviewSummary, 'accepted', 0)).toBe(false)
+    expect(Reflect.set(visible[0], 'suggestion', '篡改替换')).toBe(false)
+    expect(() =>
+      Reflect.apply(Array.prototype.push, conflictIds, [earlier.issue_id])
+    ).toThrow(TypeError)
+    expect(() =>
+      Reflect.apply(Array.prototype.push, visible, [buildIssue()])
+    ).toThrow(TypeError)
+
+    expect(workspace.result.value?.text).toBe('abcdef')
+    expect(workspace.currentRevision.value).toBe(revision)
+    expect(workspace.issueStates.value).toEqual({
+      [earlier.issue_id]: 'accepted',
+      [later.issue_id]: 'accepted'
+    })
+    expect(workspace.selectedSuggestions.value).toEqual({
+      [earlier.issue_id]: 'SAFE'
+    })
+    expect(workspace.summary.value).toEqual({
+      total: 2,
+      pending: 0,
+      accepted: 2,
+      rejected: 0
+    })
+    expect(workspace.replacementConflictIssueIds.value).toEqual([
+      earlier.issue_id,
+      later.issue_id
+    ])
+    expect(workspace.visibleIssues.value).toEqual([earlier, later])
   })
 
   it('creates immutable manual revisions and invalidates source-bound decisions', () => {

@@ -118,7 +118,7 @@ Ruling: Superseding the earlier client-sequence ruling, Task 6's minimal backend
   and validates and retains only that clone. Caller mutations after loading
   cannot alter document text, blocks, issues, offsets, or replacements.
 - Canonical block validation now precedes issue validation. It enforces
-  non-empty unique string IDs, integer nonnegative global/local offsets,
+  unique string IDs, integer nonnegative global/local offsets,
   code-point range lengths, zero-anchored local ranges, document slice
   equality, valid containing parents, acyclic parent chains, and
   ancestor/descendant-only range overlap.
@@ -173,3 +173,50 @@ Ruling: Source text does not imply a source sentinel after authored work exists;
 revision identity and ancestry must be preserved even when text content matches
 the original source — this keeps persistence history append-only; cost if wrong
 is an additional draft revision for an authored revert.
+
+## Task 1 final allowed fix wave — 2026-09-02
+
+- Replaced every returned `readonly(ref)` wrapper with a readonly computed
+  accessor. `toRaw` now reaches only the computed accessor, never the internal
+  writable result, revision, decision, suggestion, or re-verification refs.
+- Result and revision accessors return the existing deeply frozen immutable
+  values. Decision and selected-suggestion accessors return frozen record
+  snapshots, and re-verification is exposed as a scalar computed value.
+- Froze every publicly cached computed container: review summaries and
+  replacement-conflict ID arrays. `visibleIssues` always returns a frozen array
+  whose issue objects remain deeply frozen. Computed source text remains scalar
+  and cannot be retargeted through `toRaw`.
+- Removed the frontend-only non-empty `block_id` rule. A single empty string ID
+  now follows the backend `TextBlock` contract and participates in canonical
+  issue matching; duplicate empty IDs still fail closed through the unchanged
+  uniqueness check in either input order.
+
+### Final allowed fix wave TDD and validation evidence
+
+- Focused pre-change baseline:
+  `cd apps/web && npm test -- --run tests/useVerificationWorkspace.spec.ts`
+  passed 47 tests in 1 file.
+- RED: the same focused command failed with 3 failures and 48 passes (51
+  total). Failures proved that one empty block ID was incorrectly rejected,
+  `toRaw` could replace the public result source ref, and decision snapshots
+  were mutable.
+- GREEN: the focused command passed 51 tests in 1 file.
+- Full frontend suite: `cd apps/web && npm test -- --run` passed 82 tests
+  across 4 files. Node emitted the existing experimental `localStorage`
+  warning; all tests passed.
+- Production build: `cd apps/web && npm run build` passed `vue-tsc -b` and
+  Vite 6.4.3 with 22 modules transformed.
+- Scope check target: Task 1 composable/tests plus this ledger and
+  `task-1-report.md`; no canonical wire type changes were required.
+
+Ruling: Public composable state is exposed only through computed accessors, with
+frozen snapshots for mutable record state and frozen values for every computed
+container — Vue `readonly(ref)` is insufficient because `toRaw` reveals its
+writable source ref; cost if wrong is allocating small record snapshots when
+decision or suggestion state changes.
+
+Ruling: `TextBlock.block_id` follows the backend string contract exactly,
+including `""`, while uniqueness remains mandatory — adding frontend-only
+non-empty validation rejects canonical backend payloads; cost if wrong is that
+an empty ID is less descriptive, but it remains stable and unambiguous when
+unique.
