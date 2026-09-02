@@ -5,12 +5,14 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
-from typing import Protocol
+from typing import ParamSpec, Protocol
 from uuid import UUID, uuid4
 
-from text_verification.domain.documents import DocumentModel, FileType
+from text_verification.domain.documents import DocumentModel, ExportFormat, FileType
 from text_verification.domain.issues import Issue
 from text_verification.domain.verification import Scenario, VerificationOptions
+
+_ExportParameters = ParamSpec("_ExportParameters")
 
 
 class VerificationProgressStage(StrEnum):
@@ -95,16 +97,13 @@ class Checker(Protocol):
     ) -> CheckResult: ...
 
 
-class Exporter(Protocol):
-    file_type: FileType
+class Exporter(Protocol[_ExportParameters]):
+    @property
+    def file_type(self) -> FileType | ExportFormat: ...
 
     def export(
         self,
         document: DocumentModel,
-        issues: list[Issue],
-        target: Path,
-        *,
-        source_path: Path | None = None,
-        track_changes: bool = False,
-        modified_text: str | None = None,
+        *args: _ExportParameters.args,
+        **kwargs: _ExportParameters.kwargs,
     ) -> Path: ...

@@ -17,6 +17,10 @@ class FileType(StrEnum):
     CSV = "csv"
 
 
+class ExportFormat(StrEnum):
+    DOCX_RECONSTRUCTION = "docx_reconstruction"
+
+
 class TextBlock(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
