@@ -144,6 +144,56 @@ def test_sync_and_async_results_have_equivalent_canonical_semantics(
     assert _normalize_result(sync_result) == _normalize_result(async_result)
 
 
+def test_sync_and_async_nondefault_options_have_equivalent_semantics(
+    tmp_path,
+) -> None:
+    source_text = "colour forbidden test@example.com"
+    options = VerificationOptions(
+        scenario="legal",
+        enable_security=False,
+        enable_sensitive=False,
+        enable_ad_extreme=True,
+        custom_glossary=({"original": "colour", "standard": "color"},),
+        banned_words=("forbidden",),
+    )
+    settings = Settings(storage_root=tmp_path / "jobs", llm_api_key="")
+    storage = JobStorage(settings.storage_root, settings.max_upload_bytes)
+    job_id = uuid4()
+    stored = storage.save_bytes(job_id, "sample.txt", source_text.encode())
+    created_at = datetime.now(UTC)
+    job = JobRead(
+        job_id=job_id,
+        source_name=stored.original_name,
+        file_type=stored.file_type,
+        size_bytes=stored.size_bytes,
+        status=JobStatus.QUEUED,
+        progress=0,
+        verification_options=options,
+        created_at=created_at,
+        expires_at=created_at + timedelta(hours=24),
+    )
+    pipeline = build_default_verification_pipeline(settings)
+
+    asynchronous = PipelineRunner(storage, pipeline).run(job, lambda stage: None)
+    synchronous = pipeline.run(
+        VerificationCommand(
+            document_id=uuid4(),
+            source_path=stored.path,
+            direct_text=None,
+            source_name=stored.original_name,
+            file_type=stored.file_type,
+            options=options,
+            execution_mode=VerificationExecutionMode.SYNCHRONOUS,
+        )
+    )
+
+    assert _normalize_result(synchronous) == _normalize_result(asynchronous)
+    assert asynchronous.scenario.value == "legal"
+    assert all(issue.type != "pii_email" for issue in asynchronous.issues)
+    assert any(issue.original == "colour" for issue in asynchronous.issues)
+    assert any(issue.original == "forbidden" for issue in asynchronous.issues)
+
+
 def test_postgresql_worker_entry_matches_synchronous_canonical_result(
     db_session_factory,
     monkeypatch: pytest.MonkeyPatch,

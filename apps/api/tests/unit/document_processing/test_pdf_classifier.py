@@ -50,6 +50,40 @@ def test_classifies_empty_and_vector_only_pages_as_text(tmp_path: Path) -> None:
     assert classify_pages(source) == [PdfPageKind.TEXT, PdfPageKind.TEXT]
 
 
+@pytest.mark.parametrize(
+    ("rectangles", "expected"),
+    [
+        ([pymupdf.Rect(0, 0, 70, 70)], PdfPageKind.SCANNED),
+        ([pymupdf.Rect(5, 5, 10, 10)], PdfPageKind.SCANNED),
+        (
+            [
+                pymupdf.Rect(5, 5, 15, 15),
+                pymupdf.Rect(75, 75, 90, 90),
+            ],
+            PdfPageKind.SCANNED,
+        ),
+    ],
+    ids=["49-percent", "tiny-raster", "multiple-rasters"],
+)
+def test_zero_text_page_with_any_bounded_raster_is_scanned(
+    tmp_path: Path,
+    rectangles: list[pymupdf.Rect],
+    expected: PdfPageKind,
+) -> None:
+    document = pymupdf.open()
+    page = document.new_page(width=100, height=100)
+    pixmap = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 4, 4), False)
+    pixmap.clear_with(0xFFFFFF)
+    image = pixmap.tobytes("png")
+    for rectangle in rectangles:
+        page.insert_image(rectangle, stream=image)
+    source = tmp_path / "raster-only.pdf"
+    document.save(source)
+    document.close()
+
+    assert classify_pages(source) == [expected]
+
+
 def test_small_decorative_image_does_not_override_native_text(
     pdf_fixture: callable[[str], Path],
 ) -> None:

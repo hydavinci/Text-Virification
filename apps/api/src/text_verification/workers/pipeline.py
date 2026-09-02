@@ -6,7 +6,6 @@ from text_verification.domain.ports import (
 )
 from text_verification.domain.verification import (
     VerificationExecutionMode,
-    VerificationOptions,
     VerificationResult,
 )
 from text_verification.infrastructure.storage import InvalidUpload, JobStorage
@@ -50,7 +49,7 @@ class PipelineRunner:
                 direct_text=None,
                 source_name=job.source_name,
                 file_type=job.file_type,
-                options=VerificationOptions(),
+                options=job.verification_options,
                 execution_mode=VerificationExecutionMode.ASYNCHRONOUS,
             ),
             progress_observer=progress_observer,

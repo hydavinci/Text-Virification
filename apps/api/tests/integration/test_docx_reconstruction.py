@@ -1113,6 +1113,98 @@ def test_applies_pdf_page_size_orientation_and_safe_title(tmp_path: Path) -> Non
     assert rebuilt.core_properties.title == "标题\ufffd"
 
 
+def test_real_two_page_parser_roundtrip_creates_page_sections_with_geometry(
+    tmp_path: Path,
+) -> None:
+    source = _multi_page_text_pdf(
+        tmp_path / "two-pages.pdf",
+        [
+            (300.0, 500.0, "Page one"),
+            (600.0, 300.0, "Page two"),
+        ],
+    )
+    persisted = DocumentModel.model_validate_json(
+        PdfParser().parse(source).model_dump_json()
+    )
+
+    rebuilt = Document(
+        DocxReconstructionExporter().export(
+            persisted,
+            tmp_path / "two-pages.docx",
+        )
+    )
+
+    assert len(rebuilt.sections) == 2
+    assert rebuilt.sections[0].page_width.pt == pytest.approx(300.0)
+    assert rebuilt.sections[0].page_height.pt == pytest.approx(500.0)
+    assert rebuilt.sections[0].orientation == WD_ORIENT.PORTRAIT
+    assert rebuilt.sections[1].page_width.pt == pytest.approx(600.0)
+    assert rebuilt.sections[1].page_height.pt == pytest.approx(300.0)
+    assert rebuilt.sections[1].orientation == WD_ORIENT.LANDSCAPE
+    assert [paragraph.text for paragraph in rebuilt.paragraphs if paragraph.text] == [
+        "Page one",
+        "Page two",
+    ]
+
+
+def test_real_sparse_three_page_roundtrip_preserves_empty_intermediate_page(
+    tmp_path: Path,
+) -> None:
+    source = _multi_page_text_pdf(
+        tmp_path / "sparse-pages.pdf",
+        [
+            (300.0, 500.0, "First"),
+            (400.0, 400.0, None),
+            (500.0, 300.0, "Third"),
+        ],
+    )
+    persisted = DocumentModel.model_validate_json(
+        PdfParser().parse(source).model_dump_json()
+    )
+
+    rebuilt = Document(
+        DocxReconstructionExporter().export(
+            persisted,
+            tmp_path / "sparse-pages.docx",
+        )
+    )
+
+    assert len(rebuilt.sections) == 3
+    assert [
+        (section.page_width.pt, section.page_height.pt)
+        for section in rebuilt.sections
+    ] == pytest.approx(
+        [
+            (300.0, 500.0),
+            (400.0, 400.0),
+            (500.0, 300.0),
+        ]
+    )
+    assert [paragraph.text for paragraph in rebuilt.paragraphs if paragraph.text] == [
+        "First",
+        "Third",
+    ]
+
+
+def test_reconstruction_rejects_block_page_outside_pdf_metadata(
+    tmp_path: Path,
+) -> None:
+    source = _multi_page_text_pdf(
+        tmp_path / "one-page.pdf",
+        [(300.0, 500.0, "Only")],
+    )
+    parsed = PdfParser().parse(source)
+    invalid = parsed.model_copy(
+        update={"blocks": [parsed.blocks[0].model_copy(update={"page": 2})]}
+    )
+
+    with pytest.raises(ExportError, match="page metadata"):
+        DocxReconstructionExporter().export(
+            invalid,
+            tmp_path / "invalid-page.docx",
+        )
+
+
 def test_normalizes_unrepresentable_xml_controls_in_block_text(tmp_path: Path) -> None:
     document = _document([_Block("paragraph", "正文\x01内容", page=1, y=10)])
 
@@ -1443,6 +1535,24 @@ def _pdf_with_image(target: Path) -> Path:
         pdf.save(target)
     finally:
         pdf.close()
+    return target
+
+
+def _multi_page_text_pdf(
+    target: Path,
+    pages: list[tuple[float, float, str | None]],
+) -> Path:
+    import pymupdf
+
+    document = pymupdf.open()
+    try:
+        for width, height, text in pages:
+            page = document.new_page(width=width, height=height)
+            if text is not None:
+                page.insert_text((24, 48), text, fontsize=12, fontname="helv")
+        document.save(target)
+    finally:
+        document.close()
     return target
 
 

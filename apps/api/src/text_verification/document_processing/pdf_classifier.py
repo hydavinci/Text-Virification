@@ -96,10 +96,11 @@ def classify_page(
     text_density = text_length / page_area
 
     has_usable_text = text_length >= MIN_USABLE_NATIVE_TEXT_CHARACTERS
-    if image_coverage >= SUBSTANTIAL_RASTER_COVERAGE and has_usable_text:
-        kind = PdfPageKind.MIXED
-    elif image_coverage >= SUBSTANTIAL_RASTER_COVERAGE:
+    has_bounded_raster = image_coverage > 0.0
+    if not has_usable_text and has_bounded_raster:
         kind = PdfPageKind.SCANNED
+    elif image_coverage >= SUBSTANTIAL_RASTER_COVERAGE and has_usable_text:
+        kind = PdfPageKind.MIXED
     else:
         kind = PdfPageKind.TEXT
 

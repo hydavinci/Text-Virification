@@ -118,6 +118,7 @@ class InMemoryJobRepository:
         file_type: str,
         size_bytes: int,
         storage_key: str,
+        verification_options: VerificationOptions | None = None,
         created_at: datetime,
         expires_at: datetime,
     ) -> JobRead:
@@ -129,6 +130,7 @@ class InMemoryJobRepository:
             size_bytes=size_bytes,
             status=JobStatus.QUEUED,
             progress=0,
+            verification_options=verification_options or VerificationOptions(),
             created_at=created_at,
             expires_at=expires_at,
         )
@@ -931,6 +933,7 @@ def _seed_txt_job(
     persist_source: bool = True,
     created_at: datetime | None = None,
     expires_at: datetime | None = None,
+    verification_options: VerificationOptions | None = None,
 ) -> UUID:
     job_id = uuid4()
     resolved_created_at = created_at or datetime.now(UTC)
@@ -947,6 +950,7 @@ def _seed_txt_job(
         file_type=FileType.TXT.value,
         size_bytes=size_bytes,
         storage_key=str(job_id),
+        verification_options=verification_options or VerificationOptions(),
         created_at=resolved_created_at,
         expires_at=resolved_expires_at,
     )
@@ -969,11 +973,31 @@ def _seed_pdf_job(
         file_type=FileType.PDF.value,
         size_bytes=stored.size_bytes,
         storage_key=str(job_id),
+        verification_options=VerificationOptions(),
         created_at=created_at,
         expires_at=created_at + timedelta(hours=24),
     )
     repository.commit()
     return job_id
+
+
+def _raster_only_pdf_bytes() -> bytes:
+    document = pymupdf.open()
+    try:
+        page = document.new_page(width=100, height=100)
+        pixmap = pymupdf.Pixmap(
+            pymupdf.csRGB,
+            pymupdf.IRect(0, 0, 4, 4),
+            False,
+        )
+        pixmap.clear_with(0xFFFFFF)
+        page.insert_image(
+            pymupdf.Rect(0, 0, 70, 70),
+            stream=pixmap.tobytes("png"),
+        )
+        return document.tobytes()
+    finally:
+        document.close()
 
 
 def _configure_worker_dependencies(
@@ -1097,6 +1121,63 @@ def test_scanned_and_mixed_pdf_jobs_persist_real_ocr_event(
     assert result is not None
     assert "test@example.com" in result.text
     assert result.issues
+
+
+def test_partial_page_raster_without_native_text_enters_ocr_job_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    worker_storage: JobStorage,
+) -> None:
+    from text_verification.application import factory as application_factory
+    from text_verification.workers.tasks import _run_process_job_attempt
+
+    class FakeOcr:
+        def recognize(self, image: object, language: str) -> list[OcrTextBox]:
+            del image, language
+            return [
+                OcrTextBox(
+                    text="test@example.com",
+                    confidence=0.99,
+                    bbox=((10.0, 10.0), (120.0, 10.0), (120.0, 30.0), (10.0, 30.0)),
+                )
+            ]
+
+    monkeypatch.setattr(application_factory, "OcrProvider", FakeOcr)
+    repository = InMemoryJobRepository()
+    job_id = uuid4()
+    stored = worker_storage.save_bytes(
+        job_id,
+        "partial-scan.pdf",
+        _raster_only_pdf_bytes(),
+    )
+    created_at = datetime.now(UTC)
+    repository.create_job(
+        job_id=job_id,
+        source_name="partial-scan.pdf",
+        file_type=FileType.PDF.value,
+        size_bytes=stored.size_bytes,
+        storage_key=str(job_id),
+        verification_options=VerificationOptions(),
+        created_at=created_at,
+        expires_at=created_at + timedelta(hours=1),
+    )
+    repository.commit()
+    verification_repository = InMemoryVerificationRepository()
+    _configure_worker_dependencies(
+        monkeypatch,
+        repository,
+        worker_storage,
+        verification_repository=verification_repository,
+        pipeline=build_default_verification_pipeline(Settings(llm_api_key="")),
+    )
+
+    _run_process_job_attempt(job_id, uuid4())
+
+    assert JobProgressStage.OCR in [
+        event.stage for event in repository.list_events_after(job_id, 0)
+    ]
+    result = verification_repository.get_result_for_job(job_id)
+    assert result is not None
+    assert "test@example.com" in result.text
 
 
 def test_advanced_progress_persists_only_legacy_job_status_values(
@@ -1343,6 +1424,90 @@ def test_process_job_persists_pipeline_result_before_completing_job(
         execution_mode=VerificationExecutionMode.ASYNCHRONOUS,
     )
     assert operations.index("result") < operations.index("job:completed")
+
+
+def test_pipeline_runner_uses_persisted_nondefault_verification_options(
+    monkeypatch: pytest.MonkeyPatch,
+    worker_storage: JobStorage,
+) -> None:
+    from text_verification.workers.tasks import _run_process_job_attempt
+
+    options = VerificationOptions(
+        scenario="legal",
+        enable_security=False,
+        enable_sensitive=False,
+        enable_ad_extreme=True,
+        custom_glossary=({"original": "colour", "standard": "color"},),
+        banned_words=("forbidden",),
+    )
+    repository = InMemoryJobRepository()
+    pipeline = RecordingPipeline(
+        build_default_verification_pipeline(Settings(llm_api_key=""))
+    )
+    job_id = _seed_txt_job(
+        repository,
+        worker_storage,
+        verification_options=options,
+    )
+    _configure_worker_dependencies(
+        monkeypatch,
+        repository,
+        worker_storage,
+        pipeline=pipeline,
+    )
+
+    _run_process_job_attempt(job_id, uuid4())
+
+    assert len(pipeline.commands) == 1
+    assert pipeline.commands[0].options == options
+
+
+def test_retry_reload_reuses_persisted_nondefault_verification_options(
+    monkeypatch: pytest.MonkeyPatch,
+    worker_storage: JobStorage,
+    celery_eager,
+) -> None:
+    from text_verification.workers.tasks import process_job
+
+    options = VerificationOptions(
+        scenario="legal",
+        enable_security=False,
+        enable_sensitive=False,
+        custom_glossary=({"original": "colour", "standard": "color"},),
+        banned_words=("forbidden",),
+    )
+    repository = InMemoryJobRepository()
+    verification_repository = InMemoryVerificationRepository()
+    job_id = _seed_txt_job(
+        repository,
+        worker_storage,
+        verification_options=options,
+    )
+    pipeline = FlakyVerificationPipeline(
+        delegate=build_default_verification_pipeline(Settings(llm_api_key="")),
+        error=VerificationError(
+            "source_read_failed",
+            "parsing",
+            "The stored source document could not be read.",
+            True,
+        ),
+        failures_remaining=1,
+    )
+    _configure_worker_dependencies(
+        monkeypatch,
+        repository,
+        worker_storage,
+        verification_repository=verification_repository,
+        pipeline=pipeline,
+    )
+
+    task_result = process_job.delay(str(job_id))
+
+    assert task_result.successful()
+    assert pipeline.attempts == 2
+    result = verification_repository.get_result_for_job(job_id)
+    assert result is not None
+    assert result.scenario.value == "legal"
 
 
 def test_pipeline_runner_persists_result_in_postgresql(

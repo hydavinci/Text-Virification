@@ -1010,6 +1010,79 @@ def test_scan_only_pdf_returns_an_explicit_ocr_capability_error(
     }
 
 
+def test_sync_and_async_reject_pdf_declared_as_text_plain_with_safe_shapes(
+    app: FastAPI,
+    client: TestClient,
+    tmp_path: Path,
+) -> None:
+    override_storage(app, tmp_path)
+    payload = PDF_FIXTURE_DIRECTORY.joinpath("text-page.pdf").read_bytes()
+
+    synchronous = client.post(
+        "/api/v1/analyze",
+        files={"file": ("source.pdf", payload, "text/plain")},
+    )
+    asynchronous = client.post(
+        "/api/v1/jobs",
+        files={"file": ("source.pdf", payload, "text/plain")},
+    )
+
+    assert synchronous.status_code == 400
+    assert isinstance(synchronous.json()["detail"], str)
+    assert asynchronous.status_code == 415
+    assert asynchronous.json()["detail"]["code"] == "unsupported_file_type"
+
+
+@pytest.mark.parametrize(
+    ("name", "payload", "mismatched_mime"),
+    [
+        ("source.docx", None, "application/pdf"),
+        (
+            "source.doc",
+            bytes.fromhex("D0CF11E0A1B11AE1") + b"\x00" * 16,
+            "application/pdf",
+        ),
+        ("source.pdf", None, "text/plain"),
+        ("source.txt", b"text", "application/pdf"),
+        ("source.rtf", br"{\rtf1 text}", "application/pdf"),
+        ("source.md", b"# text", "application/pdf"),
+        ("source.csv", b"name,value\ntext,1\n", "application/pdf"),
+    ],
+)
+def test_all_seven_formats_have_sync_async_mime_mismatch_parity(
+    app: FastAPI,
+    client: TestClient,
+    tmp_path: Path,
+    name: str,
+    payload: bytes | None,
+    mismatched_mime: str,
+) -> None:
+    override_storage(app, tmp_path)
+    if name.endswith(".docx"):
+        stream = BytesIO()
+        document = Document()
+        document.add_paragraph("text")
+        document.save(stream)
+        payload = stream.getvalue()
+    elif name.endswith(".pdf"):
+        payload = PDF_FIXTURE_DIRECTORY.joinpath("text-page.pdf").read_bytes()
+    assert payload is not None
+
+    synchronous = client.post(
+        "/api/v1/analyze",
+        files={"file": (name, payload, mismatched_mime)},
+    )
+    asynchronous = client.post(
+        "/api/v1/jobs",
+        files={"file": (name, payload, mismatched_mime)},
+    )
+
+    assert synchronous.status_code == 400
+    assert isinstance(synchronous.json()["detail"], str)
+    assert asynchronous.status_code == 415
+    assert asynchronous.json()["detail"]["code"] == "unsupported_file_type"
+
+
 def test_mixed_pdf_reports_partial_ocr_requirement_in_compatibility_response(
     app: FastAPI,
     client: TestClient,

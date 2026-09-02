@@ -120,6 +120,12 @@ Set-Location ..\..
 - `GET /api/v1/scenarios`
 - `GET /api/v1/formats`
 
+`POST /api/v1/jobs` 使用 multipart 上传，并接受与同步检查相同的
+`scenario`、`enable_security`、`enable_sensitive`、`enable_ad_extreme`、
+`custom_glossary`（JSON 数组）和 `banned_words`（JSON 数组）字段。服务端将经过
+边界和大小校验的不可变配置快照随任务持久化；任务响应、SSE、日志和错误不会回显
+自定义术语或禁用词列表。
+
 ## 文件限制、保留与安全边界
 
 - 支持文件类型：`.docx`、`.doc`、`.pdf`、`.txt`、`.rtf`、`.md`、`.csv`
@@ -139,6 +145,9 @@ docker compose -f infra/compose.yaml run --rm migrate alembic downgrade -1
 ```
 
 PostgreSQL 集成测试要求设置 `TEST_DATABASE_URL`；Live 测试要求设置 `LIVE_API_URL`；SQLite 不是替代方案。
+
+迁移 `0009_add_job_verification_options` 为旧写入保留 `{}` JSONB 服务端默认值；
+旧任务由新 Worker 映射为默认检查配置。
 
 ```powershell
 $env:LIVE_API_URL='http://localhost:8080'

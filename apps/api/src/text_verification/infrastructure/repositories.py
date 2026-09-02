@@ -25,6 +25,11 @@ from text_verification.domain.jobs import (
     JobUnleasedError,
     TerminalJobStateError,
 )
+from text_verification.domain.verification import (
+    VerificationOptions,
+    decode_verification_options,
+    encode_verification_options,
+)
 from text_verification.infrastructure.orm import JobEventRow, JobRow, VerificationRunRow
 
 INITIAL_EVENT_MESSAGE = "作业已创建"
@@ -55,6 +60,7 @@ class JobRepository:
         file_type: FileType | str,
         size_bytes: int,
         storage_key: str,
+        verification_options: VerificationOptions | None = None,
         created_at: datetime,
         expires_at: datetime,
     ) -> JobRead:
@@ -72,6 +78,9 @@ class JobRepository:
             error_message=None,
             error_stage=None,
             error_retryable=None,
+            verification_options=encode_verification_options(
+                verification_options or VerificationOptions()
+            ),
             created_at=created_at,
             updated_at=created_at,
             expires_at=expires_at,
@@ -557,6 +566,9 @@ class JobRepository:
                         sequence=self._next_sequence(row.job_id),
                         status=JobStatus.EXPIRED.value,
                         progress=row.progress,
+                        verification_options=decode_verification_options(
+                            row.verification_options
+                        ),
                         message=EXPIRED_EVENT_MESSAGE,
                         created_at=cutoff,
                     )

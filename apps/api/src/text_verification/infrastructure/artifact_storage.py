@@ -174,6 +174,11 @@ class ArtifactVerificationHandle:
     def unlink_created_if_current(self) -> bool:
         if not self.created or self._unlinked:
             return False
+        return self.unlink_if_current()
+
+    def unlink_if_current(self) -> bool:
+        if self._unlinked:
+            return False
         self.assert_current()
         os.unlink(self._leaf_name, dir_fd=self._parent_fd)
         self._unlinked = True

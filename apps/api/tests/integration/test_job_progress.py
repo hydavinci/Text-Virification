@@ -504,6 +504,47 @@ def test_job_export_download_rejects_cross_job_artifact(
     }
 
 
+def test_job_export_create_and_download_map_expired_result_to_410(
+    client,
+    app: FastAPI,
+    completed_job: JobRead,
+) -> None:
+    from text_verification.api.dependencies import get_reconstruction_export_service
+    from text_verification.application.errors import VerificationError
+
+    class ExpiredService:
+        def export(self, *args: object, **kwargs: object):
+            raise VerificationError(
+                "job_result_expired",
+                "exporting",
+                "Job result has expired.",
+                False,
+            )
+
+        def download(self, *args: object, **kwargs: object):
+            raise VerificationError(
+                "job_result_expired",
+                "exporting",
+                "Job result has expired.",
+                False,
+            )
+
+    app.dependency_overrides[get_reconstruction_export_service] = ExpiredService
+
+    created = client.post(
+        f"/api/v1/jobs/{completed_job.job_id}/exports",
+        json={"format": "docx_reconstruction"},
+    )
+    downloaded = client.get(
+        f"/api/v1/jobs/{completed_job.job_id}/exports/{uuid4()}"
+    )
+
+    assert created.status_code == 410
+    assert downloaded.status_code == 410
+    assert created.json()["detail"]["code"] == "job_result_expired"
+    assert downloaded.json()["detail"]["code"] == "job_result_expired"
+
+
 def test_sse_closes_missing_jobs_as_expired_without_path_leakage(client) -> None:
     response = client.get("/api/v1/jobs/00000000-0000-0000-0000-000000000000/events")
     client_path = r"C:\Users\Alice\missing-secret.txt"

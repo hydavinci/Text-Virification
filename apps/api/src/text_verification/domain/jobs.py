@@ -5,9 +5,10 @@ from datetime import datetime
 from enum import StrEnum
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, computed_field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 from text_verification.domain.documents import FileType
+from text_verification.domain.verification import VerificationOptions
 
 
 class JobStatus(StrEnum):
@@ -115,6 +116,11 @@ class JobRead(BaseModel):
     size_bytes: int
     status: JobStatus
     progress: int
+    verification_options: VerificationOptions = Field(
+        default_factory=VerificationOptions,
+        exclude=True,
+        repr=False,
+    )
     error_code: str | None = None
     error_message: str | None = None
     error_stage: str | None = None

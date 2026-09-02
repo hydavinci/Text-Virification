@@ -13,7 +13,17 @@ from typing import Annotated, BinaryIO, NoReturn
 from urllib.parse import quote
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, File, Header, HTTPException, Request, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Request,
+    UploadFile,
+    status,
+)
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session, sessionmaker
@@ -28,10 +38,15 @@ from text_verification.application.errors import VerificationError
 from text_verification.application.reconstruction_export import (
     ReconstructionExportService,
 )
+from text_verification.compatibility.service import (
+    AnalysisInputError,
+    build_verification_options,
+    parse_banned_words,
+    parse_glossary,
+)
 from text_verification.config import Settings, get_settings
 from text_verification.domain.artifacts import ExportArtifactReference
-from text_verification.domain.capabilities import default_capability_manifest
-from text_verification.domain.documents import ExportFormat, FileType
+from text_verification.domain.documents import ExportFormat
 from text_verification.domain.jobs import (
     RESULT_READY_STATUSES,
     TERMINAL_STATUSES,
@@ -41,8 +56,9 @@ from text_verification.domain.jobs import (
     JobStatus,
     TerminalJobStateError,
 )
-from text_verification.domain.verification import VerificationResult
+from text_verification.domain.verification import Scenario, VerificationResult
 from text_verification.infrastructure.database import get_session_factory
+from text_verification.infrastructure.document_storage import validate_declared_mime
 from text_verification.infrastructure.repositories import JobRepository
 from text_verification.infrastructure.storage import (
     InvalidUpload,
@@ -264,6 +280,12 @@ def create_job(
     repository: Annotated[JobRepository, Depends(get_job_repository)],
     storage: Annotated[JobStorage, Depends(get_job_storage)],
     settings: Annotated[Settings, Depends(get_settings)],
+    scenario: Annotated[Scenario, Form()] = Scenario.GENERAL,
+    enable_security: Annotated[bool, Form()] = True,
+    enable_sensitive: Annotated[bool, Form()] = True,
+    enable_ad_extreme: Annotated[bool, Form()] = False,
+    custom_glossary: Annotated[str, Form()] = "",
+    banned_words: Annotated[str, Form()] = "",
 ) -> JobRead:
     job_id = uuid4()
     source_name = _normalize_source_name(file.filename or "upload")
@@ -272,16 +294,36 @@ def create_job(
     now = datetime.now(UTC)
 
     try:
+        verification_options = build_verification_options(
+            scenario=scenario,
+            custom_glossary=parse_glossary(custom_glossary),
+            banned_words=parse_banned_words(banned_words),
+            enable_security=enable_security,
+            enable_sensitive=enable_sensitive,
+            enable_ad_extreme=enable_ad_extreme,
+        )
+    except (AnalysisInputError, ValueError):
+        _raise_failure(
+            job_id,
+            file_type_hint,
+            stored_size,
+            status.HTTP_400_BAD_REQUEST,
+            "invalid_verification_options",
+            "Verification options are invalid.",
+        )
+
+    try:
         stored = storage.save_stream(job_id, source_name, _binary_stream(file))
         stored_size = stored.size_bytes
         file_type_hint = stored.file_type.value
-        _validate_declared_mime(file.content_type, stored.file_type.value)
+        validate_declared_mime(file.content_type, stored.file_type)
         job = repository.create_job(
             job_id=job_id,
             source_name=stored.original_name,
             file_type=stored.file_type.value,
             size_bytes=stored.size_bytes,
             storage_key=str(job_id),
+            verification_options=verification_options,
             created_at=now,
             expires_at=now + timedelta(hours=settings.job_retention_hours),
         )
@@ -416,15 +458,6 @@ def _cleanup_storage(job_id: UUID, storage: JobStorage) -> None:
 
 def _binary_stream(file: UploadFile) -> BinaryIO:
     return file.file
-
-
-def _validate_declared_mime(content_type: str | None, file_type: str) -> None:
-    normalized = (content_type or "").split(";", 1)[0].strip().lower()
-    if not normalized or normalized == "application/octet-stream":
-        return
-    capability = default_capability_manifest().for_type(FileType(file_type))
-    if normalized not in capability.mime_types:
-        raise UnsupportedFileType("Declared MIME type does not match upload content.")
 
 
 def _parse_last_event_id(last_event_id: str | None) -> int:
@@ -562,6 +595,7 @@ def _export_http_error(error: VerificationError) -> HTTPException:
         "unsupported_export_format": status.HTTP_422_UNPROCESSABLE_CONTENT,
         "document_reconstruction_failed": status.HTTP_422_UNPROCESSABLE_CONTENT,
         "export_artifact_conflict": status.HTTP_409_CONFLICT,
+        "export_source_superseded": status.HTTP_409_CONFLICT,
         "export_artifact_repair_cleanup_failed": status.HTTP_409_CONFLICT,
         "export_artifact_repair_pending": status.HTTP_409_CONFLICT,
         "export_artifact_repair_unsafe": status.HTTP_409_CONFLICT,

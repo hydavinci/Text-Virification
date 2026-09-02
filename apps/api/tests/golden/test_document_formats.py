@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import io
 import shutil
-import subprocess
 from collections.abc import Callable
 from pathlib import Path
 from uuid import uuid4
@@ -13,6 +12,7 @@ from docx import Document
 
 from text_verification.application.factory import build_default_verification_pipeline
 from text_verification.application.verification_pipeline import VerificationCommand
+from text_verification.compatibility.exporters import export_original
 from text_verification.config import Settings
 from text_verification.domain.documents import FileType
 from text_verification.domain.verification import (
@@ -22,6 +22,7 @@ from text_verification.domain.verification import (
 from text_verification.infrastructure.storage import JobStorage
 
 SAMPLE_TEXT = "Contact test@example.com for review."
+MATRIX_TEXT = "cat test@example.com"
 
 
 def _txt(target: Path) -> bytes:
@@ -61,6 +62,51 @@ def _pdf(target: Path) -> bytes:
         return document.tobytes()
     finally:
         document.close()
+
+
+def _matrix_payload(file_type: FileType, target: Path) -> bytes:
+    if file_type is FileType.TXT:
+        return MATRIX_TEXT.encode()
+    if file_type is FileType.MARKDOWN:
+        return f"# Review\n\n{MATRIX_TEXT}".encode()
+    if file_type is FileType.CSV:
+        return f"kind,value\ncontact,{MATRIX_TEXT}\n".encode()
+    if file_type is FileType.RTF:
+        return ("{\\rtf1\\ansi " + MATRIX_TEXT + "}").encode("ascii")
+    if file_type is FileType.DOCX:
+        stream = io.BytesIO()
+        document = Document()
+        document.add_paragraph(MATRIX_TEXT)
+        document.save(stream)
+        return stream.getvalue()
+    if file_type is FileType.PDF:
+        document = pymupdf.open()
+        try:
+            page = document.new_page(width=500, height=200)
+            page.insert_text((40, 80), MATRIX_TEXT, fontsize=14, fontname="helv")
+            return document.tobytes()
+        finally:
+            document.close()
+    if file_type is FileType.DOC:
+        converter = (
+            shutil.which("textutil")
+            or shutil.which("soffice")
+            or shutil.which("libreoffice")
+        )
+        if converter is None:
+            pytest.skip(
+                "Legacy DOC golden behavior requires textutil or LibreOffice; "
+                "neither production converter is available."
+            )
+        from text_verification.compatibility.exporters import (
+            _convert_docx_bytes_to_doc,
+        )
+
+        return _convert_docx_bytes_to_doc(
+            _matrix_payload(FileType.DOCX, target),
+            target.parent,
+        )
+    raise AssertionError(file_type)
 
 
 FORMAT_BUILDERS: dict[FileType, Callable[[Path], bytes]] = {
@@ -120,21 +166,8 @@ def test_six_self_contained_golden_formats_produce_equivalent_issue_semantics(
 
 
 def test_legacy_doc_golden_is_explicitly_converter_limited(tmp_path: Path) -> None:
-    converter = shutil.which("textutil")
-    if converter is None:
-        pytest.skip(
-            "Legacy DOC golden parsing requires the optional textutil converter; "
-            "upload acceptance remains covered without it."
-        )
-    rtf_source = tmp_path / "legacy-source.rtf"
-    rtf_source.write_bytes(_rtf(rtf_source))
-    subprocess.run(
-        [converter, "-convert", "doc", str(rtf_source), "-output", str(tmp_path / "legacy.doc")],
-        check=True,
-        capture_output=True,
-        timeout=30,
-    )
     source = tmp_path / "legacy.doc"
+    source.write_bytes(_matrix_payload(FileType.DOC, source))
     pipeline = build_default_verification_pipeline(Settings(llm_api_key=""))
 
     result = pipeline.run(
@@ -149,5 +182,66 @@ def test_legacy_doc_golden_is_explicitly_converter_limited(tmp_path: Path) -> No
         )
     )
 
-    assert SAMPLE_TEXT in result.text
+    assert MATRIX_TEXT in result.text
     assert any(issue.type == "pii_email" for issue in result.issues)
+
+
+@pytest.mark.parametrize("file_type", list(FileType))
+def test_seven_format_parse_verify_export_reparse_semantics(
+    tmp_path: Path,
+    file_type: FileType,
+) -> None:
+    source = tmp_path / f"matrix.{file_type.value}"
+    source.write_bytes(_matrix_payload(file_type, source))
+    pipeline = build_default_verification_pipeline(Settings(llm_api_key=""))
+    options = VerificationOptions(
+        custom_glossary=({"original": "cat", "standard": "dog"},),
+    )
+
+    result = pipeline.run(
+        VerificationCommand(
+            document_id=uuid4(),
+            source_path=source,
+            direct_text=None,
+            source_name=source.name,
+            file_type=file_type,
+            options=options,
+            execution_mode=VerificationExecutionMode.ASYNCHRONOUS,
+        )
+    )
+    glossary_issue = next(issue for issue in result.issues if issue.original == "cat")
+    assert glossary_issue.suggestion == "dog"
+    assert any(issue.type == "pii_email" for issue in result.issues)
+    exported = export_original(
+        source,
+        file_type.value,
+        [
+            (
+                glossary_issue.original,
+                glossary_issue.suggestion or "",
+                glossary_issue.start,
+                glossary_issue.end,
+            )
+        ],
+        False,
+        original_text=result.text,
+    )
+    exported_path = tmp_path / f"exported.{exported.extension}"
+    exported_path.write_bytes(exported.content)
+    exported_type = FileType(exported.extension)
+
+    reparsed = pipeline.run(
+        VerificationCommand(
+            document_id=uuid4(),
+            source_path=exported_path,
+            direct_text=None,
+            source_name=exported_path.name,
+            file_type=exported_type,
+            options=VerificationOptions(),
+            execution_mode=VerificationExecutionMode.ASYNCHRONOUS,
+        )
+    )
+
+    assert "dog" in reparsed.text
+    assert "cat" not in reparsed.text
+    assert any(issue.type == "pii_email" for issue in reparsed.issues)

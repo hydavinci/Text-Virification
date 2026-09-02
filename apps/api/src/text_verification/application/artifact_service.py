@@ -29,6 +29,12 @@ class ArtifactReconciliationRequiredError(RuntimeError):
         super().__init__(message)
 
 
+class ArtifactFinalizationRejectedError(RuntimeError):
+    def __init__(self, export_artifact_id: UUID) -> None:
+        self.export_artifact_id = export_artifact_id
+        super().__init__("Artifact finalization authorization was rejected.")
+
+
 class ArtifactRepository(Protocol):
     def reserve_export_artifact(
         self,
@@ -53,7 +59,8 @@ class ArtifactRepository(Protocol):
         *,
         ready_at: datetime,
         consistency_check: Callable[[], None],
-    ) -> ArtifactSnapshot: ...
+        require_current_result: bool,
+    ) -> ArtifactSnapshot | None: ...
 
     def begin_export_artifact_repair(
         self,
@@ -164,10 +171,12 @@ class ArtifactPersistenceService:
         repository_factory: ArtifactRepositoryFactory,
         *,
         now_factory: Callable[[], datetime] | None = None,
+        require_current_result: bool = False,
     ) -> None:
         self._storage = storage
         self._repository_factory = repository_factory
         self._now_factory = now_factory or (lambda: datetime.now(UTC))
+        self._require_current_result = require_current_result
 
     def persist(
         self,
@@ -276,6 +285,7 @@ class ArtifactPersistenceService:
                     reservation,
                     ready_at=self._now_factory(),
                     consistency_check=handle.assert_current,
+                    require_current_result=self._require_current_result,
                 )
             except Exception:
                 repository.rollback()
@@ -291,6 +301,17 @@ class ArtifactPersistenceService:
                     error,
                 )
 
+        if snapshot is None:
+            try:
+                handle.unlink_if_current()
+            except Exception as error:
+                raise ArtifactReconciliationRequiredError(
+                    reservation.export_artifact_id,
+                    "Rejected artifact could not be safely removed.",
+                ) from error
+            raise ArtifactFinalizationRejectedError(
+                reservation.export_artifact_id
+            )
         try:
             handle.assert_current()
         except Exception as error:

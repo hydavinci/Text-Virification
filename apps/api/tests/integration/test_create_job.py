@@ -12,6 +12,7 @@ from fastapi import FastAPI
 
 from text_verification.domain.documents import FileType
 from text_verification.domain.jobs import JobEvent, JobRead, JobStatus
+from text_verification.domain.verification import VerificationOptions
 from text_verification.infrastructure.storage import JobStorage
 
 
@@ -40,6 +41,7 @@ class RecordingJobRepository:
         file_type: str,
         size_bytes: int,
         storage_key: str,
+        verification_options: VerificationOptions,
         created_at: datetime,
         expires_at: datetime,
     ) -> JobRead:
@@ -51,6 +53,7 @@ class RecordingJobRepository:
             size_bytes=size_bytes,
             status=JobStatus.QUEUED,
             progress=0,
+            verification_options=verification_options,
             created_at=created_at,
             expires_at=expires_at,
         )
@@ -260,6 +263,92 @@ def test_create_txt_job_persists_and_enqueues(client, repository, task_spy) -> N
     assert "storage_key" not in payload
     assert task_spy.calls == [payload["job_id"]]
     assert repository.get_job(UUID(payload["job_id"])) is not None
+
+
+def test_create_job_persists_nondefault_verification_options_without_exposing_lists(
+    client,
+    repository,
+    task_spy,
+) -> None:
+    response = client.post(
+        "/api/v1/jobs",
+        files={"file": ("sample.txt", b"colour forbidden", "text/plain")},
+        data={
+            "scenario": "legal",
+            "enable_security": "false",
+            "enable_sensitive": "false",
+            "enable_ad_extreme": "true",
+            "custom_glossary": (
+                '[{"original":"colour","standard":"color"}]'
+            ),
+            "banned_words": '["forbidden"]',
+        },
+    )
+
+    assert response.status_code == 202
+    body = response.json()
+    job = repository.get_job(UUID(body["job_id"]))
+    assert job is not None
+    assert job.verification_options == VerificationOptions(
+        scenario="legal",
+        enable_security=False,
+        enable_sensitive=False,
+        enable_ad_extreme=True,
+        custom_glossary=({"original": "colour", "standard": "color"},),
+        banned_words=("forbidden",),
+    )
+    assert "verification_options" not in body
+    assert "custom_glossary" not in response.text
+    assert task_spy.calls == [body["job_id"]]
+
+
+def test_create_job_rejects_oversized_options_before_upload_side_effects(
+    client,
+    repository,
+    storage,
+    task_spy,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    banned_words = [f"private-term-{index}" for index in range(501)]
+
+    response = client.post(
+        "/api/v1/jobs",
+        files={"file": ("sample.txt", b"text", "text/plain")},
+        data={"banned_words": __import__("json").dumps(banned_words)},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "invalid_verification_options"
+    assert repository._jobs == {}
+    assert list(storage._root.iterdir()) == []
+    assert task_spy.calls == []
+    assert "private-term" not in caplog.text
+
+
+def test_same_source_with_different_options_creates_distinct_job_snapshots(
+    client,
+    repository,
+    task_spy,
+) -> None:
+    first = client.post(
+        "/api/v1/jobs",
+        files={"file": ("sample.txt", b"same source", "text/plain")},
+    )
+    second = client.post(
+        "/api/v1/jobs",
+        files={"file": ("sample.txt", b"same source", "text/plain")},
+        data={"scenario": "legal", "enable_security": "false"},
+    )
+
+    assert first.status_code == 202
+    assert second.status_code == 202
+    assert first.json()["job_id"] != second.json()["job_id"]
+    first_job = repository.get_job(UUID(first.json()["job_id"]))
+    second_job = repository.get_job(UUID(second.json()["job_id"]))
+    assert first_job is not None
+    assert second_job is not None
+    assert first_job.verification_options != second_job.verification_options
+    assert task_spy.calls == [first.json()["job_id"], second.json()["job_id"]]
 
 
 @pytest.mark.parametrize(

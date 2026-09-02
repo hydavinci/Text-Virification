@@ -43,6 +43,10 @@ from text_verification.compatibility.storage import (
 from text_verification.config import Settings, get_settings
 from text_verification.domain.documents import FileType
 from text_verification.domain.verification import VerificationExecutionMode, VerificationResult
+from text_verification.infrastructure.document_storage import (
+    UnsupportedFileType,
+    validate_declared_mime,
+)
 from text_verification.parsers.errors import ParserError
 
 router = APIRouter(tags=["compatibility"])
@@ -119,8 +123,12 @@ def analyze_content(
     file_id = uuid4()
     try:
         stored = storage.save_stream(file_id, file.filename, file.file)
+        validate_declared_mime(file.content_type, FileType(stored.extension))
     except CompatibilityUploadTooLarge as error:
         raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, detail=str(error)) from error
+    except UnsupportedFileType as error:
+        storage.delete(file_id)
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
     except CompatibilityUploadError as error:
         storage.delete(file_id)
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(error)) from error

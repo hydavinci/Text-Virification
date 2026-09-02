@@ -10,6 +10,7 @@ from typing import Protocol, cast
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from text_verification.application.artifact_service import (
+    ArtifactFinalizationRejectedError,
     ArtifactPersistenceRequest,
     ArtifactPersistenceService,
     ArtifactReconciliationRequiredError,
@@ -194,6 +195,7 @@ class ReconstructionExportService:
             data=data,
             created_at=job.created_at,
         )
+        self._assert_current_result(job.job_id, result)
         if repair_candidate:
             self._begin_repair(request)
         if progress_observer is not None:
@@ -202,7 +204,15 @@ class ReconstructionExportService:
             persisted = ArtifactPersistenceService(
                 self._storage,
                 cast(ArtifactRepositoryFactory, self._repository_factory),
+                require_current_result=True,
             ).persist(request)
+        except ArtifactFinalizationRejectedError as error:
+            raise VerificationError(
+                "job_result_expired",
+                "finalizing",
+                "Job result has expired.",
+                False,
+            ) from error
         except ArtifactReconciliationRequiredError as error:
             if repair_candidate:
                 raise VerificationError(
@@ -317,6 +327,17 @@ class ReconstructionExportService:
                 snapshot = repository.read_result_snapshot(job_id)
             finally:
                 repository.rollback()
+        if snapshot.state in {
+            JobResultState.MISSING,
+            JobResultState.EXPIRED,
+            JobResultState.UNAVAILABLE,
+        }:
+            raise VerificationError(
+                "job_result_expired",
+                "exporting",
+                "Job result has expired.",
+                False,
+            )
         if snapshot.state is not JobResultState.READY or snapshot.result is None:
             raise VerificationError(
                 "job_result_unavailable",
@@ -325,6 +346,24 @@ class ReconstructionExportService:
                 False,
             )
         return snapshot.result
+
+    def _assert_current_result(
+        self,
+        job_id: UUID,
+        expected: VerificationResult,
+    ) -> None:
+        current = self._load_result(job_id)
+        if (
+            current.verification_run_id != expected.verification_run_id
+            or current.document_id != expected.document_id
+            or current.source_version != expected.source_version
+        ):
+            raise VerificationError(
+                "export_source_superseded",
+                "finalizing",
+                "The verification result was superseded before export.",
+                False,
+            )
 
     def _read_artifact(self, export_artifact_id: UUID) -> ArtifactSnapshot | None:
         with self._repository_factory() as repository:
@@ -414,14 +453,11 @@ class ReconstructionExportService:
 
     @staticmethod
     def _download_result(snapshot: JobResultSnapshot) -> VerificationResult:
-        if snapshot.state is JobResultState.MISSING:
-            raise VerificationError(
-                "export_artifact_not_found",
-                "exporting",
-                "The export artifact was not found.",
-                False,
-            )
-        if snapshot.state is JobResultState.EXPIRED:
+        if snapshot.state in {
+            JobResultState.MISSING,
+            JobResultState.EXPIRED,
+            JobResultState.UNAVAILABLE,
+        }:
             raise VerificationError(
                 "job_result_expired",
                 "exporting",

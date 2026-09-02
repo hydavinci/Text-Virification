@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections import Counter
 from enum import StrEnum
 from math import isfinite
@@ -13,6 +14,10 @@ from text_verification.domain.documents import DocumentMetadata, DocumentModel, 
 from text_verification.domain.issues import Issue
 
 SummaryCount = Annotated[int, Field(ge=0)]
+BoundedOptionText = Annotated[str, Field(strict=True, min_length=1, max_length=200)]
+MAX_CUSTOM_GLOSSARY_TERMS = 500
+MAX_BANNED_WORDS = 500
+MAX_VERIFICATION_OPTIONS_JSON_BYTES = 64 * 1024
 
 LEGACY_TYPE_LABELS = {
     "typo": "错别字",
@@ -73,14 +78,62 @@ class GlossaryTerm(BaseModel):
 
 
 class VerificationOptions(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     scenario: Scenario = Scenario.GENERAL
     enable_security: bool = True
     enable_sensitive: bool = True
     enable_ad_extreme: bool = False
-    custom_glossary: tuple[GlossaryTerm, ...] = ()
-    banned_words: tuple[str, ...] = ()
+    custom_glossary: tuple[GlossaryTerm, ...] = Field(
+        default=(),
+        max_length=MAX_CUSTOM_GLOSSARY_TERMS,
+    )
+    banned_words: tuple[BoundedOptionText, ...] = Field(
+        default=(),
+        max_length=MAX_BANNED_WORDS,
+    )
+
+    @field_validator("banned_words", mode="before")
+    @classmethod
+    def normalize_banned_words(cls, value: object) -> object:
+        if not isinstance(value, tuple | list):
+            return value
+        normalized: list[object] = []
+        seen: set[str] = set()
+        for item in value:
+            if not isinstance(item, str):
+                normalized.append(item)
+                continue
+            word = item.strip()
+            if word and word not in seen:
+                normalized.append(word)
+                seen.add(word)
+        return tuple(normalized)
+
+    @model_validator(mode="after")
+    def validate_serialized_size(self) -> VerificationOptions:
+        encoded = json.dumps(
+            self.model_dump(mode="json"),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode()
+        if len(encoded) > MAX_VERIFICATION_OPTIONS_JSON_BYTES:
+            raise ValueError("Verification options exceed the serialized size limit.")
+        return self
+
+
+def encode_verification_options(
+    options: VerificationOptions,
+) -> dict[str, JsonValue]:
+    return options.model_dump(mode="json")
+
+
+def decode_verification_options(payload: object) -> VerificationOptions:
+    if payload is None or payload == {}:
+        return VerificationOptions()
+    if not isinstance(payload, dict):
+        raise ValueError("Persisted verification options must be a JSON object.")
+    return VerificationOptions.model_validate(payload)
 
 
 class VerificationStatistics(BaseModel):

@@ -119,6 +119,21 @@ def safe_original_name(original_name: str) -> str:
     return _safe_name(original_name)
 
 
+def validate_declared_mime(
+    content_type: str | None,
+    file_type: FileType | str,
+) -> None:
+    normalized = (content_type or "").split(";", 1)[0].strip().lower()
+    if not normalized or normalized == "application/octet-stream":
+        return
+    resolved_file_type = file_type if isinstance(file_type, FileType) else FileType(file_type)
+    capability = default_capability_manifest().for_type(resolved_file_type)
+    if normalized not in capability.mime_types:
+        raise UnsupportedFileType(
+            "Declared MIME type does not match upload content."
+        )
+
+
 class DocumentStorage:
     def __init__(
         self,

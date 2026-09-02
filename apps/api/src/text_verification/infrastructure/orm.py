@@ -17,6 +17,9 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
+from sqlalchemy import (
+    text as sql_text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -51,6 +54,12 @@ class JobRow(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_stage: Mapped[str | None] = mapped_column(String(32), nullable=True)
     error_retryable: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    verification_options: Mapped[dict[str, object]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default=sql_text("'{}'::jsonb"),
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)

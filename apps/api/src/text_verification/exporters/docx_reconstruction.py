@@ -17,7 +17,7 @@ from uuid import uuid4
 
 import pymupdf
 from docx import Document
-from docx.enum.section import WD_ORIENT
+from docx.enum.section import WD_ORIENT, WD_SECTION
 from docx.image.exceptions import (
     InvalidImageStreamError,
     UnexpectedEndOfFileError,
@@ -159,15 +159,7 @@ class DocxReconstructionExporter:
 
         output = Document()
         _set_core_properties(output, document)
-        _set_page_setup(output, document)
-
-        for unit in units:
-            if isinstance(unit, _Table):
-                _add_table(output, unit)
-            elif unit.kind == "image":
-                _add_image(output, images[unit.block_id])
-            elif unit.kind in {"heading", "paragraph"}:
-                _add_text_block(output, unit)
+        _render_paginated_units(output, document, units, images)
 
         stream = _BoundedBytesIO(self.limits.max_output_bytes)
         output.save(stream)
@@ -196,6 +188,54 @@ def _canonical_docx_archive(content: bytes, *, max_bytes: int) -> bytes:
                 canonical_info.flag_bits = source_info.flag_bits & 0x800
                 target.writestr(canonical_info, source.read(source_info))
     return output.getvalue()
+
+
+def _render_paginated_units(
+    output: Any,
+    document: DocumentModel,
+    units: list[_RenderUnit],
+    images: Mapping[str, _Image],
+) -> None:
+    page_setups = _page_setups(document)
+    if document.metadata.pdf is None:
+        _apply_section_setup(output.sections[0], page_setups[0])
+        for unit in units:
+            _render_unit(output, unit, images)
+        return
+
+    units_by_page: dict[int, list[_RenderUnit]] = {
+        page_number: [] for page_number in range(1, len(page_setups) + 1)
+    }
+    for unit in units:
+        page = unit.page
+        if page is None or page not in units_by_page:
+            raise ExportError(
+                "Canonical block page does not match PDF page metadata."
+            )
+        units_by_page[page].append(unit)
+
+    for page_number, setup in enumerate(page_setups, start=1):
+        section = (
+            output.sections[0]
+            if page_number == 1
+            else output.add_section(WD_SECTION.NEW_PAGE)
+        )
+        _apply_section_setup(section, setup)
+        for unit in units_by_page[page_number]:
+            _render_unit(output, unit, images)
+
+
+def _render_unit(
+    output: Any,
+    unit: _RenderUnit,
+    images: Mapping[str, _Image],
+) -> None:
+    if isinstance(unit, _Table):
+        _add_table(output, unit)
+    elif unit.kind == "image":
+        _add_image(output, images[unit.block_id])
+    elif unit.kind in {"heading", "paragraph"}:
+        _add_text_block(output, unit)
 
 
 def _preflight_document(
@@ -1302,17 +1342,28 @@ def _xml_safe_text(value: str) -> str:
     return "".join(normalized)
 
 
-def _set_page_setup(output: Any, document: DocumentModel) -> None:
-    width = _DEFAULT_PAGE_WIDTH_POINTS
-    height = _DEFAULT_PAGE_HEIGHT_POINTS
-    if document.metadata.pdf is not None and document.metadata.pdf.pages:
-        page_bbox = document.metadata.pdf.pages[0].page_bbox
-        candidate_width = page_bbox[2] - page_bbox[0]
-        candidate_height = page_bbox[3] - page_bbox[1]
-        if 72.0 <= candidate_width <= 2_000.0 and 72.0 <= candidate_height <= 2_000.0:
-            width = candidate_width
-            height = candidate_height
-    section = output.sections[0]
+def _page_setups(
+    document: DocumentModel,
+) -> tuple[tuple[float, float], ...]:
+    if document.metadata.pdf is None:
+        return ((_DEFAULT_PAGE_WIDTH_POINTS, _DEFAULT_PAGE_HEIGHT_POINTS),)
+    if not document.metadata.pdf.pages:
+        raise ExportError("PDF page metadata must not be empty.")
+    setups: list[tuple[float, float]] = []
+    for page in document.metadata.pdf.pages:
+        width = page.page_bbox[2] - page.page_bbox[0]
+        height = page.page_bbox[3] - page.page_bbox[1]
+        if not 72.0 <= width <= 2_000.0 or not 72.0 <= height <= 2_000.0:
+            raise ExportError("PDF page metadata contains an unsupported page size.")
+        setups.append((width, height))
+    return tuple(setups)
+
+
+def _apply_section_setup(
+    section: Any,
+    setup: tuple[float, float],
+) -> None:
+    width, height = setup
     section.page_width = Pt(width)
     section.page_height = Pt(height)
     section.orientation = WD_ORIENT.LANDSCAPE if width > height else WD_ORIENT.PORTRAIT

@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from threading import RLock
+from threading import Event, RLock
 from uuid import UUID, uuid4
 
 import pytest
@@ -40,6 +40,7 @@ from text_verification.domain.verification import (
     VerificationStatistics,
     VerificationSummary,
 )
+from text_verification.exporters.registry import ExporterRegistry
 from text_verification.infrastructure.storage import (
     JobOwnedSourcePathResolver,
     JobStorage,
@@ -71,6 +72,10 @@ class _RepositoryState:
     artifacts: dict[UUID, ArtifactSnapshot] = field(default_factory=dict)
     result_state_by_job: dict[UUID, JobResultState] = field(default_factory=dict)
     reserve_error: Exception | None = None
+    expire_on_snapshot_read: int | None = None
+    replacement_result_on_snapshot_read: tuple[int, VerificationResult] | None = None
+    reject_finalize_once: bool = False
+    snapshot_reads: int = 0
     lock: RLock = field(default_factory=RLock)
 
 
@@ -79,6 +84,12 @@ class _InMemoryExportRepository:
         self._state = state
 
     def read_result_snapshot(self, job_id: UUID) -> JobResultSnapshot:
+        self._state.snapshot_reads += 1
+        if self._state.expire_on_snapshot_read == self._state.snapshot_reads:
+            return JobResultSnapshot(JobResultState.EXPIRED, None)
+        replacement = self._state.replacement_result_on_snapshot_read
+        if replacement is not None and replacement[0] == self._state.snapshot_reads:
+            self._state.result_by_job[job_id] = replacement[1]
         result = self._state.result_by_job.get(job_id)
         state = self._state.result_state_by_job.get(
             job_id,
@@ -157,9 +168,15 @@ class _InMemoryExportRepository:
         *,
         ready_at: datetime,
         consistency_check,
-    ) -> ArtifactSnapshot:
+        require_current_result: bool = False,
+    ) -> ArtifactSnapshot | None:
+        del require_current_result
         consistency_check()
         with self._state.lock:
+            if self._state.reject_finalize_once:
+                self._state.reject_finalize_once = False
+                self._state.artifacts.pop(reservation.export_artifact_id, None)
+                return None
             snapshot_values = asdict(reservation)
             snapshot_values["status"] = ArtifactLifecycleStatus.READY
             snapshot = ArtifactSnapshot(
@@ -346,6 +363,138 @@ def test_reconstruction_eligibility_uses_canonical_structure_not_filename(
     assert raised.value.stage == "exporting"
     assert raised.value.retryable is False
     assert state.artifacts == {}
+
+
+def test_export_expiry_before_render_returns_gone_without_artifact(
+    tmp_path: Path,
+) -> None:
+    storage = JobStorage(tmp_path / "jobs", max_upload_bytes=5 * 1024 * 1024)
+    job, result = _job_and_result(storage)
+    state = _RepositoryState(
+        {job.job_id: result},
+        result_state_by_job={job.job_id: JobResultState.EXPIRED},
+    )
+    registry_calls: list[object] = []
+
+    with pytest.raises(VerificationError) as raised:
+        _service(
+            storage,
+            state,
+            registry_calls=registry_calls,
+        ).export(job, ExportFormat.DOCX_RECONSTRUCTION)
+
+    assert raised.value.code == "job_result_expired"
+    assert registry_calls == []
+    assert state.artifacts == {}
+
+
+def test_export_expiry_after_render_before_publish_leaves_no_artifact(
+    tmp_path: Path,
+) -> None:
+    storage = JobStorage(tmp_path / "jobs", max_upload_bytes=5 * 1024 * 1024)
+    job, result = _job_and_result(storage)
+    state = _RepositoryState(
+        {job.job_id: result},
+        expire_on_snapshot_read=2,
+    )
+
+    with pytest.raises(VerificationError) as raised:
+        _service(storage, state).export(job, ExportFormat.DOCX_RECONSTRUCTION)
+
+    assert raised.value.code == "job_result_expired"
+    assert state.artifacts == {}
+    assert not list((storage._root / "artifacts").rglob("*.docx"))
+
+
+def test_concurrent_cleanup_wins_after_render_barrier_before_publish(
+    tmp_path: Path,
+) -> None:
+    storage = JobStorage(tmp_path / "jobs", max_upload_bytes=5 * 1024 * 1024)
+    job, result = _job_and_result(storage)
+    state = _RepositoryState({job.job_id: result})
+    rendered = Event()
+    release = Event()
+
+    def registry_factory(resolver):
+        delegate = build_default_exporter_registry(
+            anchored_source_resolver=resolver,
+            max_output_bytes=storage.max_document_bytes,
+        ).get(ExportFormat.DOCX_RECONSTRUCTION)
+
+        class BlockingExporter:
+            file_type = ExportFormat.DOCX_RECONSTRUCTION
+
+            def export(self, document: DocumentModel, target: Path) -> Path:
+                exported = delegate.export(document, target)
+                rendered.set()
+                if not release.wait(timeout=2):
+                    raise TimeoutError("cleanup barrier was not released")
+                return exported
+
+        return ExporterRegistry([BlockingExporter()])
+
+    service = ReconstructionExportService(
+        storage,
+        _repository_factory(state),
+        exporter_registry_factory=registry_factory,
+    )
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            service.export,
+            job,
+            ExportFormat.DOCX_RECONSTRUCTION,
+        )
+        assert rendered.wait(timeout=2)
+        state.result_state_by_job[job.job_id] = JobResultState.EXPIRED
+        release.set()
+        with pytest.raises(VerificationError) as raised:
+            future.result(timeout=5)
+
+    assert raised.value.code == "job_result_expired"
+    assert state.artifacts == {}
+    assert not list((storage._root / "artifacts").rglob("*.docx"))
+
+
+def test_export_expiry_after_publish_before_finalize_aborts_file_and_metadata(
+    tmp_path: Path,
+) -> None:
+    storage = JobStorage(tmp_path / "jobs", max_upload_bytes=5 * 1024 * 1024)
+    job, result = _job_and_result(storage)
+    state = _RepositoryState(
+        {job.job_id: result},
+        reject_finalize_once=True,
+    )
+
+    with pytest.raises(VerificationError) as raised:
+        _service(storage, state).export(job, ExportFormat.DOCX_RECONSTRUCTION)
+
+    assert raised.value.code == "job_result_expired"
+    assert state.artifacts == {}
+    assert not list((storage._root / "artifacts").rglob("*.docx"))
+
+
+def test_export_result_supersession_after_render_prevents_publish(
+    tmp_path: Path,
+) -> None:
+    storage = JobStorage(tmp_path / "jobs", max_upload_bytes=5 * 1024 * 1024)
+    job, result = _job_and_result(storage)
+    replacement = result.model_copy(
+        update={
+            "verification_run_id": uuid4(),
+            "source_version": "sha256:replacement",
+        }
+    )
+    state = _RepositoryState(
+        {job.job_id: result},
+        replacement_result_on_snapshot_read=(2, replacement),
+    )
+
+    with pytest.raises(VerificationError) as raised:
+        _service(storage, state).export(job, ExportFormat.DOCX_RECONSTRUCTION)
+
+    assert raised.value.code == "export_source_superseded"
+    assert state.artifacts == {}
+    assert not list((storage._root / "artifacts").rglob("*.docx"))
 
 
 def test_repeated_and_concurrent_exports_share_one_artifact_reference(
@@ -582,9 +731,9 @@ def test_download_maps_corrupt_artifact_to_typed_unavailable_error(
 @pytest.mark.parametrize(
     ("result_state", "expected_code"),
     [
-        (JobResultState.MISSING, "export_artifact_not_found"),
+        (JobResultState.MISSING, "job_result_expired"),
         (JobResultState.PENDING, "job_result_unavailable"),
-        (JobResultState.UNAVAILABLE, "job_result_unavailable"),
+        (JobResultState.UNAVAILABLE, "job_result_expired"),
         (JobResultState.EXPIRED, "job_result_expired"),
     ],
 )

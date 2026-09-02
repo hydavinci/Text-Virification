@@ -13,6 +13,7 @@ from sqlalchemy.orm.session import sessionmaker
 from alembic import command
 from text_verification.domain.documents import FileType
 from text_verification.domain.jobs import JobStatus, TerminalJobStateError
+from text_verification.domain.verification import Scenario, VerificationOptions
 from text_verification.infrastructure.orm import JobRow
 from text_verification.infrastructure.repositories import JobRepository
 
@@ -37,6 +38,8 @@ def test_database_schema_matches_head_migration(
     assert {"ix_job_events_job_sequence"} <= {
         index["name"] for index in inspector.get_indexes("job_events")
     }
+    job_columns = {column["name"]: column for column in inspector.get_columns("jobs")}
+    assert job_columns["verification_options"]["nullable"] is False
 
 
 def test_migration_0002_cycle_preserves_0001_job_column_types(
@@ -63,6 +66,11 @@ def test_repository_persists_job_and_ordered_events(db_session: Session) -> None
         file_type="docx",
         size_bytes=1024,
         storage_key=str(job_id),
+        verification_options=VerificationOptions(
+            scenario=Scenario.LEGAL,
+            enable_security=False,
+            banned_words=("forbidden",),
+        ),
         created_at=now,
         expires_at=now + timedelta(hours=24),
     )
@@ -79,6 +87,11 @@ def test_repository_persists_job_and_ordered_events(db_session: Session) -> None
     assert job.file_type == FileType.DOCX
     assert job.error_code is None
     assert job.error_message is None
+    assert job.verification_options == VerificationOptions(
+        scenario=Scenario.LEGAL,
+        enable_security=False,
+        banned_words=("forbidden",),
+    )
     assert [(event.sequence, event.status) for event in events] == [
         (1, JobStatus.QUEUED),
         (2, JobStatus.UPLOAD_VALIDATED),
@@ -88,6 +101,29 @@ def test_repository_persists_job_and_ordered_events(db_session: Session) -> None
         (2, JobStatus.UPLOAD_VALIDATED),
         (3, JobStatus.PARSING),
     ]
+
+
+def test_repository_maps_legacy_empty_options_to_fresh_defaults(
+    db_session: Session,
+) -> None:
+    repository = JobRepository(db_session)
+    job_id = uuid4()
+    now = datetime.now(UTC)
+    repository.create_job(
+        job_id=job_id,
+        source_name="legacy.txt",
+        file_type=FileType.TXT,
+        size_bytes=4,
+        storage_key=str(job_id),
+        created_at=now,
+        expires_at=now + timedelta(hours=1),
+    )
+    repository.commit()
+
+    job = repository.get_job(job_id)
+
+    assert job is not None
+    assert job.verification_options == VerificationOptions()
 
 
 def test_repository_expires_jobs_before_cutoff(db_session: Session) -> None:
