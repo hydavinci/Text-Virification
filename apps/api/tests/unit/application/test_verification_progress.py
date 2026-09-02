@@ -4,12 +4,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
+
 from text_verification.application.verification_pipeline import (
     VerificationCommand,
     VerificationPipeline,
 )
 from text_verification.checkers.registry import CheckerRegistry
 from text_verification.document_processing.ocr_provider import OcrTextBox
+from text_verification.document_processing.pdf_models import PdfResourceLimits
 from text_verification.domain.documents import DocumentModel, FileType, TextBlock
 from text_verification.domain.ports import (
     CheckContext,
@@ -21,6 +24,7 @@ from text_verification.domain.verification import (
     VerificationExecutionMode,
     VerificationOptions,
 )
+from text_verification.parsers.errors import PdfResourceLimitError
 from text_verification.parsers.pdf_parser import PdfParser
 from text_verification.parsers.registry import ParserRegistry
 
@@ -118,6 +122,53 @@ def test_pdf_parser_emits_ocr_only_when_a_page_enters_ocr_work() -> None:
 
     assert VerificationProgressStage.OCR not in text_stages
     assert scan_stages == [VerificationProgressStage.OCR]
+
+
+def test_pdf_parser_emits_ocr_after_successful_render_and_before_recognize(
+    monkeypatch,
+) -> None:
+    from text_verification.parsers import pdf_parser as pdf_parser_module
+
+    fixtures = Path(__file__).resolve().parents[2] / "fixtures" / "pdf"
+    operations: list[str] = []
+    original_render = pdf_parser_module._render_page_for_ocr
+
+    def render(page, limits):
+        rendered = original_render(page, limits)
+        operations.append("rendered")
+        return rendered
+
+    class OrderingOcr:
+        def recognize(self, image: object, language: str) -> list[OcrTextBox]:
+            del image, language
+            operations.append("recognize")
+            assert operations == ["rendered", "stage:ocr", "recognize"]
+            return _FakeOcr().recognize(object(), "zh")
+
+    monkeypatch.setattr(pdf_parser_module, "_render_page_for_ocr", render)
+
+    PdfParser(ocr=OrderingOcr()).parse_with_progress(
+        fixtures / "scanned-page.pdf",
+        progress_observer=lambda stage: operations.append(f"stage:{stage.value}"),
+    )
+
+    assert operations == ["rendered", "stage:ocr", "recognize"]
+
+
+def test_pdf_raster_resource_failure_emits_no_ocr_stage() -> None:
+    fixtures = Path(__file__).resolve().parents[2] / "fixtures" / "pdf"
+    stages: list[VerificationProgressStage] = []
+
+    with pytest.raises(PdfResourceLimitError):
+        PdfParser(
+            ocr=_FakeOcr(),
+            limits=PdfResourceLimits(max_ocr_raster_width=1),
+        ).parse_with_progress(
+            fixtures / "scanned-page.pdf",
+            progress_observer=stages.append,
+        )
+
+    assert stages == []
 
 
 def _document(source_name: str) -> DocumentModel:

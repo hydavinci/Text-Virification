@@ -27,6 +27,7 @@ from text_verification.domain.jobs import (
     JobClaimDisposition,
     JobClaimResult,
     JobLeaseLostError,
+    JobProgressStage,
     JobRead,
     JobStateConflictError,
     JobStatus,
@@ -77,45 +78,51 @@ PERIODIC_RESCUE_PUBLICATION_SECONDS = 120
 PERIODIC_RESCUE_FAILURE_RETRY_SECONDS = 60
 PERIODIC_RESCUE_LIMIT = 100
 
-_STATUS_ORDER = (
-    JobStatus.QUEUED,
-    JobStatus.UPLOAD_VALIDATED,
-    JobStatus.PARSING,
-    JobStatus.OCR,
-    JobStatus.CHECKING_FORMAT,
-    JobStatus.CHECKING_SENSITIVE,
-    JobStatus.CHECKING_CHINESE,
-    JobStatus.CHECKING_ENGLISH,
-    JobStatus.FINALIZING,
-)
-_STATUS_EVENT_DETAILS = {
-    JobStatus.UPLOAD_VALIDATED: (10, UPLOAD_VALIDATED_EVENT_MESSAGE),
-    JobStatus.PARSING: (25, PARSING_EVENT_MESSAGE),
-    JobStatus.OCR: (40, OCR_EVENT_MESSAGE),
-    JobStatus.CHECKING_FORMAT: (50, CHECKING_FORMAT_EVENT_MESSAGE),
-    JobStatus.CHECKING_SENSITIVE: (65, CHECKING_SENSITIVE_EVENT_MESSAGE),
-    JobStatus.CHECKING_CHINESE: (80, CHECKING_CHINESE_EVENT_MESSAGE),
-    JobStatus.CHECKING_ENGLISH: (90, CHECKING_ENGLISH_EVENT_MESSAGE),
-    JobStatus.FINALIZING: (95, FINALIZING_EVENT_MESSAGE),
-}
-_STAGE_STATUSES = {
-    VerificationProgressStage.PARSING: JobStatus.PARSING,
-    VerificationProgressStage.OCR: JobStatus.OCR,
-    VerificationProgressStage.CHECKING_FORMAT: JobStatus.CHECKING_FORMAT,
-    VerificationProgressStage.CHECKING_SENSITIVE: JobStatus.CHECKING_SENSITIVE,
-    VerificationProgressStage.CHECKING_CHINESE: JobStatus.CHECKING_CHINESE,
-    VerificationProgressStage.CHECKING_ENGLISH: JobStatus.CHECKING_ENGLISH,
+_STAGE_EVENT_DETAILS = {
+    VerificationProgressStage.PARSING: (
+        JobStatus.PARSING,
+        JobProgressStage.PARSING,
+        25,
+        PARSING_EVENT_MESSAGE,
+    ),
+    VerificationProgressStage.OCR: (
+        JobStatus.PARSING,
+        JobProgressStage.OCR,
+        40,
+        OCR_EVENT_MESSAGE,
+    ),
+    VerificationProgressStage.CHECKING_FORMAT: (
+        JobStatus.CHECKING_FORMAT,
+        JobProgressStage.CHECKING_FORMAT,
+        50,
+        CHECKING_FORMAT_EVENT_MESSAGE,
+    ),
+    VerificationProgressStage.CHECKING_SENSITIVE: (
+        JobStatus.CHECKING_SENSITIVE,
+        JobProgressStage.CHECKING_SENSITIVE,
+        65,
+        CHECKING_SENSITIVE_EVENT_MESSAGE,
+    ),
+    VerificationProgressStage.CHECKING_CHINESE: (
+        JobStatus.CHECKING_CHINESE,
+        JobProgressStage.CHECKING_CHINESE,
+        80,
+        CHECKING_CHINESE_EVENT_MESSAGE,
+    ),
+    VerificationProgressStage.CHECKING_ENGLISH: (
+        JobStatus.CHECKING_ENGLISH,
+        JobProgressStage.CHECKING_ENGLISH,
+        90,
+        CHECKING_ENGLISH_EVENT_MESSAGE,
+    ),
 }
 _ALLOWED_PROGRESS_TRANSITIONS = {
     (JobStatus.QUEUED, JobStatus.UPLOAD_VALIDATED),
     (JobStatus.UPLOAD_VALIDATED, JobStatus.PARSING),
-    (JobStatus.PARSING, JobStatus.OCR),
     (JobStatus.PARSING, JobStatus.CHECKING_FORMAT),
-    (JobStatus.OCR, JobStatus.CHECKING_FORMAT),
     (JobStatus.CHECKING_FORMAT, JobStatus.CHECKING_SENSITIVE),
     (JobStatus.CHECKING_SENSITIVE, JobStatus.CHECKING_CHINESE),
     (JobStatus.CHECKING_CHINESE, JobStatus.CHECKING_ENGLISH),
-    (JobStatus.CHECKING_ENGLISH, JobStatus.FINALIZING),
 }
 
 
@@ -171,6 +178,7 @@ class _LeaseProgressObserver(VerificationProgressObserver):
         job_id: UUID,
         owner_token: UUID,
         current_status: JobStatus,
+        current_progress: int,
         lease_seconds: int,
     ) -> None:
         self._session_factory = session_factory
@@ -178,22 +186,35 @@ class _LeaseProgressObserver(VerificationProgressObserver):
         self._owner_token = owner_token
         self._lease_seconds = lease_seconds
         self.current_status = current_status
+        self.current_progress = current_progress
 
     def ensure_upload_validated(self) -> None:
-        self._advance(JobStatus.UPLOAD_VALIDATED)
+        self._advance(
+            JobStatus.UPLOAD_VALIDATED,
+            JobProgressStage.UPLOAD_VALIDATED,
+            10,
+            UPLOAD_VALIDATED_EVENT_MESSAGE,
+        )
 
     def ensure_finalizing(self) -> None:
-        self._advance(JobStatus.FINALIZING)
+        self._advance(
+            JobStatus.CHECKING_ENGLISH,
+            JobProgressStage.FINALIZING,
+            95,
+            FINALIZING_EVENT_MESSAGE,
+        )
 
     def __call__(self, stage: VerificationProgressStage) -> None:
-        self._advance(_STAGE_STATUSES[stage])
+        self._advance(*_STAGE_EVENT_DETAILS[stage])
 
-    def _advance(self, target_status: JobStatus) -> None:
-        current_index = _STATUS_ORDER.index(self.current_status)
-        target_index = _STATUS_ORDER.index(target_status)
-        if target_index < current_index:
-            return
-        if target_status is self.current_status:
+    def _advance(
+        self,
+        target_status: JobStatus,
+        target_stage: JobProgressStage,
+        target_progress: int,
+        message: str,
+    ) -> None:
+        if target_progress <= self.current_progress:
             now = NOW_FACTORY()
             _renew_claimed(
                 self._session_factory,
@@ -204,6 +225,21 @@ class _LeaseProgressObserver(VerificationProgressObserver):
                 lease_expires_at=now + timedelta(seconds=self._lease_seconds),
             )
             return
+        if target_status is self.current_status:
+            now = NOW_FACTORY()
+            job = _record_claimed_progress(
+                self._session_factory,
+                self._job_id,
+                owner_token=self._owner_token,
+                expected_status=self.current_status,
+                stage=target_stage,
+                progress=target_progress,
+                message=message,
+                now=now,
+                lease_expires_at=now + timedelta(seconds=self._lease_seconds),
+            )
+            self.current_progress = job.progress
+            return
         if (self.current_status, target_status) not in _ALLOWED_PROGRESS_TRANSITIONS:
             raise JobStateConflictError(
                 job_id=self._job_id,
@@ -211,7 +247,6 @@ class _LeaseProgressObserver(VerificationProgressObserver):
                 current_status=self.current_status,
             )
 
-        progress, message = _STATUS_EVENT_DETAILS[target_status]
         now = NOW_FACTORY()
         job = _transition_claimed(
             self._session_factory,
@@ -219,12 +254,13 @@ class _LeaseProgressObserver(VerificationProgressObserver):
             owner_token=self._owner_token,
             expected_status=self.current_status,
             status=target_status,
-            progress=progress,
+            progress=target_progress,
             message=message,
             now=now,
             lease_expires_at=now + timedelta(seconds=self._lease_seconds),
         )
         self.current_status = job.status
+        self.current_progress = job.progress
 
 
 def _process_job(
@@ -319,6 +355,7 @@ def _run_process_job_attempt(
         job_id=job_id,
         owner_token=owner_token,
         current_status=job.status,
+        current_progress=job.progress,
         lease_seconds=lease_seconds,
     )
     try:
@@ -329,14 +366,13 @@ def _run_process_job_attempt(
                 owner_token=owner_token,
             )
             if existing_result is not None:
-                if observer.current_status is JobStatus.CHECKING_ENGLISH:
-                    observer.ensure_finalizing()
-                if observer.current_status is not JobStatus.FINALIZING:
+                if observer.current_status is not JobStatus.CHECKING_ENGLISH:
                     raise JobStateConflictError(
                         job_id=job_id,
-                        expected_status=JobStatus.FINALIZING,
+                        expected_status=JobStatus.CHECKING_ENGLISH,
                         current_status=observer.current_status,
                     )
+                observer.ensure_finalizing()
                 _complete_claimed_job(
                     session_factory,
                     job_id,
@@ -676,6 +712,40 @@ def _transition_claimed(
         session.close()
 
 
+def _record_claimed_progress(
+    session_factory: sessionmaker[Session],
+    job_id: UUID,
+    *,
+    owner_token: UUID,
+    expected_status: JobStatus,
+    stage: JobProgressStage,
+    progress: int,
+    message: str,
+    now: datetime,
+    lease_expires_at: datetime,
+) -> JobRead:
+    session = session_factory()
+    repository = REPOSITORY_FACTORY(session)
+    try:
+        job = repository.record_claimed_progress(
+            job_id,
+            owner_token=owner_token,
+            expected_status=expected_status,
+            stage=stage,
+            progress=progress,
+            message=message,
+            now=now,
+            lease_expires_at=lease_expires_at,
+        )
+        repository.commit()
+        return job
+    except Exception:
+        repository.rollback()
+        raise
+    finally:
+        session.close()
+
+
 def _renew_claimed(
     session_factory: sessionmaker[Session],
     job_id: UUID,
@@ -972,14 +1042,26 @@ def _persist_exhausted_failure(
         )
         if claim.disposition is not JobClaimDisposition.ACQUIRED or claim.job is None:
             return
+        failure_details = (
+            {
+                "error_message": error.message,
+                "error_code": error.code,
+                "error_stage": error.stage,
+                "error_retryable": error.retryable,
+            }
+            if isinstance(error, VerificationError)
+            else {
+                "error_message": UNEXPECTED_FAILURE_MESSAGE,
+            }
+        )
         failure_applied = _fail_claimed_job(
             session_factory,
             job_id,
             owner_token=failure_owner_token,
             expected_status=claim.job.status,
-            error_message=UNEXPECTED_FAILURE_MESSAGE,
+            **failure_details,
         )
-        if not failure_applied and claim.job.status is JobStatus.FINALIZING:
+        if not failure_applied and claim.job.status is JobStatus.CHECKING_ENGLISH:
             _complete_claimed_job(
                 session_factory,
                 job_id,

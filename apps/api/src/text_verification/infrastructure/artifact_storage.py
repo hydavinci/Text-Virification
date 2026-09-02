@@ -138,8 +138,20 @@ class ArtifactVerificationHandle:
                 "Artifact directory entry no longer names the verified file."
             )
 
-    def read_bytes(self) -> bytes:
-        self.assert_current()
+    def read_bytes(self, *, require_current_entry: bool = True) -> bytes:
+        if self._closed:
+            raise RuntimeError("Artifact verification handle is closed.")
+        if require_current_entry:
+            self.assert_current()
+        else:
+            descriptor_stat = os.fstat(self._file_fd)
+            if (
+                not stat.S_ISREG(descriptor_stat.st_mode)
+                or descriptor_stat.st_size != self.size_bytes
+            ):
+                raise InvalidUpload(
+                    "Artifact descriptor no longer matches its verified size."
+                )
         os.lseek(self._file_fd, 0, os.SEEK_SET)
         chunks: list[bytes] = []
         remaining = self.size_bytes + 1
@@ -155,7 +167,8 @@ class ArtifactVerificationHandle:
             or hashlib.sha256(content).hexdigest() != self.content_sha256
         ):
             raise InvalidUpload("Artifact content no longer matches its verified digest.")
-        self.assert_current()
+        if require_current_entry:
+            self.assert_current()
         return content
 
     def unlink_created_if_current(self) -> bool:
@@ -366,6 +379,198 @@ class ArtifactStorage:
                 os.close(file_fd)
             for descriptor in reversed(directory_fds):
                 os.close(descriptor)
+
+    def prepare_repair(
+        self,
+        job_id: UUID,
+        artifact_id: UUID,
+        storage_key: str,
+        file_type: FileType | str,
+        *,
+        expected_size: int,
+        expected_digest: str,
+    ) -> bool | None:
+        if not self._supports_descriptor_operations():
+            raise InvalidUpload(
+                "Safe artifact repair requires descriptor-relative "
+                "no-follow filesystem operations."
+            )
+        resolved_file_type = file_type if isinstance(file_type, FileType) else FileType(file_type)
+        relative_path = validate_artifact_identity(
+            job_id,
+            artifact_id,
+            resolved_file_type,
+            storage_key,
+        )
+        quarantine_name = _repair_quarantine_name(relative_path.name)
+        try:
+            _, directory_fds, parent_fd = self._open_directory_chain(
+                relative_path,
+                create=False,
+            )
+        except ArtifactNotFoundError:
+            return None
+        file_fd = -1
+        try:
+            try:
+                file_fd = os.open(
+                    relative_path.name,
+                    os.O_RDONLY | os.O_NOFOLLOW,
+                    dir_fd=parent_fd,
+                )
+            except FileNotFoundError:
+                return (
+                    True
+                    if _validate_existing_quarantine(parent_fd, quarantine_name)
+                    else None
+                )
+            except OSError as error:
+                if error.errno in {errno.ELOOP, errno.ENOTDIR}:
+                    raise InvalidUpload(
+                        "Artifact repair target is an unsafe filesystem entry."
+                    ) from error
+                raise
+
+            file_stat = os.fstat(file_fd)
+            if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
+                raise InvalidUpload(
+                    "Artifact repair target must be an unlinked regular file."
+                )
+            size_bytes, content_sha256, file_signature = _hash_stable_file(file_fd)
+            if size_bytes == expected_size and content_sha256 == expected_digest:
+                return False
+
+            try:
+                named = os.stat(
+                    relative_path.name,
+                    dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                quarantine_inode = _quarantine_inode(parent_fd, quarantine_name)
+                if quarantine_inode == (
+                    file_signature.device,
+                    file_signature.inode,
+                ):
+                    return True
+                raise InvalidUpload(
+                    "Artifact repair target changed before quarantine."
+                ) from None
+            if (
+                not stat.S_ISREG(named.st_mode)
+                or named.st_nlink != 1
+                or (named.st_dev, named.st_ino)
+                != (file_signature.device, file_signature.inode)
+            ):
+                raise InvalidUpload(
+                    "Artifact repair target changed before quarantine."
+                )
+            try:
+                os.stat(
+                    quarantine_name,
+                    dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                pass
+            else:
+                raise InvalidUpload("Artifact repair quarantine is already occupied.")
+            os.rename(
+                relative_path.name,
+                quarantine_name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+            )
+            if _quarantine_inode(parent_fd, quarantine_name) != (
+                file_signature.device,
+                file_signature.inode,
+            ):
+                raise InvalidUpload("Artifact repair quarantine changed unexpectedly.")
+            return True
+        finally:
+            if file_fd >= 0:
+                os.close(file_fd)
+            for descriptor in reversed(directory_fds):
+                os.close(descriptor)
+
+    def delete_repair_quarantine(
+        self,
+        job_id: UUID,
+        artifact_id: UUID,
+        storage_key: str,
+        file_type: FileType | str,
+    ) -> bool:
+        resolved_file_type = file_type if isinstance(file_type, FileType) else FileType(file_type)
+        relative_path = validate_artifact_identity(
+            job_id,
+            artifact_id,
+            resolved_file_type,
+            storage_key,
+        )
+        quarantine_name = _repair_quarantine_name(relative_path.name)
+        try:
+            _, directory_fds, parent_fd = self._open_directory_chain(
+                relative_path,
+                create=False,
+            )
+        except ArtifactNotFoundError:
+            return False
+        file_fd = -1
+        try:
+            try:
+                file_fd = os.open(
+                    quarantine_name,
+                    os.O_RDONLY | os.O_NOFOLLOW,
+                    dir_fd=parent_fd,
+                )
+            except FileNotFoundError:
+                return False
+            except OSError as error:
+                if error.errno in {errno.ELOOP, errno.ENOTDIR}:
+                    raise InvalidUpload(
+                        "Artifact repair quarantine is an unsafe filesystem entry."
+                    ) from error
+                raise
+            file_stat = os.fstat(file_fd)
+            if not stat.S_ISREG(file_stat.st_mode):
+                raise InvalidUpload(
+                    "Artifact repair quarantine must be an unlinked regular file."
+                )
+            if file_stat.st_nlink == 0:
+                return False
+            if file_stat.st_nlink != 1:
+                raise InvalidUpload(
+                    "Artifact repair quarantine must not have additional hard links."
+                )
+            return _unlink_named_inode(
+                parent_fd,
+                quarantine_name,
+                (file_stat.st_dev, file_stat.st_ino),
+            )
+        finally:
+            if file_fd >= 0:
+                os.close(file_fd)
+            for descriptor in reversed(directory_fds):
+                os.close(descriptor)
+
+    def repair_quarantine_path(
+        self,
+        job_id: UUID,
+        artifact_id: UUID,
+        storage_key: str,
+        file_type: FileType | str,
+    ) -> Path:
+        resolved_file_type = file_type if isinstance(file_type, FileType) else FileType(file_type)
+        relative_path = validate_artifact_identity(
+            job_id,
+            artifact_id,
+            resolved_file_type,
+            storage_key,
+        )
+        return self._root.joinpath(
+            *relative_path.parts[:-1],
+            _repair_quarantine_name(relative_path.name),
+        )
 
     def delete_owned(self, job_id: UUID, storage_key: str) -> bool:
         relative_path = validate_artifact_storage_key(job_id, storage_key)
@@ -607,7 +812,14 @@ class ArtifactStorage:
             raise
 
     def _supports_descriptor_operations(self) -> bool:
-        required_dir_fd = (os.open, os.mkdir, os.unlink, os.link, os.stat)
+        required_dir_fd = (
+            os.open,
+            os.mkdir,
+            os.unlink,
+            os.link,
+            os.rename,
+            os.stat,
+        )
         return (
             hasattr(os, "O_DIRECTORY")
             and hasattr(os, "O_NOFOLLOW")
@@ -631,6 +843,11 @@ def _orphan_candidate_relative_path(
         candidate.path_storage_key,
     )
     if candidate_path == canonical_path:
+        return candidate_path
+    if (
+        candidate_path.parts[:-1] == canonical_path.parts[:-1]
+        and candidate_path.name == _repair_quarantine_name(canonical_path.name)
+    ):
         return candidate_path
     temporary_prefix = f".{canonical_path.name}."
     temporary_suffix = ".uploading"
@@ -715,5 +932,38 @@ def _unlink_named_inode(
         return False
     if (named.st_dev, named.st_ino) != expected_inode:
         return False
-    os.unlink(leaf_name, dir_fd=parent_fd)
+    try:
+        os.unlink(leaf_name, dir_fd=parent_fd)
+    except FileNotFoundError:
+        return False
     return True
+
+
+def _repair_quarantine_name(canonical_name: str) -> str:
+    return f".{canonical_name}.repair-corrupt"
+
+
+def _quarantine_inode(
+    parent_fd: int,
+    quarantine_name: str,
+) -> tuple[int, int] | None:
+    try:
+        quarantine = os.stat(
+            quarantine_name,
+            dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(quarantine.st_mode) or quarantine.st_nlink != 1:
+        raise InvalidUpload(
+            "Artifact repair quarantine must be an unlinked regular file."
+        )
+    return quarantine.st_dev, quarantine.st_ino
+
+
+def _validate_existing_quarantine(
+    parent_fd: int,
+    quarantine_name: str,
+) -> bool:
+    return _quarantine_inode(parent_fd, quarantine_name) is not None

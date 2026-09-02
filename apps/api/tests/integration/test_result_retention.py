@@ -19,7 +19,7 @@ from text_verification.application import (
 )
 from text_verification.domain.documents import FileType, TextBlock
 from text_verification.domain.issues import Issue, IssueSeverity
-from text_verification.domain.jobs import JobStatus
+from text_verification.domain.jobs import JobProgressStage, JobStatus
 from text_verification.domain.verification import (
     Scenario,
     VerificationAnalysisMode,
@@ -208,7 +208,7 @@ def test_committed_result_prevents_claimed_failure_in_two_session_race(
                 job_id,
                 _result(job_id, run_id),
                 owner_token=owner,
-                expected_status=JobStatus.FINALIZING,
+                expected_status=JobStatus.CHECKING_ENGLISH,
                 now=now + timedelta(minutes=1),
             )
             result_saved.set()
@@ -230,7 +230,7 @@ def test_committed_result_prevents_claimed_failure_in_two_session_race(
             applied = repository.fail_claimed_job(
                 job_id,
                 owner_token=owner,
-                expected_status=JobStatus.FINALIZING,
+                expected_status=JobStatus.CHECKING_ENGLISH,
                 progress=95,
                 message="处理失败",
                 error_code="pipeline_failed",
@@ -370,12 +370,6 @@ def _advance_to_finalizing(
             90,
             "正在检查英文",
         ),
-        (
-            JobStatus.CHECKING_ENGLISH,
-            JobStatus.FINALIZING,
-            95,
-            "正在保存结果",
-        ),
     )
     for index, (expected, target, progress, message) in enumerate(transitions, start=1):
         changed_at = now + timedelta(seconds=index)
@@ -390,6 +384,18 @@ def _advance_to_finalizing(
             lease_expires_at=now + timedelta(minutes=20),
         )
         repository.commit()
+    changed_at = now + timedelta(seconds=len(transitions) + 1)
+    repository.record_claimed_progress(
+        job_id,
+        owner_token=owner,
+        expected_status=JobStatus.CHECKING_ENGLISH,
+        stage=JobProgressStage.FINALIZING,
+        progress=95,
+        message="正在保存结果",
+        now=changed_at,
+        lease_expires_at=now + timedelta(minutes=20),
+    )
+    repository.commit()
 
 
 def _result(job_id: UUID, run_id: UUID) -> VerificationResult:

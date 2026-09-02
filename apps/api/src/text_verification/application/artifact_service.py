@@ -55,6 +55,13 @@ class ArtifactRepository(Protocol):
         consistency_check: Callable[[], None],
     ) -> ArtifactSnapshot: ...
 
+    def begin_export_artifact_repair(
+        self,
+        expected: ArtifactReservation,
+        *,
+        consistency_check: Callable[[], bool | None],
+    ) -> ArtifactReservation | None: ...
+
     def finalize_stale_pending_export_artifact(
         self,
         reservation: ArtifactReservation,

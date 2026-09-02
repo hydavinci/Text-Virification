@@ -16,6 +16,7 @@ from text_verification.domain.jobs import (
     RESULT_READY_STATUSES,
     TERMINAL_STATUSES,
     JobEvent,
+    JobProgressStage,
     JobRead,
     JobStatus,
 )
@@ -79,7 +80,7 @@ class RecordingJobRepository:
             ),
             JobEvent(
                 sequence=4,
-                status=JobStatus.OCR,
+                status=JobStatus.PARSING,
                 progress=40,
                 message="正在进行 OCR",
                 created_at=created_at,
@@ -114,7 +115,7 @@ class RecordingJobRepository:
             ),
             JobEvent(
                 sequence=9,
-                status=JobStatus.FINALIZING,
+                status=JobStatus.CHECKING_ENGLISH,
                 progress=95,
                 message="正在保存结果",
                 created_at=created_at,
@@ -153,7 +154,7 @@ class RecordingJobRepository:
     def append_stage_event(
         self,
         job_id: UUID,
-        stage: JobStatus,
+        stage: JobProgressStage,
         message: str,
         *,
         changed_at: datetime,
@@ -161,10 +162,11 @@ class RecordingJobRepository:
         job = self._jobs[job_id]
         event = JobEvent(
             sequence=len(self._events[job_id]) + 1,
-            status=stage,
+            status=job.status,
             progress=job.progress,
             message=message,
             created_at=changed_at,
+            stage=stage,
         )
         self._events[job_id].append(event)
         return event
@@ -278,6 +280,7 @@ def test_get_job_returns_job_payload(client, completed_job: JobRead) -> None:
     assert response.status_code == 200
     assert response.json()["job_id"] == str(completed_job.job_id)
     assert response.json()["status"] == "completed"
+    assert response.json()["stage"] == "completed"
 
 
 def test_get_job_returns_404_for_unknown_job(client) -> None:
@@ -406,8 +409,8 @@ def test_sse_replays_events_after_last_event_id(client, completed_job: JobRead) 
     assert response.headers["content-type"].startswith("text/event-stream")
     assert "id: 2" in response.text
     assert '"status":"upload_validated"' in response.text
-    assert '"stage":"ocr"' in response.text
-    assert '"stage":"finalizing"' in response.text
+    assert '"status":"parsing","stage":"ocr"' in response.text
+    assert '"status":"checking_english","stage":"finalizing"' in response.text
     assert '"status":"completed"' in response.text
     assert "event: done" in response.text
     assert completed_job.source_name not in response.text
@@ -418,6 +421,7 @@ def test_job_reconstruction_export_route_returns_stable_artifact_reference(
     client,
     app: FastAPI,
     completed_job: JobRead,
+    repository: RecordingJobRepository,
 ) -> None:
     from text_verification.api.dependencies import get_reconstruction_export_service
 
@@ -442,8 +446,8 @@ def test_job_reconstruction_export_route_returns_stable_artifact_reference(
         def export(self, job, export_format, *, progress_observer=None):
             calls.append((job, export_format))
             assert progress_observer is not None
-            progress_observer(JobStatus.EXPORTING)
-            progress_observer(JobStatus.FINALIZING)
+            progress_observer(JobProgressStage.EXPORTING)
+            progress_observer(JobProgressStage.FINALIZING)
             return artifact
 
     app.dependency_overrides[get_reconstruction_export_service] = FakeService
@@ -456,6 +460,15 @@ def test_job_reconstruction_export_route_returns_stable_artifact_reference(
     assert response.status_code == 200
     assert response.json() == artifact.model_dump(mode="json")
     assert calls == [(completed_job, ExportFormat.DOCX_RECONSTRUCTION)]
+    export_events = repository.list_events_after(completed_job.job_id, 10)
+    assert [event.status for event in export_events] == [
+        JobStatus.COMPLETED,
+        JobStatus.COMPLETED,
+    ]
+    assert [event.stage for event in export_events] == [
+        JobProgressStage.EXPORTING,
+        JobProgressStage.FINALIZING,
+    ]
 
 
 def test_job_export_download_rejects_cross_job_artifact(

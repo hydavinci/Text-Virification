@@ -1,3 +1,4 @@
+import hashlib
 import io
 import logging
 import os
@@ -146,6 +147,97 @@ def test_verified_artifact_handle_reads_the_verified_inode(tmp_path):
         data,
     ) as handle:
         assert handle.read_bytes() == data
+
+
+@pytest.mark.parametrize("replacement_kind", ["symlink", "hardlink"])
+def test_artifact_repair_refuses_linked_corrupt_replacement(
+    tmp_path,
+    replacement_kind: str,
+):
+    storage = JobStorage(tmp_path / "storage", max_upload_bytes=1024)
+    job_id = uuid4()
+    artifact_id = uuid4()
+    storage_key = storage_module.build_artifact_storage_key(
+        job_id,
+        artifact_id,
+        FileType.DOCX,
+    )
+    original = make_docx_bytes()
+    with storage.publish_verified_artifact(
+        job_id,
+        artifact_id,
+        storage_key,
+        FileType.DOCX,
+        original,
+    ) as handle:
+        artifact_path = handle.path
+    artifact_path.unlink()
+    outside = tmp_path / "outside.docx"
+    outside.write_bytes(b"corrupt")
+    try:
+        if replacement_kind == "symlink":
+            artifact_path.symlink_to(outside)
+        else:
+            os.link(outside, artifact_path)
+    except OSError as error:
+        pytest.skip(f"{replacement_kind} creation unavailable: {error}")
+
+    with pytest.raises(InvalidUpload):
+        storage.prepare_artifact_repair(
+            job_id,
+            artifact_id,
+            storage_key,
+            FileType.DOCX,
+            expected_size=len(original),
+            expected_digest=hashlib.sha256(original).hexdigest(),
+        )
+
+    assert outside.read_bytes() == b"corrupt"
+    assert artifact_path.exists() or artifact_path.is_symlink()
+
+
+def test_repair_quarantine_is_discovered_as_exact_canonical_artifact_candidate(
+    tmp_path,
+) -> None:
+    storage = JobStorage(tmp_path / "storage", max_upload_bytes=1024)
+    job_id = uuid4()
+    artifact_id = uuid4()
+    storage_key = storage_module.build_artifact_storage_key(
+        job_id,
+        artifact_id,
+        FileType.DOCX,
+    )
+    original = make_docx_bytes()
+    with storage.publish_verified_artifact(
+        job_id,
+        artifact_id,
+        storage_key,
+        FileType.DOCX,
+        original,
+    ) as handle:
+        handle.path.write_bytes(b"corrupt")
+    assert storage.prepare_artifact_repair(
+        job_id,
+        artifact_id,
+        storage_key,
+        FileType.DOCX,
+        expected_size=len(original),
+        expected_digest=hashlib.sha256(original).hexdigest(),
+    )
+    quarantine = storage.artifact_repair_quarantine_path(
+        job_id,
+        artifact_id,
+        FileType.DOCX,
+    )
+    cutoff = datetime.now(UTC)
+    stale_timestamp = (cutoff - timedelta(seconds=1)).timestamp()
+    os.utime(quarantine, (stale_timestamp, stale_timestamp))
+
+    candidates = storage.discover_stale_orphaned_artifacts(cutoff)
+
+    assert len(candidates) == 1
+    assert candidates[0].storage_key == storage_key
+    assert candidates[0].path_storage_key.endswith(".repair-corrupt")
 
 
 def test_source_path_rejects_job_directory_outside_storage_root(tmp_path, monkeypatch):

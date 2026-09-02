@@ -5,12 +5,26 @@ from datetime import datetime
 from enum import StrEnum
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, computed_field
 
 from text_verification.domain.documents import FileType
 
 
 class JobStatus(StrEnum):
+    QUEUED = "queued"
+    UPLOAD_VALIDATED = "upload_validated"
+    PARSING = "parsing"
+    CHECKING_FORMAT = "checking_format"
+    CHECKING_SENSITIVE = "checking_sensitive"
+    CHECKING_CHINESE = "checking_chinese"
+    CHECKING_ENGLISH = "checking_english"
+    COMPLETED = "completed"
+    PARTIAL = "partial"
+    FAILED = "failed"
+    EXPIRED = "expired"
+
+
+class JobProgressStage(StrEnum):
     QUEUED = "queued"
     UPLOAD_VALIDATED = "upload_validated"
     PARSING = "parsing"
@@ -108,14 +122,62 @@ class JobRead(BaseModel):
     created_at: datetime
     expires_at: datetime
 
+    @computed_field
+    def stage(self) -> JobProgressStage:
+        return _stage_from_status_progress(self.status, self.progress)
 
-@dataclass(frozen=True)
+
+@dataclass(frozen=True, init=False)
 class JobEvent:
     sequence: int
     status: JobStatus
+    stage: JobProgressStage
     progress: int
     message: str
     created_at: datetime
+
+    def __init__(
+        self,
+        sequence: int,
+        status: JobStatus,
+        progress: int,
+        message: str,
+        created_at: datetime,
+        stage: JobProgressStage | None = None,
+    ) -> None:
+        object.__setattr__(self, "sequence", sequence)
+        object.__setattr__(self, "status", status)
+        object.__setattr__(
+            self,
+            "stage",
+            stage or _stage_from_persisted_event(status, progress, message),
+        )
+        object.__setattr__(self, "progress", progress)
+        object.__setattr__(self, "message", message)
+        object.__setattr__(self, "created_at", created_at)
+
+
+def _stage_from_persisted_event(
+    status: JobStatus,
+    progress: int,
+    message: str,
+) -> JobProgressStage:
+    special_stage = {
+        "正在重建文档": JobProgressStage.EXPORTING,
+        "正在保存导出文件": JobProgressStage.FINALIZING,
+    }.get(message)
+    return special_stage or _stage_from_status_progress(status, progress)
+
+
+def _stage_from_status_progress(
+    status: JobStatus,
+    progress: int,
+) -> JobProgressStage:
+    if status is JobStatus.PARSING and progress >= 40:
+        return JobProgressStage.OCR
+    if status is JobStatus.CHECKING_ENGLISH and progress >= 95:
+        return JobProgressStage.FINALIZING
+    return JobProgressStage(status.value)
 
 
 class JobClaimDisposition(StrEnum):

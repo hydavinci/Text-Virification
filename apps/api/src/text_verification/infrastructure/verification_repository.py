@@ -82,9 +82,9 @@ class VerificationRepository:
         expected_status: JobStatus,
         now: datetime,
     ) -> None:
-        if expected_status is not JobStatus.FINALIZING:
+        if expected_status is not JobStatus.CHECKING_ENGLISH:
             raise ValueError(
-                "Claimed results may only persist from finalizing."
+                "Claimed results may only persist from checking_english."
             )
         job = self._lock_job(job_id)
         self._assert_active_lease(job, owner_token, now)
@@ -425,6 +425,40 @@ class VerificationRepository:
         self._session.flush()
         return snapshot
 
+    def begin_export_artifact_repair(
+        self,
+        expected: ArtifactReservation,
+        *,
+        consistency_check: Callable[[], bool | None],
+    ) -> ArtifactReservation | None:
+        run = self._lock_run(expected.verification_run_id)
+        job = self._lock_job(run.job_id)
+        if job.job_id != expected.job_id:
+            raise ValueError("Artifact repair does not belong to the requested job.")
+        if JobStatus(job.status) not in RESULT_READY_STATUSES:
+            raise ValueError("Artifact repair requires a result-ready job.")
+        row = self._lock_artifact_or_none(expected.export_artifact_id)
+        if row is None:
+            return None
+        if not _artifact_row_matches_repair(row, expected):
+            raise ValueError(
+                f"Export artifact {expected.export_artifact_id} cannot be repaired "
+                "with different canonical metadata."
+            )
+        repair_state = consistency_check()
+        if (
+            repair_state is not False
+            or ArtifactLifecycleStatus(row.status) is ArtifactLifecycleStatus.PENDING
+        ):
+            row.status = ArtifactLifecycleStatus.PENDING.value
+            row.reserved_at = expected.reserved_at
+            row.ready_at = None
+            self._session.flush()
+        return _artifact_reservation_from_row(
+            row,
+            expected_content_sha256=expected.content_sha256,
+        )
+
     def finalize_stale_pending_export_artifact(
         self,
         reservation: ArtifactReservation,
@@ -490,6 +524,20 @@ class VerificationRepository:
         job = self._lock_job_or_none(job_id)
         if job is None:
             return delete_path(True)
+        if candidate_storage_key != storage_key:
+            canonical = self._session.scalar(
+                select(ExportArtifactRow)
+                .where(ExportArtifactRow.storage_key == storage_key)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if canonical is not None:
+                if (
+                    ArtifactLifecycleStatus(canonical.status)
+                    is ArtifactLifecycleStatus.PENDING
+                ):
+                    return False
+                return delete_path(False)
         referenced = self._session.scalar(
             select(ExportArtifactRow.export_artifact_id)
             .where(
@@ -998,6 +1046,25 @@ def _artifact_row_matches_reservation(
             row.content_sha256 is None
             or row.content_sha256 == reservation.content_sha256
         )
+        )
+
+
+def _artifact_row_matches_repair(
+        row: ExportArtifactRow,
+        expected: ArtifactReservation,
+) -> bool:
+        return (
+            row.run.job_id == expected.job_id
+            and row.verification_run_id == expected.verification_run_id
+            and row.review_revision_id == expected.review_revision_id
+            and row.source_version == expected.source_version
+            and row.file_type == expected.file_type.value
+            and row.file_name == expected.file_name
+            and row.media_type == expected.media_type
+            and row.storage_key == expected.storage_key
+            and row.size_bytes == expected.size_bytes
+            and row.content_sha256 == expected.content_sha256
+            and row.created_at == expected.created_at
     )
 
 

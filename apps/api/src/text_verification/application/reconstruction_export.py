@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol, cast
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
@@ -18,11 +20,12 @@ from text_verification.application.errors import VerificationError
 from text_verification.compatibility.exporters import ExportError
 from text_verification.domain.artifacts import (
     ArtifactLifecycleStatus,
+    ArtifactReservation,
     ArtifactSnapshot,
     ExportArtifactReference,
 )
 from text_verification.domain.documents import DocumentModel, ExportFormat, FileType
-from text_verification.domain.jobs import JobRead, JobStatus
+from text_verification.domain.jobs import JobProgressStage, JobRead
 from text_verification.domain.ports import AnchoredSourcePathResolver
 from text_verification.domain.verification import VerificationResult
 from text_verification.exporters.docx_reconstruction import DocxReconstructionExporter
@@ -43,7 +46,7 @@ from text_verification.infrastructure.verification_repository import (
 )
 
 DOCX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-ExportProgressObserver = Callable[[JobStatus], None]
+ExportProgressObserver = Callable[[JobProgressStage], None]
 ExporterRegistryFactory = Callable[[AnchoredSourcePathResolver], ExporterRegistry]
 
 
@@ -80,10 +83,12 @@ class ReconstructionExportService:
         repository_factory: ReconstructionRepositoryFactory,
         *,
         exporter_registry_factory: ExporterRegistryFactory,
+        now_factory: Callable[[], datetime] | None = None,
     ) -> None:
         self._storage = storage
         self._repository_factory = repository_factory
         self._exporter_registry_factory = exporter_registry_factory
+        self._now_factory = now_factory or (lambda: datetime.now(UTC))
 
     def export(
         self,
@@ -107,6 +112,7 @@ class ReconstructionExportService:
         file_name = _file_name(job.source_name)
         storage_key = build_artifact_storage_key(job.job_id, artifact_id, FileType.DOCX)
         existing = self._read_artifact(artifact_id)
+        repair_candidate = existing is not None
         if existing is not None and existing.status is ArtifactLifecycleStatus.READY:
             reference = _reference_from_snapshot(
                 existing,
@@ -129,10 +135,16 @@ class ReconstructionExportService:
             except InvalidUpload:
                 pass
             else:
+                self._delete_repair_quarantine(
+                    existing.job_id,
+                    existing.export_artifact_id,
+                    existing.storage_key,
+                    existing.file_type,
+                )
                 return reference
 
         if progress_observer is not None:
-            progress_observer(JobStatus.EXPORTING)
+            progress_observer(JobProgressStage.EXPORTING)
         resolver = JobOwnedSourcePathResolver(
             self._storage,
             job.job_id,
@@ -169,28 +181,36 @@ class ReconstructionExportService:
                     True,
                 ) from error
 
+        request = ArtifactPersistenceRequest(
+            job_id=job.job_id,
+            export_artifact_id=artifact_id,
+            verification_run_id=result.verification_run_id,
+            review_revision_id=None,
+            source_version=result.source_version,
+            file_type=FileType.DOCX,
+            file_name=file_name,
+            media_type=DOCX_MEDIA_TYPE,
+            storage_key=storage_key,
+            data=data,
+            created_at=job.created_at,
+        )
+        if repair_candidate:
+            self._begin_repair(request)
         if progress_observer is not None:
-            progress_observer(JobStatus.FINALIZING)
+            progress_observer(JobProgressStage.FINALIZING)
         try:
             persisted = ArtifactPersistenceService(
                 self._storage,
                 cast(ArtifactRepositoryFactory, self._repository_factory),
-            ).persist(
-                ArtifactPersistenceRequest(
-                    job_id=job.job_id,
-                    export_artifact_id=artifact_id,
-                    verification_run_id=result.verification_run_id,
-                    review_revision_id=None,
-                    source_version=result.source_version,
-                    file_type=FileType.DOCX,
-                    file_name=file_name,
-                    media_type=DOCX_MEDIA_TYPE,
-                    storage_key=storage_key,
-                    data=data,
-                    created_at=job.created_at,
-                )
-            )
+            ).persist(request)
         except ArtifactReconciliationRequiredError as error:
+            if repair_candidate:
+                raise VerificationError(
+                    "export_artifact_repair_pending",
+                    "finalizing",
+                    "The export artifact repair is incomplete and can be retried.",
+                    True,
+                ) from error
             raise VerificationError(
                 "export_finalization_uncertain",
                 "finalizing",
@@ -198,12 +218,25 @@ class ReconstructionExportService:
                 True,
             ) from error
         except Exception as error:
+            if repair_candidate:
+                raise VerificationError(
+                    "export_artifact_repair_pending",
+                    "finalizing",
+                    "The export artifact repair is incomplete and can be retried.",
+                    True,
+                ) from error
             raise VerificationError(
                 "export_persistence_failed",
                 "finalizing",
                 "The export artifact could not be persisted.",
                 True,
             ) from error
+        self._delete_repair_quarantine(
+            persisted.job_id,
+            persisted.export_artifact_id,
+            persisted.storage_key,
+            persisted.file_type,
+        )
         return ExportArtifactReference(
             export_artifact_id=persisted.export_artifact_id,
             job_id=persisted.job_id,
@@ -223,41 +256,60 @@ class ReconstructionExportService:
         job_id: UUID,
         export_artifact_id: UUID,
     ) -> ArtifactDownload:
-        snapshot = self._read_artifact(export_artifact_id)
-        if snapshot is None or snapshot.job_id != job_id:
-            raise VerificationError(
-                "export_artifact_not_found",
-                "exporting",
-                "The export artifact was not found.",
-                False,
-            )
-        if (
-            snapshot.status is not ArtifactLifecycleStatus.READY
-            or snapshot.content_sha256 is None
-        ):
-            raise VerificationError(
-                "export_artifact_pending",
-                "finalizing",
-                "The export artifact is not ready.",
-                True,
-            )
-        try:
-            handle = self._storage.open_verified_artifact(
-                snapshot.job_id,
-                snapshot.export_artifact_id,
-                snapshot.storage_key,
-                snapshot.file_type,
-                expected_size=snapshot.size_bytes,
-                expected_digest=snapshot.content_sha256,
-            )
-        except (ArtifactNotFoundError, InvalidUpload) as error:
-            raise VerificationError(
-                "export_artifact_unavailable",
-                "finalizing",
-                "The export artifact is unavailable.",
-                True,
-            ) from error
-        return ArtifactDownload(handle, snapshot.file_name, snapshot.media_type)
+        handle: ArtifactVerificationHandle | None = None
+        with self._repository_factory() as repository:
+            try:
+                result_snapshot = repository.read_result_snapshot(job_id)
+                result = self._download_result(result_snapshot)
+                artifact = repository.read_export_artifact(export_artifact_id)
+                if artifact is None or not _artifact_belongs_to_result(
+                    artifact,
+                    job_id,
+                    result,
+                ):
+                    raise VerificationError(
+                        "export_artifact_not_found",
+                        "exporting",
+                        "The export artifact was not found.",
+                        False,
+                    )
+                if (
+                    artifact.status is not ArtifactLifecycleStatus.READY
+                    or artifact.content_sha256 is None
+                ):
+                    raise VerificationError(
+                        "export_artifact_pending",
+                        "finalizing",
+                        "The export artifact is not ready.",
+                        True,
+                    )
+                _validate_reconstruction_eligibility(_document_from_result(result))
+                try:
+                    handle = self._storage.open_verified_artifact(
+                        artifact.job_id,
+                        artifact.export_artifact_id,
+                        artifact.storage_key,
+                        artifact.file_type,
+                        expected_size=artifact.size_bytes,
+                        expected_digest=artifact.content_sha256,
+                    )
+                except (ArtifactNotFoundError, InvalidUpload) as error:
+                    raise VerificationError(
+                        "export_artifact_unavailable",
+                        "finalizing",
+                        "The export artifact is unavailable.",
+                        True,
+                    ) from error
+            finally:
+                try:
+                    repository.rollback()
+                except Exception:
+                    if handle is not None:
+                        handle.close()
+                    raise
+        if handle is None:
+            raise AssertionError("authorized artifact download must retain a descriptor")
+        return ArtifactDownload(handle, artifact.file_name, artifact.media_type)
 
     def _load_result(self, job_id: UUID) -> VerificationResult:
         with self._repository_factory() as repository:
@@ -280,6 +332,110 @@ class ReconstructionExportService:
                 return repository.read_export_artifact(export_artifact_id)
             finally:
                 repository.rollback()
+
+    def _begin_repair(self, request: ArtifactPersistenceRequest) -> None:
+        digest = hashlib.sha256(request.data).hexdigest()
+        expected = ArtifactReservation(
+            export_artifact_id=request.export_artifact_id,
+            job_id=request.job_id,
+            verification_run_id=request.verification_run_id,
+            review_revision_id=request.review_revision_id,
+            source_version=request.source_version,
+            file_type=request.file_type,
+            file_name=request.file_name,
+            media_type=request.media_type,
+            storage_key=request.storage_key,
+            size_bytes=len(request.data),
+            content_sha256=digest,
+            status=ArtifactLifecycleStatus.PENDING,
+            reserved_at=self._now_factory(),
+            created_at=request.created_at,
+        )
+        with self._repository_factory() as repository:
+            try:
+                repository.begin_export_artifact_repair(
+                    expected,
+                    consistency_check=lambda: self._storage.prepare_artifact_repair(
+                        request.job_id,
+                        request.export_artifact_id,
+                        request.storage_key,
+                        request.file_type,
+                        expected_size=len(request.data),
+                        expected_digest=digest,
+                    ),
+                )
+                repository.commit()
+            except InvalidUpload as error:
+                repository.rollback()
+                raise VerificationError(
+                    "export_artifact_repair_unsafe",
+                    "finalizing",
+                    "The corrupt export artifact cannot be repaired safely.",
+                    False,
+                ) from error
+            except ValueError as error:
+                repository.rollback()
+                raise VerificationError(
+                    "export_artifact_conflict",
+                    "finalizing",
+                    "The existing export artifact does not match this request.",
+                    False,
+                ) from error
+            except Exception as error:
+                repository.rollback()
+                raise VerificationError(
+                    "export_artifact_repair_pending",
+                    "finalizing",
+                    "The export artifact repair is incomplete and can be retried.",
+                    True,
+                ) from error
+
+    def _delete_repair_quarantine(
+        self,
+        job_id: UUID,
+        export_artifact_id: UUID,
+        storage_key: str,
+        file_type: FileType,
+    ) -> None:
+        try:
+            self._storage.delete_artifact_repair_quarantine(
+                job_id,
+                export_artifact_id,
+                storage_key,
+                file_type,
+            )
+        except (InvalidUpload, OSError) as error:
+            raise VerificationError(
+                "export_artifact_repair_cleanup_failed",
+                "finalizing",
+                "The repaired artifact quarantine could not be removed safely.",
+                True,
+            ) from error
+
+    @staticmethod
+    def _download_result(snapshot: JobResultSnapshot) -> VerificationResult:
+        if snapshot.state is JobResultState.MISSING:
+            raise VerificationError(
+                "export_artifact_not_found",
+                "exporting",
+                "The export artifact was not found.",
+                False,
+            )
+        if snapshot.state is JobResultState.EXPIRED:
+            raise VerificationError(
+                "job_result_expired",
+                "exporting",
+                "Job result has expired.",
+                False,
+            )
+        if snapshot.state is not JobResultState.READY or snapshot.result is None:
+            raise VerificationError(
+                "job_result_unavailable",
+                "exporting",
+                "The job has no canonical result available for export.",
+                False,
+            )
+        return snapshot.result
 
 
 def _document_from_result(result: VerificationResult) -> DocumentModel:
@@ -380,4 +536,18 @@ def _reference_from_snapshot(
         content_sha256=snapshot.content_sha256,
         status=snapshot.status,
         created_at=snapshot.created_at,
+    )
+
+
+def _artifact_belongs_to_result(
+    artifact: ArtifactSnapshot,
+    job_id: UUID,
+    result: VerificationResult,
+) -> bool:
+    return (
+        artifact.job_id == job_id
+        and artifact.verification_run_id == result.verification_run_id
+        and artifact.review_revision_id is None
+        and artifact.source_version == result.source_version
+        and artifact.file_type is FileType.DOCX
     )

@@ -22,6 +22,7 @@ from text_verification.application import (
     ArtifactPersistenceRequest,
     ArtifactPersistenceResult,
     ArtifactPersistenceService,
+    ArtifactReservation,
 )
 from text_verification.document_processing.pdf_models import (
     OcrRequirement,
@@ -36,6 +37,7 @@ from text_verification.document_processing.pdf_models import (
 )
 from text_verification.domain.documents import DocumentMetadata, FileType, TextBlock
 from text_verification.domain.issues import Issue, IssueSeverity
+from text_verification.domain.jobs import JobStatus
 from text_verification.domain.verification import (
     Scenario,
     VerificationAnalysisMode,
@@ -1489,6 +1491,139 @@ def test_postgres_orphan_cleanup_waits_for_committed_pending_reservation(
         assert row.status == ArtifactLifecycleStatus.PENDING.value
     finally:
         verification_session.close()
+
+
+def test_postgres_cleanup_protects_pending_repair_quarantine_until_ready(
+    db_session_factory: sessionmaker[Session],
+    artifact_storage: JobStorage,
+) -> None:
+    job_id = uuid4()
+    run_id = uuid4()
+    request = _artifact_request(
+        job_id=job_id,
+        artifact_id=uuid4(),
+        verification_run_id=run_id,
+        data=b"repair-content",
+    )
+    seed_session = db_session_factory()
+    try:
+        _create_job(seed_session, job_id=job_id)
+        repository = VerificationRepository(seed_session)
+        repository.save_result(
+            job_id,
+            _result(
+                document_id=uuid4(),
+                verification_run_id=run_id,
+                issue_id=uuid4(),
+            ),
+        )
+        repository.commit()
+        jobs = JobRepository(seed_session)
+        jobs.transition(job_id, JobStatus.COMPLETED, 100, "处理完成")
+        jobs.commit()
+    finally:
+        seed_session.close()
+
+    persisted = ArtifactPersistenceService(
+        artifact_storage,
+        _artifact_repository_factory(db_session_factory),
+    ).persist(request)
+    persisted.path.write_bytes(b"corrupt")
+    digest = sha256(request.data).hexdigest()
+    expected = ArtifactReservation(
+        export_artifact_id=request.export_artifact_id,
+        job_id=request.job_id,
+        verification_run_id=request.verification_run_id,
+        review_revision_id=request.review_revision_id,
+        source_version=request.source_version,
+        file_type=request.file_type,
+        file_name=request.file_name,
+        media_type=request.media_type,
+        storage_key=request.storage_key,
+        size_bytes=len(request.data),
+        content_sha256=digest,
+        status=ArtifactLifecycleStatus.PENDING,
+        reserved_at=CREATED_AT + timedelta(minutes=1),
+        created_at=request.created_at,
+    )
+    repair_session = db_session_factory()
+    try:
+        repository = VerificationRepository(repair_session)
+        reservation = repository.begin_export_artifact_repair(
+            expected,
+            consistency_check=lambda: artifact_storage.prepare_artifact_repair(
+                request.job_id,
+                request.export_artifact_id,
+                request.storage_key,
+                request.file_type,
+                expected_size=len(request.data),
+                expected_digest=digest,
+            ),
+        )
+        repository.commit()
+        assert reservation is not None
+        assert reservation.status is ArtifactLifecycleStatus.PENDING
+    finally:
+        repair_session.close()
+
+    quarantine = artifact_storage.artifact_repair_quarantine_path(
+        request.job_id,
+        request.export_artifact_id,
+        request.file_type,
+    )
+    cutoff = datetime.now(UTC) + timedelta(hours=1)
+    stale_timestamp = (cutoff - timedelta(seconds=1)).timestamp()
+    os.utime(quarantine, (stale_timestamp, stale_timestamp))
+    candidate = next(
+        candidate
+        for candidate in artifact_storage.discover_stale_orphaned_artifacts(cutoff)
+        if candidate.path_storage_key.endswith(".repair-corrupt")
+    )
+    pending_cleanup_session = db_session_factory()
+    try:
+        repository = VerificationRepository(pending_cleanup_session)
+        deleted = repository.delete_unreferenced_artifact(
+            job_id=candidate.job_id,
+            artifact_id=candidate.artifact_id,
+            file_type=candidate.file_type,
+            storage_key=candidate.storage_key,
+            candidate_storage_key=candidate.path_storage_key,
+            delete_path=lambda prune: artifact_storage.delete_stale_orphaned_artifact(
+                candidate,
+                cutoff,
+                prune_empty_directories=prune,
+            ),
+        )
+        repository.commit()
+    finally:
+        pending_cleanup_session.close()
+    assert deleted is False
+    assert quarantine.exists()
+
+    ArtifactPersistenceService(
+        artifact_storage,
+        _artifact_repository_factory(db_session_factory),
+    ).persist(request)
+    ready_cleanup_session = db_session_factory()
+    try:
+        repository = VerificationRepository(ready_cleanup_session)
+        deleted = repository.delete_unreferenced_artifact(
+            job_id=candidate.job_id,
+            artifact_id=candidate.artifact_id,
+            file_type=candidate.file_type,
+            storage_key=candidate.storage_key,
+            candidate_storage_key=candidate.path_storage_key,
+            delete_path=lambda prune: artifact_storage.delete_stale_orphaned_artifact(
+                candidate,
+                cutoff,
+                prune_empty_directories=prune,
+            ),
+        )
+        repository.commit()
+    finally:
+        ready_cleanup_session.close()
+    assert deleted is True
+    assert not quarantine.exists()
 
 
 def test_postgres_orphan_cleanup_deletes_before_reservation_then_publication(

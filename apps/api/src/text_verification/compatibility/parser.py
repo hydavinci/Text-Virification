@@ -8,12 +8,27 @@
 
 import os
 import re
+import signal
 import shutil
 import subprocess
 import uuid
 import codecs
 from html.parser import HTMLParser
+from pathlib import Path, PurePosixPath
+from time import monotonic
 from typing import Tuple, Optional, List
+import zipfile
+
+
+MAX_DOC_SOURCE_BYTES = 25 * 1024 * 1024
+MAX_DOC_CONVERTED_BYTES = 100 * 1024 * 1024
+MAX_DOC_EXPANDED_BYTES = 200 * 1024 * 1024
+MAX_DOC_SINGLE_ENTRY_BYTES = 100 * 1024 * 1024
+MAX_DOC_ARCHIVE_ENTRIES = 10_000
+MAX_DOC_PARSED_ELEMENTS = 100_000
+MAX_DOC_PARSED_TEXT_CHARS = 5_000_000
+DOC_CONVERSION_TIMEOUT_SECONDS = 180.0
+DOC_CONVERSION_POLL_SECONDS = 0.1
 
 
 class _HTMLStripper(HTMLParser):
@@ -125,22 +140,39 @@ def _parse_txt(file_path: str) -> str:
 def _parse_docx(file_path: str) -> Tuple[str, PageMap]:
     """解析 Word (.docx) 文件，追踪段落号，并清理混入的 HTML 代码"""
     from docx import Document
+    _validate_converted_docx(Path(file_path))
     doc = Document(file_path)
     paragraphs = []
     page_map: PageMap = []
     offset = 0
     para_num = 0
+    parsed_elements = 0
+    parsed_text_chars = 0
 
-    document_paragraphs = list(doc.paragraphs)
-    seen_paragraphs = {id(para._element) for para in document_paragraphs}
+    document_paragraphs = []
+    seen_paragraphs = set()
+
+    def append_paragraph(para) -> None:
+        nonlocal parsed_elements, parsed_text_chars
+        element_id = id(para._element)
+        if element_id in seen_paragraphs:
+            return
+        parsed_elements += 1
+        if parsed_elements > MAX_DOC_PARSED_ELEMENTS:
+            raise ValueError('DOCX parsed element limit exceeded')
+        parsed_text_chars += len(para.text)
+        if parsed_text_chars > MAX_DOC_PARSED_TEXT_CHARS:
+            raise ValueError('DOCX parsed text size limit exceeded')
+        document_paragraphs.append(para)
+        seen_paragraphs.add(element_id)
+
+    for para in doc.paragraphs:
+        append_paragraph(para)
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 for para in cell.paragraphs:
-                    element_id = id(para._element)
-                    if element_id not in seen_paragraphs:
-                        document_paragraphs.append(para)
-                        seen_paragraphs.add(element_id)
+                    append_paragraph(para)
 
     for para in document_paragraphs:
         text = _strip_html(para.text).strip()
@@ -159,48 +191,228 @@ def _convert_doc_to_docx(file_path: str, work_directory: Optional[str] = None) -
     优先使用 macOS 内置的 textutil；若不可用则尝试 LibreOffice (soffice)。
     返回转换后的 .docx 临时文件路径（调用方负责清理）。
     """
-    work_dir = os.path.abspath(work_directory or os.path.dirname(file_path))
-    os.makedirs(work_dir, exist_ok=True)
-    out_path = os.path.join(work_dir, f'converted-{uuid.uuid4()}.docx')
+    raw_source = Path(file_path)
+    if raw_source.is_symlink():
+        raise ValueError('DOC source must be a regular file')
+    source = raw_source.resolve(strict=True)
+    if not source.is_file():
+        raise ValueError('DOC source must be a regular file')
+    if source.stat().st_size <= 0 or source.stat().st_size > MAX_DOC_SOURCE_BYTES:
+        raise ValueError('DOC source exceeds the configured size limit')
 
-    # 1) macOS 内置 textutil（最可靠、零依赖）
-    if shutil.which('textutil'):
+    work_dir = Path(work_directory or source.parent).resolve(strict=False)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    workspace = work_dir / f'doc-conversion-{uuid.uuid4().hex}'
+    workspace.mkdir(mode=0o700)
+    staged_source = workspace / 'source.doc'
+    _copy_bounded(source, staged_source, MAX_DOC_SOURCE_BYTES)
+    output = workspace / 'converted.docx'
+    environment = _conversion_environment(workspace)
+    attempted = False
+    last_error = None
+
+    textutil = shutil.which('textutil')
+    if textutil:
+        attempted = True
         try:
-            subprocess.run(
-                ['textutil', '-convert', 'docx', file_path, '-output', out_path],
-                check=True, capture_output=True, timeout=120,
+            _run_conversion_process(
+                [
+                    textutil,
+                    '-convert',
+                    'docx',
+                    str(staged_source),
+                    '-output',
+                    str(output),
+                ],
+                output_path=output,
+                cwd=workspace,
+                environment=environment,
+                timeout_seconds=DOC_CONVERSION_TIMEOUT_SECONDS,
             )
-            if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
-                return out_path
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
-            pass
+            _validate_converted_docx(output)
+            return str(output)
+        except (OSError, ValueError) as error:
+            last_error = error
+            output.unlink(missing_ok=True)
 
-    # 2) LibreOffice 回退（Linux / 未安装 textutil 的环境）
     soffice = shutil.which('soffice') or shutil.which('libreoffice')
     if soffice:
+        attempted = True
+        candidate = workspace / 'source.docx'
+        profile = workspace / 'libreoffice-profile'
+        profile.mkdir(mode=0o700)
         try:
-            subprocess.run(
-                [soffice, '--headless', '--convert-to', 'docx', '--outdir', work_dir, file_path],
-                check=True, capture_output=True, timeout=180,
+            _run_conversion_process(
+                [
+                    soffice,
+                    f'-env:UserInstallation={profile.as_uri()}',
+                    '--headless',
+                    '--invisible',
+                    '--nologo',
+                    '--nodefault',
+                    '--nolockcheck',
+                    '--nofirststartwizard',
+                    '--norestore',
+                    '--safe-mode',
+                    '--convert-to',
+                    'docx',
+                    '--outdir',
+                    str(workspace),
+                    str(staged_source),
+                ],
+                output_path=candidate,
+                cwd=workspace,
+                environment=environment,
+                timeout_seconds=DOC_CONVERSION_TIMEOUT_SECONDS,
             )
-            candidate = os.path.join(
-                work_dir,
-                os.path.splitext(os.path.basename(file_path))[0] + '.docx'
-            )
-            if os.path.exists(candidate) and os.path.getsize(candidate) > 0:
-                if candidate != out_path:
-                    os.replace(candidate, out_path)
-                return out_path
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
-            pass
+            _validate_converted_docx(candidate)
+            candidate.replace(output)
+            return str(output)
+        except (OSError, ValueError) as error:
+            last_error = error
+            candidate.unlink(missing_ok=True)
 
-    # 转换失败，清理临时文件
-    try:
-        if os.path.exists(out_path):
-            os.unlink(out_path)
-    except OSError:
-        pass
+    shutil.rmtree(workspace, ignore_errors=True)
+    if attempted:
+        if isinstance(last_error, ValueError):
+            raise last_error
+        raise ValueError('DOC conversion did not produce a valid DOCX file') from last_error
     raise ValueError('无法处理 .doc 文件：本机未安装 textutil 或 LibreOffice，请先安装其中之一')
+
+
+def _run_conversion_process(
+    command,
+    *,
+    output_path: Path,
+    cwd: Path,
+    environment: dict[str, str],
+    timeout_seconds: float,
+) -> None:
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        env=environment,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    deadline = monotonic() + timeout_seconds
+    while True:
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            _terminate_conversion_process(process)
+            raise ValueError('DOC conversion timed out')
+        try:
+            return_code = process.wait(
+                timeout=min(DOC_CONVERSION_POLL_SECONDS, remaining)
+            )
+            break
+        except subprocess.TimeoutExpired:
+            if output_path.exists() and output_path.stat().st_size > MAX_DOC_CONVERTED_BYTES:
+                _terminate_conversion_process(process)
+                raise ValueError('Converted DOCX exceeds the configured size limit')
+    if return_code != 0:
+        raise ValueError('DOC conversion process failed')
+    if not output_path.is_file():
+        raise ValueError('DOC conversion did not produce a valid DOCX file')
+    if output_path.stat().st_size <= 0 or output_path.stat().st_size > MAX_DOC_CONVERTED_BYTES:
+        raise ValueError('Converted DOCX exceeds the configured size limit')
+
+
+def _terminate_conversion_process(process) -> None:
+    if process.poll() is not None:
+        return
+    if os.name == 'posix':
+        os.killpg(process.pid, signal.SIGTERM)
+    else:
+        process.terminate()
+    if process.poll() is not None:
+        return
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        if os.name == 'posix':
+            os.killpg(process.pid, signal.SIGKILL)
+        else:
+            process.kill()
+        process.wait(timeout=5)
+
+
+def _conversion_environment(workspace: Path) -> dict[str, str]:
+    blocked = {
+        'http_proxy',
+        'https_proxy',
+        'all_proxy',
+        'ftp_proxy',
+        'no_proxy',
+    }
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key.lower() not in blocked
+    }
+    environment.update(
+        {
+            'HOME': str(workspace),
+            'TMPDIR': str(workspace),
+            'SAL_USE_VCLPLUGIN': 'svp',
+        }
+    )
+    return environment
+
+
+def _copy_bounded(source: Path, target: Path, maximum: int) -> None:
+    copied = 0
+    with source.open('rb') as input_file, target.open('xb') as output_file:
+        while chunk := input_file.read(1024 * 1024):
+            copied += len(chunk)
+            if copied > maximum:
+                raise ValueError('DOC source exceeds the configured size limit')
+            output_file.write(chunk)
+
+
+def _validate_converted_docx(path: Path) -> None:
+    if not path.is_file():
+        raise ValueError('DOC conversion did not produce a valid DOCX file')
+    size = path.stat().st_size
+    if size <= 0 or size > MAX_DOC_CONVERTED_BYTES:
+        raise ValueError('Converted DOCX exceeds the configured size limit')
+    try:
+        with zipfile.ZipFile(path) as archive:
+            infos = archive.infolist()
+            if len(infos) > MAX_DOC_ARCHIVE_ENTRIES:
+                raise ValueError('Converted DOCX has too many archive entries')
+            total = 0
+            names = set()
+            for info in infos:
+                if info.flag_bits & 0x1:
+                    raise ValueError('Converted DOCX contains an encrypted entry')
+                if info.file_size > MAX_DOC_SINGLE_ENTRY_BYTES:
+                    raise ValueError('Converted DOCX entry exceeds the size limit')
+                total += info.file_size
+                if total > MAX_DOC_EXPANDED_BYTES:
+                    raise ValueError('Converted DOCX expanded size limit exceeded')
+                if _unsafe_archive_name(info.filename):
+                    raise ValueError('Converted DOCX contains an unsafe archive path')
+                names.add(info.filename)
+            if '[Content_Types].xml' not in names or 'word/document.xml' not in names:
+                raise ValueError('DOC conversion did not produce a valid DOCX file')
+            if archive.testzip() is not None:
+                raise ValueError('DOC conversion did not produce a valid DOCX file')
+    except zipfile.BadZipFile as error:
+        raise ValueError('DOC conversion did not produce a valid DOCX file') from error
+
+
+def _unsafe_archive_name(name: str) -> bool:
+    if (
+        not name
+        or name.startswith(('/', '\\'))
+        or '\\' in name
+        or (len(name) >= 2 and name[1] == ':')
+    ):
+        return True
+    return any(part in {'', '.', '..'} for part in PurePosixPath(name).parts)
 
 
 def _parse_doc(file_path: str, work_directory: Optional[str] = None) -> Tuple[str, PageMap]:
@@ -210,8 +422,8 @@ def _parse_doc(file_path: str, work_directory: Optional[str] = None) -> Tuple[st
         return _parse_docx(docx_path)
     finally:
         try:
-            if docx_path and os.path.exists(docx_path):
-                os.unlink(docx_path)
+            if docx_path:
+                shutil.rmtree(Path(docx_path).parent)
         except OSError:
             pass
 

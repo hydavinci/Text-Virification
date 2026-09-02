@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import RLock
@@ -30,7 +30,7 @@ from text_verification.domain.documents import (
     FileType,
     TextBlock,
 )
-from text_verification.domain.jobs import JobRead, JobStatus
+from text_verification.domain.jobs import JobProgressStage, JobRead, JobStatus
 from text_verification.domain.verification import (
     Scenario,
     VerificationAnalysisMode,
@@ -69,6 +69,7 @@ class _FakeOcr:
 class _RepositoryState:
     result_by_job: dict[UUID, VerificationResult]
     artifacts: dict[UUID, ArtifactSnapshot] = field(default_factory=dict)
+    result_state_by_job: dict[UUID, JobResultState] = field(default_factory=dict)
     reserve_error: Exception | None = None
     lock: RLock = field(default_factory=RLock)
 
@@ -79,10 +80,42 @@ class _InMemoryExportRepository:
 
     def read_result_snapshot(self, job_id: UUID) -> JobResultSnapshot:
         result = self._state.result_by_job.get(job_id)
-        return JobResultSnapshot(
+        state = self._state.result_state_by_job.get(
+            job_id,
             JobResultState.MISSING if result is None else JobResultState.READY,
-            result,
         )
+        return JobResultSnapshot(
+            state,
+            result if state is JobResultState.READY else None,
+        )
+
+    def begin_export_artifact_repair(
+        self,
+        expected: ArtifactReservation,
+        *,
+        consistency_check,
+    ) -> ArtifactReservation | None:
+        with self._state.lock:
+            existing = self._state.artifacts.get(expected.export_artifact_id)
+            if existing is None:
+                return None
+            if existing.content_sha256 != expected.content_sha256:
+                raise ValueError("repair metadata conflict")
+            consistency_check()
+            pending = replace(
+                existing,
+                status=ArtifactLifecycleStatus.PENDING,
+                reserved_at=expected.reserved_at,
+                ready_at=None,
+            )
+            self._state.artifacts[expected.export_artifact_id] = pending
+            return ArtifactReservation(
+                **{
+                    key: value
+                    for key, value in asdict(pending).items()
+                    if key != "ready_at"
+                }
+            )
 
     def reserve_export_artifact(self, **values: object) -> ArtifactReservation:
         if self._state.reserve_error is not None:
@@ -237,7 +270,7 @@ def test_reconstructs_persisted_ocr_document_and_downloads_verified_artifact(
     storage = JobStorage(tmp_path / "jobs", max_upload_bytes=5 * 1024 * 1024)
     job, result = _job_and_result(storage)
     state = _RepositoryState({job.job_id: result})
-    stages: list[JobStatus] = []
+    stages: list[JobProgressStage] = []
 
     artifact = _service(storage, state).export(
         job,
@@ -249,7 +282,7 @@ def test_reconstructs_persisted_ocr_document_and_downloads_verified_artifact(
         artifact.export_artifact_id,
     )
 
-    assert stages == [JobStatus.EXPORTING, JobStatus.FINALIZING]
+    assert stages == [JobProgressStage.EXPORTING, JobProgressStage.FINALIZING]
     assert artifact.job_id == job.job_id
     assert artifact.file_type is FileType.DOCX
     rebuilt = Document(download.path)
@@ -404,6 +437,129 @@ def test_repeated_export_repairs_missing_ready_artifact_without_new_reference(
     download.handle.close()
 
 
+def test_repeated_export_repairs_corrupt_ready_artifact_without_new_reference(
+    tmp_path: Path,
+) -> None:
+    storage = JobStorage(tmp_path / "jobs", max_upload_bytes=5 * 1024 * 1024)
+    job, result = _job_and_result(storage)
+    state = _RepositoryState({job.job_id: result})
+    service = _service(storage, state)
+    first = service.export(job, ExportFormat.DOCX_RECONSTRUCTION)
+    snapshot = state.artifacts[first.export_artifact_id]
+    (storage._root / snapshot.storage_key).write_bytes(b"corrupt")
+
+    repaired = service.export(job, ExportFormat.DOCX_RECONSTRUCTION)
+    download = service.download(job.job_id, repaired.export_artifact_id)
+
+    assert repaired == first
+    assert download.handle.read_bytes()
+    download.handle.close()
+    assert not storage.artifact_repair_quarantine_path(
+        job.job_id,
+        first.export_artifact_id,
+        FileType.DOCX,
+    ).exists()
+
+
+def test_concurrent_corrupt_ready_repairs_converge(
+    tmp_path: Path,
+) -> None:
+    storage = JobStorage(tmp_path / "jobs", max_upload_bytes=5 * 1024 * 1024)
+    job, result = _job_and_result(storage)
+    state = _RepositoryState({job.job_id: result})
+    service = _service(storage, state)
+    first = service.export(job, ExportFormat.DOCX_RECONSTRUCTION)
+    snapshot = state.artifacts[first.export_artifact_id]
+    (storage._root / snapshot.storage_key).write_bytes(b"corrupt")
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        repaired = list(
+            executor.map(
+                lambda _: service.export(job, ExportFormat.DOCX_RECONSTRUCTION),
+                range(2),
+            )
+        )
+
+    assert repaired == [first, first]
+    concurrent_download = service.download(job.job_id, first.export_artifact_id)
+    with concurrent_download.handle:
+        assert concurrent_download.handle.read_bytes()
+    assert not storage.artifact_repair_quarantine_path(
+        job.job_id,
+        first.export_artifact_id,
+        FileType.DOCX,
+    ).exists()
+
+
+def test_crash_after_corrupt_quarantine_is_recoverable_on_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = JobStorage(tmp_path / "jobs", max_upload_bytes=5 * 1024 * 1024)
+    job, result = _job_and_result(storage)
+    state = _RepositoryState({job.job_id: result})
+    service = _service(storage, state)
+    first = service.export(job, ExportFormat.DOCX_RECONSTRUCTION)
+    snapshot = state.artifacts[first.export_artifact_id]
+    (storage._root / snapshot.storage_key).write_bytes(b"corrupt")
+    real_publish = storage.publish_verified_artifact
+    attempts = 0
+
+    def fail_once(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("worker stopped")
+        return real_publish(*args, **kwargs)
+
+    monkeypatch.setattr(storage, "publish_verified_artifact", fail_once)
+
+    with pytest.raises(VerificationError) as raised:
+        service.export(job, ExportFormat.DOCX_RECONSTRUCTION)
+
+    assert raised.value.code == "export_artifact_repair_pending"
+    assert state.artifacts[first.export_artifact_id].status is ArtifactLifecycleStatus.PENDING
+    assert storage.artifact_repair_quarantine_path(
+        job.job_id,
+        first.export_artifact_id,
+        FileType.DOCX,
+    ).exists()
+
+    repaired = service.export(job, ExportFormat.DOCX_RECONSTRUCTION)
+
+    assert repaired == first
+    retry_download = service.download(job.job_id, first.export_artifact_id)
+    with retry_download.handle:
+        assert retry_download.handle.read_bytes()
+    assert not storage.artifact_repair_quarantine_path(
+        job.job_id,
+        first.export_artifact_id,
+        FileType.DOCX,
+    ).exists()
+
+
+def test_corrupt_ready_repair_rejects_changed_canonical_metadata(
+    tmp_path: Path,
+) -> None:
+    storage = JobStorage(tmp_path / "jobs", max_upload_bytes=5 * 1024 * 1024)
+    job, result = _job_and_result(storage)
+    state = _RepositoryState({job.job_id: result})
+    service = _service(storage, state)
+    artifact = service.export(job, ExportFormat.DOCX_RECONSTRUCTION)
+    snapshot = state.artifacts[artifact.export_artifact_id]
+    (storage._root / snapshot.storage_key).write_bytes(b"corrupt")
+    state.artifacts[artifact.export_artifact_id] = replace(
+        snapshot,
+        content_sha256="0" * 64,
+    )
+
+    with pytest.raises(VerificationError) as raised:
+        service.export(job, ExportFormat.DOCX_RECONSTRUCTION)
+
+    assert raised.value.code == "export_artifact_conflict"
+    assert raised.value.retryable is False
+
+
 def test_download_maps_corrupt_artifact_to_typed_unavailable_error(
     tmp_path: Path,
 ) -> None:
@@ -421,6 +577,72 @@ def test_download_maps_corrupt_artifact_to_typed_unavailable_error(
     assert raised.value.code == "export_artifact_unavailable"
     assert raised.value.stage == "finalizing"
     assert raised.value.retryable is True
+
+
+@pytest.mark.parametrize(
+    ("result_state", "expected_code"),
+    [
+        (JobResultState.MISSING, "export_artifact_not_found"),
+        (JobResultState.PENDING, "job_result_unavailable"),
+        (JobResultState.UNAVAILABLE, "job_result_unavailable"),
+        (JobResultState.EXPIRED, "job_result_expired"),
+    ],
+)
+def test_download_denies_lingering_artifact_without_current_ready_result(
+    tmp_path: Path,
+    result_state: JobResultState,
+    expected_code: str,
+) -> None:
+    storage = JobStorage(tmp_path / "jobs", max_upload_bytes=5 * 1024 * 1024)
+    job, result = _job_and_result(storage)
+    state = _RepositoryState({job.job_id: result})
+    service = _service(storage, state)
+    artifact = service.export(job, ExportFormat.DOCX_RECONSTRUCTION)
+    state.result_state_by_job[job.job_id] = result_state
+
+    with pytest.raises(VerificationError) as raised:
+        service.download(job.job_id, artifact.export_artifact_id)
+
+    assert raised.value.code == expected_code
+
+
+def test_download_denies_artifact_from_superseded_result_version(
+    tmp_path: Path,
+) -> None:
+    storage = JobStorage(tmp_path / "jobs", max_upload_bytes=5 * 1024 * 1024)
+    job, result = _job_and_result(storage)
+    state = _RepositoryState({job.job_id: result})
+    service = _service(storage, state)
+    artifact = service.export(job, ExportFormat.DOCX_RECONSTRUCTION)
+    state.result_by_job[job.job_id] = result.model_copy(
+        update={
+            "verification_run_id": uuid4(),
+            "source_version": "sha256:superseded",
+        }
+    )
+
+    with pytest.raises(VerificationError) as raised:
+        service.download(job.job_id, artifact.export_artifact_id)
+
+    assert raised.value.code == "export_artifact_not_found"
+
+
+def test_authorized_download_descriptor_survives_retention_unlink(
+    tmp_path: Path,
+) -> None:
+    storage = JobStorage(tmp_path / "jobs", max_upload_bytes=5 * 1024 * 1024)
+    job, result = _job_and_result(storage)
+    state = _RepositoryState({job.job_id: result})
+    service = _service(storage, state)
+    artifact = service.export(job, ExportFormat.DOCX_RECONSTRUCTION)
+    download = service.download(job.job_id, artifact.export_artifact_id)
+    artifact_path = download.handle.path
+    artifact_path.unlink()
+
+    content = download.handle.read_bytes(require_current_entry=False)
+
+    assert content
+    download.handle.close()
 
 
 def test_export_workspace_cleanup_failure_is_typed(

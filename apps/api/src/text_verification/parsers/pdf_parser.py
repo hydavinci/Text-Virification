@@ -188,8 +188,6 @@ def _extract_page(
     )
     recognized_boxes: tuple[OcrLayoutBox, ...] | None = None
     if classification.ocr_required and ocr is not None:
-        if progress_observer is not None:
-            progress_observer(VerificationProgressStage.OCR)
         recognized_boxes = _recognize_page(
             page,
             page_number=page_number,
@@ -197,6 +195,7 @@ def _extract_page(
             ocr=ocr,
             language=ocr_language,
             limits=limits,
+            progress_observer=progress_observer,
         )
     tables, table_warnings = _extract_tables(page, page_number, limits)
     tables = _normalize_tables(tables, geometry)
@@ -253,8 +252,11 @@ def _recognize_page(
     ocr: OcrRecognizer,
     language: SupportedOcrLanguage,
     limits: PdfResourceLimits,
+    progress_observer: VerificationProgressObserver | None,
 ) -> tuple[OcrLayoutBox, ...]:
     payload, raster_width, raster_height = _render_page_for_ocr(page, limits)
+    if progress_observer is not None:
+        progress_observer(VerificationProgressStage.OCR)
     try:
         raw_boxes = ocr.recognize(payload, language)
     except (OcrOutputError, OcrUnavailableError):

@@ -21,6 +21,10 @@ def live_api_url() -> str:
         pytest.skip(
             "LIVE_API_URL is not set; a live Compose API/worker with OCR runtime is required."
         )
+    if os.environ.get("LIVE_OCR_RUNTIME") != "1":
+        pytest.skip(
+            "LIVE_OCR_RUNTIME=1 is not set; the live OCR model/runtime must be explicitly enabled."
+        )
     return url.rstrip("/")
 
 
@@ -47,8 +51,13 @@ def test_scanned_pdf_job_reports_real_ocr_and_reconstructs_docx(
     )
     assert result_response.status_code == 200, result_response.text
     result = result_response.json()
-    assert result["text"].strip()
-    assert result["issues"]
+    expected_original = "test@example.com"
+    issue = next(item for item in result["issues"] if item["type"] == "pii_email")
+    expected_start = result["text"].index(expected_original)
+    assert issue["original"] == expected_original
+    assert issue["start"] == expected_start
+    assert issue["end"] == expected_start + len(expected_original)
+    assert result["text"][issue["start"] : issue["end"]] == expected_original
 
     export_response = httpx.post(
         f"{live_api_url}/api/v1/jobs/{job_id}/exports",
@@ -63,7 +72,18 @@ def test_scanned_pdf_job_reports_real_ocr_and_reconstructs_docx(
     )
     assert download.status_code == 200, download.text
     rebuilt = Document(io.BytesIO(download.content))
-    assert any(paragraph.text.strip() for paragraph in rebuilt.paragraphs)
+    rebuilt_text = "\n".join(
+        [
+            *(paragraph.text for paragraph in rebuilt.paragraphs),
+            *(
+                cell.text
+                for table in rebuilt.tables
+                for row in table.rows
+                for cell in row.cells
+            ),
+        ]
+    )
+    assert expected_original in rebuilt_text
 
     wrong_job_download = httpx.get(
         f"{live_api_url}/api/v1/jobs/00000000-0000-0000-0000-000000000000/"

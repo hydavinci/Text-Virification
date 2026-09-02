@@ -98,6 +98,53 @@ class JobStorage(DocumentStorage):
             expected_digest=expected_digest,
         )
 
+    def prepare_artifact_repair(
+        self,
+        job_id: UUID,
+        artifact_id: UUID,
+        storage_key: str,
+        file_type: FileType | str,
+        *,
+        expected_size: int,
+        expected_digest: str,
+    ) -> bool | None:
+        return self._artifact_storage.prepare_repair(
+            job_id,
+            artifact_id,
+            storage_key,
+            file_type,
+            expected_size=expected_size,
+            expected_digest=expected_digest,
+        )
+
+    def delete_artifact_repair_quarantine(
+        self,
+        job_id: UUID,
+        artifact_id: UUID,
+        storage_key: str,
+        file_type: FileType | str,
+    ) -> bool:
+        return self._artifact_storage.delete_repair_quarantine(
+            job_id,
+            artifact_id,
+            storage_key,
+            file_type,
+        )
+
+    def artifact_repair_quarantine_path(
+        self,
+        job_id: UUID,
+        artifact_id: UUID,
+        file_type: FileType | str,
+    ) -> Path:
+        storage_key = build_artifact_storage_key(job_id, artifact_id, file_type)
+        return self._artifact_storage.repair_quarantine_path(
+            job_id,
+            artifact_id,
+            storage_key,
+            file_type,
+        )
+
     def delete_artifact(self, job_id: UUID, storage_key: str) -> bool:
         return self._artifact_storage.delete_owned(job_id, storage_key)
 
@@ -210,8 +257,41 @@ class JobStorage(DocumentStorage):
         job_id: UUID,
         storage_key: str,
     ) -> ArtifactOrphanCandidate:
+        relative_path = validate_artifact_storage_key(job_id, storage_key)
+        repair_suffix = ".repair-corrupt"
+        if relative_path.name.startswith(".") and relative_path.name.endswith(
+            repair_suffix
+        ):
+            canonical_name = relative_path.name[1 : -len(repair_suffix)]
+            artifact_text, separator, file_type_text = canonical_name.rpartition(".")
+            if not separator:
+                raise InvalidUpload(
+                    "Artifact repair quarantine has no canonical identity."
+                )
+            try:
+                artifact_id = UUID(artifact_text)
+                file_type = FileType(file_type_text)
+            except ValueError as error:
+                raise InvalidUpload(
+                    "Artifact repair quarantine has no canonical identity."
+                ) from error
+            canonical_storage_key = "/".join(
+                (*relative_path.parts[:-1], canonical_name)
+            )
+            validate_artifact_identity(
+                job_id,
+                artifact_id,
+                file_type,
+                canonical_storage_key,
+            )
+            return ArtifactOrphanCandidate(
+                job_id,
+                artifact_id,
+                file_type,
+                canonical_storage_key,
+                storage_key,
+            )
         try:
-            relative_path = validate_artifact_storage_key(job_id, storage_key)
             artifact_text, separator, file_type_text = relative_path.name.rpartition(".")
             if not separator:
                 raise ValueError("Artifact filename has no file type suffix.")

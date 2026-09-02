@@ -1,3 +1,4 @@
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -5,7 +6,7 @@ from pydantic import ValidationError
 
 from text_verification.domain.documents import DocumentModel, FileType, TextBlock
 from text_verification.domain.issues import Issue, IssueSeverity
-from text_verification.domain.jobs import JobRead, JobStatus
+from text_verification.domain.jobs import JobProgressStage, JobRead, JobStatus
 
 
 def _block(
@@ -346,18 +347,64 @@ def test_job_status_contains_all_pipeline_states() -> None:
         "queued",
         "upload_validated",
         "parsing",
-        "ocr",
         "checking_format",
         "checking_sensitive",
         "checking_chinese",
         "checking_english",
-        "exporting",
-        "finalizing",
         "completed",
         "partial",
         "failed",
         "expired",
     }
+    assert {"ocr", "exporting", "finalizing"} <= {
+        stage.value for stage in JobProgressStage
+    }
+
+
+@pytest.mark.parametrize(
+    ("status", "progress", "expected_stage"),
+    [
+        (JobStatus.PARSING, 25, JobProgressStage.PARSING),
+        (JobStatus.PARSING, 40, JobProgressStage.OCR),
+        (JobStatus.CHECKING_ENGLISH, 90, JobProgressStage.CHECKING_ENGLISH),
+        (JobStatus.CHECKING_ENGLISH, 95, JobProgressStage.FINALIZING),
+        (JobStatus.COMPLETED, 100, JobProgressStage.COMPLETED),
+    ],
+)
+def test_job_read_derives_advanced_stage_from_legacy_status_and_progress(
+    status: JobStatus,
+    progress: int,
+    expected_stage: JobProgressStage,
+) -> None:
+    job = JobRead(
+        job_id=uuid4(),
+        source_name="sample.pdf",
+        file_type=FileType.PDF,
+        size_bytes=10,
+        status=status,
+        progress=progress,
+        created_at=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+
+    assert job.stage is expected_stage
+
+
+def test_job_read_stage_tracks_status_progress_model_copy_updates() -> None:
+    job = JobRead(
+        job_id=uuid4(),
+        source_name="sample.pdf",
+        file_type=FileType.PDF,
+        size_bytes=10,
+        status=JobStatus.PARSING,
+        progress=25,
+        created_at=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+
+    updated = job.model_copy(update={"progress": 40})
+
+    assert updated.stage is JobProgressStage.OCR
 
 
 def test_job_read_rejects_unsupported_file_type() -> None:

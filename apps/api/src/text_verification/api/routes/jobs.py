@@ -36,6 +36,7 @@ from text_verification.domain.jobs import (
     RESULT_READY_STATUSES,
     TERMINAL_STATUSES,
     JobEvent,
+    JobProgressStage,
     JobRead,
     JobStatus,
     TerminalJobStateError,
@@ -179,10 +180,10 @@ def create_job_export(
             "Job result is not available yet.",
         )
 
-    def record(stage: JobStatus) -> None:
+    def record(stage: JobProgressStage) -> None:
         message = (
             EXPORTING_EVENT_MESSAGE
-            if stage is JobStatus.EXPORTING
+            if stage is JobProgressStage.EXPORTING
             else FINALIZING_EXPORT_EVENT_MESSAGE
         )
         try:
@@ -229,7 +230,7 @@ def download_job_export(
     except VerificationError as error:
         raise _export_http_error(error) from error
     with download.handle:
-        content = download.handle.read_bytes()
+        content = download.handle.read_bytes(require_current_entry=False)
     return Response(
         content=content,
         media_type=download.media_type,
@@ -501,7 +502,7 @@ def _format_progress_event(event: JobEvent) -> str:
     payload = json.dumps(
         {
             "status": event.status.value,
-            "stage": event.status.value,
+            "stage": event.stage.value,
             "progress": event.progress,
             "message": event.message,
             "created_at": event.created_at.isoformat(),
@@ -562,9 +563,13 @@ def _export_http_error(error: VerificationError) -> HTTPException:
         "unsupported_export_format": status.HTTP_422_UNPROCESSABLE_CONTENT,
         "document_reconstruction_failed": status.HTTP_422_UNPROCESSABLE_CONTENT,
         "export_artifact_conflict": status.HTTP_409_CONFLICT,
+        "export_artifact_repair_cleanup_failed": status.HTTP_409_CONFLICT,
+        "export_artifact_repair_pending": status.HTTP_409_CONFLICT,
+        "export_artifact_repair_unsafe": status.HTTP_409_CONFLICT,
         "export_finalization_uncertain": status.HTTP_503_SERVICE_UNAVAILABLE,
         "export_persistence_failed": status.HTTP_503_SERVICE_UNAVAILABLE,
         "export_workspace_cleanup_failed": status.HTTP_503_SERVICE_UNAVAILABLE,
+        "job_result_expired": status.HTTP_410_GONE,
     }.get(error.code, status.HTTP_500_INTERNAL_SERVER_ERROR)
     return _typed_http_error(
         status_code,
