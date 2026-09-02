@@ -1533,6 +1533,74 @@ def test_table_spatial_index_enforces_cumulative_node_visit_budget() -> None:
     assert raised.value.actual == 3
 
 
+def test_table_spatial_index_default_budget_accepts_legal_grid_workload() -> None:
+    grid_size = 100
+    cells: list[object] = []
+    characters: list[object] = []
+    glyph_offsets = ((0.1, 0.1), (0.6, 0.1), (0.1, 0.6), (0.6, 0.6))
+    for row in range(grid_size):
+        for column in range(grid_size):
+            index = row * grid_size + column
+            x = float(column * 2)
+            y = float(row * 2)
+            cells.append(
+                pdf_parser_module._TableCellCandidate(
+                    key=(0, row, column),
+                    bbox=(x, y, x + 1.0, y + 1.0),
+                    order=index,
+                )
+            )
+            characters.extend(
+                SimpleNamespace(
+                    group_id=f"grid-{index}-{glyph_index}",
+                    bbox=(x + dx, y + dy, x + dx + 0.2, y + dy + 0.2),
+                )
+                for glyph_index, (dx, dy) in enumerate(glyph_offsets)
+            )
+    span = SimpleNamespace(
+        span_index=0,
+        bbox=(0.0, 0.0, float(grid_size * 2), float(grid_size * 2)),
+        characters=tuple(characters),
+    )
+
+    candidate_index = pdf_parser_module._build_candidate_index(
+        tuple(cells),
+        [span],
+    )
+
+    assert len(candidate_index.groups_by_cell) == 10_000
+    assert all(
+        len(cell_characters) == 4
+        for cell_characters in candidate_index.groups_by_cell.values()
+    )
+
+
+def test_table_spatial_node_visit_budget_scales_and_caps() -> None:
+    limits = PdfResourceLimits()
+    hard_maximum = limits.max_table_spatial_node_visits_per_page
+
+    assert pdf_parser_module._table_spatial_node_visit_budget(1, 1, hard_maximum) == 5
+    assert pdf_parser_module._table_spatial_node_visit_budget(1, 2, hard_maximum) == 8
+    assert pdf_parser_module._table_spatial_node_visit_budget(8, 1, hard_maximum) == 28
+    assert hard_maximum == 45_020_000
+    assert (
+        pdf_parser_module._table_spatial_node_visit_budget(
+            limits.max_table_cells_per_page,
+            limits.max_table_text_chars_per_page,
+            hard_maximum,
+        )
+        == hard_maximum
+    )
+    assert (
+        pdf_parser_module._table_spatial_node_visit_budget(
+            10**100,
+            10**100,
+            hard_maximum,
+        )
+        == hard_maximum
+    )
+
+
 def test_partial_table_overlap_preserves_unowned_editable_glyph() -> None:
     rawdict = _rawdict_with_line(
         [

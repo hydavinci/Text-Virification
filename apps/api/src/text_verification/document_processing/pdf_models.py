@@ -335,6 +335,7 @@ class PdfResourceLimits(_PdfModel):
     max_table_text_chars_per_cell: PositiveInt = 100_000
     max_table_text_chars_per_page: PositiveInt = 1_000_000
     max_table_glyph_candidates_per_cell: PositiveInt = 100_000
+    max_table_spatial_node_visits_per_page: PositiveInt = 45_020_000
 
 
 def _contains(outer: BBox, inner: BBox) -> bool:

@@ -35,7 +35,10 @@ _MIN_VISUAL_GAP = 0.5
 _FONT_GAP_RATIO = 0.08
 _GLYPH_GAP_RATIO = 0.2
 _RAWDICT_TEXT_FLAGS = pymupdf.TEXTFLAGS_RAWDICT & ~pymupdf.TEXT_PRESERVE_IMAGES
-_MAX_TABLE_SPATIAL_NODE_VISITS_PER_PAGE = 1_000_000
+_TABLE_SPATIAL_VISITS_PER_DEPTH = 3
+_MAX_TABLE_SPATIAL_NODE_VISITS_PER_PAGE = (
+    PdfResourceLimits().max_table_spatial_node_visits_per_page
+)
 
 
 @dataclass(frozen=True)
@@ -343,7 +346,11 @@ def _align_table_characters(
     *,
     limits: PdfResourceLimits,
 ) -> tuple[list[PdfTable], set[str]]:
-    candidate_index = _build_table_candidate_index(tables, spans)
+    candidate_index = _build_table_candidate_index(
+        tables,
+        spans,
+        hard_max_node_visits=limits.max_table_spatial_node_visits_per_page,
+    )
     aligned_tables: list[PdfTable] = []
     owned_group_ids: set[str] = set()
     for table_position, table in enumerate(tables):
@@ -546,15 +553,19 @@ class _TableCellSpatialNode:
 @dataclass
 class _TableCellSpatialIndex:
     root: _TableCellSpatialNode | None
-    max_node_visits: int = _MAX_TABLE_SPATIAL_NODE_VISITS_PER_PAGE
+    unique_cell_count: int
+    hard_max_node_visits: int = _MAX_TABLE_SPATIAL_NODE_VISITS_PER_PAGE
+    max_node_visits: int | None = None
     node_visits: int = 0
+    query_count: int = 0
 
     @classmethod
     def build(
         cls,
         cells: tuple[_TableCellCandidate, ...],
         *,
-        max_node_visits: int = _MAX_TABLE_SPATIAL_NODE_VISITS_PER_PAGE,
+        max_node_visits: int | None = None,
+        hard_max_node_visits: int = _MAX_TABLE_SPATIAL_NODE_VISITS_PER_PAGE,
     ) -> _TableCellSpatialIndex:
         entries_by_bbox: dict[
             tuple[float, float, float, float],
@@ -575,6 +586,8 @@ class _TableCellSpatialIndex:
                 entries,
                 axis=_table_cell_spatial_axis(entries),
             ),
+            unique_cell_count=len(entries),
+            hard_max_node_visits=hard_max_node_visits,
             max_node_visits=max_node_visits,
         )
 
@@ -584,6 +597,16 @@ class _TableCellSpatialIndex:
     ) -> _TableCellCandidate | None:
         if self.root is None:
             return None
+        self.query_count += 1
+        maximum = (
+            self.max_node_visits
+            if self.max_node_visits is not None
+            else _table_spatial_node_visit_budget(
+                self.unique_cell_count,
+                self.query_count,
+                self.hard_max_node_visits,
+            )
+        )
         best: _TableCellCandidate | None = None
         best_score: tuple[bool, bool, float, float, int] | None = None
 
@@ -591,10 +614,10 @@ class _TableCellSpatialIndex:
             node: _TableCellSpatialNode,
         ) -> tuple[bool, bool, float, float, int] | None:
             self.node_visits += 1
-            if self.node_visits > self.max_node_visits:
+            if self.node_visits > maximum:
                 raise PdfResourceLimitError(
                     limit="max_table_spatial_node_visits_per_page",
-                    maximum=self.max_node_visits,
+                    maximum=maximum,
                     actual=self.node_visits,
                 )
             return _table_cell_node_upper_bound(node, bbox)
@@ -686,6 +709,21 @@ def _table_cell_spatial_axis(entries: tuple[_IndexedTableCell, ...]) -> int:
     )
 
 
+def _table_spatial_node_visit_budget(
+    unique_cell_count: int,
+    glyph_count: int,
+    hard_maximum: int,
+) -> int:
+    if unique_cell_count == 0 or glyph_count == 0:
+        return 0
+    depth = (unique_cell_count - 1).bit_length() + 1
+    workload_budget = (
+        unique_cell_count * 2
+        + glyph_count * depth * _TABLE_SPATIAL_VISITS_PER_DEPTH
+    )
+    return min(workload_budget, hard_maximum)
+
+
 def _table_cell_node_upper_bound(
     node: _TableCellSpatialNode,
     bbox: tuple[float, float, float, float],
@@ -753,6 +791,8 @@ def _bbox_area(bbox: tuple[float, float, float, float]) -> float:
 def _build_table_candidate_index(
     tables: list[PdfTable],
     spans: list[PdfTextSpan],
+    *,
+    hard_max_node_visits: int = _MAX_TABLE_SPATIAL_NODE_VISITS_PER_PAGE,
 ) -> _TableCandidateIndex:
     cells: list[_TableCellCandidate] = []
     order = 0
@@ -768,12 +808,18 @@ def _build_table_candidate_index(
                         )
                     )
                 order += 1
-    return _build_candidate_index(tuple(cells), spans)
+    return _build_candidate_index(
+        tuple(cells),
+        spans,
+        hard_max_node_visits=hard_max_node_visits,
+    )
 
 
 def _build_candidate_index(
     cells: tuple[_TableCellCandidate, ...],
     spans: list[PdfTextSpan],
+    *,
+    hard_max_node_visits: int = _MAX_TABLE_SPATIAL_NODE_VISITS_PER_PAGE,
 ) -> _TableCandidateIndex:
     groups_by_cell: dict[
         tuple[int, int, int],
@@ -781,7 +827,10 @@ def _build_candidate_index(
     ] = {cell.key: [] for cell in cells}
     if not cells:
         return _TableCandidateIndex(groups_by_cell={})
-    spatial_index = _TableCellSpatialIndex.build(cells)
+    spatial_index = _TableCellSpatialIndex.build(
+        cells,
+        hard_max_node_visits=hard_max_node_visits,
+    )
     seen_group_ids: set[str] = set()
     page_order = 0
     for span in spans:
