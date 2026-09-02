@@ -24,12 +24,12 @@ class CompatibilityExporter:
         track_changes: bool = False,
         modified_text: str | None = None,
     ) -> Path:
-        resolved_source_path = self.source_path_resolver.resolve(
+        resolved_source = self.source_path_resolver.resolve(
             document,
             source_path=source_path,
         )
         exported = export_original(
-            resolved_source_path,
+            resolved_source.path,
             self.file_type.value,
             [_replacement_for_issue(issue) for issue in issues],
             track_changes,

@@ -21,7 +21,7 @@ from text_verification.compatibility.exporters import (
 )
 from text_verification.domain.documents import DocumentModel, FileType, TextBlock
 from text_verification.domain.issues import Issue, IssueSeverity
-from text_verification.domain.ports import CheckContext, CheckResult
+from text_verification.domain.ports import CheckContext, CheckResult, ResolvedSourcePath
 from text_verification.domain.verification import GlossaryTerm, Scenario, VerificationOptions
 from text_verification.exporters.compatibility_exporter import CompatibilityExporter
 from text_verification.exporters.registry import ExporterRegistry
@@ -1183,9 +1183,14 @@ def _with_pdf_character_direction(
 class StaticSourcePathResolver:
     path: Path
 
-    def resolve(self, document: DocumentModel, *, source_path: Path | None = None) -> Path:
+    def resolve(
+        self,
+        document: DocumentModel,
+        *,
+        source_path: Path | None = None,
+    ) -> ResolvedSourcePath:
         del document
-        return source_path or self.path
+        return ResolvedSourcePath.from_path(source_path or self.path)
 
 
 def _document(text: str = "帐号", *, source_name: str = "sample.txt") -> DocumentModel:

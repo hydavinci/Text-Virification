@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import ParamSpec, Protocol
 from uuid import UUID, uuid4
@@ -83,13 +83,50 @@ class Parser(Protocol):
     def parse(self, source_path: Path) -> DocumentModel: ...
 
 
+@dataclass(frozen=True)
+class ResolvedSourcePath:
+    root: Path
+    relative_path: PurePosixPath
+
+    def __post_init__(self) -> None:
+        if not self.root.is_absolute() or ".." in self.root.parts:
+            raise ValueError("source root must be absolute and normalized")
+        relative_text = self.relative_path.as_posix()
+        if (
+            self.relative_path.is_absolute()
+            or not self.relative_path.parts
+            or relative_text in {"", "."}
+            or "\x00" in relative_text
+            or "\\" in relative_text
+            or any(part in {"", ".", ".."} for part in self.relative_path.parts)
+            or any(
+                len(part) >= 2 and part[1] == ":"
+                for part in self.relative_path.parts
+            )
+        ):
+            raise ValueError("source path must be a safe relative path")
+
+    @classmethod
+    def from_path(cls, path: Path) -> ResolvedSourcePath:
+        if not path.is_absolute() or ".." in path.parts or not path.name:
+            raise ValueError("source path must be absolute and normalized")
+        return cls(
+            root=path.parent,
+            relative_path=PurePosixPath(path.name),
+        )
+
+    @property
+    def path(self) -> Path:
+        return self.root.joinpath(*self.relative_path.parts)
+
+
 class SourcePathResolver(Protocol):
     def resolve(
         self,
         document: DocumentModel,
         *,
         source_path: Path | None = None,
-    ) -> Path: ...
+    ) -> ResolvedSourcePath: ...
 
 
 class Checker(Protocol):

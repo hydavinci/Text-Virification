@@ -33,7 +33,7 @@ from text_verification.domain.documents import (
     FileType,
     TextBlock,
 )
-from text_verification.domain.ports import SourcePathResolver
+from text_verification.domain.ports import ResolvedSourcePath, SourcePathResolver
 
 DOCX_RECONSTRUCTION = ExportFormat.DOCX_RECONSTRUCTION
 _DEFAULT_PAGE_WIDTH_POINTS = 612.0
@@ -41,6 +41,8 @@ _DEFAULT_PAGE_HEIGHT_POINTS = 792.0
 _DEFAULT_MARGIN_POINTS = 54.0
 _FIXED_CORE_PROPERTY_TIME = datetime(2000, 1, 1, tzinfo=UTC)
 _XML_REPLACEMENT_CHARACTER = "\ufffd"
+_TABLE_GEOMETRY_TOLERANCE_POINTS = 0.5
+_TABLE_MIN_HORIZONTAL_OVERLAP_RATIO = 0.1
 _PYMUPDF: Any = pymupdf
 
 type SupportedImageMime = Literal["image/png", "image/jpeg"]
@@ -100,7 +102,9 @@ class _Table:
     last_source_index: int
     y: float
     x: float
+    right: float
     bottom: float
+    row_anchors: tuple[float, ...]
 
 
 type _RenderUnit = TextBlock | _Table
@@ -170,10 +174,17 @@ def _preflight_document(
             image_count += 1
             if image_count > limits.max_images:
                 raise ExportError("Document exceeds the configured image count limit.")
+            run_count += 1
         if block.kind in {"heading", "paragraph"}:
-            raw_runs = block.style.get("runs", block.style.get("spans"))
-            run_count += len(raw_runs) if isinstance(raw_runs, list) else 1
-            if block.style.get("spans") is not None:
+            raw_spans = block.style.get("spans")
+            if raw_spans is None:
+                run_count += 1
+            elif not isinstance(raw_spans, list):
+                raise ExportError("Canonical PDF span metadata is invalid.")
+            else:
+                run_count += max(1, len(raw_spans))
+                if run_count > limits.max_runs:
+                    raise ExportError("Document exceeds the configured run count limit.")
                 _validated_pdf_spans(block)
         elif block.kind == "table_cell":
             run_count += 1
@@ -201,12 +212,14 @@ def _resolve_images(
     if source_path_resolver is None:
         raise ExportError("Canonical PDF images require an injected source resolver.")
     try:
-        source_path = source_path_resolver.resolve(document)
+        resolved_source = source_path_resolver.resolve(document)
     except (OSError, ValueError) as error:
         raise ExportError("Canonical PDF source could not be resolved.") from error
+    if not isinstance(resolved_source, ResolvedSourcePath):
+        raise ExportError("Canonical PDF source resolver must return an anchored source.")
     source = _read_resolved_source(
         document,
-        source_path,
+        resolved_source,
         limits.max_pdf_source_bytes,
     )
     try:
@@ -247,19 +260,16 @@ def _preflight_pdf_image_streams(
         try:
             if not pdf.xref_is_image(request.xref):
                 raise ExportError("Canonical PDF image reference is not an image object.")
-            value_type, raw_value = pdf.xref_get_key(request.xref, "Length")
-            width_type, raw_width = pdf.xref_get_key(request.xref, "Width")
-            height_type, raw_height = pdf.xref_get_key(request.xref, "Height")
+            raw_stream = pdf.xref_stream_raw(request.xref)
+            width = _direct_pdf_integer(pdf, request.xref, "Width")
+            height = _direct_pdf_integer(pdf, request.xref, "Height")
+        except ExportError:
+            raise
         except (RuntimeError, ValueError) as error:
             raise ExportError("Canonical PDF image reference is invalid.") from error
-        if value_type != "int" or width_type != "int" or height_type != "int":
-            raise ExportError("Canonical PDF image stream metadata is unavailable.")
-        try:
-            image_bytes = int(raw_value)
-            width = int(raw_width)
-            height = int(raw_height)
-        except (TypeError, ValueError) as error:
-            raise ExportError("Canonical PDF image stream metadata is invalid.") from error
+        if not isinstance(raw_stream, bytes):
+            raise ExportError("Canonical PDF image raw stream is unavailable.")
+        image_bytes = len(raw_stream)
         if image_bytes <= 0 or image_bytes > limits.max_image_bytes:
             raise ExportError("PDF image stream exceeds the configured size limit.")
         if (
@@ -275,6 +285,18 @@ def _preflight_pdf_image_streams(
         total_bytes += image_bytes
         if total_bytes > limits.max_total_image_bytes:
             raise ExportError("Document exceeds the configured aggregate image media limit.")
+
+
+def _direct_pdf_integer(pdf: Any, xref: int, key: str) -> int:
+    value_type, raw_value = pdf.xref_get_key(xref, key)
+    if (
+        value_type != "int"
+        or not isinstance(raw_value, str)
+        or not raw_value.isdecimal()
+        or len(raw_value) > 20
+    ):
+        raise ExportError(f"PDF image {key} must be an integer.")
+    return int(raw_value)
 
 
 def _extract_pdf_image_content(
@@ -403,6 +425,20 @@ def _table_from_blocks(
             max(bbox[2] for bbox in bboxes),
             max(bbox[3] for bbox in bboxes),
         )
+    row_anchors = tuple(
+        min(
+            block.bbox[1]
+            for block in cells.values()
+            if block.row_index == row_index and block.bbox is not None
+        )
+        for row_index in sorted(
+            {
+                block.row_index
+                for block in cells.values()
+                if block.row_index is not None and block.bbox is not None
+            }
+        )
+    )
     return _Table(
         page=page,
         table_index=table_index,
@@ -415,7 +451,9 @@ def _table_from_blocks(
         last_source_index=last_source_index,
         y=table_bbox[1] if table_bbox is not None else math.inf,
         x=table_bbox[0] if table_bbox is not None else math.inf,
+        right=table_bbox[2] if table_bbox is not None else math.inf,
         bottom=table_bbox[3] if table_bbox is not None else math.inf,
+        row_anchors=row_anchors,
     )
 
 
@@ -471,14 +509,38 @@ def _reject_interleaved_table_blocks(
                 block.bbox is None
                 and table.first_source_index < source_index < table.last_source_index
             )
-            within_vertical_span = (
-                block.bbox is not None
-                and table.y <= block.bbox[1] < table.bottom
-            )
-            if within_source_span or within_vertical_span:
+            if within_source_span or _block_interleaves_table_rows(table, block):
                 raise ExportError(
                     "Canonical blocks interleaved within a table cannot be reconstructed safely."
                 )
+
+
+def _block_interleaves_table_rows(table: _Table, block: TextBlock) -> bool:
+    if block.bbox is None or len(table.row_anchors) < 2:
+        return False
+    x0, y0, x1, y1 = block.bbox
+    block_center_y = (y0 + y1) / 2.0
+    if not (
+        table.row_anchors[0] + _TABLE_GEOMETRY_TOLERANCE_POINTS
+        < block_center_y
+        < table.row_anchors[-1] - _TABLE_GEOMETRY_TOLERANCE_POINTS
+    ):
+        return False
+    overlap = min(table.right, x1) - max(table.x, x0)
+    if overlap <= _TABLE_GEOMETRY_TOLERANCE_POINTS:
+        return False
+    block_width = x1 - x0
+    table_width = table.right - table.x
+    if block_width <= 0 or table_width <= 0:
+        return False
+    block_center_x = (x0 + x1) / 2.0
+    center_inside = (
+        table.x - _TABLE_GEOMETRY_TOLERANCE_POINTS
+        <= block_center_x
+        <= table.right + _TABLE_GEOMETRY_TOLERANCE_POINTS
+    )
+    overlap_ratio = overlap / min(block_width, table_width)
+    return center_inside or overlap_ratio >= _TABLE_MIN_HORIZONTAL_OVERLAP_RATIO
 
 
 def _declared_table_shape(block: TextBlock) -> tuple[int, int] | None:
@@ -631,7 +693,10 @@ def _validated_pdf_spans(block: TextBlock) -> tuple[PdfTextSpan, ...]:
     if not isinstance(raw_spans, list):
         raise ExportError("Canonical PDF span metadata is invalid.")
     try:
-        spans = tuple(PdfTextSpan.model_validate(value) for value in raw_spans)
+        spans = tuple(
+            PdfTextSpan.model_validate(_bounded_span_metadata(value))
+            for value in raw_spans
+        )
     except (TypeError, ValueError) as error:
         raise ExportError("Canonical PDF span metadata is invalid.") from error
     reconstructed: list[str] = []
@@ -644,6 +709,24 @@ def _validated_pdf_spans(block: TextBlock) -> tuple[PdfTextSpan, ...]:
     if "".join(reconstructed) != block.text:
         raise ExportError("Canonical PDF spans do not reconstruct their block text.")
     return spans
+
+
+def _bounded_span_metadata(value: object) -> dict[str, object]:
+    if not isinstance(value, Mapping):
+        raise ExportError("Canonical PDF span metadata is invalid.")
+    return {
+        "text": value.get("text"),
+        "bbox": value.get("bbox"),
+        "font_name": value.get("font_name"),
+        "font_size": value.get("font_size"),
+        "font_flags": value.get("font_flags"),
+        "color": value.get("color"),
+        "span_index": value.get("span_index"),
+        "line_direction": value.get("line_direction", (1.0, 0.0)),
+        "writing_mode": value.get("writing_mode", 0),
+        "line_index": value.get("line_index", 0),
+        "span_order": value.get("span_order", 0),
+    }
 
 
 def _heading_level(value: object) -> int:
@@ -779,14 +862,30 @@ def _canonical_pdf_image_request(
 
 def _read_resolved_source(
     document: DocumentModel,
-    source_path: Path,
+    resolved_source: ResolvedSourcePath,
     max_bytes: int,
 ) -> bytes:
-    if not source_path.is_absolute() or ".." in source_path.parts:
-        raise ExportError("Resolved source path must be absolute and normalized.")
+    root_fd = _open_absolute_directory(
+        resolved_source.root,
+        "Resolved source root is unsafe or unavailable.",
+    )
+    directory_fd = root_fd
+    opened_directories: list[int] = []
     file_fd = -1
     try:
-        file_fd = os.open(source_path, os.O_RDONLY | os.O_NOFOLLOW)
+        for part in resolved_source.relative_path.parts[:-1]:
+            next_fd = os.open(
+                part,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=directory_fd,
+            )
+            opened_directories.append(next_fd)
+            directory_fd = next_fd
+        file_fd = os.open(
+            resolved_source.relative_path.name,
+            os.O_RDONLY | os.O_NOFOLLOW,
+            dir_fd=directory_fd,
+        )
         file_stat = os.fstat(file_fd)
         if not stat.S_ISREG(file_stat.st_mode):
             raise ExportError("Resolved source must be a regular file.")
@@ -800,6 +899,9 @@ def _read_resolved_source(
     finally:
         if file_fd >= 0:
             os.close(file_fd)
+        for opened_fd in reversed(opened_directories):
+            os.close(opened_fd)
+        os.close(root_fd)
     if f"sha256:{hashlib.sha256(content).hexdigest()}" != document.source_version:
         raise ExportError("Resolved source does not match the canonical document.")
     return content

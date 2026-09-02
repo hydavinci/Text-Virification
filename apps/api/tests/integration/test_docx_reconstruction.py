@@ -4,7 +4,7 @@ import base64
 import struct
 import zlib
 from collections.abc import Iterable
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
 import pytest
@@ -25,6 +25,7 @@ from text_verification.domain.documents import (
     FileType,
     TextBlock,
 )
+from text_verification.domain.ports import ResolvedSourcePath
 from text_verification.exporters import docx_reconstruction as reconstruction_module
 from text_verification.exporters.docx_reconstruction import (
     DOCX_RECONSTRUCTION,
@@ -69,9 +70,41 @@ class _StaticSourcePathResolver:
         document: DocumentModel,
         *,
         source_path: Path | None = None,
-    ) -> Path:
+    ) -> ResolvedSourcePath:
         del document
-        return source_path or self.path
+        return ResolvedSourcePath.from_path(source_path or self.path)
+
+
+class _AnchoredSourcePathResolver:
+    def __init__(self, root: Path, relative_path: PurePosixPath) -> None:
+        self.root = root
+        self.relative_path = relative_path
+
+    def resolve(
+        self,
+        document: DocumentModel,
+        *,
+        source_path: Path | None = None,
+    ) -> ResolvedSourcePath:
+        del document, source_path
+        return ResolvedSourcePath(
+            root=self.root,
+            relative_path=self.relative_path,
+        )
+
+
+class _LegacyPathResolver:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def resolve(
+        self,
+        document: DocumentModel,
+        *,
+        source_path: Path | None = None,
+    ) -> Path:
+        del document, source_path
+        return self.path
 
 
 class _FakeOcr:
@@ -332,6 +365,59 @@ def test_reconstructs_real_parser_image_after_json_roundtrip(
     assert any(paragraph.text == "After image" for paragraph in rebuilt.paragraphs)
 
 
+def test_reconstructs_pdf_image_with_indirect_stream_length(tmp_path: Path) -> None:
+    source = _pdf_with_indirect_image_length(
+        tmp_path / "indirect-length.pdf",
+        "valid",
+    )
+    parsed = PdfParser().parse(source)
+
+    rebuilt = Document(
+        DocxReconstructionExporter(
+            source_path_resolver=_StaticSourcePathResolver(source)
+        ).export(parsed, tmp_path / "indirect-length.docx")
+    )
+
+    assert len(rebuilt.inline_shapes) == 1
+
+
+@pytest.mark.parametrize(
+    "length_kind",
+    ["chain", "non_integer", "oversized"],
+)
+def test_ignores_untrusted_pdf_length_declarations_and_bounds_actual_stream(
+    tmp_path: Path,
+    length_kind: str,
+) -> None:
+    source = _pdf_with_indirect_image_length(
+        tmp_path / f"{length_kind}.pdf",
+        length_kind,
+    )
+    parsed = PdfParser().parse(source)
+
+    rebuilt = Document(
+        DocxReconstructionExporter(
+            source_path_resolver=_StaticSourcePathResolver(source)
+        ).export(parsed, tmp_path / f"{length_kind}.docx")
+    )
+
+    assert len(rebuilt.inline_shapes) == 1
+
+
+def test_rejects_actual_raw_pdf_image_stream_before_extraction(tmp_path: Path) -> None:
+    source = _pdf_with_indirect_image_length(
+        tmp_path / "raw-stream-limit.pdf",
+        "valid",
+    )
+    parsed = PdfParser().parse(source)
+
+    with pytest.raises(ExportError, match="size limit"):
+        DocxReconstructionExporter(
+            limits=DocxReconstructionLimits(max_image_bytes=10),
+            source_path_resolver=_StaticSourcePathResolver(source),
+        ).export(parsed, tmp_path / "raw-stream-limit.docx")
+
+
 def test_reconstructs_real_native_pdf_spans_as_distinct_runs(tmp_path: Path) -> None:
     source = _pdf_with_styled_spans(tmp_path / "styled.pdf")
     parsed = PdfParser().parse(source)
@@ -413,10 +499,65 @@ def test_rejects_ambient_relative_source_resolution(
     parsed = PdfParser().parse(source)
     monkeypatch.chdir(tmp_path)
 
-    with pytest.raises(ExportError, match="absolute"):
+    with pytest.raises(ExportError, match="anchored"):
         DocxReconstructionExporter(
-            source_path_resolver=_StaticSourcePathResolver(Path("relative-source.pdf"))
+            source_path_resolver=_LegacyPathResolver(Path("relative-source.pdf"))  # type: ignore[arg-type]
         ).export(parsed, tmp_path / "relative-source.docx")
+
+
+def test_reads_normal_nested_anchored_source_path(tmp_path: Path) -> None:
+    root = tmp_path / "repository"
+    nested = root / "nested"
+    nested.mkdir(parents=True)
+    source = _pdf_with_image(nested / "source.pdf")
+    parsed = PdfParser().parse(source)
+
+    rebuilt = Document(
+        DocxReconstructionExporter(
+            source_path_resolver=_AnchoredSourcePathResolver(
+                root,
+                PurePosixPath("nested/source.pdf"),
+            )
+        ).export(parsed, tmp_path / "nested-source.docx")
+    )
+
+    assert len(rebuilt.inline_shapes) == 1
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        PurePosixPath("../source.pdf"),
+        PurePosixPath("/source.pdf"),
+        PurePosixPath("."),
+        PurePosixPath("bad\x00.pdf"),
+        PurePosixPath("C:/source.pdf"),
+    ],
+)
+def test_rejects_unsafe_anchored_source_components(
+    tmp_path: Path,
+    relative_path: PurePosixPath,
+) -> None:
+    with pytest.raises(ValueError, match="safe relative"):
+        ResolvedSourcePath(root=tmp_path, relative_path=relative_path)
+
+
+def test_rejects_intermediate_symlink_in_anchored_source_path(tmp_path: Path) -> None:
+    root = tmp_path / "repository"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    source = _pdf_with_image(outside / "source.pdf")
+    parsed = PdfParser().parse(source)
+    (root / "linked").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ExportError, match="unsafe"):
+        DocxReconstructionExporter(
+            source_path_resolver=_AnchoredSourcePathResolver(
+                root,
+                PurePosixPath("linked/source.pdf"),
+            )
+        ).export(parsed, tmp_path / "symlinked-parent.docx")
 
 
 def test_rejects_mismatched_and_symlinked_resolved_sources(tmp_path: Path) -> None:
@@ -473,21 +614,65 @@ def test_rejects_embedded_image_payloads_in_canonical_metadata(
         )
 
 
-@pytest.mark.parametrize("interleaved_kind", ["paragraph", "image"])
-def test_rejects_real_parser_blocks_interleaved_between_table_rows(
+def test_exports_horizontally_disjoint_side_note_between_table_rows(
     tmp_path: Path,
-    interleaved_kind: str,
 ) -> None:
     source = _pdf_with_interleaved_table(
-        tmp_path / f"interleaved-{interleaved_kind}.pdf",
-        interleaved_kind,
+        tmp_path / "side-note.pdf",
+        "side",
+    )
+    parsed = PdfParser().parse(source)
+
+    rebuilt = Document(
+        DocxReconstructionExporter().export(
+            parsed,
+            tmp_path / "side-note.docx",
+        )
+    )
+
+    assert rebuilt.tables[0].cell(1, 1).text == "B2"
+    assert any(paragraph.text == "SIDE" for paragraph in rebuilt.paragraphs)
+
+
+@pytest.mark.parametrize(
+    ("placement", "text"),
+    [("caption", "CAPTION"), ("below", "BELOW")],
+)
+def test_exports_blocks_near_but_outside_table_row_span(
+    tmp_path: Path,
+    placement: str,
+    text: str,
+) -> None:
+    source = _pdf_with_interleaved_table(
+        tmp_path / f"{placement}.pdf",
+        placement,
+    )
+    parsed = PdfParser().parse(source)
+
+    rebuilt = Document(
+        DocxReconstructionExporter().export(
+            parsed,
+            tmp_path / f"{placement}.docx",
+        )
+    )
+
+    assert rebuilt.tables[0].cell(0, 0).text == "A1"
+    assert any(paragraph.text == text for paragraph in rebuilt.paragraphs)
+
+
+def test_rejects_spatially_embedded_image_between_table_rows(
+    tmp_path: Path,
+) -> None:
+    source = _pdf_with_interleaved_table(
+        tmp_path / "embedded-image.pdf",
+        "image",
     )
     parsed = PdfParser().parse(source)
 
     with pytest.raises(ExportError, match="interleaved"):
         DocxReconstructionExporter(
             source_path_resolver=_StaticSourcePathResolver(source)
-        ).export(parsed, tmp_path / f"interleaved-{interleaved_kind}.docx")
+        ).export(parsed, tmp_path / "embedded-image.docx")
 
 
 @pytest.mark.parametrize(
@@ -849,6 +1034,74 @@ def test_preflight_rejects_native_run_count(tmp_path: Path) -> None:
         ).export(document, tmp_path / "run-bound.docx")
 
 
+def test_preflight_rejects_raw_span_count_before_model_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document = _document(
+        [
+            _Block(
+                "paragraph",
+                "A",
+                page=1,
+                y=10,
+                style={"spans": [{}, {}]},
+            )
+        ]
+    )
+
+    def unexpected_validation(value: object) -> object:
+        del value
+        raise AssertionError("span validation must not run over budget")
+
+    monkeypatch.setattr(
+        reconstruction_module.PdfTextSpan,
+        "model_validate",
+        unexpected_validation,
+    )
+    with pytest.raises(ExportError, match="run count"):
+        DocxReconstructionExporter(
+            limits=DocxReconstructionLimits(max_runs=1)
+        ).export(document, tmp_path / "raw-run-bound.docx")
+
+
+def test_preflight_rejects_malformed_span_collection_without_length_access(
+    tmp_path: Path,
+) -> None:
+    class PoisonedCollection:
+        def __len__(self) -> int:
+            raise AssertionError("malformed span collection length was accessed")
+
+    document = _document(
+        [
+            _Block(
+                "paragraph",
+                "A",
+                page=1,
+                y=10,
+                style={"spans": PoisonedCollection()},
+            )
+        ]
+    )
+
+    with pytest.raises(ExportError, match="span metadata"):
+        DocxReconstructionExporter().export(
+            document,
+            tmp_path / "malformed-spans.docx",
+        )
+
+
+def test_preflight_counts_image_render_run(tmp_path: Path) -> None:
+    source = _pdf_with_image(tmp_path / "image-run-limit.pdf")
+    document = PdfParser().parse(source)
+
+    with pytest.raises(ExportError, match="run count"):
+        DocxReconstructionExporter(
+            limits=DocxReconstructionLimits(max_runs=1),
+            source_path_resolver=_StaticSourcePathResolver(source),
+        ).export(document, tmp_path / "image-run-bound.docx")
+
+
 def test_preflight_rejects_image_count_and_aggregate_media(tmp_path: Path) -> None:
     source = _pdf_with_images(tmp_path / "two-images.pdf")
     document = PdfParser().parse(source)
@@ -1063,8 +1316,12 @@ def _pdf_with_interleaved_table(target: Path, interleaved_kind: str) -> Path:
             ("B2", 114, 140),
         ):
             page.insert_text((x, y), text, fontsize=10, fontname="helv")
-        if interleaved_kind == "paragraph":
+        if interleaved_kind == "side":
             page.insert_text((220, 90), "SIDE", fontsize=10, fontname="helv")
+        elif interleaved_kind == "caption":
+            page.insert_text((24, 30), "CAPTION", fontsize=10, fontname="helv")
+        elif interleaved_kind == "below":
+            page.insert_text((24, 190), "BELOW", fontsize=10, fontname="helv")
         else:
             page.insert_image(
                 pymupdf.Rect(80, 80, 120, 95),
@@ -1087,4 +1344,72 @@ def _pdf_with_images(target: Path) -> Path:
         pdf.save(target)
     finally:
         pdf.close()
+    return target
+
+
+def _pdf_with_indirect_image_length(target: Path, length_kind: str) -> Path:
+    image_stream = zlib.compress(b"\xff\x00\x00\x00\xff\x00")
+    content_stream = b"q 100 0 0 50 20 100 cm /Im0 Do Q\n"
+    actual_length = str(len(image_stream)).encode("ascii")
+    if length_kind == "valid":
+        length_object = actual_length
+        extra_objects: list[bytes] = []
+    elif length_kind == "chain":
+        length_object = b"7 0 R"
+        extra_objects = [actual_length]
+    elif length_kind == "non_integer":
+        length_object = b"(invalid)"
+        extra_objects = []
+    elif length_kind == "oversized":
+        length_object = str(
+            DocxReconstructionLimits().max_image_bytes + 1
+        ).encode("ascii")
+        extra_objects = []
+    else:
+        raise AssertionError(length_kind)
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        (
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] "
+            b"/Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>"
+        ),
+        (
+            b"<< /Type /XObject /Subtype /Image /Width 2 /Height 1 "
+            b"/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode "
+            b"/Length 6 0 R >>\nstream\n"
+            + image_stream
+            + b"\nendstream"
+        ),
+        (
+            b"<< /Length "
+            + str(len(content_stream)).encode("ascii")
+            + b" >>\nstream\n"
+            + content_stream
+            + b"endstream"
+        ),
+        length_object,
+        *extra_objects,
+    ]
+    payload = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets = [0]
+    for object_number, value in enumerate(objects, start=1):
+        offsets.append(len(payload))
+        payload.extend(
+            f"{object_number} 0 obj\n".encode("ascii")
+            + value
+            + b"\nendobj\n"
+        )
+    xref_offset = len(payload)
+    payload.extend(f"xref\n0 {len(objects) + 1}\n".encode("ascii"))
+    payload.extend(b"0000000000 65535 f \n")
+    for offset in offsets[1:]:
+        payload.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
+    payload.extend(
+        (
+            f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
+            f"startxref\n{xref_offset}\n%%EOF\n"
+        ).encode("ascii")
+    )
+    target.write_bytes(payload)
     return target
