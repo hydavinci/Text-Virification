@@ -652,6 +652,7 @@ def test_cleanup_is_scheduled_hourly() -> None:
     assert celery_app.conf.beat_schedule["cleanup-expired-jobs-hourly"] == {
         "task": "text_verification.cleanup_expired_jobs",
         "schedule": 3600.0,
+        "options": {"queue": "maintenance-v2"},
     }
 
 
@@ -661,4 +662,5 @@ def test_expired_lease_rescue_is_scheduled_every_minute() -> None:
     assert celery_app.conf.beat_schedule["rescue-expired-job-leases"] == {
         "task": "text_verification.rescue_expired_job_leases",
         "schedule": 60.0,
+        "options": {"queue": "maintenance-v2"},
     }

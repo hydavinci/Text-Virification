@@ -6,6 +6,7 @@ from enum import StrEnum
 from pathlib import Path
 from uuid import UUID, uuid4
 
+import pymupdf
 import pytest
 
 from text_verification.application import (
@@ -1554,6 +1555,54 @@ def test_process_job_retries_retryable_pipeline_error_without_failed_event(
     ]
 
 
+def test_retryable_job_retry_is_routed_to_v2_queue(
+    monkeypatch: pytest.MonkeyPatch,
+    worker_storage: JobStorage,
+) -> None:
+    from text_verification.workers import tasks as worker_tasks
+
+    class RetryScheduled(RuntimeError):
+        pass
+
+    class CapturingTask:
+        request = FakeTaskRequest(retries=0)
+
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def retry(self, **kwargs: object) -> None:
+            self.calls.append(kwargs)
+            raise RetryScheduled()
+
+    repository = InMemoryJobRepository()
+    job_id = _seed_txt_job(repository, worker_storage)
+    pipeline = FlakyVerificationPipeline(
+        delegate=build_default_verification_pipeline(Settings(llm_api_key="")),
+        error=VerificationError(
+            "source_read_failed",
+            "parsing",
+            "The stored source document could not be read.",
+            True,
+        ),
+        failures_remaining=10,
+    )
+    _configure_worker_dependencies(
+        monkeypatch,
+        repository,
+        worker_storage,
+        pipeline=pipeline,
+    )
+    task = CapturingTask()
+
+    with pytest.raises(RetryScheduled):
+        worker_tasks._process_job(task, str(job_id))  # type: ignore[arg-type]
+
+    assert len(task.calls) == 1
+    assert task.calls[0]["queue"] == "verification-v2"
+    assert task.calls[0]["retry"] is True
+    assert task.calls[0]["retry_policy"]["max_retries"] == 3  # type: ignore[index]
+
+
 def test_exhausted_retryable_verification_error_preserves_typed_identity(
     monkeypatch,
     worker_storage,
@@ -1591,6 +1640,41 @@ def test_exhausted_retryable_verification_error_preserves_typed_identity(
     assert job.error_stage == "parsing"
     assert job.error_message == "The stored source document could not be read."
     assert job.error_retryable is True
+
+
+def test_exhausted_pdf_render_failure_persists_typed_ocr_identity_end_to_end(
+    monkeypatch: pytest.MonkeyPatch,
+    worker_storage: JobStorage,
+    celery_eager,
+) -> None:
+    from text_verification.workers.tasks import process_job
+
+    attempts = 0
+
+    def fail_render(page: pymupdf.Page, **kwargs: object) -> object:
+        del page, kwargs
+        nonlocal attempts
+        attempts += 1
+        raise RuntimeError("renderer unavailable")
+
+    monkeypatch.setattr(pymupdf.Page, "get_pixmap", fail_render)
+    repository = InMemoryJobRepository()
+    job_id = _seed_pdf_job(repository, worker_storage, "scanned-page.pdf")
+    _configure_worker_dependencies(monkeypatch, repository, worker_storage)
+
+    task_result = process_job.delay(str(job_id))
+
+    assert task_result.failed()
+    assert attempts == 3
+    job = repository.get_job(job_id)
+    assert job is not None
+    assert job.error_code == "ocr_render_failed"
+    assert job.error_stage == "ocr"
+    assert job.error_message == "OCR page rendering failed."
+    assert job.error_retryable is True
+    assert JobProgressStage.OCR not in [
+        event.stage for event in repository.list_events_after(job_id, 0)
+    ]
 
 
 def test_process_job_noops_when_job_is_missing(
@@ -2174,7 +2258,7 @@ def test_owner_death_duplicate_schedules_fresh_message_at_lease_expiry_and_recov
     monkeypatch.setattr(
         worker_tasks.process_job,
         "apply_async",
-        lambda args, countdown, kwargs=None: scheduled.append(
+        lambda args, countdown, kwargs=None, **publish_options: scheduled.append(
             CapturedCeleryMessage(
                 worker_tasks,
                 tuple(args),
@@ -2297,7 +2381,93 @@ def test_rescue_scheduler_starts_fresh_task_without_failure_retry_state(
 
     worker_tasks._default_rescue_scheduler("job-id", 17)
 
-    assert calls == [{"args": ("job-id",), "countdown": 17}]
+    assert calls == [
+        {
+            "args": ("job-id",),
+            "countdown": 17,
+            "queue": "verification-v2",
+            "retry": True,
+            "retry_policy": {
+                "max_retries": 3,
+                "interval_start": 0,
+                "interval_step": 0.2,
+                "interval_max": 0.2,
+            },
+        }
+    ]
+
+
+def test_initial_worker_dispatch_publishes_to_v2_with_broker_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from text_verification.workers import tasks as worker_tasks
+
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        worker_tasks.process_job,
+        "apply_async",
+        lambda **kwargs: calls.append(kwargs),
+    )
+
+    worker_tasks.dispatch_process_job("job-id")
+
+    assert calls == [
+        {
+            "args": ("job-id",),
+            "queue": "verification-v2",
+            "retry": True,
+            "retry_policy": {
+                "max_retries": 3,
+                "interval_start": 0,
+                "interval_step": 0.2,
+                "interval_max": 0.2,
+            },
+        }
+    ]
+
+
+def test_periodic_rescue_republishes_jobs_to_v2_with_broker_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    worker_storage: JobStorage,
+) -> None:
+    from text_verification.workers import tasks as worker_tasks
+
+    created_at = datetime(2026, 9, 2, 3, 0, tzinfo=UTC)
+    repository = InMemoryJobRepository()
+    job_id = _seed_txt_job(
+        repository,
+        worker_storage,
+        created_at=created_at,
+        expires_at=created_at + timedelta(hours=1),
+    )
+    _configure_worker_dependencies(monkeypatch, repository, worker_storage)
+    monkeypatch.setattr(
+        worker_tasks,
+        "NOW_FACTORY",
+        MutableClock(created_at + timedelta(minutes=2)),
+    )
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        worker_tasks.process_job,
+        "apply_async",
+        lambda **kwargs: calls.append(kwargs),
+    )
+
+    assert worker_tasks._rescue_expired_job_leases() == [str(job_id)]
+
+    assert calls == [
+        {
+            "args": (str(job_id),),
+            "queue": "verification-v2",
+            "retry": True,
+            "retry_policy": {
+                "max_retries": 3,
+                "interval_start": 0,
+                "interval_step": 0.2,
+                "interval_max": 0.2,
+            },
+        }
+    ]
 
 
 def test_immediate_publish_failure_leaves_job_for_periodic_rescue(
@@ -2342,7 +2512,7 @@ def test_immediate_publish_failure_leaves_job_for_periodic_rescue(
     monkeypatch.setattr(
         worker_tasks.process_job,
         "apply_async",
-        lambda args, kwargs=None, countdown=None: captured.append(
+        lambda args, kwargs=None, countdown=None, **publish_options: captured.append(
             CapturedCeleryMessage(
                 worker_tasks,
                 tuple(args),

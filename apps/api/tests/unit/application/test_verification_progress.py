@@ -11,6 +11,10 @@ from text_verification.application.verification_pipeline import (
     VerificationPipeline,
 )
 from text_verification.checkers.registry import CheckerRegistry
+from text_verification.document_processing.errors import (
+    OcrOutputError,
+    OcrProcessingError,
+)
 from text_verification.document_processing.ocr_provider import OcrTextBox
 from text_verification.document_processing.pdf_models import PdfResourceLimits
 from text_verification.domain.documents import DocumentModel, FileType, TextBlock
@@ -169,6 +173,78 @@ def test_pdf_raster_resource_failure_emits_no_ocr_stage() -> None:
         )
 
     assert stages == []
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_type"),
+    [
+        (RuntimeError("render failed"), OcrProcessingError),
+        (ValueError("invalid page"), OcrOutputError),
+        (MemoryError("allocation failed"), OcrProcessingError),
+    ],
+)
+def test_get_pixmap_failure_emits_no_ocr_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+    expected_type: type[Exception],
+) -> None:
+    import pymupdf
+
+    fixtures = Path(__file__).resolve().parents[2] / "fixtures" / "pdf"
+    stages: list[VerificationProgressStage] = []
+
+    def fail_render(page: pymupdf.Page, **kwargs: object) -> object:
+        del page, kwargs
+        raise error
+
+    monkeypatch.setattr(pymupdf.Page, "get_pixmap", fail_render)
+
+    with pytest.raises(expected_type):
+        PdfParser(ocr=_FakeOcr()).parse_with_progress(
+            fixtures / "scanned-page.pdf",
+            progress_observer=stages.append,
+        )
+
+    assert stages == []
+
+
+def test_pixmap_encoding_failure_emits_no_ocr_stage_and_closes_pixmap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pymupdf
+
+    class FailingPixmap:
+        width = 20
+        height = 20
+        stride = 60
+
+        def __init__(self) -> None:
+            self.closed = False
+
+        def tobytes(self, output: str) -> bytes:
+            assert output == "png"
+            raise RuntimeError("encode failed")
+
+        def close(self) -> None:
+            self.closed = True
+
+    fixtures = Path(__file__).resolve().parents[2] / "fixtures" / "pdf"
+    stages: list[VerificationProgressStage] = []
+    pixmap = FailingPixmap()
+    monkeypatch.setattr(
+        pymupdf.Page,
+        "get_pixmap",
+        lambda page, **kwargs: pixmap,
+    )
+
+    with pytest.raises(OcrOutputError):
+        PdfParser(ocr=_FakeOcr()).parse_with_progress(
+            fixtures / "scanned-page.pdf",
+            progress_observer=stages.append,
+        )
+
+    assert stages == []
+    assert pixmap.closed is True
 
 
 def _document(source_name: str) -> DocumentModel:

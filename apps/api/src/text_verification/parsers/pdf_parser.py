@@ -259,9 +259,15 @@ def _recognize_page(
         progress_observer(VerificationProgressStage.OCR)
     try:
         raw_boxes = ocr.recognize(payload, language)
-    except (OcrOutputError, OcrUnavailableError):
+    except (OcrOutputError, OcrProcessingError, OcrUnavailableError):
         raise
-    except Exception as error:
+    except MemoryError as error:
+        raise OcrProcessingError(
+            "OCR recognition exceeded available memory.",
+            code="ocr_resource_exhausted",
+            retryable=True,
+        ) from error
+    except (OSError, RuntimeError) as error:
         raise OcrProcessingError() from error
     return _normalize_ocr_boxes(
         raw_boxes,
@@ -287,18 +293,48 @@ def _render_page_for_ocr(
         limits,
     )
 
-    pixmap: Any = page.get_pixmap(
-        matrix=_PYMUPDF.Matrix(scale, scale),
-        colorspace=_PYMUPDF.csRGB,
-        alpha=False,
-        annots=False,
-    )
     try:
-        width = int(pixmap.width)
-        height = int(pixmap.height)
-        raw_bytes = int(pixmap.stride) * height
+        pixmap: Any = page.get_pixmap(
+            matrix=_PYMUPDF.Matrix(scale, scale),
+            colorspace=_PYMUPDF.csRGB,
+            alpha=False,
+            annots=False,
+        )
+    except MemoryError as error:
+        raise OcrProcessingError(
+            "OCR page rendering exceeded available memory.",
+            code="ocr_render_resource_exhausted",
+            retryable=True,
+        ) from error
+    except ValueError as error:
+        raise OcrOutputError("OCR page renderer rejected the page.") from error
+    except (OSError, RuntimeError) as error:
+        raise OcrProcessingError(
+            "OCR page rendering failed.",
+            code="ocr_render_failed",
+            retryable=True,
+        ) from error
+    try:
+        try:
+            width = int(pixmap.width)
+            height = int(pixmap.height)
+            raw_bytes = int(pixmap.stride) * height
+        except (TypeError, ValueError, OverflowError) as error:
+            raise OcrOutputError(
+                "OCR page renderer returned invalid raster dimensions."
+            ) from error
         _enforce_ocr_raster_limits(width, height, raw_bytes, limits)
-        payload = bytes(pixmap.tobytes("png"))
+        try:
+            encoded = pixmap.tobytes("png")
+            payload = bytes(encoded)
+        except MemoryError as error:
+            raise OcrProcessingError(
+                "OCR page raster encoding exceeded available memory.",
+                code="ocr_render_resource_exhausted",
+                retryable=True,
+            ) from error
+        except (OSError, RuntimeError, TypeError, ValueError) as error:
+            raise OcrOutputError("OCR page raster encoding failed.") from error
         if len(payload) > limits.max_ocr_raster_bytes:
             raise PdfResourceLimitError(
                 limit="max_ocr_raster_bytes",

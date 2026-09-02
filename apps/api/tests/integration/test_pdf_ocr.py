@@ -17,7 +17,11 @@ from text_verification.application.verification_pipeline import (
 )
 from text_verification.checkers.compatibility_checker import CompatibilityChecker
 from text_verification.checkers.registry import CheckerRegistry
-from text_verification.document_processing.errors import OcrOutputError, OcrUnavailableError
+from text_verification.document_processing.errors import (
+    OcrOutputError,
+    OcrProcessingError,
+    OcrUnavailableError,
+)
 from text_verification.document_processing.layout import OcrLayoutBox, OcrLayoutElement
 from text_verification.document_processing.ocr_provider import OcrTextBox
 from text_verification.document_processing.pdf_models import (
@@ -1085,6 +1089,167 @@ def test_ocr_provider_capability_error_propagates_unchanged() -> None:
 
     assert raised.value.code == "ocr_unavailable"
     assert raised.value.stage == "ocr"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        OcrUnavailableError(
+            "custom unavailable",
+            code="custom_ocr_unavailable",
+            stage="custom-ocr",
+            retryable=True,
+        ),
+        OcrOutputError("custom output"),
+        OcrProcessingError(
+            "custom processing",
+            code="custom_ocr_processing",
+            stage="custom-processing",
+            retryable=False,
+        ),
+    ],
+)
+def test_typed_ocr_provider_errors_propagate_as_the_same_instance(
+    error: Exception,
+) -> None:
+    class TypedFailingOcr:
+        def recognize(self, image: object, language: str) -> list[OcrTextBox]:
+            del image, language
+            raise error
+
+    with pytest.raises(type(error)) as raised:
+        PdfParser(ocr=TypedFailingOcr()).parse(
+            FIXTURE_DIRECTORY / "scanned-page.pdf"
+        )
+
+    assert raised.value is error
+
+
+def test_typed_ocr_processing_identity_survives_verification_pipeline() -> None:
+    error = OcrProcessingError(
+        "safe custom processing failure",
+        code="custom_ocr_processing",
+        stage="ocr-provider",
+        retryable=False,
+    )
+
+    class TypedFailingOcr:
+        def recognize(self, image: object, language: str) -> list[OcrTextBox]:
+            del image, language
+            raise error
+
+    pipeline = VerificationPipeline(
+        parsers=ParserRegistry([PdfParser(ocr=TypedFailingOcr())]),
+        checkers=CheckerRegistry([CompatibilityChecker()]),
+        reviewer=None,
+    )
+
+    with pytest.raises(VerificationError) as raised:
+        pipeline.run(
+            VerificationCommand(
+                document_id=uuid4(),
+                source_path=FIXTURE_DIRECTORY / "scanned-page.pdf",
+                direct_text=None,
+                source_name="scanned-page.pdf",
+                file_type=FileType.PDF,
+                options=VerificationOptions(),
+                execution_mode=VerificationExecutionMode.ASYNCHRONOUS,
+            )
+        )
+
+    assert raised.value.code == error.code
+    assert raised.value.stage == error.stage
+    assert raised.value.message == error.message
+    assert raised.value.retryable is error.retryable
+
+
+def test_programmer_error_from_ocr_provider_is_not_normalized() -> None:
+    class BrokenOcr:
+        def recognize(self, image: object, language: str) -> list[OcrTextBox]:
+            del image, language
+            raise AssertionError("provider invariant")
+
+    with pytest.raises(AssertionError, match="provider invariant"):
+        PdfParser(ocr=BrokenOcr()).parse(FIXTURE_DIRECTORY / "scanned-page.pdf")
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_type", "expected_code"),
+    [
+        (RuntimeError("render failed"), OcrProcessingError, "ocr_render_failed"),
+        (ValueError("invalid page"), OcrOutputError, None),
+        (
+            MemoryError("allocation failed"),
+            OcrProcessingError,
+            "ocr_render_resource_exhausted",
+        ),
+    ],
+)
+def test_get_pixmap_expected_failures_are_normalized_without_ocr_progress(
+    error: Exception,
+    expected_type: type[Exception],
+    expected_code: str | None,
+) -> None:
+    class FailingPage:
+        rect = SimpleNamespace(width=10.0, height=10.0)
+
+        def get_pixmap(self, **kwargs: object) -> object:
+            del kwargs
+            raise error
+
+    with pytest.raises(expected_type) as raised:
+        pdf_parser_module._render_page_for_ocr(
+            FailingPage(),
+            PdfResourceLimits(),
+        )
+
+    if expected_code is not None:
+        assert raised.value.code == expected_code
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_type", "expected_code"),
+    [
+        (RuntimeError("encode failed"), OcrOutputError, None),
+        (
+            MemoryError("encode allocation"),
+            OcrProcessingError,
+            "ocr_render_resource_exhausted",
+        ),
+    ],
+)
+def test_pixmap_encoding_failure_is_typed_and_releases_pixmap(
+    error: Exception,
+    expected_type: type[Exception],
+    expected_code: str | None,
+) -> None:
+    class FailingPixmap:
+        width = 20
+        height = 20
+        stride = 60
+
+        def __init__(self) -> None:
+            self.closed = False
+
+        def tobytes(self, output: str) -> bytes:
+            assert output == "png"
+            raise error
+
+        def close(self) -> None:
+            self.closed = True
+
+    pixmap = FailingPixmap()
+    page = SimpleNamespace(
+        rect=SimpleNamespace(width=10.0, height=10.0),
+        get_pixmap=lambda **kwargs: pixmap,
+    )
+
+    with pytest.raises(expected_type) as raised:
+        pdf_parser_module._render_page_for_ocr(page, PdfResourceLimits())
+
+    if expected_code is not None:
+        assert raised.value.code == expected_code
+    assert pixmap.closed is True
 
 
 def test_untyped_ocr_runtime_failure_becomes_retryable_verification_error() -> None:

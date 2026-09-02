@@ -76,6 +76,31 @@ services:
         "text_verification.workers.celery_app:celery_app",
         "worker",
         "--loglevel=INFO",
+        "--queues=celery,verification-v2",
+      ]
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - job-data:/var/lib/text-verification/jobs
+
+  maintenance-worker:
+    <<: *backend-service
+    command:
+      [
+        "celery",
+        "-A",
+        "text_verification.workers.celery_app:celery_app",
+        "worker",
+        "--loglevel=INFO",
+        "--queues=maintenance-v2",
+        "--concurrency=1",
+        "--hostname=maintenance@%h",
       ]
     restart: unless-stopped
     depends_on:

@@ -28,8 +28,6 @@
 
 ### 后续演进
 
-- 将当前同步预检能力接入 Celery 分阶段任务流水线。
-- 扫描型 PDF OCR 与版式重建。
 - 共享词库数据库管理、版本及回滚。
 - 基于 `DocumentModel` 精确块定位的审阅决策持久化。
 
@@ -43,7 +41,7 @@ Browser → nginx → FastAPI → PostgreSQL
 
 - `apps/web` 提供 Vue 3 审阅前端和 nginx 静态站点/反向代理。
 - `apps/api` 提供 FastAPI API、Celery Worker、Alembic 迁移和后端测试。
-- PostgreSQL 是任务与事件的持久化来源；Redis 负责队列；Worker 当前执行 Stub 流水线。
+- PostgreSQL 是任务与事件的持久化来源；Redis 负责队列；Worker 执行统一文档解析、OCR 与规则检查流水线。
 - 浏览器可通过同步预检 REST 接口完成完整检查和导出；原任务接口继续通过 SSE 推送进度。
 
 ## Monorepo 目录说明
@@ -65,13 +63,23 @@ Browser → nginx → FastAPI → PostgreSQL
 Copy-Item .env.example .env
 docker compose -f infra/compose.yaml up --build -d
 docker compose -f infra/compose.yaml exec api pytest
-docker compose -f infra/compose.yaml logs -f api worker
+docker compose -f infra/compose.yaml logs -f api worker maintenance-worker
 docker compose -f infra/compose.yaml down
 ```
 
 - 应用地址：`http://localhost:8080`
 - 健康检查：`http://localhost:8080/api/v1/health`
-- `migrate` 服务只负责执行 Alembic，成功后退出；其余六个长运行服务继续保持运行。
+- `migrate` 服务只负责执行 Alembic，成功后退出；`maintenance-worker` 独占清理和租约救援队列。
+
+### Worker 滚动升级队列
+
+- 旧版 Worker 命令：`celery -A text_verification.workers.celery_app:celery_app worker --queues=celery`
+- 新版 Worker 命令：`celery -A text_verification.workers.celery_app:celery_app worker --queues=celery,verification-v2`
+- 维护 Worker 命令：`celery -A text_verification.workers.celery_app:celery_app worker --queues=maintenance-v2 --concurrency=1`
+- 新 API 创建的七格式异步任务、任务重试和租约救援重新投递统一进入 `verification-v2`。
+- 新版 Worker 同时消费 `celery` 与 `verification-v2`，因此可排空升级前已发布的旧任务；旧版 Worker 只消费 `celery`，不会取得新版任务。
+- Beat 将清理与租约救援任务发布到 `maintenance-v2`，由单并发维护 Worker 处理，避免文档队列饥饿或旧 Worker 错误重投递。
+- 滚动顺序：先启动新版普通 Worker 和维护 Worker，再切换到新版 Beat，随后部署新版 API；确认旧 `celery` 队列排空后再停止旧版 Worker。滚动期间只保留一个 Beat 实例。
 
 ## 本地后端与前端开发、测试、构建
 
@@ -100,6 +108,9 @@ Set-Location ..\..
 - `POST /api/v1/jobs`
 - `GET /api/v1/jobs/{job_id}`
 - `GET /api/v1/jobs/{job_id}/events`
+- `GET /api/v1/jobs/{job_id}/result`
+- `POST /api/v1/jobs/{job_id}/exports`
+- `GET /api/v1/jobs/{job_id}/exports/{artifact_id}`
 - `GET /api/v1/health`
 - `POST /api/v1/analyze`
 - `POST /api/v1/export`
@@ -152,8 +163,6 @@ $env:LIVE_API_URL='http://localhost:8080'
 
 ### 后续路线图
 
-- 异步流水线接入现有解析与规则引擎
-- 扫描型 PDF OCR 工作流
 - 共享词库管理能力
 - 精确块级替换与审阅决策持久化
 - 生产加固与可观测性完善

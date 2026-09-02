@@ -544,17 +544,14 @@ def test_dispatch_recovery_commit_failure_returns_shaped_error(
 
 
 def test_dispatch_process_job_imports_planned_worker_task(monkeypatch) -> None:
-    task_calls: list[str] = []
+    dispatch_calls: list[str] = []
 
     def fake_import_module(module_name: str) -> object:
         assert module_name == "text_verification.workers.tasks"
 
-        class FakeTask:
-            @staticmethod
-            def delay(job_id: str) -> None:
-                task_calls.append(job_id)
-
-        return SimpleNamespace(process_job=FakeTask())
+        return SimpleNamespace(
+            dispatch_process_job=lambda job_id: dispatch_calls.append(job_id)
+        )
 
     monkeypatch.setattr(
         "text_verification.api.routes.jobs.import_module",
@@ -565,7 +562,7 @@ def test_dispatch_process_job_imports_planned_worker_task(monkeypatch) -> None:
 
     dispatch_process_job("job-123")
 
-    assert task_calls == ["job-123"]
+    assert dispatch_calls == ["job-123"]
 
 
 def test_create_job_response_never_exposes_storage_path(client) -> None:

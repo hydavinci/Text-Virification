@@ -100,8 +100,7 @@ class JobExportRequest(BaseModel):
 
 def dispatch_process_job(job_id: str) -> None:
     worker_tasks = import_module("text_verification.workers.tasks")
-    process_job = worker_tasks.process_job
-    process_job.delay(job_id)
+    worker_tasks.dispatch_process_job(job_id)
 
 
 @router.get("/jobs/{job_id}", response_model=JobRead)

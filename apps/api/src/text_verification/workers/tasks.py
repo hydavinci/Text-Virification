@@ -43,7 +43,11 @@ from text_verification.infrastructure.database import get_session_factory
 from text_verification.infrastructure.repositories import JobRepository
 from text_verification.infrastructure.storage import InvalidUpload, JobStorage
 from text_verification.infrastructure.verification_repository import VerificationRepository
-from text_verification.workers.celery_app import celery_app
+from text_verification.workers.celery_app import (
+    ADVANCED_PROCESSING_QUEUE,
+    PROCESS_JOB_PUBLISH_RETRY_POLICY,
+    celery_app,
+)
 from text_verification.workers.pipeline import (
     CHECKING_CHINESE_EVENT_MESSAGE,
     CHECKING_ENGLISH_EVENT_MESSAGE,
@@ -288,6 +292,9 @@ def _process_job(
                 exc=error,
                 countdown=_retry_countdown(task.request.retries),
                 kwargs={"previous_lease_owner_token": str(owner_token)},
+                queue=ADVANCED_PROCESSING_QUEUE,
+                retry=True,
+                retry_policy=PROCESS_JOB_PUBLISH_RETRY_POLICY,
             ) from error
         _persist_exhausted_failure(parsed_job_id, owner_token, error)
         _log_original_failure(parsed_job_id, error)
@@ -445,7 +452,7 @@ process_job = cast(
 
 
 def _default_rescue_scheduler(job_id: str, countdown: int) -> None:
-    process_job.apply_async(args=(job_id,), countdown=countdown)
+    _publish_process_job(job_id, countdown=countdown)
 
 
 RESCUE_SCHEDULER: Callable[[str, int], None] = _default_rescue_scheduler
@@ -497,7 +504,7 @@ def _rescue_expired_job_leases() -> list[str]:
             raise AssertionError("recoverable claim must include a job")
         job_id = str(claim.job.job_id)
         try:
-            process_job.apply_async(args=(job_id,))
+            _publish_process_job(job_id)
         except Exception as error:
             _mark_recovery_publish_failed(
                 session_factory,
@@ -647,7 +654,23 @@ cleanup_expired_jobs = cast(
 
 
 def dispatch_process_job(job_id: str) -> None:
-    process_job.delay(job_id)
+    _publish_process_job(job_id)
+
+
+def _publish_process_job(
+    job_id: str,
+    *,
+    countdown: int | None = None,
+) -> None:
+    options: dict[str, object] = {
+        "args": (job_id,),
+        "queue": ADVANCED_PROCESSING_QUEUE,
+        "retry": True,
+        "retry_policy": PROCESS_JOB_PUBLISH_RETRY_POLICY,
+    }
+    if countdown is not None:
+        options["countdown"] = countdown
+    process_job.apply_async(**options)
 
 
 def _acquire_claim(
