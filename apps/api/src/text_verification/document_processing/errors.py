@@ -19,3 +19,7 @@ class OcrUnavailableError(RuntimeError):
 
 class OcrOutputError(ValueError):
     pass
+
+
+class OcrLayoutError(ValueError):
+    pass

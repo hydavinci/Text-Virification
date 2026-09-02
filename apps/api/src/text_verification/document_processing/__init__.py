@@ -4,12 +4,22 @@ from typing import TYPE_CHECKING, Any
 from text_verification.document_processing.pdf_models import PdfPageKind
 
 if TYPE_CHECKING:
-    from text_verification.document_processing.errors import OcrOutputError, OcrUnavailableError
-    from text_verification.document_processing.ocr_provider import OcrProvider, OcrTextBox
+    from text_verification.document_processing.errors import (
+        OcrLayoutError,
+        OcrOutputError,
+        OcrUnavailableError,
+    )
+    from text_verification.document_processing.ocr_provider import (
+        OcrProvider,
+        OcrRecognizer,
+        OcrTextBox,
+    )
 
 __all__ = [
+    "OcrLayoutError",
     "OcrOutputError",
     "OcrProvider",
+    "OcrRecognizer",
     "OcrTextBox",
     "OcrUnavailableError",
     "PdfPageKind",
@@ -17,9 +27,9 @@ __all__ = [
 
 
 def __getattr__(name: str) -> Any:
-    if name in {"OcrOutputError", "OcrUnavailableError"}:
+    if name in {"OcrLayoutError", "OcrOutputError", "OcrUnavailableError"}:
         module = import_module("text_verification.document_processing.errors")
-    elif name in {"OcrProvider", "OcrTextBox"}:
+    elif name in {"OcrProvider", "OcrRecognizer", "OcrTextBox"}:
         module = import_module("text_verification.document_processing.ocr_provider")
     else:
         raise AttributeError(

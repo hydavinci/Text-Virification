@@ -31,6 +31,38 @@ def _png(width: int, height: int, color: tuple[int, int, int]) -> bytes:
     )
 
 
+def _table_png(width: int, height: int) -> bytes:
+    pixels = bytearray(b"\xff\xff\xff" * width * height)
+    for x in (12, 48, 84, 120):
+        for y in range(12, height - 12):
+            offset = (y * width + x) * 3
+            pixels[offset : offset + 3] = b"\x20\x20\x20"
+    for y in (12, 38, 64, 90):
+        for x in range(12, width - 12):
+            offset = (y * width + x) * 3
+            pixels[offset : offset + 3] = b"\x20\x20\x20"
+
+    raw = b"".join(
+        b"\x00" + bytes(pixels[row * width * 3 : (row + 1) * width * 3])
+        for row in range(height)
+    )
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(data))
+            + kind
+            + data
+            + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+        )
+
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(raw, level=9))
+        + chunk(b"IEND", b"")
+    )
+
+
 def _document() -> pymupdf.Document:
     document = pymupdf.open()
     document.set_metadata(
@@ -90,6 +122,11 @@ def _add_text_page(document: pymupdf.Document) -> None:
 def _add_scanned_page(document: pymupdf.Document) -> None:
     page = document.new_page(width=PAGE_WIDTH, height=PAGE_HEIGHT)
     page.insert_image(page.rect, stream=_png(24, 24, (220, 220, 220)))
+
+
+def _add_scanned_table_page(document: pymupdf.Document) -> None:
+    page = document.new_page(width=PAGE_WIDTH, height=PAGE_HEIGHT)
+    page.insert_image(page.rect, stream=_table_png(132, 104))
 
 
 def _add_mixed_page(document: pymupdf.Document) -> None:
@@ -187,6 +224,10 @@ def main() -> None:
     scanned_page = _document()
     _add_scanned_page(scanned_page)
     _save(scanned_page, "scanned-page.pdf")
+
+    scanned_table = _document()
+    _add_scanned_table_page(scanned_table)
+    _save(scanned_table, "scanned-table.pdf")
 
     mixed_pages = _document()
     _add_text_page(mixed_pages)

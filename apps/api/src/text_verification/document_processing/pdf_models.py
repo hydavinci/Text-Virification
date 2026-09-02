@@ -58,8 +58,12 @@ class _PdfModel(BaseModel):
 
 class PdfExtractionWarning(_PdfModel):
     page: PositiveInt
-    stage: Literal["table", "image"]
-    code: Literal["pdf_table_extraction_failed", "pdf_image_extraction_failed"]
+    stage: Literal["table", "image", "ocr"]
+    code: Literal[
+        "pdf_table_extraction_failed",
+        "pdf_image_extraction_failed",
+        "pdf_ocr_no_text",
+    ]
     message: str
 
 
@@ -336,6 +340,12 @@ class PdfResourceLimits(_PdfModel):
     max_table_text_chars_per_page: PositiveInt = 1_000_000
     max_table_glyph_candidates_per_cell: PositiveInt = 100_000
     max_table_spatial_node_visits_per_page: PositiveInt = 45_020_000
+    max_ocr_raster_width: PositiveInt = 5_000
+    max_ocr_raster_height: PositiveInt = 5_000
+    max_ocr_raster_pixels: PositiveInt = 20_000_000
+    max_ocr_raster_bytes: PositiveInt = 60_000_000
+    max_ocr_boxes_per_page: PositiveInt = 5_000
+    max_ocr_text_chars_per_page: PositiveInt = 1_000_000
 
 
 def _contains(outer: BBox, inner: BBox) -> bool:

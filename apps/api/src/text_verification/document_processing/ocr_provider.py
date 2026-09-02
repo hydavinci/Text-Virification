@@ -34,6 +34,10 @@ class _SupportsArrayProtocol(Protocol):
     def __array__(self) -> object: ...
 
 
+class OcrRecognizer(Protocol):
+    def recognize(self, image: object, language: str) -> list[OcrTextBox]: ...
+
+
 class OcrTextBox(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 

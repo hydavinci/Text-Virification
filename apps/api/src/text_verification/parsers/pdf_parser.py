@@ -2,14 +2,26 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from itertools import groupby
-from math import isfinite
+from math import ceil, isfinite
 from pathlib import Path
 from typing import Any, Literal
 from uuid import NAMESPACE_URL, uuid5
 
 import pymupdf
+from pydantic import ValidationError
 
 from text_verification.compatibility.adapters import source_version_for_file
+from text_verification.document_processing.errors import OcrOutputError
+from text_verification.document_processing.layout import (
+    OcrLayoutBox,
+    OcrLayoutElement,
+    build_ocr_layout,
+)
+from text_verification.document_processing.ocr_provider import (
+    OcrRecognizer,
+    OcrTextBox,
+    SupportedOcrLanguage,
+)
 from text_verification.document_processing.pdf_classifier import classify_page
 from text_verification.document_processing.pdf_models import (
     OcrRequirement,
@@ -39,12 +51,17 @@ _TABLE_SPATIAL_VISITS_PER_DEPTH = 3
 _MAX_TABLE_SPATIAL_NODE_VISITS_PER_PAGE = (
     PdfResourceLimits().max_table_spatial_node_visits_per_page
 )
+OCR_RENDER_DPI = 144
+_OCR_RASTER_CHANNELS = 3
+_OCR_DEDUPE_OVERLAP_RATIO = 0.5
 
 
 @dataclass(frozen=True)
 class PdfParser:
-    supported_type: FileType = FileType.PDF
+    ocr: OcrRecognizer | None = None
     limits: PdfResourceLimits = field(default_factory=PdfResourceLimits)
+    ocr_language: SupportedOcrLanguage = "zh"
+    supported_type: FileType = field(default=FileType.PDF, init=False)
 
     def parse(self, source_path: Path) -> DocumentModel:
         source_version = source_version_for_file(source_path)
@@ -62,7 +79,13 @@ class PdfParser:
                     actual=pdf.page_count,
                 )
             extracted_pages = tuple(
-                _extract_page(page, page_number, self.limits)
+                _extract_page(
+                    page,
+                    page_number,
+                    self.limits,
+                    ocr=self.ocr,
+                    ocr_language=self.ocr_language,
+                )
                 for page_number, page in enumerate(pdf, start=1)
             )
         finally:
@@ -78,7 +101,14 @@ class PdfParser:
             ),
             ocr_requirement=_ocr_requirement(pages),
         )
-        blocks, text = _canonical_blocks(pages)
+        blocks, text = _canonical_blocks(
+            pages,
+            ocr_elements_by_page={
+                extracted.metadata.page: extracted.ocr_elements
+                for extracted in extracted_pages
+                if extracted.ocr_elements
+            },
+        )
         return DocumentModel(
             document_id=uuid5(
                 NAMESPACE_URL,
@@ -99,6 +129,9 @@ def _extract_page(
     page: Any,
     page_number: int,
     limits: PdfResourceLimits,
+    *,
+    ocr: OcrRecognizer | None = None,
+    ocr_language: SupportedOcrLanguage = "zh",
 ) -> _ExtractedPage:
     geometry = _PageGeometry(
         page_bbox=_bbox(page.rect),
@@ -111,6 +144,16 @@ def _extract_page(
         page_number,
         image_rectangles=(image.bbox for image in images),
     )
+    recognized_boxes: tuple[OcrLayoutBox, ...] | None = None
+    if classification.ocr_required and ocr is not None:
+        recognized_boxes = _recognize_page(
+            page,
+            page_number=page_number,
+            geometry=geometry,
+            ocr=ocr,
+            language=ocr_language,
+            limits=limits,
+        )
     tables, table_warnings = _extract_tables(page, page_number, limits)
     tables = _normalize_tables(tables, geometry)
     all_spans = _extract_spans(raw_spans, [])
@@ -120,6 +163,24 @@ def _extract_page(
         limits=limits,
     )
     spans = _residual_spans(all_spans, table_character_groups)
+    ocr_elements: tuple[OcrLayoutElement, ...] = ()
+    ocr_warnings: tuple[PdfExtractionWarning, ...] = ()
+    ocr_resolved = False
+    if recognized_boxes is not None:
+        if recognized_boxes:
+            unique_boxes = _deduplicate_ocr_boxes(
+                recognized_boxes,
+                spans=tuple(spans),
+                tables=tuple(tables),
+            )
+            ocr_elements = build_ocr_layout(
+                unique_boxes,
+                language=ocr_language,
+                max_boxes=limits.max_ocr_boxes_per_page,
+            ).elements
+            ocr_resolved = True
+        else:
+            ocr_warnings = (_ocr_warning(page_number),)
     return _ExtractedPage(
         metadata=PdfPageMetadata(
             page=page_number,
@@ -128,13 +189,245 @@ def _extract_page(
             text_length=classification.text_length,
             text_density=classification.text_density,
             image_coverage=classification.image_coverage,
-            ocr_required=classification.ocr_required,
+            ocr_required=classification.ocr_required and not ocr_resolved,
             spans=tuple(spans),
             tables=tuple(tables),
             images=tuple(images),
         ),
-        warnings=tuple((*image_warnings, *table_warnings)),
+        warnings=tuple((*image_warnings, *table_warnings, *ocr_warnings)),
+        ocr_elements=ocr_elements,
     )
+
+
+def _recognize_page(
+    page: Any,
+    *,
+    page_number: int,
+    geometry: _PageGeometry,
+    ocr: OcrRecognizer,
+    language: SupportedOcrLanguage,
+    limits: PdfResourceLimits,
+) -> tuple[OcrLayoutBox, ...]:
+    payload, raster_width, raster_height = _render_page_for_ocr(page, limits)
+    raw_boxes = ocr.recognize(payload, language)
+    return _normalize_ocr_boxes(
+        raw_boxes,
+        page_number=page_number,
+        page_bbox=geometry.page_bbox,
+        raster_width=raster_width,
+        raster_height=raster_height,
+        limits=limits,
+    )
+
+
+def _render_page_for_ocr(
+    page: Any,
+    limits: PdfResourceLimits,
+) -> tuple[bytes, int, int]:
+    scale = OCR_RENDER_DPI / 72.0
+    estimated_width = max(1, ceil(float(page.rect.width) * scale))
+    estimated_height = max(1, ceil(float(page.rect.height) * scale))
+    _enforce_ocr_raster_limits(
+        estimated_width,
+        estimated_height,
+        estimated_width * estimated_height * _OCR_RASTER_CHANNELS,
+        limits,
+    )
+
+    pixmap: Any = page.get_pixmap(
+        matrix=_PYMUPDF.Matrix(scale, scale),
+        colorspace=_PYMUPDF.csRGB,
+        alpha=False,
+        annots=False,
+    )
+    try:
+        width = int(pixmap.width)
+        height = int(pixmap.height)
+        raw_bytes = int(pixmap.stride) * height
+        _enforce_ocr_raster_limits(width, height, raw_bytes, limits)
+        payload = bytes(pixmap.tobytes("png"))
+        if len(payload) > limits.max_ocr_raster_bytes:
+            raise PdfResourceLimitError(
+                limit="max_ocr_raster_bytes",
+                maximum=limits.max_ocr_raster_bytes,
+                actual=len(payload),
+            )
+        return payload, width, height
+    finally:
+        close = getattr(pixmap, "close", None)
+        if callable(close):
+            close()
+        del pixmap
+
+
+def _enforce_ocr_raster_limits(
+    width: int,
+    height: int,
+    byte_count: int,
+    limits: PdfResourceLimits,
+) -> None:
+    for limit_name, actual, maximum in (
+        ("max_ocr_raster_width", width, limits.max_ocr_raster_width),
+        ("max_ocr_raster_height", height, limits.max_ocr_raster_height),
+        ("max_ocr_raster_pixels", width * height, limits.max_ocr_raster_pixels),
+        ("max_ocr_raster_bytes", byte_count, limits.max_ocr_raster_bytes),
+    ):
+        if actual > maximum:
+            raise PdfResourceLimitError(
+                limit=limit_name,
+                maximum=maximum,
+                actual=actual,
+            )
+
+
+def _normalize_ocr_boxes(
+    raw_boxes: object,
+    *,
+    page_number: int,
+    page_bbox: tuple[float, float, float, float],
+    raster_width: int,
+    raster_height: int,
+    limits: PdfResourceLimits,
+) -> tuple[OcrLayoutBox, ...]:
+    if not isinstance(raw_boxes, list):
+        raise OcrOutputError("OCR provider must return a list of OcrTextBox values")
+    if len(raw_boxes) > limits.max_ocr_boxes_per_page:
+        raise PdfResourceLimitError(
+            limit="max_ocr_boxes_per_page",
+            maximum=limits.max_ocr_boxes_per_page,
+            actual=len(raw_boxes),
+        )
+
+    normalized: list[
+        tuple[str, float, tuple[tuple[float, float], ...]]
+    ] = []
+    text_characters = 0
+    page_width = page_bbox[2] - page_bbox[0]
+    page_height = page_bbox[3] - page_bbox[1]
+    for raw_box in raw_boxes:
+        try:
+            box = (
+                raw_box
+                if isinstance(raw_box, OcrTextBox)
+                else OcrTextBox.model_validate(raw_box)
+            )
+        except (ValidationError, TypeError, ValueError) as error:
+            raise OcrOutputError(str(error)) from error
+        text_characters += len(box.text)
+        if text_characters > limits.max_ocr_text_chars_per_page:
+            raise PdfResourceLimitError(
+                limit="max_ocr_text_chars_per_page",
+                maximum=limits.max_ocr_text_chars_per_page,
+                actual=text_characters,
+            )
+        if any(
+            x < 0.0 or x > raster_width or y < 0.0 or y > raster_height
+            for x, y in box.bbox
+        ):
+            raise OcrOutputError("OCR bbox coordinates must be within the rendered page")
+        quad = tuple(
+            (
+                page_bbox[0] + (x / raster_width) * page_width,
+                page_bbox[1] + (y / raster_height) * page_height,
+            )
+            for x, y in box.bbox
+        )
+        normalized.append((box.text, box.confidence, quad))
+
+    normalized.sort(
+        key=lambda item: (
+            min(point[1] for point in item[2]),
+            min(point[0] for point in item[2]),
+            item[0],
+            -item[1],
+            item[2],
+        )
+    )
+    return tuple(
+        OcrLayoutBox(
+            page=page_number,
+            box_index=index,
+            text=text,
+            confidence=confidence,
+            quad=quad,
+        )
+        for index, (text, confidence, quad) in enumerate(normalized)
+    )
+
+
+def _deduplicate_ocr_boxes(
+    boxes: tuple[OcrLayoutBox, ...],
+    *,
+    spans: tuple[PdfTextSpan, ...],
+    tables: tuple[PdfTable, ...],
+) -> tuple[OcrLayoutBox, ...]:
+    regions = sorted(
+        (
+            (text, bbox)
+            for text, bbox in _native_text_regions(spans, tables)
+            if text and bbox is not None
+        ),
+        key=lambda region: (region[1][1], region[1][0]),
+    )
+    if not regions:
+        return boxes
+
+    active: list[tuple[str, tuple[float, float, float, float]]] = []
+    region_index = 0
+    unique: list[OcrLayoutBox] = []
+    for box in sorted(boxes, key=lambda value: (value.bbox[1], value.bbox[0])):
+        while region_index < len(regions) and regions[region_index][1][1] < box.bbox[3]:
+            active.append(regions[region_index])
+            region_index += 1
+        active = [region for region in active if region[1][3] > box.bbox[1]]
+        if any(_ocr_box_duplicates_native(box, text, bbox) for text, bbox in active):
+            continue
+        unique.append(box)
+    return tuple(unique)
+
+
+def _native_text_regions(
+    spans: tuple[PdfTextSpan, ...],
+    tables: tuple[PdfTable, ...],
+) -> list[tuple[str, tuple[float, float, float, float] | None]]:
+    regions: list[
+        tuple[str, tuple[float, float, float, float] | None]
+    ] = [(span.text, span.bbox) for span in spans]
+    regions.extend(
+        (character.text, character.bbox)
+        for span in spans
+        for character in span.characters
+    )
+    regions.extend(
+        (cell.text, cell.bbox)
+        for table in tables
+        for row in table.rows
+        for cell in row
+    )
+    regions.extend(
+        (character.text, character.bbox)
+        for table in tables
+        for row in table.rows
+        for cell in row
+        for character in cell.characters
+    )
+    return regions
+
+
+def _ocr_box_duplicates_native(
+    box: OcrLayoutBox,
+    native_text: str,
+    native_bbox: tuple[float, float, float, float],
+) -> bool:
+    ocr_text = _comparison_text(box.text).casefold()
+    comparison = _comparison_text(native_text).casefold()
+    if not ocr_text or not comparison or (
+        ocr_text not in comparison and comparison not in ocr_text
+    ):
+        return False
+    overlap = _bbox_overlap_area(box.bbox, native_bbox)
+    minimum_area = min(_bbox_area(box.bbox), _bbox_area(native_bbox))
+    return overlap / max(minimum_area, 1e-9) >= _OCR_DEDUPE_OVERLAP_RATIO
 
 
 def _extract_images(
@@ -1547,7 +1840,12 @@ def _characters_with_offsets(
     return tuple(characters)
 
 
-def _canonical_blocks(pages: tuple[PdfPageMetadata, ...]) -> tuple[list[TextBlock], str]:
+def _canonical_blocks(
+    pages: tuple[PdfPageMetadata, ...],
+    *,
+    ocr_elements_by_page: dict[int, tuple[OcrLayoutElement, ...]] | None = None,
+) -> tuple[list[TextBlock], str]:
+    ocr_by_page = ocr_elements_by_page or {}
     ordered: list[_ExtractedBlock] = []
     for page in pages:
         visual_lines = _visual_lines(page.spans)
@@ -1558,6 +1856,7 @@ def _canonical_blocks(pages: tuple[PdfPageMetadata, ...]) -> tuple[list[TextBloc
             extracted.extend(_line_blocks(page.page, visual_lines))
         extracted.extend(_table_blocks(page.page, page.tables))
         extracted.extend(_image_blocks(page.page, page.images))
+        extracted.extend(_ocr_blocks(ocr_by_page.get(page.page, ())))
         ordered.extend(_order_page_blocks(extracted))
     text_parts: list[str] = []
     blocks: list[TextBlock] = []
@@ -1626,6 +1925,7 @@ class _RawSpan:
 class _ExtractedPage:
     metadata: PdfPageMetadata
     warnings: tuple[PdfExtractionWarning, ...]
+    ocr_elements: tuple[OcrLayoutElement, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1686,7 +1986,7 @@ def _line_preserves_raw_flow(line: _VisualLine) -> bool:
 @dataclass(frozen=True)
 class _ExtractedBlock:
     block_id: str
-    kind: Literal["paragraph", "table_cell", "image"]
+    kind: Literal["paragraph", "heading", "table_cell", "image"]
     text: str
     page: int
     bbox: tuple[float, float, float, float]
@@ -1858,6 +2158,73 @@ def _image_blocks(page: int, images: tuple[PdfImage, ...]) -> list[_ExtractedBlo
         )
         for image in images
     ]
+
+
+def _ocr_blocks(elements: tuple[OcrLayoutElement, ...]) -> list[_ExtractedBlock]:
+    blocks: list[_ExtractedBlock] = []
+    for ordinal, element in enumerate(elements):
+        if element.kind == "table_cell":
+            block_id = (
+                f"ocr-page-{element.page}-table-{element.table_index}"
+                f"-row-{element.row_index}-cell-{element.cell_index}"
+            )
+        else:
+            block_id = (
+                f"ocr-page-{element.page}-{element.kind}-{element.paragraph_index}"
+            )
+        boxes = [
+            {
+                "box_index": box.box_index,
+                "text": box.text,
+                "confidence": box.confidence,
+                "bbox": list(box.bbox),
+                "quad": [list(point) for point in box.quad],
+            }
+            for box in element.boxes
+        ]
+        source_locator: dict[str, object] = {
+            "locator_kind": "ocr",
+            "source": "ocr",
+            "page": element.page,
+            "language": element.language,
+            "confidence": element.confidence,
+            "bbox": list(element.bbox),
+            "boxes": boxes,
+        }
+        if len(element.boxes) == 1:
+            source_locator["quad"] = [list(point) for point in element.boxes[0].quad]
+        if element.paragraph_index is not None:
+            source_locator["paragraph_index"] = element.paragraph_index
+        if element.table_index is not None:
+            source_locator.update(
+                {
+                    "table_index": element.table_index,
+                    "row_index": element.row_index,
+                    "cell_index": element.cell_index,
+                }
+            )
+        blocks.append(
+            _ExtractedBlock(
+                block_id=block_id,
+                kind=element.kind,
+                text=element.text,
+                page=element.page,
+                bbox=element.bbox,
+                ordinal=ordinal,
+                paragraph_index=element.paragraph_index,
+                table_index=element.table_index,
+                row_index=element.row_index,
+                cell_index=element.cell_index,
+                style={
+                    "source": "ocr",
+                    "language": element.language,
+                    "confidence": element.confidence,
+                },
+                source_locator=source_locator,
+                preserve_raw_flow=False,
+            )
+        )
+    return blocks
 
 
 def _lines_text_and_source_metadata(
@@ -2033,6 +2400,15 @@ def _warning(page: int, stage: Literal["table", "image"]) -> PdfExtractionWarnin
     )
 
 
+def _ocr_warning(page: int) -> PdfExtractionWarning:
+    return PdfExtractionWarning(
+        page=page,
+        stage="ocr",
+        code="pdf_ocr_no_text",
+        message="OCR returned no usable text for the required PDF page.",
+    )
+
+
 def _normalized_bbox(
     rectangle: Any,
     geometry: _PageGeometry,
@@ -2098,5 +2474,5 @@ def _as_any(value: object) -> Any:
     return value
 
 
-def _kind_order(kind: Literal["paragraph", "table_cell", "image"]) -> int:
-    return {"paragraph": 0, "table_cell": 1, "image": 2}[kind]
+def _kind_order(kind: Literal["paragraph", "heading", "table_cell", "image"]) -> int:
+    return {"heading": 0, "paragraph": 1, "table_cell": 2, "image": 3}[kind]
