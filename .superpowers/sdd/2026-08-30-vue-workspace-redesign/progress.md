@@ -220,3 +220,51 @@ including `""`, while uniqueness remains mandatory — adding frontend-only
 non-empty validation rejects canonical backend payloads; cost if wrong is that
 an empty ID is less descriptive, but it remains stable and unambiguous when
 unique.
+
+## Task 1 fifth and terminal review fix — 2026-09-02
+
+- Confirmed the release blocker at the Vue implementation boundary:
+  `toRaw(computed(...))` returns the same unfrozen `ComputedRefImpl`, which owns
+  a writable private `_value`; assigning that cache retargeted subsequent
+  public reads without using the readonly `.value` setter.
+- Added the typed `WorkspaceReadonlyValue<T>` boundary. Every returned reactive
+  value is now a frozen plain object with only a readonly getter and the minimal
+  immutable `__v_isRef: true` marker. The getter closes over private internal
+  refs/computeds, so Vue dependency tracking and ref unwrapping remain intact
+  without exposing a Vue implementation object, writable source, cache, setter,
+  or closure field.
+- Wrapped `result`, `issueStates`, `selectedSuggestions`, `currentRevision`,
+  `requiresReverification`, `modifiedText`, `visibleIssues`, `summary`,
+  `replacementConflictIssueIds`, and `hasReplacementConflicts` consistently.
+  Existing deep-frozen results/revisions/issues and frozen record/array/summary
+  snapshots remain unchanged.
+- Regression coverage proves each public facade is its own `toRaw` value,
+  frozen, has no `_value`, rejects `_value` and `.value` replacement through
+  both `Reflect.set` and assignment operations, preserves frozen containers,
+  and continues updating through composable methods while facade identities
+  remain stable.
+
+### Fifth review TDD and validation evidence
+
+- Focused pre-change baseline:
+  `cd apps/web && npm test -- --run tests/useVerificationWorkspace.spec.ts`
+  passed 51 tests in 1 file.
+- RED: the same focused command failed with 1 failure and 51 passes (52 total)
+  because the returned computed accessor was not frozen; a direct runtime
+  diagnostic also showed `toRaw` identity, own `_value`, successful
+  `Reflect.set`, and the public read changing from `"safe"` to `"poison"`.
+- Focused GREEN: the same command passed 52 tests in 1 file.
+- Full frontend suite: `cd apps/web && npm test -- --run` passed 83 tests
+  across 4 files. Node emitted the existing experimental `localStorage`
+  warning; all tests passed.
+- Production build: `cd apps/web && npm run build` passed `vue-tsc -b` and
+  Vite 6.4.3 with 22 modules transformed, built in 270 ms.
+- Scope check target: Task 1 composable/tests plus this ledger and
+  `task-1-report.md`; no canonical wire types or unrelated files changed.
+
+Ruling: No Vue `Ref` or `ComputedRef` object may cross the Task 1 composable
+boundary. Public reactivity is represented by a frozen getter facade over
+private Vue state, and mutable container values remain frozen snapshots — this
+closes both public setter and private-cache retargeting paths; cost if wrong is
+one tiny facade allocation per returned value and unchanged snapshot allocation
+for decision/suggestion records.

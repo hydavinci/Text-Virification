@@ -140,6 +140,35 @@ function attemptAccessorReplacement<T extends object>(
   }
 }
 
+function expectSealedReactiveFacade<T>(
+  facade: { readonly value: T },
+  replacement: unknown
+): T {
+  const rawFacade = toRaw(facade)
+  const originalValue = facade.value
+
+  expect(rawFacade).toBe(facade)
+  expect(Object.isFrozen(rawFacade)).toBe(true)
+  expect(Reflect.ownKeys(rawFacade).sort()).toEqual(['__v_isRef', 'value'])
+  expect(Object.prototype.hasOwnProperty.call(rawFacade, '_value')).toBe(false)
+  expect(
+    Object.getOwnPropertyDescriptor(rawFacade, 'value')?.set
+  ).toBeUndefined()
+  expect(() => {
+    // @ts-expect-error Exercise runtime defense against hostile private access.
+    rawFacade._value = replacement
+  }).toThrow(TypeError)
+  expect(Reflect.set(rawFacade, '_value', replacement)).toBe(false)
+  expect(() => {
+    // @ts-expect-error Exercise runtime defense beyond readonly type checking.
+    rawFacade.value = replacement
+  }).toThrow(TypeError)
+  expect(Reflect.set(rawFacade, 'value', replacement)).toBe(false)
+  expect(facade.value).toBe(originalValue)
+
+  return originalValue
+}
+
 describe('useVerificationWorkspace', () => {
   it('keeps decisions and selected suggestions attached to issue ids after reordering', () => {
     const issueA = buildIssue()
@@ -1053,54 +1082,160 @@ describe('useVerificationWorkspace', () => {
     expect(visible).toEqual([issue])
   })
 
-  it('does not expose internal refs through Vue toRaw or allow public accessors to be retargeted', () => {
-    const issue = buildIssue()
-
-    const resultWorkspace = useVerificationWorkspace()
-    resultWorkspace.loadResult(buildResult([issue]))
-    const loadedResult = resultWorkspace.result.value
-    attemptAccessorReplacement(resultWorkspace.result, buildResult([]))
-    expect(resultWorkspace.result.value).toBe(loadedResult)
-
-    const revisionWorkspace = useVerificationWorkspace()
-    revisionWorkspace.loadResult(buildResult([issue]))
-    const loadedRevision = revisionWorkspace.currentRevision.value
-    attemptAccessorReplacement(revisionWorkspace.currentRevision, null)
-    expect(revisionWorkspace.currentRevision.value).toBe(loadedRevision)
-
-    const decisionWorkspace = useVerificationWorkspace()
-    decisionWorkspace.loadResult(buildResult([issue]))
-    decisionWorkspace.acceptIssue(issue.issue_id)
-    attemptAccessorReplacement(decisionWorkspace.issueStates, {
-      [issue.issue_id]: 'rejected'
+  it('exposes every reactive value through a frozen facade without Vue internals', () => {
+    const earlier = buildIssue({
+      issue_id: '40000000-0000-0000-0000-000000000001',
+      start: 1,
+      end: 4,
+      block_start: 1,
+      block_end: 4,
+      original: 'bcd',
+      suggestion: 'X',
+      context: 'abcdef'
     })
-    expect(decisionWorkspace.issueStates.value).toEqual({
+    const later = buildIssue({
+      issue_id: '40000000-0000-0000-0000-000000000002',
+      start: 2,
+      end: 5,
+      block_start: 2,
+      block_end: 5,
+      original: 'cde',
+      suggestion: 'Y',
+      context: 'abcdef'
+    })
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(buildResult([earlier, later], { text: 'abcdef' }))
+    workspace.selectSuggestion(earlier.issue_id, 'SAFE')
+    workspace.acceptIssues([earlier.issue_id, later.issue_id])
+
+    expectSealedReactiveFacade(workspace.result, buildResult([]))
+    expectSealedReactiveFacade(workspace.issueStates, {
+      [earlier.issue_id]: 'rejected'
+    })
+    expectSealedReactiveFacade(workspace.selectedSuggestions, {
+      [earlier.issue_id]: 'POISON'
+    })
+    expectSealedReactiveFacade(workspace.currentRevision, null)
+    expectSealedReactiveFacade(workspace.requiresReverification, true)
+    expectSealedReactiveFacade(workspace.modifiedText, 'POISON')
+    expectSealedReactiveFacade(workspace.visibleIssues, [])
+    expectSealedReactiveFacade(workspace.summary, {
+      total: 0,
+      pending: 0,
+      accepted: 0,
+      rejected: 0
+    })
+    expectSealedReactiveFacade(workspace.replacementConflictIssueIds, [])
+    expectSealedReactiveFacade(workspace.hasReplacementConflicts, false)
+
+    expect(workspace.result.value?.text).toBe('abcdef')
+    expect(workspace.issueStates.value).toEqual({
+      [earlier.issue_id]: 'accepted',
+      [later.issue_id]: 'accepted'
+    })
+    expect(workspace.selectedSuggestions.value).toEqual({
+      [earlier.issue_id]: 'SAFE'
+    })
+    expect(workspace.currentRevision.value?.kind).toBe('source')
+    expect(workspace.requiresReverification.value).toBe(false)
+    expect(workspace.modifiedText.value).toBe('abcdef')
+    expect(workspace.visibleIssues.value).toEqual([earlier, later])
+    expect(workspace.summary.value).toEqual({
+      total: 2,
+      pending: 0,
+      accepted: 2,
+      rejected: 0
+    })
+    expect(workspace.replacementConflictIssueIds.value).toEqual([
+      earlier.issue_id,
+      later.issue_id
+    ])
+    expect(workspace.hasReplacementConflicts.value).toBe(true)
+  })
+
+  it('keeps facade reads reactive while preserving frozen container values', () => {
+    const issue = buildIssue()
+    const workspace = useVerificationWorkspace()
+    const facades = {
+      result: workspace.result,
+      issueStates: workspace.issueStates,
+      selectedSuggestions: workspace.selectedSuggestions,
+      currentRevision: workspace.currentRevision,
+      requiresReverification: workspace.requiresReverification,
+      modifiedText: workspace.modifiedText,
+      visibleIssues: workspace.visibleIssues,
+      summary: workspace.summary,
+      replacementConflictIssueIds: workspace.replacementConflictIssueIds,
+      hasReplacementConflicts: workspace.hasReplacementConflicts
+    }
+
+    workspace.loadResult(buildResult([issue]))
+    workspace.selectSuggestion(issue.issue_id, '用户选择')
+    workspace.acceptIssue(issue.issue_id)
+
+    expect(workspace.result).toBe(facades.result)
+    expect(workspace.issueStates).toBe(facades.issueStates)
+    expect(workspace.selectedSuggestions).toBe(facades.selectedSuggestions)
+    expect(workspace.currentRevision).toBe(facades.currentRevision)
+    expect(workspace.requiresReverification).toBe(
+      facades.requiresReverification
+    )
+    expect(workspace.modifiedText).toBe(facades.modifiedText)
+    expect(workspace.visibleIssues).toBe(facades.visibleIssues)
+    expect(workspace.summary).toBe(facades.summary)
+    expect(workspace.replacementConflictIssueIds).toBe(
+      facades.replacementConflictIssueIds
+    )
+    expect(workspace.hasReplacementConflicts).toBe(
+      facades.hasReplacementConflicts
+    )
+    expect(workspace.result.value?.text).toBe('甲乙丙丁')
+    expect(workspace.issueStates.value).toEqual({
       [issue.issue_id]: 'accepted'
     })
-
-    const suggestionWorkspace = useVerificationWorkspace()
-    suggestionWorkspace.loadResult(buildResult([issue]))
-    suggestionWorkspace.selectSuggestion(issue.issue_id, '用户选择')
-    attemptAccessorReplacement(suggestionWorkspace.selectedSuggestions, {
-      [issue.issue_id]: '篡改替换'
-    })
-    expect(suggestionWorkspace.selectedSuggestions.value).toEqual({
+    expect(workspace.selectedSuggestions.value).toEqual({
       [issue.issue_id]: '用户选择'
     })
+    expect(workspace.currentRevision.value?.text).toBe('甲用户选择丙丁')
+    expect(workspace.requiresReverification.value).toBe(false)
+    expect(workspace.modifiedText.value).toBe('甲用户选择丙丁')
+    expect(workspace.visibleIssues.value).toEqual([issue])
+    expect(workspace.summary.value).toEqual({
+      total: 1,
+      pending: 0,
+      accepted: 1,
+      rejected: 0
+    })
+    expect(workspace.replacementConflictIssueIds.value).toEqual([])
+    expect(workspace.hasReplacementConflicts.value).toBe(false)
 
-    const reverificationWorkspace = useVerificationWorkspace()
-    reverificationWorkspace.loadResult(buildResult([issue]))
-    attemptAccessorReplacement(
-      reverificationWorkspace.requiresReverification,
+    expect(Object.isFrozen(workspace.result.value)).toBe(true)
+    expect(Object.isFrozen(workspace.issueStates.value)).toBe(true)
+    expect(Object.isFrozen(workspace.selectedSuggestions.value)).toBe(true)
+    expect(Object.isFrozen(workspace.currentRevision.value)).toBe(true)
+    expect(Object.isFrozen(workspace.visibleIssues.value)).toBe(true)
+    expect(Object.isFrozen(workspace.summary.value)).toBe(true)
+    expect(Object.isFrozen(workspace.replacementConflictIssueIds.value)).toBe(
       true
     )
-    expect(reverificationWorkspace.requiresReverification.value).toBe(false)
 
-    const textWorkspace = useVerificationWorkspace()
-    textWorkspace.loadResult(buildResult([issue]))
-    attemptAccessorReplacement(textWorkspace.modifiedText, '篡改文本')
-    textWorkspace.acceptIssue(issue.issue_id)
-    expect(textWorkspace.modifiedText.value).toBe('甲B丙丁')
+    workspace.saveManualEdit('手工修改')
+
+    expect(workspace.result.value?.text).toBe('甲乙丙丁')
+    expect(workspace.issueStates.value).toEqual({})
+    expect(workspace.selectedSuggestions.value).toEqual({})
+    expect(workspace.currentRevision.value?.text).toBe('手工修改')
+    expect(workspace.requiresReverification.value).toBe(true)
+    expect(workspace.modifiedText.value).toBe('手工修改')
+    expect(workspace.visibleIssues.value).toEqual([])
+    expect(workspace.summary.value).toEqual({
+      total: 0,
+      pending: 0,
+      accepted: 0,
+      rejected: 0
+    })
+    expect(workspace.replacementConflictIssueIds.value).toEqual([])
+    expect(workspace.hasReplacementConflicts.value).toBe(false)
   })
 
   it('returns frozen public snapshots and computed containers', () => {

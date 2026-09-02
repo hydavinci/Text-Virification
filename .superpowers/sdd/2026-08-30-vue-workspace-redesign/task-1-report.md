@@ -18,7 +18,10 @@
 - Detects overlap only among accepted issues with effective non-null suggestions and exposes reactive `replacementConflictIssueIds` plus `hasReplacementConflicts`.
 - Fails closed on conflicting replacements: it keeps the last valid revision/text, creates no arbitrary partial draft, and resumes revision generation after rejection, undo, or suggestion changes resolve the conflict.
 - Restores exact pre-batch state, including absent versus explicit properties.
-- Exposes computed modified text, visible issues, review summary, frozen document revisions, manual revision creation, and re-verification state.
+- Exposes reactive values through typed frozen getter facades over private Vue
+  refs/computeds, while retaining computed modified text, visible issues, review
+  summary, frozen document revisions, manual revision creation, and
+  re-verification state.
 - Models revisions as a strict source/draft/persisted union. Source and draft revisions use `revision_number: null`; review/manual drafts use client UUIDs, run/source identity, ISO timestamps, and `persistence_state: 'draft'`. Positive numbers are reserved for server-returned persisted revisions.
 - Removes per-instance revision numbering while retaining UUID noncollision and `parent_revision_id` chaining to the prior valid non-source revision.
 - Adds backend-compatible image, PDF, OCR, JSON metadata, and revision types while retaining legacy aliases only for compatibility.
@@ -79,6 +82,7 @@
 - Second scoped-review fix subject: `fix: preserve overlapping verification issues`
 - Fourth review-wave subject: `fix: harden canonical workspace state`
 - Final allowed fix-wave subject: `fix: seal workspace state boundaries`
+- Fifth and terminal fix-wave subject: `fix: hide workspace reactive internals`
 - Scope: Task 1 tracked files and required SDD ledger/report only.
 - Attribution: required Copilot co-author and session trailers are included in this commit.
 
@@ -104,3 +108,33 @@
   warning.
 - Production build: `cd apps/web && npm run build` passed `vue-tsc -b` and
   Vite 6.4.3 with 22 modules transformed.
+
+### Fifth and terminal review fix
+
+- Finding: readonly computed accessors still expose Vue's concrete
+  `ComputedRefImpl` through `toRaw`. Its private `_value` cache is writable and
+  can retarget public reads even though assigning `.value` is readonly.
+- Added `WorkspaceReadonlyValue<T>`, a frozen plain getter facade carrying only
+  readonly `value` and the immutable minimal `__v_isRef: true` marker. All ten
+  public reactive values use this boundary; no Vue ref/computed, source, cache,
+  setter, or closure field is returned.
+- Existing container guarantees remain: result/revision/issue graphs are deeply
+  frozen, and decision, suggestion, visible-issue, summary, and conflict-ID
+  values are frozen snapshots.
+- Regression tests prove `toRaw(facade) === facade`, each facade is frozen and
+  lacks `_value`, `_value`/`.value` assignment and `Reflect.set` cannot change
+  reads, container mutation fails, facade identity is stable, and later
+  composable methods update every public value reactively.
+- Focused pre-change baseline: 51 tests passed in 1 file.
+- RED:
+  `cd apps/web && npm test -- --run tests/useVerificationWorkspace.spec.ts`
+  failed with 1 failure and 51 passes (52 total) on the unfrozen computed
+  implementation object.
+- Focused GREEN: the same command passed 52 tests in 1 file.
+- Full frontend suite: `cd apps/web && npm test -- --run` passed 83 tests
+  across 4 files, with only the existing Node experimental `localStorage`
+  warning.
+- Production build: `cd apps/web && npm run build` passed `vue-tsc -b` and
+  Vite 6.4.3 with 22 modules transformed, built in 270 ms.
+- This is the terminal Task 1 review fix; scope remains the composable, its
+  tests, this ledger, and this report.

@@ -25,6 +25,23 @@ type PriorIssueState =
   | { hadValue: false }
   | { hadValue: true; value: IssueState }
 
+export interface WorkspaceReadonlyValue<T> {
+  readonly __v_isRef: true
+  readonly value: T
+}
+
+function workspaceReadonlyValue<T>(
+  readValue: () => T
+): WorkspaceReadonlyValue<T> {
+  const facade: WorkspaceReadonlyValue<T> = {
+    __v_isRef: true,
+    get value(): T {
+      return readValue()
+    }
+  }
+  return Object.freeze(facade)
+}
+
 function hasOwn<T extends object>(value: T, key: PropertyKey): boolean {
   return Object.prototype.hasOwnProperty.call(value, key)
 }
@@ -634,29 +651,32 @@ export function useVerificationWorkspace() {
     return revision
   }
 
-  const publicResult = computed(() => result.value)
-  const publicIssueStates = computed(() =>
+  const issueStateSnapshots = computed(() =>
     Object.freeze({ ...issueStates.value })
   )
-  const publicSelectedSuggestions = computed(() =>
+  const selectedSuggestionSnapshots = computed(() =>
     Object.freeze({ ...selectedSuggestions.value })
-  )
-  const publicCurrentRevision = computed(() => currentRevision.value)
-  const publicRequiresReverification = computed(
-    () => requiresReverification.value
   )
 
   return {
-    result: publicResult,
-    issueStates: publicIssueStates,
-    selectedSuggestions: publicSelectedSuggestions,
-    currentRevision: publicCurrentRevision,
-    requiresReverification: publicRequiresReverification,
-    modifiedText,
-    visibleIssues,
-    summary,
-    replacementConflictIssueIds,
-    hasReplacementConflicts,
+    result: workspaceReadonlyValue(() => result.value),
+    issueStates: workspaceReadonlyValue(() => issueStateSnapshots.value),
+    selectedSuggestions: workspaceReadonlyValue(
+      () => selectedSuggestionSnapshots.value
+    ),
+    currentRevision: workspaceReadonlyValue(() => currentRevision.value),
+    requiresReverification: workspaceReadonlyValue(
+      () => requiresReverification.value
+    ),
+    modifiedText: workspaceReadonlyValue(() => modifiedText.value),
+    visibleIssues: workspaceReadonlyValue(() => visibleIssues.value),
+    summary: workspaceReadonlyValue(() => summary.value),
+    replacementConflictIssueIds: workspaceReadonlyValue(
+      () => replacementConflictIssueIds.value
+    ),
+    hasReplacementConflicts: workspaceReadonlyValue(
+      () => hasReplacementConflicts.value
+    ),
     loadResult,
     setIssueState,
     acceptIssue,
