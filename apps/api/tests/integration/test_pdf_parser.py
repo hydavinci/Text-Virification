@@ -1356,6 +1356,86 @@ def test_table_spatial_index_bounds_candidate_cell_inspections() -> None:
     assert inspections <= cell_count * 2
 
 
+def test_table_spatial_index_resolves_nested_cells_by_specificity() -> None:
+    outer = pdf_parser_module._TableCellCandidate(
+        key=(0, 0, 0),
+        bbox=(0.0, 0.0, 100.0, 100.0),
+        order=0,
+    )
+    inner = pdf_parser_module._TableCellCandidate(
+        key=(0, 0, 1),
+        bbox=(10.0, 10.0, 20.0, 20.0),
+        order=1,
+    )
+    index = pdf_parser_module._TableCellSpatialIndex.build((outer, inner))
+
+    assert index.owner((50.0, 50.0, 51.0, 51.0)) is outer
+    assert index.owner((12.0, 12.0, 13.0, 13.0)) is inner
+
+
+@pytest.mark.parametrize(
+    ("bboxes", "glyph", "owner_index"),
+    [
+        (
+            ((0.0, 0.0, 20.0, 20.0), (0.0, 0.0, 20.0, 20.0)),
+            (5.0, 5.0, 6.0, 6.0),
+            0,
+        ),
+        (
+            ((0.0, 0.0, 20.0, 20.0), (10.0, 0.0, 30.0, 20.0)),
+            (12.0, 5.0, 25.0, 15.0),
+            1,
+        ),
+    ],
+    ids=["identical-stable-order", "partial-overlap-area"],
+)
+def test_table_spatial_index_resolves_adversarial_overlaps(
+    bboxes: tuple[
+        tuple[float, float, float, float],
+        tuple[float, float, float, float],
+    ],
+    glyph: tuple[float, float, float, float],
+    owner_index: int,
+) -> None:
+    cells = tuple(
+        pdf_parser_module._TableCellCandidate(
+            key=(0, 0, index),
+            bbox=bbox,
+            order=index,
+        )
+        for index, bbox in enumerate(bboxes)
+    )
+
+    assert pdf_parser_module._TableCellSpatialIndex.build(cells).owner(glyph) is cells[
+        owner_index
+    ]
+
+
+def test_table_spatial_index_bounds_fully_overlapping_cell_inspections() -> None:
+    cell_count = 256
+    inspections = 0
+
+    class _CountingCell:
+        def __init__(self, index: int) -> None:
+            self.key = (0, 0, index)
+            self.order = index
+
+        @property
+        def bbox(self) -> tuple[float, float, float, float]:
+            nonlocal inspections
+            inspections += 1
+            return (0.0, 0.0, 100.0, 100.0)
+
+    cells = tuple(_CountingCell(index) for index in range(cell_count))
+    index = pdf_parser_module._TableCellSpatialIndex.build(cells)
+    inspections = 0
+
+    for _ in range(cell_count):
+        assert index.owner((50.0, 50.0, 51.0, 51.0)) is cells[0]
+
+    assert inspections <= cell_count * 2
+
+
 def test_partial_table_overlap_preserves_unowned_editable_glyph() -> None:
     rawdict = _rawdict_with_line(
         [

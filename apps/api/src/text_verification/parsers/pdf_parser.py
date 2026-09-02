@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
 from itertools import groupby
 from math import isfinite
@@ -528,119 +527,186 @@ class _TableCandidateIndex:
 
 
 @dataclass(frozen=True)
-class _TableRowSpatialIndex:
+class _IndexedTableCell:
+    candidate: _TableCellCandidate
     bbox: tuple[float, float, float, float]
-    cells: tuple[_TableCellCandidate, ...]
-    left_edges: tuple[float, ...]
-    right_edges: tuple[float, ...]
-
-    @classmethod
-    def build(
-        cls,
-        cells: tuple[_TableCellCandidate, ...],
-    ) -> _TableRowSpatialIndex:
-        ordered = tuple(sorted(cells, key=lambda cell: (cell.bbox[0], cell.order)))
-        return cls(
-            bbox=_combined_bbox(cell.bbox for cell in ordered),
-            cells=ordered,
-            left_edges=tuple(cell.bbox[0] for cell in ordered),
-            right_edges=tuple(cell.bbox[2] for cell in ordered),
-        )
+    area: float
 
 
 @dataclass(frozen=True)
-class _TableSpatialIndex:
+class _TableCellSpatialNode:
     bbox: tuple[float, float, float, float]
-    rows: tuple[_TableRowSpatialIndex, ...]
-    top_edges: tuple[float, ...]
-    bottom_edges: tuple[float, ...]
+    best_priority: tuple[float, int]
+    entry: _IndexedTableCell | None = None
+    left: _TableCellSpatialNode | None = None
+    right: _TableCellSpatialNode | None = None
 
 
 @dataclass(frozen=True)
 class _TableCellSpatialIndex:
-    tables: tuple[_TableSpatialIndex, ...]
+    root: _TableCellSpatialNode | None
 
     @classmethod
     def build(
         cls,
         cells: tuple[_TableCellCandidate, ...],
     ) -> _TableCellSpatialIndex:
-        grouped: dict[int, dict[int, list[_TableCellCandidate]]] = {}
+        entries_by_bbox: dict[
+            tuple[float, float, float, float],
+            _IndexedTableCell,
+        ] = {}
         for cell in cells:
-            table_index, row_index, _ = cell.key
-            grouped.setdefault(table_index, {}).setdefault(row_index, []).append(cell)
-        tables: list[_TableSpatialIndex] = []
-        for table_rows in grouped.values():
-            rows = tuple(
-                _TableRowSpatialIndex.build(tuple(row_cells))
-                for row_cells in table_rows.values()
-            )
-            ordered_rows = tuple(
-                sorted(rows, key=lambda row: (row.bbox[1], row.bbox[3]))
-            )
-            tables.append(
-                _TableSpatialIndex(
-                    bbox=_combined_bbox(row.bbox for row in ordered_rows),
-                    rows=ordered_rows,
-                    top_edges=tuple(row.bbox[1] for row in ordered_rows),
-                    bottom_edges=tuple(row.bbox[3] for row in ordered_rows),
+            bbox = cell.bbox
+            existing = entries_by_bbox.get(bbox)
+            if existing is None or cell.order < existing.candidate.order:
+                entries_by_bbox[bbox] = _IndexedTableCell(
+                    candidate=cell,
+                    bbox=bbox,
+                    area=_bbox_area(bbox),
                 )
-            )
-        return cls(tables=tuple(tables))
+        return cls(
+            root=_build_table_cell_spatial_node(tuple(entries_by_bbox.values()))
+        )
 
     def owner(
         self,
         bbox: tuple[float, float, float, float],
     ) -> _TableCellCandidate | None:
-        center_x = (bbox[0] + bbox[2]) / 2
-        center_y = (bbox[1] + bbox[3]) / 2
+        if self.root is None:
+            return None
         best: _TableCellCandidate | None = None
-        best_score: tuple[bool, bool, float, int] | None = None
-        for table in self.tables:
-            if (
-                table.bbox[0] >= bbox[2]
-                or table.bbox[1] >= bbox[3]
-                or table.bbox[2] <= bbox[0]
-                or table.bbox[3] <= bbox[1]
-            ):
-                continue
-            row_start = bisect_right(table.bottom_edges, bbox[1])
-            row_end = bisect_left(table.top_edges, bbox[3])
-            for row in table.rows[row_start:row_end]:
-                cell_start = bisect_right(row.right_edges, bbox[0])
-                cell_end = bisect_left(row.left_edges, bbox[2])
-                for cell in row.cells[cell_start:cell_end]:
-                    cell_bbox = cell.bbox
-                    overlap_width = min(cell_bbox[2], bbox[2]) - max(
-                        cell_bbox[0],
-                        bbox[0],
-                    )
-                    overlap_height = min(cell_bbox[3], bbox[3]) - max(
-                        cell_bbox[1],
-                        bbox[1],
-                    )
-                    if overlap_width <= 0.0 or overlap_height <= 0.0:
-                        continue
-                    contains = (
-                        cell_bbox[0] <= bbox[0]
-                        and cell_bbox[1] <= bbox[1]
-                        and bbox[2] <= cell_bbox[2]
-                        and bbox[3] <= cell_bbox[3]
-                    )
-                    contains_center = (
-                        cell_bbox[0] <= center_x <= cell_bbox[2]
-                        and cell_bbox[1] <= center_y <= cell_bbox[3]
-                    )
-                    score = (
-                        contains,
-                        contains_center,
-                        overlap_width * overlap_height,
-                        -cell.order,
-                    )
-                    if best_score is None or score > best_score:
-                        best = cell
-                        best_score = score
+        best_score: tuple[bool, bool, float, float, int] | None = None
+
+        def search(
+            node: _TableCellSpatialNode,
+            upper_bound: tuple[bool, bool, float, float, int],
+        ) -> None:
+            nonlocal best, best_score
+            if best_score is not None and upper_bound <= best_score:
+                return
+            if node.entry is not None:
+                cell = node.entry.candidate
+                cell_bbox = cell.bbox
+                score = _table_cell_ownership_score(cell_bbox, bbox, cell.order)
+                if score is not None and (best_score is None or score > best_score):
+                    best = cell
+                    best_score = score
+                return
+            ranked_children = [
+                (child_bound, child)
+                for child in (node.left, node.right)
+                if child is not None
+                and (
+                    child_bound := _table_cell_node_upper_bound(child, bbox)
+                ) is not None
+            ]
+            ranked_children.sort(key=lambda value: value[0], reverse=True)
+            for child_bound, child in ranked_children:
+                search(child, child_bound)
+
+        root_bound = _table_cell_node_upper_bound(self.root, bbox)
+        if root_bound is not None:
+            search(self.root, root_bound)
         return best
+
+
+def _build_table_cell_spatial_node(
+    entries: tuple[_IndexedTableCell, ...],
+) -> _TableCellSpatialNode | None:
+    if not entries:
+        return None
+    if len(entries) == 1:
+        entry = entries[0]
+        return _TableCellSpatialNode(
+            bbox=entry.bbox,
+            best_priority=(entry.area, entry.candidate.order),
+            entry=entry,
+        )
+    bbox = _combined_bbox(entry.bbox for entry in entries)
+    axis = 0 if bbox[2] - bbox[0] >= bbox[3] - bbox[1] else 1
+    ordered = tuple(
+        sorted(
+            entries,
+            key=lambda entry: (
+                entry.bbox[axis] + entry.bbox[axis + 2],
+                entry.candidate.order,
+            )
+        )
+    )
+    middle = len(ordered) // 2
+    left = _build_table_cell_spatial_node(ordered[:middle])
+    right = _build_table_cell_spatial_node(ordered[middle:])
+    assert left is not None and right is not None
+    return _TableCellSpatialNode(
+        bbox=bbox,
+        best_priority=min(left.best_priority, right.best_priority),
+        left=left,
+        right=right,
+    )
+
+
+def _table_cell_node_upper_bound(
+    node: _TableCellSpatialNode,
+    bbox: tuple[float, float, float, float],
+) -> tuple[bool, bool, float, float, int] | None:
+    overlap_area = _bbox_overlap_area(node.bbox, bbox)
+    if overlap_area <= 0.0:
+        return None
+    center_x = (bbox[0] + bbox[2]) / 2
+    center_y = (bbox[1] + bbox[3]) / 2
+    return (
+        _bbox_contains(node.bbox, bbox),
+        node.bbox[0] <= center_x <= node.bbox[2]
+        and node.bbox[1] <= center_y <= node.bbox[3],
+        overlap_area,
+        -node.best_priority[0],
+        -node.best_priority[1],
+    )
+
+
+def _table_cell_ownership_score(
+    cell_bbox: tuple[float, float, float, float],
+    bbox: tuple[float, float, float, float],
+    order: int,
+) -> tuple[bool, bool, float, float, int] | None:
+    overlap_area = _bbox_overlap_area(cell_bbox, bbox)
+    if overlap_area <= 0.0:
+        return None
+    center_x = (bbox[0] + bbox[2]) / 2
+    center_y = (bbox[1] + bbox[3]) / 2
+    return (
+        _bbox_contains(cell_bbox, bbox),
+        cell_bbox[0] <= center_x <= cell_bbox[2]
+        and cell_bbox[1] <= center_y <= cell_bbox[3],
+        overlap_area,
+        -_bbox_area(cell_bbox),
+        -order,
+    )
+
+
+def _bbox_contains(
+    outer: tuple[float, float, float, float],
+    inner: tuple[float, float, float, float],
+) -> bool:
+    return (
+        outer[0] <= inner[0]
+        and outer[1] <= inner[1]
+        and inner[2] <= outer[2]
+        and inner[3] <= outer[3]
+    )
+
+
+def _bbox_overlap_area(
+    first: tuple[float, float, float, float],
+    second: tuple[float, float, float, float],
+) -> float:
+    width = min(first[2], second[2]) - max(first[0], second[0])
+    height = min(first[3], second[3]) - max(first[1], second[1])
+    return max(width, 0.0) * max(height, 0.0)
+
+
+def _bbox_area(bbox: tuple[float, float, float, float]) -> float:
+    return (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
 
 
 def _build_table_candidate_index(
