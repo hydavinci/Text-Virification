@@ -1436,6 +1436,103 @@ def test_table_spatial_index_bounds_fully_overlapping_cell_inspections() -> None
     assert inspections <= cell_count * 2
 
 
+def test_table_spatial_index_prunes_alternating_vertical_partitions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cell_count = 256
+    cells = tuple(
+        pdf_parser_module._TableCellCandidate(
+            key=(0, 0, index),
+            bbox=(
+                float(index * 2),
+                0.0 if index % 2 == 0 else 3.0,
+                float(index * 2 + 1),
+                1.0 if index % 2 == 0 else 4.0,
+            ),
+            order=index,
+        )
+        for index in range(cell_count)
+    )
+    node_visits = 0
+    original_upper_bound = pdf_parser_module._table_cell_node_upper_bound
+
+    def counting_upper_bound(
+        node: object,
+        bbox: tuple[float, float, float, float],
+    ) -> object:
+        nonlocal node_visits
+        node_visits += 1
+        return original_upper_bound(node, bbox)
+
+    monkeypatch.setattr(
+        pdf_parser_module,
+        "_table_cell_node_upper_bound",
+        counting_upper_bound,
+    )
+    index = pdf_parser_module._TableCellSpatialIndex.build(cells)
+    glyph = (0.0, 1.5, float(cell_count * 2), 2.5)
+
+    for _ in range(cell_count):
+        assert index.owner(glyph) is None
+
+    assert node_visits <= cell_count * 8
+
+
+@pytest.mark.parametrize(
+    "insertion_order",
+    [
+        tuple(range(256)),
+        tuple(range(0, 256, 2)) + tuple(range(255, 0, -2)),
+    ],
+    ids=["sorted", "adversarial"],
+)
+def test_table_spatial_index_build_stays_balanced(
+    insertion_order: tuple[int, ...],
+) -> None:
+    cells = tuple(
+        pdf_parser_module._TableCellCandidate(
+            key=(0, index // 16, index % 16),
+            bbox=(
+                float((index % 16) * 2),
+                float((index // 16) * 2),
+                float((index % 16) * 2 + 1),
+                float((index // 16) * 2 + 1),
+            ),
+            order=index,
+        )
+        for index in insertion_order
+    )
+    root = pdf_parser_module._TableCellSpatialIndex.build(cells).root
+
+    def depth(node: object | None) -> int:
+        if node is None:
+            return 0
+        return 1 + max(depth(node.left), depth(node.right))
+
+    assert depth(root) <= 9
+
+
+def test_table_spatial_index_enforces_cumulative_node_visit_budget() -> None:
+    cell = pdf_parser_module._TableCellCandidate(
+        key=(0, 0, 0),
+        bbox=(0.0, 0.0, 10.0, 10.0),
+        order=0,
+    )
+    index = pdf_parser_module._TableCellSpatialIndex.build(
+        (cell,),
+        max_node_visits=2,
+    )
+
+    assert index.owner((1.0, 1.0, 2.0, 2.0)) is cell
+    assert index.owner((1.0, 1.0, 2.0, 2.0)) is cell
+    with pytest.raises(PdfResourceLimitError) as raised:
+        index.owner((1.0, 1.0, 2.0, 2.0))
+
+    assert raised.value.limit == "max_table_spatial_node_visits_per_page"
+    assert raised.value.maximum == 2
+    assert raised.value.actual == 3
+
+
 def test_partial_table_overlap_preserves_unowned_editable_glyph() -> None:
     rawdict = _rawdict_with_line(
         [

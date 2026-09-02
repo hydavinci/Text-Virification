@@ -35,6 +35,7 @@ _MIN_VISUAL_GAP = 0.5
 _FONT_GAP_RATIO = 0.08
 _GLYPH_GAP_RATIO = 0.2
 _RAWDICT_TEXT_FLAGS = pymupdf.TEXTFLAGS_RAWDICT & ~pymupdf.TEXT_PRESERVE_IMAGES
+_MAX_TABLE_SPATIAL_NODE_VISITS_PER_PAGE = 1_000_000
 
 
 @dataclass(frozen=True)
@@ -542,14 +543,18 @@ class _TableCellSpatialNode:
     right: _TableCellSpatialNode | None = None
 
 
-@dataclass(frozen=True)
+@dataclass
 class _TableCellSpatialIndex:
     root: _TableCellSpatialNode | None
+    max_node_visits: int = _MAX_TABLE_SPATIAL_NODE_VISITS_PER_PAGE
+    node_visits: int = 0
 
     @classmethod
     def build(
         cls,
         cells: tuple[_TableCellCandidate, ...],
+        *,
+        max_node_visits: int = _MAX_TABLE_SPATIAL_NODE_VISITS_PER_PAGE,
     ) -> _TableCellSpatialIndex:
         entries_by_bbox: dict[
             tuple[float, float, float, float],
@@ -564,8 +569,13 @@ class _TableCellSpatialIndex:
                     bbox=bbox,
                     area=_bbox_area(bbox),
                 )
+        entries = tuple(entries_by_bbox.values())
         return cls(
-            root=_build_table_cell_spatial_node(tuple(entries_by_bbox.values()))
+            root=_build_table_cell_spatial_node(
+                entries,
+                axis=_table_cell_spatial_axis(entries),
+            ),
+            max_node_visits=max_node_visits,
         )
 
     def owner(
@@ -576,6 +586,18 @@ class _TableCellSpatialIndex:
             return None
         best: _TableCellCandidate | None = None
         best_score: tuple[bool, bool, float, float, int] | None = None
+
+        def node_upper_bound(
+            node: _TableCellSpatialNode,
+        ) -> tuple[bool, bool, float, float, int] | None:
+            self.node_visits += 1
+            if self.node_visits > self.max_node_visits:
+                raise PdfResourceLimitError(
+                    limit="max_table_spatial_node_visits_per_page",
+                    maximum=self.max_node_visits,
+                    actual=self.node_visits,
+                )
+            return _table_cell_node_upper_bound(node, bbox)
 
         def search(
             node: _TableCellSpatialNode,
@@ -596,15 +618,13 @@ class _TableCellSpatialIndex:
                 (child_bound, child)
                 for child in (node.left, node.right)
                 if child is not None
-                and (
-                    child_bound := _table_cell_node_upper_bound(child, bbox)
-                ) is not None
+                and (child_bound := node_upper_bound(child)) is not None
             ]
             ranked_children.sort(key=lambda value: value[0], reverse=True)
             for child_bound, child in ranked_children:
                 search(child, child_bound)
 
-        root_bound = _table_cell_node_upper_bound(self.root, bbox)
+        root_bound = node_upper_bound(self.root)
         if root_bound is not None:
             search(self.root, root_bound)
         return best
@@ -612,6 +632,8 @@ class _TableCellSpatialIndex:
 
 def _build_table_cell_spatial_node(
     entries: tuple[_IndexedTableCell, ...],
+    *,
+    axis: int,
 ) -> _TableCellSpatialNode | None:
     if not entries:
         return None
@@ -623,25 +645,44 @@ def _build_table_cell_spatial_node(
             entry=entry,
         )
     bbox = _combined_bbox(entry.bbox for entry in entries)
-    axis = 0 if bbox[2] - bbox[0] >= bbox[3] - bbox[1] else 1
+    other_axis = 1 - axis
     ordered = tuple(
         sorted(
             entries,
             key=lambda entry: (
                 entry.bbox[axis] + entry.bbox[axis + 2],
+                entry.bbox[other_axis] + entry.bbox[other_axis + 2],
                 entry.candidate.order,
             )
         )
     )
     middle = len(ordered) // 2
-    left = _build_table_cell_spatial_node(ordered[:middle])
-    right = _build_table_cell_spatial_node(ordered[middle:])
+    left = _build_table_cell_spatial_node(
+        ordered[:middle],
+        axis=other_axis,
+    )
+    right = _build_table_cell_spatial_node(
+        ordered[middle:],
+        axis=other_axis,
+    )
     assert left is not None and right is not None
     return _TableCellSpatialNode(
         bbox=bbox,
         best_priority=min(left.best_priority, right.best_priority),
         left=left,
         right=right,
+    )
+
+
+def _table_cell_spatial_axis(entries: tuple[_IndexedTableCell, ...]) -> int:
+    if not entries:
+        return 0
+    x_centers = [entry.bbox[0] + entry.bbox[2] for entry in entries]
+    y_centers = [entry.bbox[1] + entry.bbox[3] for entry in entries]
+    return (
+        0
+        if max(x_centers) - min(x_centers) >= max(y_centers) - min(y_centers)
+        else 1
     )
 
 
