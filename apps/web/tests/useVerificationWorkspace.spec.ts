@@ -9,6 +9,8 @@ import type {
 const documentId = '11111111-1111-1111-1111-111111111111'
 const runId = '22222222-2222-2222-2222-222222222222'
 const sourceVersion = 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+const uuidPattern =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
 function buildIssue(overrides: Partial<VerificationIssue> = {}): VerificationIssue {
   return {
@@ -32,7 +34,7 @@ function buildIssue(overrides: Partial<VerificationIssue> = {}): VerificationIss
     rule_id: 'cn_typo',
     rule_version: '1',
     source: 'test',
-    source_version: sourceVersion,
+    source_version: '1',
     confidence: 0.8,
     auto_fixable: true,
     context: '甲乙丙丁',
@@ -49,6 +51,7 @@ function buildResult(
   overrides: Partial<VerificationResult> = {}
 ): VerificationResult {
   const text = overrides.text ?? '甲乙丙丁'
+  const codePointLength = Array.from(text).length
   return {
     success: true,
     filename: 'sample.txt',
@@ -61,9 +64,9 @@ function buildResult(
         kind: 'paragraph',
         text,
         global_start: 0,
-        global_end: text.length,
+        global_end: codePointLength,
         block_start: 0,
-        block_end: text.length,
+        block_end: codePointLength,
         page: null,
         paragraph_index: 0,
         table_index: null,
@@ -78,12 +81,12 @@ function buildResult(
     parser_name: 'compatibility-flat-text',
     parser_version: '1',
     stats: {
-      char_count: text.length,
-      char_count_no_space: text.length,
+      char_count: codePointLength,
+      char_count_no_space: codePointLength,
       line_count: 1,
       paragraph_count: 1,
       language: 'zh',
-      primary_count: text.length,
+      primary_count: codePointLength,
       primary_label: '总字数'
     },
     issues,
@@ -153,7 +156,7 @@ describe('useVerificationWorkspace', () => {
     workspace.loadResult(buildResult([issueB]))
 
     expect(workspace.issueStates.value).toEqual({ [issueB.issue_id]: 'accepted' })
-    expect(workspace.selectedSuggestions.value).toEqual({ [issueB.issue_id]: 'C' })
+    expect(workspace.selectedSuggestions.value).toEqual({})
   })
 
   it.each([
@@ -171,12 +174,7 @@ describe('useVerificationWorkspace', () => {
     {
       label: 'source revision',
       result: buildResult([buildIssue()], {
-        source_version: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-        issues: [
-          buildIssue({
-            source_version: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
-          })
-        ]
+        source_version: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
       })
     }
   ])('resets review state for a different $label', ({ result }) => {
@@ -188,6 +186,41 @@ describe('useVerificationWorkspace', () => {
     workspace.loadResult(result)
 
     expect(workspace.issueStates.value).toEqual({})
+  })
+
+  it('resets decisions and overrides for a new verification run with stable issue ids', () => {
+    const issue = buildIssue()
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(buildResult([issue]))
+    workspace.acceptIssue(issue.issue_id)
+    workspace.selectSuggestion(issue.issue_id, '显式替换')
+
+    const nextRunId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    workspace.loadResult(buildResult([
+      buildIssue({ verification_run_id: nextRunId })
+    ], {
+      verification_run_id: nextRunId
+    }))
+
+    expect(workspace.issueStates.value).toEqual({})
+    expect(workspace.selectedSuggestions.value).toEqual({})
+    expect(workspace.currentRevision.value).toMatchObject({
+      kind: 'source',
+      verification_run_id: nextRunId,
+      revision_id: null,
+      revision_number: 0
+    })
+  })
+
+  it('accepts production-shaped checker source versions independent of document source versions', () => {
+    const issue = buildIssue({ source_version: '1' })
+    const workspace = useVerificationWorkspace()
+
+    workspace.loadResult(buildResult([issue], { source_version: sourceVersion }))
+    workspace.acceptIssue(issue.issue_id)
+
+    expect(workspace.visibleIssues.value).toEqual([issue])
+    expect(workspace.modifiedText.value).toBe('甲B丙丁')
   })
 
   it('applies accepted replacements in descending canonical offset order', () => {
@@ -244,6 +277,127 @@ describe('useVerificationWorkspace', () => {
     expect(workspace.modifiedText.value).toBe('甲乙丙丁')
   })
 
+  it('uses updated backend defaults for untouched suggestions on same-result reload', () => {
+    const issue = buildIssue({ suggestion: '旧默认值' })
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(buildResult([issue]))
+    workspace.acceptIssue(issue.issue_id)
+
+    workspace.loadResult(buildResult([
+      buildIssue({ suggestion: '新默认值' })
+    ]))
+
+    expect(workspace.selectedSuggestions.value).toEqual({})
+    expect(workspace.modifiedText.value).toBe('甲新默认值丙丁')
+  })
+
+  it('preserves explicit suggestion overrides on same-result reload', () => {
+    const issue = buildIssue({ suggestion: '旧默认值' })
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(buildResult([issue]))
+    workspace.acceptIssue(issue.issue_id)
+    workspace.selectSuggestion(issue.issue_id, '用户选择')
+
+    workspace.loadResult(buildResult([
+      buildIssue({ suggestion: '新默认值' })
+    ]))
+
+    expect(workspace.selectedSuggestions.value).toEqual({
+      [issue.issue_id]: '用户选择'
+    })
+    expect(workspace.modifiedText.value).toBe('甲用户选择丙丁')
+  })
+
+  it.each([
+    {
+      label: 'null',
+      override: null,
+      expectedText: '甲乙丙丁'
+    },
+    {
+      label: 'empty string',
+      override: '',
+      expectedText: '甲丙丁'
+    }
+  ])('preserves an explicit $label suggestion override on reload', ({
+    override,
+    expectedText
+  }) => {
+    const issue = buildIssue({ suggestion: '旧默认值' })
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(buildResult([issue]))
+    workspace.acceptIssue(issue.issue_id)
+    workspace.selectSuggestion(issue.issue_id, override)
+
+    workspace.loadResult(buildResult([
+      buildIssue({ suggestion: '新默认值' })
+    ]))
+
+    expect(workspace.selectedSuggestions.value).toEqual({
+      [issue.issue_id]: override
+    })
+    expect(workspace.modifiedText.value).toBe(expectedText)
+  })
+
+  it('validates block-local canonical offsets after an astral character and replaces them', () => {
+    const text = '前😀块乙后'
+    const issue = buildIssue({
+      start: 3,
+      end: 4,
+      block_start: 2,
+      block_end: 3,
+      original: '乙',
+      suggestion: 'B'
+    })
+    const workspace = useVerificationWorkspace()
+
+    workspace.loadResult(buildResult([issue], {
+      text,
+      blocks: [
+        {
+          block_id: 'p-0',
+          kind: 'paragraph',
+          text: '😀块乙',
+          global_start: 1,
+          global_end: 4,
+          block_start: 0,
+          block_end: 3,
+          page: null,
+          paragraph_index: 0,
+          table_index: null,
+          row_index: null,
+          cell_index: null,
+          bbox: null,
+          parent_id: null,
+          style: {},
+          source_locator: { paragraph_index: 0 }
+        }
+      ]
+    }))
+    workspace.acceptIssue(issue.issue_id)
+
+    expect(workspace.visibleIssues.value).toEqual([issue])
+    expect(workspace.modifiedText.value).toBe('前😀块B后')
+  })
+
+  it('validates and replaces an astral original using canonical code-point offsets', () => {
+    const issue = buildIssue({
+      start: 1,
+      end: 2,
+      block_start: 1,
+      block_end: 2,
+      original: '😀',
+      suggestion: '表情'
+    })
+    const workspace = useVerificationWorkspace()
+
+    workspace.loadResult(buildResult([issue], { text: '甲😀乙' }))
+    workspace.acceptIssue(issue.issue_id)
+
+    expect(workspace.visibleIssues.value).toEqual([issue])
+    expect(workspace.modifiedText.value).toBe('甲表情乙')
+  })
+
   it('uses canonical start and end while safely ignoring stale or invalid issues', () => {
     const valid = buildIssue({ position: -50, end_position: -25 })
     const staleDocument = buildIssue({
@@ -253,10 +407,6 @@ describe('useVerificationWorkspace', () => {
     const staleRun = buildIssue({
       issue_id: '40000000-0000-0000-0000-000000000002',
       verification_run_id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
-    })
-    const staleSource = buildIssue({
-      issue_id: '40000000-0000-0000-0000-000000000003',
-      source_version: 'sha256:stale'
     })
     const outOfRange = buildIssue({
       issue_id: '40000000-0000-0000-0000-000000000004',
@@ -279,7 +429,6 @@ describe('useVerificationWorkspace', () => {
     workspace.loadResult(buildResult([
       staleDocument,
       staleRun,
-      staleSource,
       outOfRange,
       mismatchedOriginal,
       fractionalOffset,
@@ -288,7 +437,6 @@ describe('useVerificationWorkspace', () => {
     workspace.acceptIssues([
       staleDocument.issue_id,
       staleRun.issue_id,
-      staleSource.issue_id,
       outOfRange.issue_id,
       mismatchedOriginal.issue_id,
       fractionalOffset.issue_id,
@@ -397,16 +545,98 @@ describe('useVerificationWorkspace', () => {
     expect(reviewRevision?.text).toBe('甲B丙丁')
     expect(workspace.currentRevision.value).toMatchObject({
       document_id: documentId,
+      verification_run_id: runId,
       source_version: sourceVersion,
       parent_revision_id: reviewRevision?.revision_id,
       kind: 'manual',
+      revision_number: 2,
       text: '手工修改后的全文'
     })
-    expect(workspace.currentRevision.value?.revision_id).toBeTruthy()
+    expect(workspace.currentRevision.value?.revision_id).toMatch(uuidPattern)
+    expect(workspace.currentRevision.value?.created_at).toBe(
+      new Date(workspace.currentRevision.value?.created_at ?? '').toISOString()
+    )
     expect(Object.isFrozen(workspace.currentRevision.value)).toBe(true)
     expect(workspace.requiresReverification.value).toBe(true)
     expect(workspace.issueStates.value).toEqual({})
     expect(workspace.selectedSuggestions.value).toEqual({})
     expect(workspace.modifiedText.value).toBe('手工修改后的全文')
+  })
+
+  it('distinguishes non-persisted source revisions from serializable persistable drafts', () => {
+    const issue = buildIssue()
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(buildResult([issue]))
+
+    expect(workspace.currentRevision.value).toEqual({
+      revision_id: null,
+      document_id: documentId,
+      verification_run_id: runId,
+      source_version: sourceVersion,
+      revision_number: 0,
+      created_at: null,
+      parent_revision_id: null,
+      kind: 'source',
+      text: '甲乙丙丁'
+    })
+    expect(Object.isFrozen(workspace.currentRevision.value)).toBe(true)
+
+    workspace.acceptIssue(issue.issue_id)
+    const reviewRevision = workspace.currentRevision.value
+
+    expect(reviewRevision).toMatchObject({
+      document_id: documentId,
+      verification_run_id: runId,
+      source_version: sourceVersion,
+      revision_number: 1,
+      parent_revision_id: null,
+      kind: 'review',
+      text: '甲B丙丁'
+    })
+    expect(reviewRevision?.revision_id).toMatch(uuidPattern)
+    expect(reviewRevision?.created_at).toBe(
+      new Date(reviewRevision?.created_at ?? '').toISOString()
+    )
+    expect(Object.isFrozen(reviewRevision)).toBe(true)
+    expect(JSON.parse(JSON.stringify(reviewRevision))).toEqual(reviewRevision)
+  })
+
+  it('generates non-colliding revision UUIDs across workspace instances', () => {
+    const issue = buildIssue()
+    const first = useVerificationWorkspace()
+    const second = useVerificationWorkspace()
+    first.loadResult(buildResult([issue]))
+    second.loadResult(buildResult([issue]))
+
+    first.acceptIssue(issue.issue_id)
+    second.acceptIssue(issue.issue_id)
+
+    expect(first.currentRevision.value?.revision_id).toMatch(uuidPattern)
+    expect(second.currentRevision.value?.revision_id).toMatch(uuidPattern)
+    expect(first.currentRevision.value?.revision_id).not.toBe(
+      second.currentRevision.value?.revision_id
+    )
+  })
+
+  it('resets persistable revision numbering for a different result identity', () => {
+    const issue = buildIssue()
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(buildResult([issue]))
+    workspace.acceptIssue(issue.issue_id)
+    workspace.selectSuggestion(issue.issue_id, '第二版')
+    expect(workspace.currentRevision.value?.revision_number).toBe(2)
+
+    const nextRunId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    const nextIssue = buildIssue({ verification_run_id: nextRunId })
+    workspace.loadResult(buildResult([nextIssue], {
+      verification_run_id: nextRunId
+    }))
+    workspace.acceptIssue(nextIssue.issue_id)
+
+    expect(workspace.currentRevision.value).toMatchObject({
+      verification_run_id: nextRunId,
+      revision_number: 1,
+      kind: 'review'
+    })
   })
 })

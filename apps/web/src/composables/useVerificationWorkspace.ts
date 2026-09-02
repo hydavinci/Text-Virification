@@ -10,8 +10,14 @@ import type {
 
 interface BatchStateSnapshot {
   documentId: string
+  verificationRunId: string
   sourceVersion: string
   entries: Record<string, PriorIssueState>
+}
+
+interface Utf16Range {
+  start: number
+  end: number
 }
 
 type PriorIssueState =
@@ -26,6 +32,77 @@ function isInteger(value: number | null): value is number {
   return value !== null && Number.isInteger(value)
 }
 
+function codePointLength(value: string): number {
+  return Array.from(value).length
+}
+
+function utf16IndexAtCodePointOffset(
+  value: string,
+  codePointOffset: number
+): number | null {
+  if (!Number.isInteger(codePointOffset) || codePointOffset < 0) {
+    return null
+  }
+
+  let currentCodePointOffset = 0
+  let currentUtf16Index = 0
+  for (const character of value) {
+    if (currentCodePointOffset === codePointOffset) {
+      return currentUtf16Index
+    }
+    currentCodePointOffset += 1
+    currentUtf16Index += character.length
+  }
+  return currentCodePointOffset === codePointOffset ? currentUtf16Index : null
+}
+
+function utf16RangeForCodePointOffsets(
+  value: string,
+  start: number,
+  end: number
+): Utf16Range | null {
+  if (
+    !Number.isInteger(start) ||
+    !Number.isInteger(end) ||
+    start < 0 ||
+    end <= start
+  ) {
+    return null
+  }
+
+  const utf16Start = utf16IndexAtCodePointOffset(value, start)
+  const utf16End = utf16IndexAtCodePointOffset(value, end)
+  if (utf16Start === null || utf16End === null) {
+    return null
+  }
+  return {
+    start: utf16Start,
+    end: utf16End
+  }
+}
+
+function sliceCodePointRange(
+  value: string,
+  start: number,
+  end: number
+): string | null {
+  const range = utf16RangeForCodePointOffsets(value, start, end)
+  return range === null ? null : value.slice(range.start, range.end)
+}
+
+function replaceCodePointRange(
+  value: string,
+  start: number,
+  end: number,
+  replacement: string
+): string | null {
+  const range = utf16RangeForCodePointOffsets(value, start, end)
+  if (range === null) {
+    return null
+  }
+  return `${value.slice(0, range.start)}${replacement}${value.slice(range.end)}`
+}
+
 function isCanonicalIssue(
   issue: VerificationIssue,
   result: VerificationResult,
@@ -35,14 +112,12 @@ function isCanonicalIssue(
     !issue.issue_id ||
     issue.document_id !== result.document_id ||
     issue.verification_run_id !== result.verification_run_id ||
-    issue.source_version !== result.source_version ||
     !Number.isInteger(issue.start) ||
     !Number.isInteger(issue.end) ||
     issue.start < 0 ||
     issue.end <= issue.start ||
-    issue.end > result.text.length ||
-    issue.end - issue.start !== issue.original.length ||
-    result.text.slice(issue.start, issue.end) !== issue.original
+    issue.end - issue.start !== codePointLength(issue.original) ||
+    sliceCodePointRange(result.text, issue.start, issue.end) !== issue.original
   ) {
     return false
   }
@@ -71,7 +146,7 @@ function isCanonicalIssue(
   return (
     issue.block_start === expectedBlockStart &&
     issue.block_end === expectedBlockEnd &&
-    block.text.slice(localStart, localEnd) === issue.original
+    sliceCodePointRange(block.text, localStart, localEnd) === issue.original
   )
 }
 
@@ -101,9 +176,12 @@ function canonicalIssues(result: VerificationResult): VerificationIssue[] {
 
 function sourceRevision(result: VerificationResult): Readonly<DocumentRevision> {
   return Object.freeze({
-    revision_id: `source:${result.document_id}:${result.source_version}`,
+    revision_id: null,
     document_id: result.document_id,
+    verification_run_id: result.verification_run_id,
     source_version: result.source_version,
+    revision_number: 0,
+    created_at: null,
     parent_revision_id: null,
     kind: 'source',
     text: result.text
@@ -137,7 +215,7 @@ export function useVerificationWorkspace() {
     let text = currentResult.text
     const acceptedIssues = safeIssues.value
       .filter((issue) => issueStates.value[issue.issue_id] === 'accepted')
-      .filter((issue) => selectedSuggestions.value[issue.issue_id] !== null)
+      .filter((issue) => effectiveSuggestion(issue) !== null)
       .sort((left, right) =>
         right.start - left.start ||
         right.end - left.end ||
@@ -145,13 +223,27 @@ export function useVerificationWorkspace() {
       )
 
     for (const issue of acceptedIssues) {
-      const suggestion = selectedSuggestions.value[issue.issue_id]
+      const suggestion = effectiveSuggestion(issue)
       if (suggestion === null) {
         continue
       }
-      text = `${text.slice(0, issue.start)}${suggestion}${text.slice(issue.end)}`
+      const replaced = replaceCodePointRange(
+        text,
+        issue.start,
+        issue.end,
+        suggestion
+      )
+      if (replaced !== null) {
+        text = replaced
+      }
     }
     return text
+  }
+
+  function effectiveSuggestion(issue: VerificationIssue): string | null {
+    return hasOwn(selectedSuggestions.value, issue.issue_id)
+      ? selectedSuggestions.value[issue.issue_id]
+      : issue.suggestion
   }
 
   const modifiedText = computed(() => {
@@ -185,6 +277,7 @@ export function useVerificationWorkspace() {
     if (
       priorRevision !== null &&
       priorRevision.document_id === currentResult.document_id &&
+      priorRevision.verification_run_id === currentResult.verification_run_id &&
       priorRevision.source_version === currentResult.source_version &&
       priorRevision.kind !== 'manual' &&
       priorRevision.text === text
@@ -197,10 +290,13 @@ export function useVerificationWorkspace() {
     }
     revisionSequence += 1
     currentRevision.value = Object.freeze({
-      revision_id: `revision:${currentResult.document_id}:${currentResult.source_version}:${revisionSequence}`,
+      revision_id: globalThis.crypto.randomUUID(),
       document_id: currentResult.document_id,
+      verification_run_id: currentResult.verification_run_id,
       source_version: currentResult.source_version,
-      parent_revision_id: priorRevision?.revision_id ?? sourceRevision(currentResult).revision_id,
+      revision_number: revisionSequence,
+      created_at: new Date().toISOString(),
+      parent_revision_id: priorRevision?.revision_id ?? null,
       kind: 'review',
       text
     })
@@ -212,7 +308,8 @@ export function useVerificationWorkspace() {
       !requiresReverification.value &&
       priorResult !== null &&
       priorResult.document_id === nextResult.document_id &&
-      priorResult.source_version === nextResult.source_version
+      priorResult.source_version === nextResult.source_version &&
+      priorResult.verification_run_id === nextResult.verification_run_id
     const nextIssues = canonicalIssues(nextResult)
     const nextIds = new Set(nextIssues.map((issue) => issue.issue_id))
     const nextStates: Record<string, IssueState> = {}
@@ -223,13 +320,10 @@ export function useVerificationWorkspace() {
         if (hasOwn(issueStates.value, issueId)) {
           nextStates[issueId] = issueStates.value[issueId]
         }
+        if (hasOwn(selectedSuggestions.value, issueId)) {
+          nextSuggestions[issueId] = selectedSuggestions.value[issueId]
+        }
       }
-    }
-    for (const issue of nextIssues) {
-      nextSuggestions[issue.issue_id] =
-        sameSourceRevision && hasOwn(selectedSuggestions.value, issue.issue_id)
-          ? selectedSuggestions.value[issue.issue_id]
-          : issue.suggestion
     }
 
     result.value = nextResult
@@ -240,6 +334,7 @@ export function useVerificationWorkspace() {
     batchHistory.length = 0
 
     if (!sameSourceRevision) {
+      revisionSequence = 0
       currentRevision.value = sourceRevision(nextResult)
       return
     }
@@ -298,6 +393,7 @@ export function useVerificationWorkspace() {
     }
     batchHistory.push({
       documentId: currentResult.document_id,
+      verificationRunId: currentResult.verification_run_id,
       sourceVersion: currentResult.source_version,
       entries
     })
@@ -320,6 +416,7 @@ export function useVerificationWorkspace() {
       currentResult === null ||
       snapshot === undefined ||
       snapshot.documentId !== currentResult.document_id ||
+      snapshot.verificationRunId !== currentResult.verification_run_id ||
       snapshot.sourceVersion !== currentResult.source_version
     ) {
       return
@@ -356,9 +453,12 @@ export function useVerificationWorkspace() {
     const priorRevision = currentRevision.value ?? sourceRevision(currentResult)
     revisionSequence += 1
     const revision = Object.freeze({
-      revision_id: `revision:${currentResult.document_id}:${currentResult.source_version}:${revisionSequence}`,
+      revision_id: globalThis.crypto.randomUUID(),
       document_id: currentResult.document_id,
+      verification_run_id: currentResult.verification_run_id,
       source_version: currentResult.source_version,
+      revision_number: revisionSequence,
+      created_at: new Date().toISOString(),
       parent_revision_id: priorRevision.revision_id,
       kind: 'manual' as const,
       text
