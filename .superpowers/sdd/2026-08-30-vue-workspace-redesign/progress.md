@@ -87,3 +87,26 @@ Ruling: Canonical backend offsets remain Unicode code-point offsets, with UTF-16
 Ruling: Source revisions are non-persisted sentinels, while review/manual drafts use globally unique client UUIDs and per-result positive revision numbers — this matches backend review persistence without inventing a server source revision ID; cost if wrong is consumers needing to branch on the revision discriminant before persistence.
 
 Ruling: `selectedSuggestions` records explicit user intent only, including explicit `null` and `""`; backend defaults are read dynamically from the current issue — this prevents stale copied defaults after a same-result refresh; cost if wrong is consumers needing an effective-suggestion fallback instead of reading the override record directly.
+
+## Task 1 second scoped review fixes — 2026-09-02
+
+- Canonical validation continues to reject stale, malformed, out-of-range, and duplicate-ID payloads, but no longer discards individually valid findings merely because their source intervals overlap. Canonical ordering and duplicate-ID selection remain deterministic across backend reorderings.
+- `visibleIssues` and `summary` now retain every valid overlapping finding. Reversed-input tests prove the same two issue IDs remain visible in canonical order and are both counted.
+- Accepted issues with effective non-null suggestions are checked for interval conflicts. The composable exposes deterministic reactive `replacementConflictIssueIds` and `hasReplacementConflicts` values without throwing from computed state.
+- Conflicting accepted replacements fail closed: no draft is generated and no arbitrary partial winner is applied. The last valid source/review revision and its text remain current until rejection, undo, or suggestion changes remove the conflict; valid revision generation then resumes.
+- Non-overlapping accepted replacements still apply from descending canonical code-point offsets, including multiple replacements after astral characters.
+- Revisions are now a strict source/draft/persisted union. Source and draft revisions have `revision_number: null`; local review/manual drafts have a UUID, run/source identity, ISO timestamp, and `persistence_state: "draft"`. A separate persisted shape reserves positive server-assigned revision numbers for Task 6 hydration.
+- Removed per-workspace revision sequencing. UUIDs provide cross-workspace draft identity, while `parent_revision_id` continues chaining to the prior valid non-source revision.
+
+### Second scoped review TDD and validation evidence
+
+- Pre-change focused baseline: `cd apps/web && npm test -- useVerificationWorkspace.spec.ts` passed 23 tests in 1 file.
+- RED: the same focused command failed with 8 failed and 19 passed tests (27 total), covering overlap retention/counting, accepted-replacement conflicts, source/draft discrimination, nullable draft numbering, and UUID draft serialization.
+- GREEN: the focused command passed 27 tests in 1 file; final effective-null conflict coverage increased the focused suite to 28 passing tests.
+- Full frontend suite: `cd apps/web && npm test -- --run` passed 59 tests in 4 files. Node emitted the existing experimental `localStorage` warning; all tests passed.
+- Production build: `cd apps/web && npm run build` passed `vue-tsc -b` and Vite 6.4.3 with 22 modules transformed.
+- Scope check target: Task 1 composable/types/tests plus this ledger and `task-1-report.md`.
+
+Ruling: Overlapping canonical findings remain review-visible because backend ownership and range validation make each finding independently valid; overlap is an application-time concern only for accepted effective replacements — this preserves rule-level findings while preventing ambiguous text mutation; cost if wrong is requiring the UI to present a conflict-resolution state instead of silently selecting one rule.
+
+Ruling: Superseding the earlier client-sequence ruling, Task 6's minimal backend revision endpoint must allocate the positive per-run `revision_number` under database locking and return the persisted revision — the browser supplies the draft UUID, text, `verification_run_id`, and source metadata, but never supplies or invents a positive revision number; cost if wrong is an additional persistence round trip, required to prevent independent browser instances from colliding on the backend uniqueness constraint.

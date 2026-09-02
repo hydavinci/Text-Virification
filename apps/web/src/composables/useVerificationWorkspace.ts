@@ -157,19 +157,18 @@ function canonicalIssues(result: VerificationResult): VerificationIssue[] {
     .sort((left, right) =>
       left.start - right.start ||
       left.end - right.end ||
-      left.issue_id.localeCompare(right.issue_id)
+      left.issue_id.localeCompare(right.issue_id) ||
+      JSON.stringify(left).localeCompare(JSON.stringify(right))
     )
   const accepted: VerificationIssue[] = []
   const seenIds = new Set<string>()
-  let priorEnd = -1
 
   for (const issue of candidates) {
-    if (seenIds.has(issue.issue_id) || issue.start < priorEnd) {
+    if (seenIds.has(issue.issue_id)) {
       continue
     }
     accepted.push(issue)
     seenIds.add(issue.issue_id)
-    priorEnd = issue.end
   }
   return accepted
 }
@@ -180,9 +179,10 @@ function sourceRevision(result: VerificationResult): Readonly<DocumentRevision> 
     document_id: result.document_id,
     verification_run_id: result.verification_run_id,
     source_version: result.source_version,
-    revision_number: 0,
+    revision_number: null,
     created_at: null,
     parent_revision_id: null,
+    persistence_state: 'source',
     kind: 'source',
     text: result.text
   })
@@ -196,7 +196,6 @@ export function useVerificationWorkspace() {
   const currentRevision = ref<Readonly<DocumentRevision> | null>(null)
   const requiresReverification = ref(false)
   const batchHistory: BatchStateSnapshot[] = []
-  let revisionSequence = 0
 
   const visibleIssues = computed(() =>
     requiresReverification.value ? [] : safeIssues.value
@@ -246,8 +245,41 @@ export function useVerificationWorkspace() {
       : issue.suggestion
   }
 
+  const replacementConflictIssueIds = computed(() => {
+    const acceptedIssues = safeIssues.value
+      .filter((issue) => issueStates.value[issue.issue_id] === 'accepted')
+      .filter((issue) => effectiveSuggestion(issue) !== null)
+    const conflictingIds = new Set<string>()
+
+    for (let leftIndex = 0; leftIndex < acceptedIssues.length; leftIndex += 1) {
+      const left = acceptedIssues[leftIndex]
+      for (
+        let rightIndex = leftIndex + 1;
+        rightIndex < acceptedIssues.length;
+        rightIndex += 1
+      ) {
+        const right = acceptedIssues[rightIndex]
+        if (left.start < right.end && right.start < left.end) {
+          conflictingIds.add(left.issue_id)
+          conflictingIds.add(right.issue_id)
+        }
+      }
+    }
+
+    return acceptedIssues
+      .filter((issue) => conflictingIds.has(issue.issue_id))
+      .map((issue) => issue.issue_id)
+  })
+
+  const hasReplacementConflicts = computed(
+    () => replacementConflictIssueIds.value.length > 0
+  )
+
   const modifiedText = computed(() => {
-    if (requiresReverification.value && currentRevision.value !== null) {
+    if (
+      (requiresReverification.value || hasReplacementConflicts.value) &&
+      currentRevision.value !== null
+    ) {
       return currentRevision.value.text
     }
     return applyAcceptedReplacements()
@@ -269,7 +301,11 @@ export function useVerificationWorkspace() {
 
   function createReviewRevision(): void {
     const currentResult = result.value
-    if (currentResult === null || requiresReverification.value) {
+    if (
+      currentResult === null ||
+      requiresReverification.value ||
+      hasReplacementConflicts.value
+    ) {
       return
     }
     const text = applyAcceptedReplacements()
@@ -288,15 +324,15 @@ export function useVerificationWorkspace() {
       currentRevision.value = sourceRevision(currentResult)
       return
     }
-    revisionSequence += 1
     currentRevision.value = Object.freeze({
       revision_id: globalThis.crypto.randomUUID(),
       document_id: currentResult.document_id,
       verification_run_id: currentResult.verification_run_id,
       source_version: currentResult.source_version,
-      revision_number: revisionSequence,
+      revision_number: null,
       created_at: new Date().toISOString(),
       parent_revision_id: priorRevision?.revision_id ?? null,
+      persistence_state: 'draft',
       kind: 'review',
       text
     })
@@ -332,9 +368,7 @@ export function useVerificationWorkspace() {
     selectedSuggestions.value = nextSuggestions
     requiresReverification.value = false
     batchHistory.length = 0
-
     if (!sameSourceRevision) {
-      revisionSequence = 0
       currentRevision.value = sourceRevision(nextResult)
       return
     }
@@ -451,15 +485,15 @@ export function useVerificationWorkspace() {
       return null
     }
     const priorRevision = currentRevision.value ?? sourceRevision(currentResult)
-    revisionSequence += 1
     const revision = Object.freeze({
       revision_id: globalThis.crypto.randomUUID(),
       document_id: currentResult.document_id,
       verification_run_id: currentResult.verification_run_id,
       source_version: currentResult.source_version,
-      revision_number: revisionSequence,
+      revision_number: null,
       created_at: new Date().toISOString(),
       parent_revision_id: priorRevision.revision_id,
+      persistence_state: 'draft' as const,
       kind: 'manual' as const,
       text
     })
@@ -480,6 +514,8 @@ export function useVerificationWorkspace() {
     modifiedText,
     visibleIssues,
     summary,
+    replacementConflictIssueIds,
+    hasReplacementConflicts,
     loadResult,
     acceptIssue,
     rejectIssue,

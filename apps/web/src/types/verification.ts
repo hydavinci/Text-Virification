@@ -202,6 +202,7 @@ export interface VerificationResult {
 }
 
 export type DocumentRevisionKind = 'source' | 'review' | 'manual'
+export type DocumentRevisionPersistenceState = 'source' | 'draft' | 'persisted'
 
 interface DocumentRevisionBase {
   document_id: string
@@ -212,23 +213,35 @@ interface DocumentRevisionBase {
 
 export interface SourceDocumentRevision extends DocumentRevisionBase {
   revision_id: null
-  revision_number: 0
+  revision_number: null
   created_at: null
   parent_revision_id: null
+  persistence_state: 'source'
   kind: 'source'
 }
 
-export interface PersistableDocumentRevision extends DocumentRevisionBase {
+interface AuthoredDocumentRevision extends DocumentRevisionBase {
   revision_id: string
-  revision_number: number
   created_at: string
   parent_revision_id: string | null
   kind: 'review' | 'manual'
 }
 
+export interface DraftDocumentRevision extends AuthoredDocumentRevision {
+  revision_number: null
+  persistence_state: 'draft'
+}
+
+export interface PersistedDocumentRevision extends AuthoredDocumentRevision {
+  /** Positive per-run sequence allocated by the backend. */
+  revision_number: number
+  persistence_state: 'persisted'
+}
+
 export type DocumentRevision =
   | SourceDocumentRevision
-  | PersistableDocumentRevision
+  | DraftDocumentRevision
+  | PersistedDocumentRevision
 
 export interface WorkspaceReviewSummary {
   total: number

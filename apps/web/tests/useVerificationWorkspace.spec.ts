@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import { useVerificationWorkspace } from '../src/composables/useVerificationWorkspace'
 import type {
+  PersistedDocumentRevision,
   VerificationIssue,
   VerificationResult
 } from '../src/types/verification'
@@ -208,7 +209,8 @@ describe('useVerificationWorkspace', () => {
       kind: 'source',
       verification_run_id: nextRunId,
       revision_id: null,
-      revision_number: 0
+      persistence_state: 'source',
+      revision_number: null
     })
   })
 
@@ -223,30 +225,30 @@ describe('useVerificationWorkspace', () => {
     expect(workspace.modifiedText.value).toBe('甲B丙丁')
   })
 
-  it('applies accepted replacements in descending canonical offset order', () => {
+  it('applies non-overlapping replacements in descending canonical code-point order with astral text', () => {
     const first = buildIssue({
-      start: 1,
-      end: 2,
-      block_start: 1,
-      block_end: 2,
+      start: 2,
+      end: 3,
+      block_start: 2,
+      block_end: 3,
       original: '乙',
       suggestion: 'FIRST'
     })
     const second = buildIssue({
       issue_id: '44444444-4444-4444-4444-444444444444',
-      start: 3,
-      end: 4,
-      block_start: 3,
-      block_end: 4,
+      start: 4,
+      end: 5,
+      block_start: 4,
+      block_end: 5,
       original: '丁',
       suggestion: 'SECOND'
     })
     const workspace = useVerificationWorkspace()
 
-    workspace.loadResult(buildResult([first, second]))
+    workspace.loadResult(buildResult([first, second], { text: '甲😀乙丙丁' }))
     workspace.acceptIssues([first.issue_id, second.issue_id])
 
-    expect(workspace.modifiedText.value).toBe('甲FIRST丙SECOND')
+    expect(workspace.modifiedText.value).toBe('甲😀FIRST丙SECOND')
   })
 
   it('applies deletion suggestions', () => {
@@ -448,7 +450,10 @@ describe('useVerificationWorkspace', () => {
     expect(workspace.modifiedText.value).toBe('甲B丙丁')
   })
 
-  it('ignores overlapping issues deterministically regardless of input order', () => {
+  it.each([
+    ['forward', false],
+    ['reversed', true]
+  ])('preserves and counts overlapping issues in %s input order', (_label, reversed) => {
     const earlier = buildIssue({
       issue_id: '40000000-0000-0000-0000-000000000001',
       start: 1,
@@ -471,11 +476,165 @@ describe('useVerificationWorkspace', () => {
     })
     const workspace = useVerificationWorkspace()
 
+    workspace.loadResult(buildResult(
+      reversed ? [later, earlier] : [earlier, later],
+      { text: 'abcdef' }
+    ))
+
+    expect(workspace.visibleIssues.value.map((issue) => issue.issue_id)).toEqual([
+      earlier.issue_id,
+      later.issue_id
+    ])
+    expect(workspace.summary.value).toEqual({
+      total: 2,
+      pending: 2,
+      accepted: 0,
+      rejected: 0
+    })
+  })
+
+  it.each([
+    ['rejecting', 'rejectIssue'],
+    ['undoing', 'undoIssue']
+  ] as const)(
+    '%s a conflicting accepted replacement clears the conflict and resumes revisions',
+    (_label, resolveConflict) => {
+      const earlier = buildIssue({
+        issue_id: '40000000-0000-0000-0000-000000000001',
+        start: 1,
+        end: 4,
+        block_start: 1,
+        block_end: 4,
+        original: 'bcd',
+        suggestion: 'X',
+        context: 'abcdef'
+      })
+      const later = buildIssue({
+        issue_id: '40000000-0000-0000-0000-000000000002',
+        start: 2,
+        end: 5,
+        block_start: 2,
+        block_end: 5,
+        original: 'cde',
+        suggestion: 'Y',
+        context: 'abcdef'
+      })
+      const workspace = useVerificationWorkspace()
+      workspace.loadResult(buildResult([later, earlier], { text: 'abcdef' }))
+
+      workspace.acceptIssue(earlier.issue_id)
+      const lastValidRevision = workspace.currentRevision.value
+      expect(lastValidRevision).toMatchObject({
+        persistence_state: 'draft',
+        kind: 'review',
+        revision_number: null,
+        text: 'aXef'
+      })
+
+      workspace.acceptIssue(later.issue_id)
+
+      expect(workspace.replacementConflictIssueIds.value).toEqual([
+        earlier.issue_id,
+        later.issue_id
+      ])
+      expect(workspace.hasReplacementConflicts.value).toBe(true)
+      expect(workspace.currentRevision.value).toBe(lastValidRevision)
+      expect(workspace.modifiedText.value).toBe('aXef')
+
+      workspace[resolveConflict](later.issue_id)
+      expect(workspace.replacementConflictIssueIds.value).toEqual([])
+      expect(workspace.hasReplacementConflicts.value).toBe(false)
+      expect(workspace.currentRevision.value).toBe(lastValidRevision)
+
+      workspace.selectSuggestion(earlier.issue_id, 'SAFE')
+      expect(workspace.currentRevision.value).toMatchObject({
+        persistence_state: 'draft',
+        parent_revision_id: lastValidRevision?.revision_id,
+        revision_number: null,
+        text: 'aSAFEef'
+      })
+    }
+  )
+
+  it('fails closed when batch accepting conflicting replacements from the source revision', () => {
+    const earlier = buildIssue({
+      issue_id: '40000000-0000-0000-0000-000000000001',
+      start: 1,
+      end: 4,
+      block_start: 1,
+      block_end: 4,
+      original: 'bcd',
+      suggestion: 'X',
+      context: 'abcdef'
+    })
+    const later = buildIssue({
+      issue_id: '40000000-0000-0000-0000-000000000002',
+      start: 2,
+      end: 5,
+      block_start: 2,
+      block_end: 5,
+      original: 'cde',
+      suggestion: 'Y',
+      context: 'abcdef'
+    })
+    const workspace = useVerificationWorkspace()
     workspace.loadResult(buildResult([later, earlier], { text: 'abcdef' }))
+    const source = workspace.currentRevision.value
+
     workspace.acceptIssues([later.issue_id, earlier.issue_id])
 
-    expect(workspace.visibleIssues.value.map((issue) => issue.issue_id)).toEqual([earlier.issue_id])
-    expect(workspace.modifiedText.value).toBe('aXef')
+    expect(workspace.replacementConflictIssueIds.value).toEqual([
+      earlier.issue_id,
+      later.issue_id
+    ])
+    expect(workspace.hasReplacementConflicts.value).toBe(true)
+    expect(workspace.currentRevision.value).toBe(source)
+    expect(workspace.modifiedText.value).toBe('abcdef')
+
+    workspace.rejectIssue(later.issue_id)
+    expect(workspace.hasReplacementConflicts.value).toBe(false)
+    expect(workspace.currentRevision.value).toMatchObject({
+      persistence_state: 'draft',
+      parent_revision_id: null,
+      revision_number: null,
+      text: 'aXef'
+    })
+  })
+
+  it('does not report overlap conflicts for accepted issues with an effective null suggestion', () => {
+    const earlier = buildIssue({
+      issue_id: '40000000-0000-0000-0000-000000000001',
+      start: 1,
+      end: 4,
+      block_start: 1,
+      block_end: 4,
+      original: 'bcd',
+      suggestion: 'X',
+      context: 'abcdef'
+    })
+    const later = buildIssue({
+      issue_id: '40000000-0000-0000-0000-000000000002',
+      start: 2,
+      end: 5,
+      block_start: 2,
+      block_end: 5,
+      original: 'cde',
+      suggestion: 'Y',
+      context: 'abcdef'
+    })
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(buildResult([later, earlier], { text: 'abcdef' }))
+    workspace.selectSuggestion(later.issue_id, null)
+
+    workspace.acceptIssues([later.issue_id, earlier.issue_id])
+
+    expect(workspace.replacementConflictIssueIds.value).toEqual([])
+    expect(workspace.hasReplacementConflicts.value).toBe(false)
+    expect(workspace.currentRevision.value).toMatchObject({
+      persistence_state: 'draft',
+      revision_number: null,
+      text: 'aXef'
+    })
   })
 
   it('restores exact prior batch state including absence versus explicit pending', () => {
@@ -548,8 +707,9 @@ describe('useVerificationWorkspace', () => {
       verification_run_id: runId,
       source_version: sourceVersion,
       parent_revision_id: reviewRevision?.revision_id,
+      persistence_state: 'draft',
       kind: 'manual',
-      revision_number: 2,
+      revision_number: null,
       text: '手工修改后的全文'
     })
     expect(workspace.currentRevision.value?.revision_id).toMatch(uuidPattern)
@@ -563,19 +723,21 @@ describe('useVerificationWorkspace', () => {
     expect(workspace.modifiedText.value).toBe('手工修改后的全文')
   })
 
-  it('distinguishes non-persisted source revisions from serializable persistable drafts', () => {
+  it('distinguishes a non-persisted source from a serializable draft without inventing a number', () => {
     const issue = buildIssue()
     const workspace = useVerificationWorkspace()
     workspace.loadResult(buildResult([issue]))
+    const source = workspace.currentRevision.value
 
-    expect(workspace.currentRevision.value).toEqual({
+    expect(source).toEqual({
       revision_id: null,
       document_id: documentId,
       verification_run_id: runId,
       source_version: sourceVersion,
-      revision_number: 0,
+      revision_number: null,
       created_at: null,
       parent_revision_id: null,
+      persistence_state: 'source',
       kind: 'source',
       text: '甲乙丙丁'
     })
@@ -588,7 +750,8 @@ describe('useVerificationWorkspace', () => {
       document_id: documentId,
       verification_run_id: runId,
       source_version: sourceVersion,
-      revision_number: 1,
+      persistence_state: 'draft',
+      revision_number: null,
       parent_revision_id: null,
       kind: 'review',
       text: '甲B丙丁'
@@ -599,9 +762,11 @@ describe('useVerificationWorkspace', () => {
     )
     expect(Object.isFrozen(reviewRevision)).toBe(true)
     expect(JSON.parse(JSON.stringify(reviewRevision))).toEqual(reviewRevision)
+    expect(source?.persistence_state).toBe('source')
+    expect(reviewRevision?.persistence_state).toBe('draft')
   })
 
-  it('generates non-colliding revision UUIDs across workspace instances', () => {
+  it('generates distinct serializable UUID drafts across workspace instances without fake numbers', () => {
     const issue = buildIssue()
     const first = useVerificationWorkspace()
     const second = useVerificationWorkspace()
@@ -616,27 +781,37 @@ describe('useVerificationWorkspace', () => {
     expect(first.currentRevision.value?.revision_id).not.toBe(
       second.currentRevision.value?.revision_id
     )
+    expect(first.currentRevision.value).toMatchObject({
+      persistence_state: 'draft',
+      revision_number: null
+    })
+    expect(second.currentRevision.value).toMatchObject({
+      persistence_state: 'draft',
+      revision_number: null
+    })
+    expect(JSON.parse(JSON.stringify(first.currentRevision.value))).toEqual(
+      first.currentRevision.value
+    )
+    expect(JSON.parse(JSON.stringify(second.currentRevision.value))).toEqual(
+      second.currentRevision.value
+    )
   })
 
-  it('resets persistable revision numbering for a different result identity', () => {
-    const issue = buildIssue()
-    const workspace = useVerificationWorkspace()
-    workspace.loadResult(buildResult([issue]))
-    workspace.acceptIssue(issue.issue_id)
-    workspace.selectSuggestion(issue.issue_id, '第二版')
-    expect(workspace.currentRevision.value?.revision_number).toBe(2)
+  it('defines persisted revisions separately with positive server revision numbers', () => {
+    const persisted = {
+      revision_id: '55555555-5555-4555-8555-555555555555',
+      document_id: documentId,
+      verification_run_id: runId,
+      source_version: sourceVersion,
+      revision_number: 7,
+      created_at: '2026-09-02T07:00:00.000Z',
+      parent_revision_id: null,
+      persistence_state: 'persisted',
+      kind: 'review',
+      text: '甲B丙丁'
+    } satisfies PersistedDocumentRevision
 
-    const nextRunId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
-    const nextIssue = buildIssue({ verification_run_id: nextRunId })
-    workspace.loadResult(buildResult([nextIssue], {
-      verification_run_id: nextRunId
-    }))
-    workspace.acceptIssue(nextIssue.issue_id)
-
-    expect(workspace.currentRevision.value).toMatchObject({
-      verification_run_id: nextRunId,
-      revision_number: 1,
-      kind: 'review'
-    })
+    expect(persisted.persistence_state).toBe('persisted')
+    expect(persisted.revision_number).toBeGreaterThan(0)
   })
 })
