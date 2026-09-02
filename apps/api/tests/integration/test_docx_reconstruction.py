@@ -18,6 +18,8 @@ from text_verification.document_processing.pdf_models import (
     PdfDocumentMetadata,
     PdfPageKind,
     PdfPageMetadata,
+    PdfTable,
+    PdfTableCell,
 )
 from text_verification.domain.documents import (
     DocumentMetadata,
@@ -44,6 +46,8 @@ class _Block:
         *,
         page: int | None,
         y: float,
+        x: float = 10.0,
+        width: float = 100.0,
         style: dict[str, object] | None = None,
         table_index: int | None = None,
         row_index: int | None = None,
@@ -54,6 +58,8 @@ class _Block:
         self.text = text
         self.page = page
         self.y = y
+        self.x = x
+        self.width = width
         self.style = style or {}
         self.table_index = table_index
         self.row_index = row_index
@@ -61,11 +67,11 @@ class _Block:
         self.source_locator = source_locator or {}
 
 
-class _StaticSourcePathResolver:
+class _StaticAnchoredSourcePathResolver:
     def __init__(self, path: Path) -> None:
         self.path = path
 
-    def resolve(
+    def resolve_anchored(
         self,
         document: DocumentModel,
         *,
@@ -80,7 +86,7 @@ class _AnchoredSourcePathResolver:
         self.root = root
         self.relative_path = relative_path
 
-    def resolve(
+    def resolve_anchored(
         self,
         document: DocumentModel,
         *,
@@ -357,7 +363,7 @@ def test_reconstructs_real_parser_image_after_json_roundtrip(
     persisted = DocumentModel.model_validate_json(parsed.model_dump_json())
 
     target = DocxReconstructionExporter(
-        source_path_resolver=_StaticSourcePathResolver(source)
+        anchored_source_resolver=_StaticAnchoredSourcePathResolver(source)
     ).export(persisted, tmp_path / "parser-image.docx")
 
     rebuilt = Document(target)
@@ -374,7 +380,7 @@ def test_reconstructs_pdf_image_with_indirect_stream_length(tmp_path: Path) -> N
 
     rebuilt = Document(
         DocxReconstructionExporter(
-            source_path_resolver=_StaticSourcePathResolver(source)
+            anchored_source_resolver=_StaticAnchoredSourcePathResolver(source)
         ).export(parsed, tmp_path / "indirect-length.docx")
     )
 
@@ -397,7 +403,7 @@ def test_ignores_untrusted_pdf_length_declarations_and_bounds_actual_stream(
 
     rebuilt = Document(
         DocxReconstructionExporter(
-            source_path_resolver=_StaticSourcePathResolver(source)
+            anchored_source_resolver=_StaticAnchoredSourcePathResolver(source)
         ).export(parsed, tmp_path / f"{length_kind}.docx")
     )
 
@@ -414,7 +420,7 @@ def test_rejects_actual_raw_pdf_image_stream_before_extraction(tmp_path: Path) -
     with pytest.raises(ExportError, match="size limit"):
         DocxReconstructionExporter(
             limits=DocxReconstructionLimits(max_image_bytes=10),
-            source_path_resolver=_StaticSourcePathResolver(source),
+            anchored_source_resolver=_StaticAnchoredSourcePathResolver(source),
         ).export(parsed, tmp_path / "raw-stream-limit.docx")
 
 
@@ -463,10 +469,13 @@ def test_reconstructs_real_fake_ocr_heading_table_and_image(tmp_path: Path) -> N
     assert table_cell.source_locator["table_bbox"] == pytest.approx(
         [20.0, 100.0, 150.0, 145.0]
     )
+    row_bands = table_cell.source_locator["table_row_bands"]
+    assert row_bands[0] == pytest.approx([20.0, 100.0, 150.0, 110.0])
+    assert row_bands[1] == pytest.approx([20.0, 135.0, 150.0, 145.0])
 
     rebuilt = Document(
         DocxReconstructionExporter(
-            source_path_resolver=_StaticSourcePathResolver(source)
+            anchored_source_resolver=_StaticAnchoredSourcePathResolver(source)
         ).export(persisted, tmp_path / "ocr.docx")
     )
 
@@ -491,18 +500,15 @@ def test_real_parser_image_requires_injected_source_resolver(tmp_path: Path) -> 
         DocxReconstructionExporter().export(parsed, tmp_path / "missing-source.docx")
 
 
-def test_rejects_ambient_relative_source_resolution(
+def test_reconstruction_rejects_legacy_path_resolver_injection(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = _pdf_with_image(tmp_path / "relative-source.pdf")
-    parsed = PdfParser().parse(source)
-    monkeypatch.chdir(tmp_path)
 
-    with pytest.raises(ExportError, match="anchored"):
+    with pytest.raises(TypeError, match="anchored_source_resolver"):
         DocxReconstructionExporter(
-            source_path_resolver=_LegacyPathResolver(Path("relative-source.pdf"))  # type: ignore[arg-type]
-        ).export(parsed, tmp_path / "relative-source.docx")
+            anchored_source_resolver=_LegacyPathResolver(source)  # type: ignore[arg-type, call-arg]
+        )
 
 
 def test_reads_normal_nested_anchored_source_path(tmp_path: Path) -> None:
@@ -514,7 +520,7 @@ def test_reads_normal_nested_anchored_source_path(tmp_path: Path) -> None:
 
     rebuilt = Document(
         DocxReconstructionExporter(
-            source_path_resolver=_AnchoredSourcePathResolver(
+            anchored_source_resolver=_AnchoredSourcePathResolver(
                 root,
                 PurePosixPath("nested/source.pdf"),
             )
@@ -553,11 +559,57 @@ def test_rejects_intermediate_symlink_in_anchored_source_path(tmp_path: Path) ->
 
     with pytest.raises(ExportError, match="unsafe"):
         DocxReconstructionExporter(
-            source_path_resolver=_AnchoredSourcePathResolver(
+            anchored_source_resolver=_AnchoredSourcePathResolver(
                 root,
                 PurePosixPath("linked/source.pdf"),
             )
         ).export(parsed, tmp_path / "symlinked-parent.docx")
+
+
+def test_source_resolution_fails_closed_without_secure_platform_flags(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "repository"
+    root.mkdir()
+    source = _pdf_with_image(root / "source.pdf")
+    parsed = PdfParser().parse(source)
+    target = tmp_path / "unsupported-source.docx"
+    monkeypatch.delattr(reconstruction_module.os, "O_NOFOLLOW")
+
+    with pytest.raises(ExportError, match="Secure source access is unavailable"):
+        DocxReconstructionExporter(
+            anchored_source_resolver=_AnchoredSourcePathResolver(
+                root,
+                PurePosixPath("source.pdf"),
+            )
+        ).export(parsed, target)
+
+    assert not target.exists()
+    assert not list(tmp_path.glob(".*.uploading"))
+
+
+@pytest.mark.parametrize(
+    "missing_capability",
+    ["dir_fd", "follow_symlinks"],
+)
+def test_atomic_publication_fails_closed_without_secure_platform_capabilities(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    missing_capability: str,
+) -> None:
+    document = _document([_Block("paragraph", "正文", page=1, y=10)])
+    target = tmp_path / f"unsupported-{missing_capability}.docx"
+    if missing_capability == "dir_fd":
+        monkeypatch.delattr(reconstruction_module.os, "supports_dir_fd")
+    else:
+        monkeypatch.delattr(reconstruction_module.os, "supports_follow_symlinks")
+
+    with pytest.raises(ExportError, match="Secure DOCX publication is unavailable"):
+        DocxReconstructionExporter().export(document, target)
+
+    assert not target.exists()
+    assert not list(tmp_path.glob(".*.uploading"))
 
 
 def test_rejects_mismatched_and_symlinked_resolved_sources(tmp_path: Path) -> None:
@@ -569,14 +621,14 @@ def test_rejects_mismatched_and_symlinked_resolved_sources(tmp_path: Path) -> No
 
     with pytest.raises(ExportError, match="does not match"):
         DocxReconstructionExporter(
-            source_path_resolver=_StaticSourcePathResolver(different)
+            anchored_source_resolver=_StaticAnchoredSourcePathResolver(different)
         ).export(parsed, tmp_path / "mismatched.docx")
 
     symlink = tmp_path / "linked.pdf"
     symlink.symlink_to(source)
     with pytest.raises(ExportError, match="unsafe"):
         DocxReconstructionExporter(
-            source_path_resolver=_StaticSourcePathResolver(symlink)
+            anchored_source_resolver=_StaticAnchoredSourcePathResolver(symlink)
         ).export(parsed, tmp_path / "symlinked.docx")
 
 
@@ -607,7 +659,7 @@ def test_rejects_embedded_image_payloads_in_canonical_metadata(
 
     with pytest.raises(ExportError, match="canonical image reference"):
         DocxReconstructionExporter(
-            source_path_resolver=_StaticSourcePathResolver(source)
+            anchored_source_resolver=_StaticAnchoredSourcePathResolver(source)
         ).export(
             document,
             tmp_path / "embedded-image.docx",
@@ -671,8 +723,118 @@ def test_rejects_spatially_embedded_image_between_table_rows(
 
     with pytest.raises(ExportError, match="interleaved"):
         DocxReconstructionExporter(
-            source_path_resolver=_StaticSourcePathResolver(source)
+            anchored_source_resolver=_StaticAnchoredSourcePathResolver(source)
         ).export(parsed, tmp_path / "embedded-image.docx")
+
+
+def test_rejects_embedded_image_in_blank_terminal_table_row(
+    tmp_path: Path,
+) -> None:
+    source = _pdf_with_blank_terminal_row(
+        tmp_path / "blank-row-image.pdf",
+        "image",
+    )
+    parsed = PdfParser().parse(source)
+
+    with pytest.raises(ExportError, match="interleaved"):
+        DocxReconstructionExporter(
+            anchored_source_resolver=_StaticAnchoredSourcePathResolver(source)
+        ).export(parsed, tmp_path / "blank-row-image.docx")
+
+
+def test_exports_sparse_blank_row_table_with_disjoint_side_note(
+    tmp_path: Path,
+) -> None:
+    source = _pdf_with_blank_terminal_row(
+        tmp_path / "blank-row-side.pdf",
+        "side",
+    )
+    parsed = PdfParser().parse(source)
+
+    rebuilt = Document(
+        DocxReconstructionExporter().export(
+            parsed,
+            tmp_path / "blank-row-side.docx",
+        )
+    )
+
+    assert len(rebuilt.tables[0].rows) == 2
+    assert rebuilt.tables[0].cell(1, 0).text == ""
+    assert any(paragraph.text == "SIDE" for paragraph in rebuilt.paragraphs)
+
+
+@pytest.mark.parametrize(
+    ("block_x", "should_reject"),
+    [(80.0, True), (220.0, False)],
+    ids=["embedded", "disjoint"],
+)
+def test_vertical_merge_incomplete_geometry_fails_closed_only_on_overlap(
+    tmp_path: Path,
+    block_x: float,
+    should_reject: bool,
+) -> None:
+    table = PdfTable(
+        table_index=0,
+        bbox=(24.0, 40.0, 184.0, 160.0),
+        row_count=2,
+        column_count=1,
+        rows=(
+            (
+                PdfTableCell(
+                    text="merged",
+                    bbox=(24.0, 40.0, 184.0, 160.0),
+                    table_index=0,
+                    row_index=0,
+                    cell_index=0,
+                ),
+            ),
+            (
+                PdfTableCell(
+                    text="",
+                    bbox=None,
+                    table_index=0,
+                    row_index=1,
+                    cell_index=0,
+                ),
+            ),
+        ),
+    )
+    document = _document(
+        [
+            _Block(
+                "table_cell",
+                "merged",
+                page=1,
+                y=40,
+                x=24,
+                width=160,
+                table_index=0,
+                row_index=0,
+                cell_index=0,
+                source_locator={
+                    "merge": {"row_span": 2, "column_span": 1},
+                },
+            ),
+            _Block(
+                "paragraph",
+                "NOTE",
+                page=1,
+                y=100,
+                x=block_x,
+                width=40,
+            ),
+        ],
+        metadata=_metadata_with_table(table),
+    )
+    target = tmp_path / f"vertical-merge-{block_x}.docx"
+
+    if should_reject:
+        with pytest.raises(ExportError, match="interleaved"):
+            DocxReconstructionExporter().export(document, target)
+    else:
+        rebuilt = Document(DocxReconstructionExporter().export(document, target))
+        assert rebuilt.tables[0].cell(0, 0).text == "merged"
+        assert any(paragraph.text == "NOTE" for paragraph in rebuilt.paragraphs)
 
 
 @pytest.mark.parametrize(
@@ -1098,24 +1260,24 @@ def test_preflight_counts_image_render_run(tmp_path: Path) -> None:
     with pytest.raises(ExportError, match="run count"):
         DocxReconstructionExporter(
             limits=DocxReconstructionLimits(max_runs=1),
-            source_path_resolver=_StaticSourcePathResolver(source),
+            anchored_source_resolver=_StaticAnchoredSourcePathResolver(source),
         ).export(document, tmp_path / "image-run-bound.docx")
 
 
 def test_preflight_rejects_image_count_and_aggregate_media(tmp_path: Path) -> None:
     source = _pdf_with_images(tmp_path / "two-images.pdf")
     document = PdfParser().parse(source)
-    resolver = _StaticSourcePathResolver(source)
+    resolver = _StaticAnchoredSourcePathResolver(source)
 
     with pytest.raises(ExportError, match="image count"):
         DocxReconstructionExporter(
             limits=DocxReconstructionLimits(max_images=1),
-            source_path_resolver=resolver,
+            anchored_source_resolver=resolver,
         ).export(document, tmp_path / "image-count.docx")
     with pytest.raises(ExportError, match="aggregate image media"):
         DocxReconstructionExporter(
             limits=DocxReconstructionLimits(max_total_image_bytes=1),
-            source_path_resolver=resolver,
+            anchored_source_resolver=resolver,
         ).export(document, tmp_path / "image-media.docx")
 
 
@@ -1203,7 +1365,7 @@ def _document(
                 table_index=block.table_index,
                 row_index=block.row_index,
                 cell_index=block.cell_index,
-                bbox=(10.0, block.y, 110.0, block.y + 10.0),
+                bbox=(block.x, block.y, block.x + block.width, block.y + 10.0),
                 parent_id=None,
                 style=block.style,
                 source_locator={
@@ -1333,6 +1495,31 @@ def _pdf_with_interleaved_table(target: Path, interleaved_kind: str) -> Path:
     return target
 
 
+def _pdf_with_blank_terminal_row(target: Path, block_kind: str) -> Path:
+    import pymupdf
+
+    pdf = pymupdf.open()
+    try:
+        page = pdf.new_page(width=360, height=240)
+        for x in (24, 104, 184):
+            page.draw_line((x, 40), (x, 160))
+        for y in (40, 100, 160):
+            page.draw_line((24, y), (184, y))
+        page.insert_text((34, 70), "A1", fontsize=10, fontname="helv")
+        page.insert_text((114, 70), "B1", fontsize=10, fontname="helv")
+        if block_kind == "image":
+            page.insert_image(
+                pymupdf.Rect(80, 120, 120, 135),
+                stream=_png(2, 1),
+            )
+        else:
+            page.insert_text((220, 130), "SIDE", fontsize=10, fontname="helv")
+        pdf.save(target)
+    finally:
+        pdf.close()
+    return target
+
+
 def _pdf_with_images(target: Path) -> Path:
     import pymupdf
 
@@ -1413,3 +1600,22 @@ def _pdf_with_indirect_image_length(target: Path, length_kind: str) -> Path:
     )
     target.write_bytes(payload)
     return target
+
+
+def _metadata_with_table(table: PdfTable) -> DocumentMetadata:
+    return DocumentMetadata(
+        pdf=PdfDocumentMetadata(
+            pages=(
+                PdfPageMetadata(
+                    page=1,
+                    kind=PdfPageKind.TEXT,
+                    page_bbox=(0.0, 0.0, 360.0, 240.0),
+                    text_length=10,
+                    text_density=0.1,
+                    image_coverage=0.0,
+                    ocr_required=False,
+                    tables=(table,),
+                ),
+            )
+        )
+    )

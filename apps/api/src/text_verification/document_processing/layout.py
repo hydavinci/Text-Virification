@@ -235,6 +235,7 @@ class OcrLayoutElement(_LayoutModel):
     table_row_count: PositiveInt | None = None
     table_column_count: PositiveInt | None = None
     table_bbox: BBox | None = None
+    table_row_bands: tuple[BBox, ...] | None = None
     heading_level: HeadingLevel | None = None
     estimated_font_size: float | None = None
     boxes: tuple[OcrLayoutBox, ...] = Field(min_length=1)
@@ -279,6 +280,15 @@ class OcrLayoutElement(_LayoutModel):
             return None
         return _bbox(value, field_name="table_bbox")
 
+    @field_validator("table_row_bands", mode="before")
+    @classmethod
+    def validate_table_row_bands(cls, value: object) -> tuple[BBox, ...] | None:
+        if value is None:
+            return None
+        if not isinstance(value, list | tuple):
+            raise TypeError("table_row_bands must be a sequence")
+        return tuple(_bbox(item, field_name="table_row_bands") for item in value)
+
     @model_validator(mode="after")
     def validate_coordinates(self) -> OcrLayoutElement:
         table_coordinates = (self.table_index, self.row_index, self.cell_index)
@@ -293,6 +303,7 @@ class OcrLayoutElement(_LayoutModel):
                 self.table_row_count,
                 self.table_column_count,
                 self.table_bbox,
+                self.table_row_bands,
             )
             if any(value is not None for value in table_metadata) and any(
                 value is None for value in table_metadata
@@ -313,6 +324,7 @@ class OcrLayoutElement(_LayoutModel):
                     self.table_row_count,
                     self.table_column_count,
                     self.table_bbox,
+                    self.table_row_bands,
                 )
             ):
                 raise ValueError("paragraphs and headings must not have table metadata")
@@ -911,6 +923,10 @@ def _table_element(
         table_row_count=table.row_count,
         table_column_count=table.column_count,
         table_bbox=table.bbox,
+        table_row_bands=tuple(
+            _combined_bbox(cell.bbox for cell in row)
+            for row in table.rows
+        ),
         boxes=cell.boxes,
     )
 

@@ -2695,6 +2695,7 @@ def _ocr_blocks(elements: tuple[OcrLayoutElement, ...]) -> list[_ExtractedBlock]
             element.table_row_count is not None
             and element.table_column_count is not None
             and element.table_bbox is not None
+            and element.table_row_bands is not None
         ):
             source_locator.update(
                 {
@@ -2703,6 +2704,10 @@ def _ocr_blocks(elements: tuple[OcrLayoutElement, ...]) -> list[_ExtractedBlock]
                         "columns": element.table_column_count,
                     },
                     "table_bbox": list(element.table_bbox),
+                    "table_row_bands": [
+                        list(row_bbox)
+                        for row_bbox in element.table_row_bands
+                    ],
                 }
             )
         ocr_style: dict[str, object] = {

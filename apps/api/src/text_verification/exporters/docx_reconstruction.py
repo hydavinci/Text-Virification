@@ -33,7 +33,10 @@ from text_verification.domain.documents import (
     FileType,
     TextBlock,
 )
-from text_verification.domain.ports import ResolvedSourcePath, SourcePathResolver
+from text_verification.domain.ports import (
+    AnchoredSourcePathResolver,
+    ResolvedSourcePath,
+)
 
 DOCX_RECONSTRUCTION = ExportFormat.DOCX_RECONSTRUCTION
 _DEFAULT_PAGE_WIDTH_POINTS = 612.0
@@ -43,6 +46,10 @@ _FIXED_CORE_PROPERTY_TIME = datetime(2000, 1, 1, tzinfo=UTC)
 _XML_REPLACEMENT_CHARACTER = "\ufffd"
 _TABLE_GEOMETRY_TOLERANCE_POINTS = 0.5
 _TABLE_MIN_HORIZONTAL_OVERLAP_RATIO = 0.1
+_SECURE_SOURCE_PLATFORM_ERROR = "Secure source access is unavailable on this platform."
+_SECURE_PUBLICATION_PLATFORM_ERROR = (
+    "Secure DOCX publication is unavailable on this platform."
+)
 _PYMUPDF: Any = pymupdf
 
 type SupportedImageMime = Literal["image/png", "image/jpeg"]
@@ -104,7 +111,8 @@ class _Table:
     x: float
     right: float
     bottom: float
-    row_anchors: tuple[float, ...]
+    row_bands: tuple[tuple[float, float], ...]
+    row_geometry_complete: bool
 
 
 type _RenderUnit = TextBlock | _Table
@@ -125,8 +133,17 @@ class _BoundedBytesIO(io.BytesIO):
 @dataclass(frozen=True)
 class DocxReconstructionExporter:
     limits: DocxReconstructionLimits = DocxReconstructionLimits()
-    source_path_resolver: SourcePathResolver | None = None
+    anchored_source_resolver: AnchoredSourcePathResolver | None = None
     file_type: ExportFormat = DOCX_RECONSTRUCTION
+
+    def __post_init__(self) -> None:
+        resolver = self.anchored_source_resolver
+        if resolver is not None and not callable(
+            getattr(resolver, "resolve_anchored", None)
+        ):
+            raise TypeError(
+                "anchored_source_resolver must implement resolve_anchored(document)"
+            )
 
     def export(self, document: DocumentModel, target: Path) -> Path:
         _preflight_document(document, self.limits)
@@ -135,7 +152,7 @@ class DocxReconstructionExporter:
             document,
             units,
             self.limits,
-            self.source_path_resolver,
+            self.anchored_source_resolver,
         )
 
         output = Document()
@@ -196,7 +213,7 @@ def _resolve_images(
     document: DocumentModel,
     units: list[_RenderUnit],
     limits: DocxReconstructionLimits,
-    source_path_resolver: SourcePathResolver | None,
+    anchored_source_resolver: AnchoredSourcePathResolver | None,
 ) -> dict[str, _Image]:
     image_blocks = [
         unit
@@ -209,10 +226,10 @@ def _resolve_images(
         _canonical_pdf_image_request(document, block)
         for block in image_blocks
     ]
-    if source_path_resolver is None:
+    if anchored_source_resolver is None:
         raise ExportError("Canonical PDF images require an injected source resolver.")
     try:
-        resolved_source = source_path_resolver.resolve(document)
+        resolved_source = anchored_source_resolver.resolve_anchored(document)
     except (OSError, ValueError) as error:
         raise ExportError("Canonical PDF source could not be resolved.") from error
     if not isinstance(resolved_source, ResolvedSourcePath):
@@ -425,19 +442,10 @@ def _table_from_blocks(
             max(bbox[2] for bbox in bboxes),
             max(bbox[3] for bbox in bboxes),
         )
-    row_anchors = tuple(
-        min(
-            block.bbox[1]
-            for block in cells.values()
-            if block.row_index == row_index and block.bbox is not None
-        )
-        for row_index in sorted(
-            {
-                block.row_index
-                for block in cells.values()
-                if block.row_index is not None and block.bbox is not None
-            }
-        )
+    row_bands, row_geometry_complete = _table_row_geometry(
+        pdf_table,
+        cells,
+        rows,
     )
     return _Table(
         page=page,
@@ -453,8 +461,93 @@ def _table_from_blocks(
         x=table_bbox[0] if table_bbox is not None else math.inf,
         right=table_bbox[2] if table_bbox is not None else math.inf,
         bottom=table_bbox[3] if table_bbox is not None else math.inf,
-        row_anchors=row_anchors,
+        row_bands=row_bands,
+        row_geometry_complete=row_geometry_complete,
     )
+
+
+def _table_row_geometry(
+    pdf_table: Any | None,
+    cells: Mapping[tuple[int, int], TextBlock],
+    row_count: int,
+) -> tuple[tuple[tuple[float, float], ...], bool]:
+    if pdf_table is not None:
+        source_rows = tuple(
+            tuple(cell.bbox for cell in row if cell.bbox is not None)
+            for row in pdf_table.rows
+        )
+    else:
+        declared = _declared_table_row_bands(cells, row_count)
+        if declared is not None:
+            source_rows = tuple((bbox,) for bbox in declared)
+        else:
+            source_rows = tuple(
+                tuple(
+                    block.bbox
+                    for block in cells.values()
+                    if block.row_index == row_index and block.bbox is not None
+                )
+                for row_index in range(row_count)
+            )
+    bands: list[tuple[float, float]] = []
+    complete = len(source_rows) == row_count
+    for row in source_rows:
+        if not row:
+            complete = False
+            continue
+        top = max(bbox[1] for bbox in row)
+        bottom = min(bbox[3] for bbox in row)
+        if not math.isfinite(top) or not math.isfinite(bottom) or bottom <= top:
+            complete = False
+            continue
+        bands.append((top, bottom))
+    if len(bands) != row_count:
+        complete = False
+    if complete and any(
+        following[0] <= previous[0]
+        or following[1] <= previous[1]
+        for previous, following in zip(bands, bands[1:], strict=False)
+    ):
+        complete = False
+    return tuple(bands), complete
+
+
+def _declared_table_row_bands(
+    cells: Mapping[tuple[int, int], TextBlock],
+    row_count: int,
+) -> tuple[tuple[float, float, float, float], ...] | None:
+    declared: set[tuple[tuple[float, float, float, float], ...]] = set()
+    for block in cells.values():
+        raw_bands = block.source_locator.get("table_row_bands")
+        if raw_bands is None:
+            continue
+        if not isinstance(raw_bands, list | tuple) or len(raw_bands) != row_count:
+            raise ExportError("Table row geometry metadata is invalid.")
+        bands: list[tuple[float, float, float, float]] = []
+        for raw_bbox in raw_bands:
+            if (
+                not isinstance(raw_bbox, list | tuple)
+                or len(raw_bbox) != 4
+                or any(
+                    isinstance(coordinate, bool)
+                    or not isinstance(coordinate, int | float)
+                    for coordinate in raw_bbox
+                )
+            ):
+                raise ExportError("Table row geometry metadata is invalid.")
+            bbox = tuple(float(coordinate) for coordinate in raw_bbox)
+            x0, y0, x1, y1 = bbox
+            if (
+                not all(math.isfinite(value) for value in bbox)
+                or x1 <= x0
+                or y1 <= y0
+            ):
+                raise ExportError("Table row geometry metadata is invalid.")
+            bands.append((x0, y0, x1, y1))
+        declared.add(tuple(bands))
+    if len(declared) > 1:
+        raise ExportError("Table metadata contains conflicting row geometry.")
+    return next(iter(declared)) if declared else None
 
 
 def _declared_table_bbox(
@@ -516,14 +609,20 @@ def _reject_interleaved_table_blocks(
 
 
 def _block_interleaves_table_rows(table: _Table, block: TextBlock) -> bool:
-    if block.bbox is None or len(table.row_anchors) < 2:
+    if block.bbox is None:
         return False
     x0, y0, x1, y1 = block.bbox
     block_center_y = (y0 + y1) / 2.0
+    if table.row_geometry_complete and table.row_bands:
+        vertical_start = table.row_bands[0][0]
+        vertical_end = table.row_bands[-1][1]
+    else:
+        vertical_start = table.y
+        vertical_end = table.bottom
     if not (
-        table.row_anchors[0] + _TABLE_GEOMETRY_TOLERANCE_POINTS
+        vertical_start + _TABLE_GEOMETRY_TOLERANCE_POINTS
         < block_center_y
-        < table.row_anchors[-1] - _TABLE_GEOMETRY_TOLERANCE_POINTS
+        < vertical_end - _TABLE_GEOMETRY_TOLERANCE_POINTS
     ):
         return False
     overlap = min(table.right, x1) - max(table.x, x0)
@@ -865,6 +964,8 @@ def _read_resolved_source(
     resolved_source: ResolvedSourcePath,
     max_bytes: int,
 ) -> bytes:
+    if not _supports_secure_source_access():
+        raise ExportError(_SECURE_SOURCE_PLATFORM_ERROR)
     root_fd = _open_absolute_directory(
         resolved_source.root,
         "Resolved source root is unsafe or unavailable.",
@@ -1198,6 +1299,8 @@ def _set_page_setup(output: Any, document: DocumentModel) -> None:
 
 
 def _publish_atomic(target: Path, content: bytes) -> None:
+    if not _supports_secure_publication():
+        raise ExportError(_SECURE_PUBLICATION_PLATFORM_ERROR)
     if not target.is_absolute() or target.name in {"", ".", ".."} or "\x00" in target.name:
         raise ExportError("Target path must be an absolute DOCX path.")
     if target.suffix.lower() != ".docx":
@@ -1284,6 +1387,27 @@ def _open_absolute_directory(path: Path, error_message: str) -> int:
         if current_fd >= 0:
             os.close(current_fd)
         raise ExportError(error_message) from error
+
+
+def _supports_secure_source_access() -> bool:
+    supports_dir_fd = getattr(os, "supports_dir_fd", ())
+    return (
+        hasattr(os, "O_DIRECTORY")
+        and hasattr(os, "O_NOFOLLOW")
+        and os.open in supports_dir_fd
+    )
+
+
+def _supports_secure_publication() -> bool:
+    required_dir_fd = (os.open, os.unlink, os.link, os.stat)
+    supports_dir_fd = getattr(os, "supports_dir_fd", ())
+    supports_follow_symlinks = getattr(os, "supports_follow_symlinks", ())
+    return (
+        _supports_secure_source_access()
+        and all(operation in supports_dir_fd for operation in required_dir_fd)
+        and os.link in supports_follow_symlinks
+        and os.stat in supports_follow_symlinks
+    )
 
 
 def _write_all(file_fd: int, content: bytes) -> None:

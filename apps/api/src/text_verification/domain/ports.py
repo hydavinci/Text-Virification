@@ -126,7 +126,11 @@ class SourcePathResolver(Protocol):
         document: DocumentModel,
         *,
         source_path: Path | None = None,
-    ) -> ResolvedSourcePath: ...
+    ) -> Path: ...
+
+
+class AnchoredSourcePathResolver(Protocol):
+    def resolve_anchored(self, document: DocumentModel) -> ResolvedSourcePath: ...
 
 
 class Checker(Protocol):
