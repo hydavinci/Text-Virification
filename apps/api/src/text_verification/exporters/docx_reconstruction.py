@@ -1,17 +1,17 @@
 from __future__ import annotations
 
-import base64
-import binascii
+import hashlib
 import io
 import math
 import os
 import stat
 import struct
+import zlib
 from collections.abc import Mapping
 from dataclasses import dataclass, fields
 from datetime import UTC, datetime
-from pathlib import Path, PurePosixPath
-from typing import Any, Literal, TypedDict
+from pathlib import Path
+from typing import Any, Literal
 from uuid import uuid4
 
 import pymupdf
@@ -23,14 +23,17 @@ from docx.image.exceptions import (
     UnrecognizedImageError,
 )
 from docx.oxml.ns import qn
-from docx.shared import Inches, Pt
+from docx.shared import Inches, Pt, RGBColor
 
 from text_verification.compatibility.exporters import ExportError
+from text_verification.document_processing.pdf_models import PdfTextSpan
 from text_verification.domain.documents import (
     DocumentModel,
     ExportFormat,
+    FileType,
     TextBlock,
 )
+from text_verification.domain.ports import SourcePathResolver
 
 DOCX_RECONSTRUCTION = ExportFormat.DOCX_RECONSTRUCTION
 _DEFAULT_PAGE_WIDTH_POINTS = 612.0
@@ -43,51 +46,24 @@ _PYMUPDF: Any = pymupdf
 type SupportedImageMime = Literal["image/png", "image/jpeg"]
 
 
-class InMemoryImagePayload(TypedDict):
-    kind: Literal["bytes"]
-    mime_type: SupportedImageMime
-    data: bytes
-
-
-class Base64ImagePayload(TypedDict):
-    kind: Literal["base64"]
-    mime_type: SupportedImageMime
-    data: str
-
-
-class RepositoryImagePayload(TypedDict):
-    kind: Literal["repository_path"]
-    mime_type: SupportedImageMime
-    path: str
-
-
-class PdfXrefImagePayload(TypedDict):
-    kind: Literal["pdf_xref"]
-    path: str
-    xref: int
-
-
-type DocxImagePayload = (
-    InMemoryImagePayload
-    | Base64ImagePayload
-    | RepositoryImagePayload
-    | PdfXrefImagePayload
-)
-
-
 @dataclass(frozen=True)
 class DocxReconstructionLimits:
+    max_text_chars: int = 5_000_000
     max_output_elements: int = 20_000
+    max_runs: int = 50_000
+    max_images: int = 500
     max_tables: int = 100
     max_table_index: int = 10_000
     max_table_rows: int = 1_000
     max_table_columns: int = 100
     max_table_cells: int = 10_000
     max_image_bytes: int = 20 * 1024 * 1024
+    max_total_image_bytes: int = 50 * 1024 * 1024
     max_pdf_source_bytes: int = 200 * 1024 * 1024
     max_image_width: int = 20_000
     max_image_height: int = 20_000
     max_image_pixels: int = 40_000_000
+    max_decoded_image_bytes: int = 64 * 1024 * 1024
     max_output_bytes: int = 100 * 1024 * 1024
 
     def __post_init__(self) -> None:
@@ -106,6 +82,12 @@ class _Image:
 
 
 @dataclass(frozen=True)
+class _PdfImageRequest:
+    block_id: str
+    xref: int
+
+
+@dataclass(frozen=True)
 class _Table:
     page: int | None
     table_index: int
@@ -115,43 +97,203 @@ class _Table:
     merges: dict[tuple[int, int], tuple[int, int]]
     merged_coordinates: frozenset[tuple[int, int]]
     first_source_index: int
+    last_source_index: int
     y: float
     x: float
+    bottom: float
 
 
 type _RenderUnit = TextBlock | _Table
 
 
+class _BoundedBytesIO(io.BytesIO):
+    def __init__(self, max_bytes: int) -> None:
+        super().__init__()
+        self._max_bytes = max_bytes
+
+    def write(self, data: Any) -> int:
+        size = len(data)
+        if max(len(self.getbuffer()), self.tell() + size) > self._max_bytes:
+            raise ExportError("Reconstructed DOCX exceeds the configured output size limit.")
+        return super().write(data)
+
+
 @dataclass(frozen=True)
 class DocxReconstructionExporter:
     limits: DocxReconstructionLimits = DocxReconstructionLimits()
-    repository_root: Path | None = None
+    source_path_resolver: SourcePathResolver | None = None
     file_type: ExportFormat = DOCX_RECONSTRUCTION
 
     def export(self, document: DocumentModel, target: Path) -> Path:
+        _preflight_document(document, self.limits)
+        units = _render_units(document, self.limits)
+        images = _resolve_images(
+            document,
+            units,
+            self.limits,
+            self.source_path_resolver,
+        )
+
         output = Document()
         _set_core_properties(output, document)
         _set_page_setup(output, document)
 
-        units = _render_units(document, self.limits)
         for unit in units:
             if isinstance(unit, _Table):
                 _add_table(output, unit)
             elif unit.kind == "image":
-                _add_image(
-                    output,
-                    _image_from_block(unit, self.limits, self.repository_root),
-                )
+                _add_image(output, images[unit.block_id])
             elif unit.kind in {"heading", "paragraph"}:
                 _add_text_block(output, unit)
 
-        stream = io.BytesIO()
+        stream = _BoundedBytesIO(self.limits.max_output_bytes)
         output.save(stream)
         content = stream.getvalue()
-        if len(content) > self.limits.max_output_bytes:
-            raise ExportError("Reconstructed DOCX exceeds the configured output size limit.")
         _publish_atomic(target, content)
         return target
+
+
+def _preflight_document(
+    document: DocumentModel,
+    limits: DocxReconstructionLimits,
+) -> None:
+    if len(document.blocks) > limits.max_output_elements:
+        raise ExportError("Document exceeds the configured output element limit.")
+    text_characters = 0
+    image_count = 0
+    run_count = 0
+    for block in document.blocks:
+        text_characters += len(block.text)
+        if text_characters > limits.max_text_chars:
+            raise ExportError("Document exceeds the configured text character limit.")
+        if block.kind == "image":
+            image_count += 1
+            if image_count > limits.max_images:
+                raise ExportError("Document exceeds the configured image count limit.")
+        if block.kind in {"heading", "paragraph"}:
+            raw_runs = block.style.get("runs", block.style.get("spans"))
+            run_count += len(raw_runs) if isinstance(raw_runs, list) else 1
+            if block.style.get("spans") is not None:
+                _validated_pdf_spans(block)
+        elif block.kind == "table_cell":
+            run_count += 1
+        if run_count > limits.max_runs:
+            raise ExportError("Document exceeds the configured run count limit.")
+
+
+def _resolve_images(
+    document: DocumentModel,
+    units: list[_RenderUnit],
+    limits: DocxReconstructionLimits,
+    source_path_resolver: SourcePathResolver | None,
+) -> dict[str, _Image]:
+    image_blocks = [
+        unit
+        for unit in units
+        if isinstance(unit, TextBlock) and unit.kind == "image"
+    ]
+    if not image_blocks:
+        return {}
+    requests = [
+        _canonical_pdf_image_request(document, block)
+        for block in image_blocks
+    ]
+    if source_path_resolver is None:
+        raise ExportError("Canonical PDF images require an injected source resolver.")
+    try:
+        source_path = source_path_resolver.resolve(document)
+    except (OSError, ValueError) as error:
+        raise ExportError("Canonical PDF source could not be resolved.") from error
+    source = _read_resolved_source(
+        document,
+        source_path,
+        limits.max_pdf_source_bytes,
+    )
+    try:
+        pdf: Any = _PYMUPDF.open(stream=source, filetype="pdf")
+    except (RuntimeError, ValueError) as error:
+        raise ExportError("Resolved PDF image source is invalid.") from error
+    try:
+        _preflight_pdf_image_streams(pdf, requests, limits)
+        extracted: list[tuple[bytes, SupportedImageMime]] = []
+        total_bytes = 0
+        for request in requests:
+            content, mime_type = _extract_pdf_image_content(pdf, request.xref)
+            total_bytes += len(content)
+            if total_bytes > limits.max_total_image_bytes:
+                raise ExportError(
+                    "Document exceeds the configured aggregate image media limit."
+                )
+            extracted.append((content, mime_type))
+    finally:
+        pdf.close()
+
+    images: dict[str, _Image] = {}
+    for request, (content, mime_type) in zip(requests, extracted, strict=True):
+        image = _validated_image(content, limits)
+        if image.mime_type != mime_type:
+            raise ExportError("PDF image MIME type does not match its signature.")
+        images[request.block_id] = image
+    return images
+
+
+def _preflight_pdf_image_streams(
+    pdf: Any,
+    requests: list[_PdfImageRequest],
+    limits: DocxReconstructionLimits,
+) -> None:
+    total_bytes = 0
+    for request in requests:
+        try:
+            if not pdf.xref_is_image(request.xref):
+                raise ExportError("Canonical PDF image reference is not an image object.")
+            value_type, raw_value = pdf.xref_get_key(request.xref, "Length")
+            width_type, raw_width = pdf.xref_get_key(request.xref, "Width")
+            height_type, raw_height = pdf.xref_get_key(request.xref, "Height")
+        except (RuntimeError, ValueError) as error:
+            raise ExportError("Canonical PDF image reference is invalid.") from error
+        if value_type != "int" or width_type != "int" or height_type != "int":
+            raise ExportError("Canonical PDF image stream metadata is unavailable.")
+        try:
+            image_bytes = int(raw_value)
+            width = int(raw_width)
+            height = int(raw_height)
+        except (TypeError, ValueError) as error:
+            raise ExportError("Canonical PDF image stream metadata is invalid.") from error
+        if image_bytes <= 0 or image_bytes > limits.max_image_bytes:
+            raise ExportError("PDF image stream exceeds the configured size limit.")
+        if (
+            width <= 0
+            or height <= 0
+            or width > limits.max_image_width
+            or height > limits.max_image_height
+            or width * height > limits.max_image_pixels
+        ):
+            raise ExportError("PDF image dimensions exceed configured limits.")
+        if width * height * 8 > limits.max_decoded_image_bytes:
+            raise ExportError("Image exceeds the configured decoded image byte limit.")
+        total_bytes += image_bytes
+        if total_bytes > limits.max_total_image_bytes:
+            raise ExportError("Document exceeds the configured aggregate image media limit.")
+
+
+def _extract_pdf_image_content(
+    pdf: Any,
+    xref: int,
+) -> tuple[bytes, SupportedImageMime]:
+    try:
+        extracted = pdf.extract_image(xref)
+    except (RuntimeError, ValueError) as error:
+        raise ExportError("PDF image reference could not be extracted.") from error
+    content = extracted.get("image")
+    extension = extracted.get("ext")
+    if not isinstance(content, bytes):
+        raise ExportError("PDF image reference did not contain image data.")
+    if extension in {"jpg", "jpeg"}:
+        return content, "image/jpeg"
+    if extension == "png":
+        return content, "image/png"
+    raise ExportError("PDF image reference uses an unsupported format.")
 
 
 def _render_units(
@@ -183,6 +325,7 @@ def _render_units(
         _table_from_blocks(document, key, blocks, limits)
         for key, blocks in table_groups.items()
     ]
+    _reject_interleaved_table_blocks(tables, non_table)
     if len(non_table) + sum(table.rows * table.columns for table in tables) > (
         limits.max_output_elements
     ):
@@ -230,9 +373,9 @@ def _table_from_blocks(
         if shape is not None:
             declared_shapes.add(shape)
 
-    pdf_shape = _pdf_table_shape(document, page, table_index)
-    if pdf_shape is not None:
-        declared_shapes.add(pdf_shape)
+    pdf_table = _pdf_table_metadata(document, page, table_index)
+    if pdf_table is not None:
+        declared_shapes.add((pdf_table.row_count, pdf_table.column_count))
     if len(declared_shapes) > 1:
         raise ExportError("Table metadata contains conflicting dimensions.")
 
@@ -250,7 +393,16 @@ def _table_from_blocks(
 
     merges, merged_coordinates = _table_merges(cells, rows, columns)
     first_source_index = min(index for index, _ in indexed_blocks)
+    last_source_index = max(index for index, _ in indexed_blocks)
     bboxes = [block.bbox for _, block in indexed_blocks if block.bbox is not None]
+    table_bbox = pdf_table.bbox if pdf_table is not None else _declared_table_bbox(cells)
+    if table_bbox is None and bboxes:
+        table_bbox = (
+            min(bbox[0] for bbox in bboxes),
+            min(bbox[1] for bbox in bboxes),
+            max(bbox[2] for bbox in bboxes),
+            max(bbox[3] for bbox in bboxes),
+        )
     return _Table(
         page=page,
         table_index=table_index,
@@ -260,9 +412,73 @@ def _table_from_blocks(
         merges=merges,
         merged_coordinates=frozenset(merged_coordinates),
         first_source_index=first_source_index,
-        y=min((bbox[1] for bbox in bboxes), default=math.inf),
-        x=min((bbox[0] for bbox in bboxes), default=math.inf),
+        last_source_index=last_source_index,
+        y=table_bbox[1] if table_bbox is not None else math.inf,
+        x=table_bbox[0] if table_bbox is not None else math.inf,
+        bottom=table_bbox[3] if table_bbox is not None else math.inf,
     )
+
+
+def _declared_table_bbox(
+    cells: Mapping[tuple[int, int], TextBlock],
+) -> tuple[float, float, float, float] | None:
+    declared: set[tuple[float, float, float, float]] = set()
+    for block in cells.values():
+        raw_bbox = block.source_locator.get("table_bbox")
+        if raw_bbox is None:
+            continue
+        if (
+            not isinstance(raw_bbox, list | tuple)
+            or len(raw_bbox) != 4
+            or any(
+                isinstance(coordinate, bool)
+                or not isinstance(coordinate, int | float)
+                for coordinate in raw_bbox
+            )
+        ):
+            raise ExportError("Table placement metadata is invalid.")
+        declared.add(
+            (
+                float(raw_bbox[0]),
+                float(raw_bbox[1]),
+                float(raw_bbox[2]),
+                float(raw_bbox[3]),
+            )
+        )
+    if len(declared) > 1:
+        raise ExportError("Table metadata contains conflicting placement bounds.")
+    if not declared:
+        return None
+    x0, y0, x1, y1 = next(iter(declared))
+    if not all(math.isfinite(value) for value in (x0, y0, x1, y1)):
+        raise ExportError("Table placement metadata is invalid.")
+    if x1 <= x0 or y1 <= y0:
+        raise ExportError("Table placement metadata is invalid.")
+    return x0, y0, x1, y1
+
+
+def _reject_interleaved_table_blocks(
+    tables: list[_Table],
+    non_table: list[tuple[int, TextBlock]],
+) -> None:
+    for table in tables:
+        if not math.isfinite(table.y) or not math.isfinite(table.bottom):
+            continue
+        for source_index, block in non_table:
+            if block.page != table.page:
+                continue
+            within_source_span = (
+                block.bbox is None
+                and table.first_source_index < source_index < table.last_source_index
+            )
+            within_vertical_span = (
+                block.bbox is not None
+                and table.y <= block.bbox[1] < table.bottom
+            )
+            if within_source_span or within_vertical_span:
+                raise ExportError(
+                    "Canonical blocks interleaved within a table cannot be reconstructed safely."
+                )
 
 
 def _declared_table_shape(block: TextBlock) -> tuple[int, int] | None:
@@ -348,11 +564,11 @@ def _table_merges(
     return merges, merged_coordinates
 
 
-def _pdf_table_shape(
+def _pdf_table_metadata(
     document: DocumentModel,
     page: int | None,
     table_index: int,
-) -> tuple[int, int] | None:
+) -> Any | None:
     if document.metadata.pdf is None or page is None:
         return None
     if not 1 <= page <= len(document.metadata.pdf.pages):
@@ -360,7 +576,7 @@ def _pdf_table_shape(
     page_metadata = document.metadata.pdf.pages[page - 1]
     for table in page_metadata.tables:
         if table.table_index == table_index:
-            return table.row_count, table.column_count
+            return table
     return None
 
 
@@ -382,9 +598,52 @@ def _add_text_block(document: Any, block: TextBlock) -> None:
         paragraph = document.add_paragraph(style=f"Heading {level}")
     else:
         paragraph = document.add_paragraph()
-    run = paragraph.add_run()
-    _set_run_text(run, block.text)
-    _apply_run_style(run, block.style)
+    spans = _validated_pdf_spans(block)
+    if not spans:
+        run = paragraph.add_run()
+        _set_run_text(run, block.text)
+        _apply_run_style(run, block.style)
+        return
+    previous_line: int | None = None
+    for span in spans:
+        run = paragraph.add_run()
+        if previous_line is not None and span.line_index != previous_line:
+            run.add_break()
+        _set_run_text(run, span.text)
+        _apply_run_style(
+            run,
+            {
+                "font": {
+                    "name": span.font_name,
+                    "size": span.font_size,
+                    "flags": span.font_flags,
+                    "color": span.color,
+                }
+            },
+        )
+        previous_line = span.line_index
+
+
+def _validated_pdf_spans(block: TextBlock) -> tuple[PdfTextSpan, ...]:
+    raw_spans = block.style.get("spans")
+    if raw_spans is None:
+        return ()
+    if not isinstance(raw_spans, list):
+        raise ExportError("Canonical PDF span metadata is invalid.")
+    try:
+        spans = tuple(PdfTextSpan.model_validate(value) for value in raw_spans)
+    except (TypeError, ValueError) as error:
+        raise ExportError("Canonical PDF span metadata is invalid.") from error
+    reconstructed: list[str] = []
+    previous_line: int | None = None
+    for span in spans:
+        if previous_line is not None and span.line_index != previous_line:
+            reconstructed.append("\n")
+        reconstructed.append(span.text)
+        previous_line = span.line_index
+    if "".join(reconstructed) != block.text:
+        raise ExportError("Canonical PDF spans do not reconstruct their block text.")
+    return spans
 
 
 def _heading_level(value: object) -> int:
@@ -419,11 +678,12 @@ def _apply_run_style(run: Any, style: Mapping[str, object]) -> None:
         and math.isfinite(float(size))
         and 1.0 <= float(size) <= 200.0
     ):
-        run.font.size = Pt(float(size))
+        run.font.size = Pt(round(float(size) * 2.0) / 2.0)
 
     bold = font.get("bold")
     italic = font.get("italic")
     flags = font.get("flags")
+    color = font.get("color")
     if isinstance(bold, bool):
         run.bold = bold
     elif isinstance(flags, int) and not isinstance(flags, bool):
@@ -432,6 +692,16 @@ def _apply_run_style(run: Any, style: Mapping[str, object]) -> None:
         run.italic = italic
     elif isinstance(flags, int) and not isinstance(flags, bool):
         run.italic = bool(flags & 2)
+    if (
+        isinstance(color, int)
+        and not isinstance(color, bool)
+        and 0 <= color <= 0xFFFFFF
+    ):
+        run.font.color.rgb = RGBColor(
+            (color >> 16) & 0xFF,
+            (color >> 8) & 0xFF,
+            color & 0xFF,
+        )
 
 
 def _add_table(document: Any, source: _Table) -> None:
@@ -472,173 +742,67 @@ def _add_image(document: Any, image: _Image) -> None:
         raise ExportError("Image payload is malformed or unsupported.") from error
 
 
-def _image_from_block(
+def _canonical_pdf_image_request(
+    document: DocumentModel,
     block: TextBlock,
-    limits: DocxReconstructionLimits,
-    repository_root: Path | None,
-) -> _Image:
-    raw = block.source_locator.get("image_payload")
-    if not isinstance(raw, Mapping):
-        raise ExportError("Image block is missing its image payload.")
-    kind = raw.get("kind")
-    if kind == "bytes":
-        _validate_payload_keys(raw, {"kind", "mime_type", "data"})
-        mime_type = _declared_image_mime(raw.get("mime_type"))
-        data = raw.get("data")
-        if not isinstance(data, bytes):
-            raise ExportError("Image byte payload must use in-memory bytes.")
-        content = data
-    elif kind == "base64":
-        _validate_payload_keys(raw, {"kind", "mime_type", "data"})
-        mime_type = _declared_image_mime(raw.get("mime_type"))
-        data = raw.get("data")
-        if not isinstance(data, str):
-            raise ExportError("Image base64 payload must use text data.")
-        try:
-            content = base64.b64decode(data, validate=True)
-        except (ValueError, binascii.Error) as error:
-            raise ExportError("Image payload contains invalid base64 data.") from error
-    elif kind == "repository_path":
-        _validate_payload_keys(raw, {"kind", "mime_type", "path"})
-        mime_type = _declared_image_mime(raw.get("mime_type"))
-        content = _read_repository_file(
-            repository_root,
-            raw.get("path"),
-            max_bytes=limits.max_image_bytes,
-        )
-    elif kind == "pdf_xref":
-        _validate_payload_keys(raw, {"kind", "path", "xref"})
-        content, mime_type = _extract_pdf_image(
-            repository_root,
-            raw.get("path"),
-            raw.get("xref"),
-            limits,
-        )
-    else:
-        raise ExportError("Image payload contract is invalid.")
-    if not content or len(content) > limits.max_image_bytes:
-        raise ExportError("Image payload exceeds the configured size limit.")
-    width, height, detected_mime = _image_dimensions(content)
-    if detected_mime != mime_type:
-        raise ExportError("Image payload MIME type does not match its signature.")
+) -> _PdfImageRequest:
+    if "image_payload" in block.source_locator:
+        raise ExportError("Image block contains a non-canonical image reference.")
     if (
-        width > limits.max_image_width
-        or height > limits.max_image_height
-        or width * height > limits.max_image_pixels
+        document.file_type is not FileType.PDF
+        or document.metadata.pdf is None
+        or block.page is None
+        or not 1 <= block.page <= len(document.metadata.pdf.pages)
     ):
-        raise ExportError("Image dimensions exceed configured limits.")
-    return _Image(content, detected_mime, width, height)
+        raise ExportError("Image block does not contain a valid canonical image reference.")
+    image_index = block.source_locator.get("image_index")
+    xref = block.source_locator.get("xref")
+    if (
+        isinstance(image_index, bool)
+        or not isinstance(image_index, int)
+        or image_index < 0
+        or isinstance(xref, bool)
+        or not isinstance(xref, int)
+        or xref <= 0
+    ):
+        raise ExportError("Image block does not contain a valid canonical image reference.")
+    page_metadata = document.metadata.pdf.pages[block.page - 1]
+    matches = [
+        image
+        for image in page_metadata.images
+        if image.image_index == image_index and image.xref == xref
+    ]
+    if len(matches) != 1 or matches[0].bbox != block.bbox:
+        raise ExportError("Canonical PDF image reference conflicts with document metadata.")
+    return _PdfImageRequest(block_id=block.block_id, xref=xref)
 
 
-def _validate_payload_keys(raw: Mapping[object, object], expected: set[str]) -> None:
-    if set(raw) != expected:
-        raise ExportError("Image payload contract is invalid.")
-
-
-def _declared_image_mime(value: object) -> SupportedImageMime:
-    if value == "image/png":
-        return "image/png"
-    if value == "image/jpeg":
-        return "image/jpeg"
-    raise ExportError("Image payload has an unsupported MIME type.")
-
-
-def _extract_pdf_image(
-    repository_root: Path | None,
-    raw_path: object,
-    raw_xref: object,
-    limits: DocxReconstructionLimits,
-) -> tuple[bytes, SupportedImageMime]:
-    if isinstance(raw_xref, bool) or not isinstance(raw_xref, int) or raw_xref <= 0:
-        raise ExportError("PDF image payload has an invalid image reference.")
-    source = _read_repository_file(
-        repository_root,
-        raw_path,
-        max_bytes=limits.max_pdf_source_bytes,
-    )
-    try:
-        pdf: Any = _PYMUPDF.open(stream=source, filetype="pdf")
-    except (RuntimeError, ValueError) as error:
-        raise ExportError("Repository PDF image source is invalid.") from error
-    try:
-        extracted = pdf.extract_image(raw_xref)
-    except (RuntimeError, ValueError) as error:
-        raise ExportError("PDF image reference could not be extracted.") from error
-    finally:
-        pdf.close()
-    content = extracted.get("image")
-    extension = extracted.get("ext")
-    if not isinstance(content, bytes):
-        raise ExportError("PDF image reference did not contain image data.")
-    if extension in {"jpg", "jpeg"}:
-        return content, "image/jpeg"
-    if extension == "png":
-        return content, "image/png"
-    raise ExportError("PDF image reference uses an unsupported format.")
-
-
-def _read_repository_file(
-    repository_root: Path | None,
-    raw_path: object,
-    *,
+def _read_resolved_source(
+    document: DocumentModel,
+    source_path: Path,
     max_bytes: int,
 ) -> bytes:
-    if repository_root is None:
-        raise ExportError("Image repository is not configured.")
-    relative_path = _validated_repository_path(raw_path)
-    root_fd = _open_absolute_directory(repository_root, "Image repository is unsafe.")
-    directory_fd = root_fd
-    opened_directories: list[int] = []
+    if not source_path.is_absolute() or ".." in source_path.parts:
+        raise ExportError("Resolved source path must be absolute and normalized.")
     file_fd = -1
     try:
-        for part in relative_path.parts[:-1]:
-            next_fd = os.open(
-                part,
-                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-                dir_fd=directory_fd,
-            )
-            opened_directories.append(next_fd)
-            directory_fd = next_fd
-        file_fd = os.open(
-            relative_path.name,
-            os.O_RDONLY | os.O_NOFOLLOW,
-            dir_fd=directory_fd,
-        )
+        file_fd = os.open(source_path, os.O_RDONLY | os.O_NOFOLLOW)
         file_stat = os.fstat(file_fd)
         if not stat.S_ISREG(file_stat.st_mode):
-            raise ExportError("Image repository path must name a regular file.")
+            raise ExportError("Resolved source must be a regular file.")
         if file_stat.st_size <= 0 or file_stat.st_size > max_bytes:
-            raise ExportError("Image repository file exceeds the configured size limit.")
+            raise ExportError("Resolved source exceeds the configured size limit.")
         content = _read_bounded(file_fd, max_bytes)
-        if len(content) != file_stat.st_size:
-            raise ExportError("Image repository file changed while it was read.")
-        return content
     except ExportError:
         raise
     except OSError as error:
-        raise ExportError("Image repository path is unsafe or missing.") from error
+        raise ExportError("Resolved source is unsafe or unavailable.") from error
     finally:
         if file_fd >= 0:
             os.close(file_fd)
-        for opened_fd in reversed(opened_directories):
-            os.close(opened_fd)
-        os.close(root_fd)
-
-
-def _validated_repository_path(value: object) -> PurePosixPath:
-    if (
-        not isinstance(value, str)
-        or not value
-        or "\x00" in value
-        or "\\" in value
-        or value.startswith("/")
-        or (len(value) >= 2 and value[1] == ":")
-    ):
-        raise ExportError("Image repository path is unsafe.")
-    parts = value.split("/")
-    if any(part in {"", ".", ".."} for part in parts):
-        raise ExportError("Image repository path is unsafe.")
-    return PurePosixPath(*parts)
+    if f"sha256:{hashlib.sha256(content).hexdigest()}" != document.source_version:
+        raise ExportError("Resolved source does not match the canonical document.")
+    return content
 
 
 def _read_bounded(file_fd: int, max_bytes: int) -> bytes:
@@ -652,24 +816,196 @@ def _read_bounded(file_fd: int, max_bytes: int) -> bytes:
         remaining -= len(chunk)
     content = b"".join(chunks)
     if len(content) > max_bytes:
-        raise ExportError("Image repository file exceeds the configured size limit.")
+        raise ExportError("Resolved source exceeds the configured size limit.")
     return content
 
 
-def _image_dimensions(
+def _validated_image(
     content: bytes,
-) -> tuple[int, int, SupportedImageMime]:
+    limits: DocxReconstructionLimits,
+) -> _Image:
+    if not content or len(content) > limits.max_image_bytes:
+        raise ExportError("Image payload exceeds the configured size limit.")
     if content.startswith(b"\x89PNG\r\n\x1a\n"):
-        if len(content) < 24 or content[12:16] != b"IHDR":
-            raise ExportError("PNG image payload is malformed.")
-        width, height = struct.unpack(">II", content[16:24])
-        if width <= 0 or height <= 0:
-            raise ExportError("PNG image dimensions are invalid.")
-        return width, height, "image/png"
+        width, height, decoded_size = _validate_png(content, limits)
+        mime_type: SupportedImageMime = "image/png"
     if content.startswith(b"\xff\xd8") and content.endswith(b"\xff\xd9"):
         width, height = _jpeg_dimensions(content)
-        return width, height, "image/jpeg"
-    raise ExportError("Image payload signature is unsupported.")
+        decoded_size = width * height * 4
+        mime_type = "image/jpeg"
+    elif not content.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise ExportError("Image payload signature is unsupported.")
+    if (
+        width > limits.max_image_width
+        or height > limits.max_image_height
+        or width * height > limits.max_image_pixels
+    ):
+        raise ExportError("Image dimensions exceed configured limits.")
+    if decoded_size > limits.max_decoded_image_bytes:
+        raise ExportError("Image exceeds the configured decoded image byte limit.")
+    try:
+        pixmap: Any = _PYMUPDF.Pixmap(content)
+    except (RuntimeError, ValueError) as error:
+        raise ExportError("Image payload could not be fully decoded.") from error
+    try:
+        if pixmap.width != width or pixmap.height != height:
+            raise ExportError("Decoded image dimensions do not match its header.")
+        if pixmap.stride * pixmap.height > limits.max_decoded_image_bytes:
+            raise ExportError("Image exceeds the configured decoded image byte limit.")
+    finally:
+        del pixmap
+    return _Image(content, mime_type, width, height)
+
+
+def _validate_png(
+    content: bytes,
+    limits: DocxReconstructionLimits,
+) -> tuple[int, int, int]:
+    offset = 8
+    width = 0
+    height = 0
+    row_bytes = 0
+    expected_decoded = 0
+    color_type = -1
+    seen_header = False
+    seen_palette = False
+    seen_image_data = False
+    ended_image_data = False
+    seen_end = False
+    decoded = bytearray()
+    decompressor: Any | None = None
+    while offset < len(content):
+        if len(content) - offset < 12:
+            raise ExportError("PNG image payload is truncated.")
+        chunk_length = int.from_bytes(content[offset : offset + 4], "big")
+        chunk_type = content[offset + 4 : offset + 8]
+        data_start = offset + 8
+        data_end = data_start + chunk_length
+        crc_end = data_end + 4
+        if data_end < data_start or crc_end > len(content):
+            raise ExportError("PNG image payload is truncated.")
+        chunk_data = content[data_start:data_end]
+        expected_crc = int.from_bytes(content[data_end:crc_end], "big")
+        actual_crc = zlib.crc32(chunk_type)
+        actual_crc = zlib.crc32(chunk_data, actual_crc) & 0xFFFFFFFF
+        if expected_crc != actual_crc:
+            raise ExportError("PNG image chunk CRC is invalid.")
+        if len(chunk_type) != 4 or not all(
+            65 <= value <= 90 or 97 <= value <= 122 for value in chunk_type
+        ):
+            raise ExportError("PNG image chunk type is invalid.")
+        if not seen_header and chunk_type != b"IHDR":
+            raise ExportError("PNG image header must be the first chunk.")
+        if seen_image_data and chunk_type != b"IDAT":
+            ended_image_data = True
+
+        if chunk_type == b"IHDR":
+            if seen_header or chunk_length != 13:
+                raise ExportError("PNG image header is invalid.")
+            width, height, bit_depth, color_type, compression, filtering, interlace = (
+                struct.unpack(">IIBBBBB", chunk_data)
+            )
+            valid_depths = {
+                0: {1, 2, 4, 8, 16},
+                2: {8, 16},
+                3: {1, 2, 4, 8},
+                4: {8, 16},
+                6: {8, 16},
+            }
+            if (
+                width <= 0
+                or height <= 0
+                or bit_depth not in valid_depths.get(color_type, set())
+                or compression != 0
+                or filtering != 0
+                or interlace != 0
+            ):
+                raise ExportError("PNG image header uses unsupported values.")
+            channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[color_type]
+            row_bytes = 1 + ((width * channels * bit_depth + 7) // 8)
+            expected_decoded = row_bytes * height
+            if expected_decoded > limits.max_decoded_image_bytes:
+                raise ExportError("Image exceeds the configured decoded image byte limit.")
+            decompressor = zlib.decompressobj()
+            seen_header = True
+        elif chunk_type == b"PLTE":
+            if (
+                seen_palette
+                or seen_image_data
+                or color_type in {0, 4}
+                or chunk_length == 0
+                or chunk_length > 768
+                or chunk_length % 3
+            ):
+                raise ExportError("PNG image palette is invalid.")
+            seen_palette = True
+        elif chunk_type == b"IDAT":
+            if ended_image_data or decompressor is None:
+                raise ExportError("PNG image data chunks are invalid.")
+            if color_type == 3 and not seen_palette:
+                raise ExportError("Indexed PNG image requires a palette.")
+            _decompress_png_chunk(
+                decompressor,
+                chunk_data,
+                decoded,
+                expected_decoded,
+            )
+            seen_image_data = True
+        elif chunk_type == b"IEND":
+            if chunk_length != 0 or not seen_image_data or decompressor is None:
+                raise ExportError("PNG image end chunk is invalid.")
+            _finish_png_decompression(decompressor, decoded, expected_decoded)
+            seen_end = True
+            offset = crc_end
+            break
+        elif chunk_type[0] & 0x20 == 0:
+            raise ExportError("PNG image contains an unsupported critical chunk.")
+        offset = crc_end
+    if not seen_end or offset != len(content) or len(decoded) != expected_decoded:
+        raise ExportError("PNG image payload is incomplete.")
+    if any(decoded[row * row_bytes] > 4 for row in range(height)):
+        raise ExportError("PNG image uses an invalid scanline filter.")
+    return width, height, max(expected_decoded, width * height * 4)
+
+
+def _decompress_png_chunk(
+    decompressor: Any,
+    chunk_data: bytes,
+    decoded: bytearray,
+    maximum: int,
+) -> None:
+    pending = chunk_data
+    while pending:
+        before = len(pending)
+        remaining = maximum - len(decoded)
+        try:
+            output = decompressor.decompress(pending, max(1, remaining + 1))
+        except zlib.error as error:
+            raise ExportError("PNG image compressed data is invalid.") from error
+        decoded.extend(output)
+        if len(decoded) > maximum:
+            raise ExportError("PNG image decompression exceeds declared dimensions.")
+        pending = decompressor.unconsumed_tail
+        if pending and len(pending) >= before:
+            raise ExportError("PNG image compressed data is invalid.")
+
+
+def _finish_png_decompression(
+    decompressor: Any,
+    decoded: bytearray,
+    maximum: int,
+) -> None:
+    try:
+        decoded.extend(decompressor.flush(max(1, maximum - len(decoded) + 1)))
+    except zlib.error as error:
+        raise ExportError("PNG image compressed data is invalid.") from error
+    if (
+        len(decoded) > maximum
+        or not decompressor.eof
+        or decompressor.unused_data
+        or decompressor.unconsumed_tail
+    ):
+        raise ExportError("PNG image compressed data is invalid.")
 
 
 def _jpeg_dimensions(content: bytes) -> tuple[int, int]:

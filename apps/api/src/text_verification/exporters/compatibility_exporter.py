@@ -2,15 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
 
 from text_verification.compatibility.exporters import ExportError, export_original
 from text_verification.domain.documents import DocumentModel, FileType
 from text_verification.domain.issues import Issue
-
-
-class SourcePathResolver(Protocol):
-    def resolve(self, document: DocumentModel, *, source_path: Path | None = None) -> Path: ...
+from text_verification.domain.ports import SourcePathResolver
 
 
 @dataclass(frozen=True)

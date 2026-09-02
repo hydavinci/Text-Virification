@@ -2691,6 +2691,29 @@ def _ocr_blocks(elements: tuple[OcrLayoutElement, ...]) -> list[_ExtractedBlock]
                     "cell_index": element.cell_index,
                 }
             )
+        if (
+            element.table_row_count is not None
+            and element.table_column_count is not None
+            and element.table_bbox is not None
+        ):
+            source_locator.update(
+                {
+                    "table_shape": {
+                        "rows": element.table_row_count,
+                        "columns": element.table_column_count,
+                    },
+                    "table_bbox": list(element.table_bbox),
+                }
+            )
+        ocr_style: dict[str, object] = {
+            "source": "ocr",
+            "language": element.language,
+            "confidence": element.confidence,
+        }
+        if element.estimated_font_size is not None:
+            ocr_style["estimated_font_size"] = element.estimated_font_size
+        if element.heading_level is not None:
+            ocr_style["level"] = element.heading_level
         blocks.append(
             _ExtractedBlock(
                 block_id=block_id,
@@ -2703,11 +2726,7 @@ def _ocr_blocks(elements: tuple[OcrLayoutElement, ...]) -> list[_ExtractedBlock]
                 table_index=element.table_index,
                 row_index=element.row_index,
                 cell_index=element.cell_index,
-                style={
-                    "source": "ocr",
-                    "language": element.language,
-                    "confidence": element.confidence,
-                },
+                style=ocr_style,
                 source_locator=source_locator,
                 preserve_raw_flow=False,
             )

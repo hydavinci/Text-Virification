@@ -83,6 +83,15 @@ class Parser(Protocol):
     def parse(self, source_path: Path) -> DocumentModel: ...
 
 
+class SourcePathResolver(Protocol):
+    def resolve(
+        self,
+        document: DocumentModel,
+        *,
+        source_path: Path | None = None,
+    ) -> Path: ...
+
+
 class Checker(Protocol):
     name: str
     version: str

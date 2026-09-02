@@ -15,6 +15,7 @@ from text_verification.document_processing.errors import OcrLayoutError
 
 PositiveInt = Annotated[int, Field(strict=True, ge=1)]
 NonNegativeInt = Annotated[int, Field(strict=True, ge=0)]
+HeadingLevel = Annotated[int, Field(strict=True, ge=1, le=9)]
 BBox = tuple[float, float, float, float]
 Quad = tuple[
     tuple[float, float],
@@ -231,6 +232,11 @@ class OcrLayoutElement(_LayoutModel):
     table_index: NonNegativeInt | None = None
     row_index: NonNegativeInt | None = None
     cell_index: NonNegativeInt | None = None
+    table_row_count: PositiveInt | None = None
+    table_column_count: PositiveInt | None = None
+    table_bbox: BBox | None = None
+    heading_level: HeadingLevel | None = None
+    estimated_font_size: float | None = None
     boxes: tuple[OcrLayoutBox, ...] = Field(min_length=1)
 
     @field_validator("bbox", mode="before")
@@ -256,6 +262,23 @@ class OcrLayoutElement(_LayoutModel):
             raise ValueError("language must not be empty")
         return normalized
 
+    @field_validator("estimated_font_size", mode="before")
+    @classmethod
+    def validate_estimated_font_size(cls, value: object) -> float | None:
+        if value is None:
+            return None
+        size = _finite_float(value, field_name="estimated_font_size")
+        if size <= 0:
+            raise ValueError("estimated_font_size must be positive")
+        return size
+
+    @field_validator("table_bbox", mode="before")
+    @classmethod
+    def validate_table_bbox(cls, value: object) -> BBox | None:
+        if value is None:
+            return None
+        return _bbox(value, field_name="table_bbox")
+
     @model_validator(mode="after")
     def validate_coordinates(self) -> OcrLayoutElement:
         table_coordinates = (self.table_index, self.row_index, self.cell_index)
@@ -264,11 +287,35 @@ class OcrLayoutElement(_LayoutModel):
                 raise ValueError("table cells require table, row, and cell indices")
             if self.paragraph_index is not None:
                 raise ValueError("table cells must not have a paragraph index")
+            if self.heading_level is not None or self.estimated_font_size is not None:
+                raise ValueError("table cells must not have heading or font metadata")
+            table_metadata = (
+                self.table_row_count,
+                self.table_column_count,
+                self.table_bbox,
+            )
+            if any(value is not None for value in table_metadata) and any(
+                value is None for value in table_metadata
+            ):
+                raise ValueError("table placement metadata must be complete")
         else:
             if self.paragraph_index is None:
                 raise ValueError("paragraphs and headings require a paragraph index")
             if any(value is not None for value in table_coordinates):
                 raise ValueError("paragraphs and headings must not have table coordinates")
+            if self.estimated_font_size is None:
+                raise ValueError("paragraphs and headings require an estimated font size")
+            if (self.kind == "heading") != (self.heading_level is not None):
+                raise ValueError("only headings require a heading level")
+            if any(
+                value is not None
+                for value in (
+                    self.table_row_count,
+                    self.table_column_count,
+                    self.table_bbox,
+                )
+            ):
+                raise ValueError("paragraphs and headings must not have table metadata")
         if any(box.page != self.page for box in self.boxes):
             raise ValueError("element boxes must belong to the same page")
         return self
@@ -343,7 +390,7 @@ def build_ocr_layout(
     lines = _group_lines(boxes, language=language, max_candidate_checks=max_candidate_checks)
     tables, table_line_indices = _detect_tables(lines)
     elements = [
-        _table_element(cell, language=language)
+        _table_element(cell, table=table, language=language)
         for table in tables
         for row in table.rows
         for cell in row
@@ -711,6 +758,9 @@ def _text_elements(
                 confidence=_mean_confidence(boxes),
                 language=language,
                 paragraph_index=paragraph_index,
+                estimated_font_size=median(
+                    line.bbox[3] - line.bbox[1] for line in paragraph_lines
+                ),
                 boxes=boxes,
             )
         )
@@ -734,6 +784,8 @@ def _text_elements(
                     confidence=line.confidence,
                     language=language,
                     paragraph_index=paragraph_index,
+                    heading_level=_estimated_heading_level(line_height, body_height),
+                    estimated_font_size=line_height,
                     boxes=line.boxes,
                 )
             )
@@ -764,6 +816,17 @@ def _same_paragraph(
         and left_delta <= max(10.0, body_height * 1.5)
         and height_ratio <= _PARAGRAPH_HEIGHT_RATIO
     )
+
+
+def _estimated_heading_level(line_height: float, body_height: float) -> int:
+    ratio = line_height / body_height
+    if ratio >= 2.0:
+        return 1
+    if ratio >= 1.75:
+        return 2
+    if ratio >= 1.5:
+        return 3
+    return 4
 
 
 def _body_line_height(lines: tuple[OcrLayoutLine, ...]) -> float:
@@ -829,7 +892,12 @@ def _cluster_vertical_range(cluster: list[OcrLayoutLine]) -> tuple[float, float]
     )
 
 
-def _table_element(cell: OcrTableCell, *, language: str) -> OcrLayoutElement:
+def _table_element(
+    cell: OcrTableCell,
+    *,
+    table: OcrTable,
+    language: str,
+) -> OcrLayoutElement:
     return OcrLayoutElement(
         kind="table_cell",
         page=cell.page,
@@ -840,6 +908,9 @@ def _table_element(cell: OcrTableCell, *, language: str) -> OcrLayoutElement:
         table_index=cell.table_index,
         row_index=cell.row_index,
         cell_index=cell.cell_index,
+        table_row_count=table.row_count,
+        table_column_count=table.column_count,
+        table_bbox=table.bbox,
         boxes=cell.boxes,
     )
 
