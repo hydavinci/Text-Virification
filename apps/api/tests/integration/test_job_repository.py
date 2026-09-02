@@ -137,6 +137,11 @@ def test_repository_expires_jobs_before_cutoff(db_session: Session) -> None:
         file_type="txt",
         size_bytes=32,
         storage_key=str(job_id),
+        verification_options=VerificationOptions(
+            scenario=Scenario.LEGAL,
+            enable_security=False,
+            banned_words=("retained-after-expiry",),
+        ),
         created_at=created_at,
         expires_at=created_at,
     )
@@ -151,6 +156,11 @@ def test_repository_expires_jobs_before_cutoff(db_session: Session) -> None:
     assert second_expired_job_ids == [job_id]
     assert job is not None
     assert job.status == JobStatus.EXPIRED
+    assert job.verification_options == VerificationOptions(
+        scenario=Scenario.LEGAL,
+        enable_security=False,
+        banned_words=("retained-after-expiry",),
+    )
     assert [
         (event.sequence, event.status) for event in repository.list_events_after(job_id, 0)
     ] == [

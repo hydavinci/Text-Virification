@@ -53,6 +53,7 @@ from text_verification.domain.jobs import (
     JobEvent,
     JobProgressStage,
     JobRead,
+    JobStateConflictError,
     JobStatus,
     TerminalJobStateError,
 )
@@ -209,15 +210,43 @@ def create_job_export(
                 changed_at=datetime.now(UTC),
             )
             repository.commit()
+        except JobStateConflictError as error:
+            repository.rollback()
+            current_job = repository.get_job(job_id)
+            if current_job is None or current_job.status is JobStatus.EXPIRED:
+                raise _typed_http_error(
+                    status.HTTP_410_GONE,
+                    JOB_RESULT_EXPIRED_CODE,
+                    stage.value,
+                    "Job result has expired.",
+                    False,
+                ) from error
+            if current_job.status in TERMINAL_STATUSES:
+                raise _http_error(
+                    status.HTTP_409_CONFLICT,
+                    JOB_RESULT_UNAVAILABLE_CODE,
+                    "Job did not produce a result.",
+                ) from error
+            raise _http_error(
+                status.HTTP_409_CONFLICT,
+                JOB_RESULT_PENDING_CODE,
+                "Job result is not available yet.",
+            ) from error
         except Exception:
             repository.rollback()
             raise
+
+    record(JobProgressStage.EXPORTING)
+
+    def record_remaining(stage: JobProgressStage) -> None:
+        if stage is not JobProgressStage.EXPORTING:
+            record(stage)
 
     try:
         return service.export(
             job,
             payload.format,
-            progress_observer=record,
+            progress_observer=record_remaining,
         )
     except TerminalJobStateError as error:
         raise _typed_http_error(

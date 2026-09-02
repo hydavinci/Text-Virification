@@ -566,9 +566,6 @@ class JobRepository:
                         sequence=self._next_sequence(row.job_id),
                         status=JobStatus.EXPIRED.value,
                         progress=row.progress,
-                        verification_options=decode_verification_options(
-                            row.verification_options
-                        ),
                         message=EXPIRED_EVENT_MESSAGE,
                         created_at=cutoff,
                     )
@@ -707,6 +704,9 @@ class JobRepository:
             error_message=row.error_message,
             error_stage=row.error_stage,
             error_retryable=row.error_retryable,
+            verification_options=decode_verification_options(
+                row.verification_options
+            ),
             created_at=row.created_at,
             expires_at=row.expires_at,
         )

@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from text_verification.domain.documents import FileType
 from text_verification.domain.jobs import JobStatus
+from text_verification.domain.verification import Scenario, VerificationOptions
 from text_verification.infrastructure.orm import JobEventRow, JobRow
 from text_verification.infrastructure.repositories import JobRepository
 
@@ -107,6 +108,116 @@ def test_transition_rejects_values_longer_than_database_limits_before_locking(
         )
 
 
+def test_to_job_read_decodes_persisted_nondefault_verification_options() -> None:
+    now = datetime.now(UTC)
+    row = JobRow(
+        job_id=uuid4(),
+        source_name="sample.txt",
+        file_type=FileType.TXT.value,
+        size_bytes=4,
+        storage_key=str(uuid4()),
+        status=JobStatus.QUEUED.value,
+        progress=0,
+        error_code=None,
+        error_message=None,
+        error_stage=None,
+        error_retryable=None,
+        verification_options={
+            "scenario": "legal",
+            "enable_security": False,
+            "enable_sensitive": True,
+            "enable_ad_extreme": False,
+            "custom_glossary": [],
+            "banned_words": ["forbidden"],
+        },
+        created_at=now,
+        updated_at=now,
+        expires_at=now + timedelta(hours=1),
+        lease_owner_token=None,
+        lease_expires_at=None,
+        rescue_due_at=now,
+        rescue_attempts=0,
+        rescue_last_published_at=None,
+    )
+
+    job = JobRepository(_unexpected_session())._to_job_read(row)
+
+    assert job.verification_options == VerificationOptions(
+        scenario=Scenario.LEGAL,
+        enable_security=False,
+        banned_words=("forbidden",),
+    )
+
+
+def test_to_job_read_maps_legacy_empty_options_to_fresh_defaults() -> None:
+    now = datetime.now(UTC)
+    row = JobRow(
+        job_id=uuid4(),
+        source_name="legacy.txt",
+        file_type=FileType.TXT.value,
+        size_bytes=4,
+        storage_key=str(uuid4()),
+        status=JobStatus.QUEUED.value,
+        progress=0,
+        error_code=None,
+        error_message=None,
+        error_stage=None,
+        error_retryable=None,
+        verification_options={},
+        created_at=now,
+        updated_at=now,
+        expires_at=now + timedelta(hours=1),
+        lease_owner_token=None,
+        lease_expires_at=None,
+        rescue_due_at=now,
+        rescue_attempts=0,
+        rescue_last_published_at=None,
+    )
+    repository = JobRepository(_unexpected_session())
+
+    first = repository._to_job_read(row).verification_options
+    second = repository._to_job_read(row).verification_options
+
+    assert first == VerificationOptions()
+    assert second == VerificationOptions()
+    assert first is not second
+
+
+def test_expire_mapping_constructs_valid_job_event_without_job_only_fields() -> None:
+    now = datetime.now(UTC)
+    row = JobRow(
+        job_id=uuid4(),
+        source_name="sample.txt",
+        file_type=FileType.TXT.value,
+        size_bytes=4,
+        storage_key=str(uuid4()),
+        status=JobStatus.QUEUED.value,
+        progress=25,
+        error_code=None,
+        error_message=None,
+        error_stage=None,
+        error_retryable=None,
+        verification_options={},
+        created_at=now - timedelta(hours=2),
+        updated_at=now - timedelta(hours=2),
+        expires_at=now - timedelta(hours=1),
+        lease_owner_token=None,
+        lease_expires_at=None,
+        rescue_due_at=now - timedelta(hours=1),
+        rescue_attempts=0,
+        rescue_last_published_at=None,
+    )
+    session = _ExpireSession(row)
+
+    expired = JobRepository(cast(Session, session)).expire_jobs_before(now)
+
+    assert expired == [row.job_id]
+    assert row.status == JobStatus.EXPIRED.value
+    assert len(session.added) == 1
+    assert isinstance(session.added[0], JobEventRow)
+    assert not hasattr(session.added[0], "verification_options")
+
+
 class _OperationRecorder:
     def __init__(self) -> None:
         self.altered_columns: list[tuple[str, str]] = []
@@ -132,6 +243,36 @@ class _UnexpectedSessionUse:
 
 def _unexpected_session() -> Session:
     return cast(Session, _UnexpectedSessionUse())
+
+
+class _ScalarRows:
+    def __init__(self, row: JobRow) -> None:
+        self._row = row
+
+    def all(self) -> list[JobRow]:
+        return [self._row]
+
+
+class _ExpireSession:
+    def __init__(self, row: JobRow) -> None:
+        self.row = row
+        self.added: list[object] = []
+        self.scalar_calls = 0
+
+    def scalars(self, statement: object) -> _ScalarRows:
+        del statement
+        return _ScalarRows(self.row)
+
+    def scalar(self, statement: object) -> int:
+        del statement
+        self.scalar_calls += 1
+        return 1
+
+    def add(self, value: object) -> None:
+        self.added.append(value)
+
+    def flush(self) -> None:
+        return None
 
 
 def _load_migration() -> ModuleType:

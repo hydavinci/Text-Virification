@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 from threading import Event
+from time import monotonic
 from uuid import UUID, uuid4
 
 import pytest
@@ -51,6 +52,7 @@ from text_verification.infrastructure.orm import (
     Base,
     DocumentRow,
     ExportArtifactRow,
+    JobRow,
     ReviewRevisionRow,
     VerificationIssueRow,
     VerificationRunRow,
@@ -1005,6 +1007,110 @@ def test_identical_pending_reservation_refreshes_activity_timestamp(
     assert reservation.reserved_at == second_reserved_at
 
 
+def test_postgres_finalize_and_reserve_follow_same_lock_order_without_deadlock(
+    db_session_factory: sessionmaker[Session],
+) -> None:
+    seed_session = db_session_factory()
+    try:
+        _create_job(seed_session)
+        verification_repository = VerificationRepository(seed_session)
+        verification_repository.save_result(JOB_ID, _result())
+        verification_repository.commit()
+        jobs = JobRepository(seed_session)
+        jobs.transition(JOB_ID, JobStatus.COMPLETED, 100, "处理完成")
+        jobs.commit()
+        request = _artifact_request(data=b"pending")
+        reservation = verification_repository.reserve_export_artifact(
+            export_artifact_id=request.export_artifact_id,
+            verification_run_id=request.verification_run_id,
+            review_revision_id=request.review_revision_id,
+            source_version=request.source_version,
+            file_type=request.file_type,
+            file_name=request.file_name,
+            media_type=request.media_type,
+            storage_key=request.storage_key,
+            size_bytes=len(request.data),
+            content_sha256=sha256(request.data).hexdigest(),
+            reserved_at=request.created_at,
+            created_at=request.created_at,
+        )
+        verification_repository.commit()
+    finally:
+        seed_session.close()
+
+    run_locked = Event()
+    allow_job_lock = Event()
+    finalizer_pid_ready = Event()
+    finalizer_pid: list[int] = []
+
+    def reserve_side() -> None:
+        session = db_session_factory()
+        try:
+            session.execute(text("SET lock_timeout = '4s'"))
+            session.execute(
+                select(VerificationRunRow)
+                .where(VerificationRunRow.verification_run_id == RUN_ID)
+                .with_for_update()
+            ).scalar_one()
+            run_locked.set()
+            if not allow_job_lock.wait(timeout=5):
+                raise TimeoutError("timed out waiting to attempt the job lock")
+            session.execute(
+                select(JobRow)
+                .where(JobRow.job_id == JOB_ID)
+                .with_for_update()
+            ).scalar_one()
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def finalize_side() -> ArtifactLifecycleStatus:
+        session = db_session_factory()
+        repository = VerificationRepository(session)
+        try:
+            session.execute(text("SET lock_timeout = '4s'"))
+            finalizer_pid.append(
+                int(session.execute(text("SELECT pg_backend_pid()")).scalar_one())
+            )
+            finalizer_pid_ready.set()
+            snapshot = repository.finalize_export_artifact(
+                reservation,
+                ready_at=CREATED_AT + timedelta(minutes=1),
+                consistency_check=lambda: None,
+                require_current_result=True,
+            )
+            repository.commit()
+            assert snapshot is not None
+            return snapshot.status
+        except Exception:
+            repository.rollback()
+            raise
+        finally:
+            session.close()
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            reserve_future = executor.submit(reserve_side)
+            assert run_locked.wait(timeout=2)
+            finalize_future = executor.submit(finalize_side)
+            assert finalizer_pid_ready.wait(timeout=2)
+            _wait_until_backend_waits_for_lock(
+                db_session_factory,
+                finalizer_pid[0],
+            )
+            allow_job_lock.set()
+            reserve_future.result(timeout=6)
+            assert (
+                finalize_future.result(timeout=6)
+                is ArtifactLifecycleStatus.READY
+            )
+    finally:
+        allow_job_lock.set()
+
+
 def test_save_review_revision_rejects_source_version_mismatch(
     db_session: Session,
 ) -> None:
@@ -1924,6 +2030,32 @@ def _create_job(
         expires_at=CREATED_AT + timedelta(days=1),
     )
     repository.commit()
+
+
+def _wait_until_backend_waits_for_lock(
+    db_session_factory: sessionmaker[Session],
+    backend_pid: int,
+    *,
+    timeout_seconds: float = 3.0,
+) -> None:
+    deadline = monotonic() + timeout_seconds
+    poll_wait = Event()
+    session = db_session_factory()
+    try:
+        while monotonic() < deadline:
+            wait_event_type = session.execute(
+                text(
+                    "SELECT wait_event_type FROM pg_stat_activity "
+                    "WHERE pid = :backend_pid"
+                ),
+                {"backend_pid": backend_pid},
+            ).scalar_one_or_none()
+            if wait_event_type == "Lock":
+                return
+            poll_wait.wait(timeout=0.02)
+    finally:
+        session.close()
+    raise TimeoutError(f"backend {backend_pid} did not wait for a lock")
 
 
 def _result(

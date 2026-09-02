@@ -418,13 +418,16 @@ class VerificationRepository:
         consistency_check: Callable[[], None],
         require_current_result: bool = False,
     ) -> ArtifactSnapshot | None:
-        job = self._lock_job(reservation.job_id)
+        run = self._lock_run(reservation.verification_run_id)
+        if run.job_id != reservation.job_id:
+            raise ValueError("Artifact reservation does not belong to the requested job.")
+        job = self._lock_job(run.job_id)
         row = self._lock_artifact_or_none(reservation.export_artifact_id)
         if row is None:
             return None
         if require_current_result and not _artifact_finalization_is_authorized(
-            self._session,
             job,
+            run,
             row,
             reservation,
             ready_at,
@@ -484,7 +487,10 @@ class VerificationRepository:
         ready_at: datetime,
         consistency_check: Callable[[], None],
     ) -> ArtifactSnapshot | None:
-        self._lock_job(reservation.job_id)
+        run = self._lock_run(reservation.verification_run_id)
+        if run.job_id != reservation.job_id:
+            raise ValueError("Artifact reservation does not belong to the requested job.")
+        self._lock_job(run.job_id)
         row = self._lock_artifact_or_none(reservation.export_artifact_id)
         if row is None or not _pending_artifact_row_matches_reservation(
             row,
@@ -509,7 +515,10 @@ class VerificationRepository:
         *,
         missing_check: Callable[[], bool],
     ) -> bool:
-        self._lock_job(reservation.job_id)
+        run = self._lock_run(reservation.verification_run_id)
+        if run.job_id != reservation.job_id:
+            raise ValueError("Artifact reservation does not belong to the requested job.")
+        self._lock_job(run.job_id)
         row = self._lock_artifact_or_none(reservation.export_artifact_id)
         if row is None or not _pending_artifact_row_matches_reservation(
             row,
@@ -1105,8 +1114,8 @@ def _finalize_artifact_row(
 
 
 def _artifact_finalization_is_authorized(
-    session: Session,
     job: JobRow,
+    current_run: VerificationRunRow,
     row: ExportArtifactRow,
     reservation: ArtifactReservation,
     now: datetime,
@@ -1114,19 +1123,12 @@ def _artifact_finalization_is_authorized(
     if (
         JobStatus(job.status) not in RESULT_READY_STATUSES
         or job.expires_at <= now
+        or current_run.job_id != job.job_id
         or row.run.job_id != job.job_id
     ):
         return False
-    current_run = session.scalar(
-        select(VerificationRunRow)
-        .options(selectinload(VerificationRunRow.document))
-        .where(VerificationRunRow.job_id == job.job_id)
-        .with_for_update()
-        .execution_options(populate_existing=True)
-    )
     return (
-        current_run is not None
-        and current_run.verification_run_id == reservation.verification_run_id
+        current_run.verification_run_id == reservation.verification_run_id
         and current_run.document_id == row.run.document_id
         and current_run.document.source_version == reservation.source_version
         and row.verification_run_id == current_run.verification_run_id

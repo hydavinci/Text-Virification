@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from text_verification.domain.artifacts import (
     ArtifactLifecycleStatus,
@@ -18,6 +19,7 @@ from text_verification.domain.jobs import (
     JobEvent,
     JobProgressStage,
     JobRead,
+    JobStateConflictError,
     JobStatus,
 )
 from text_verification.domain.verification import (
@@ -39,6 +41,7 @@ class RecordingJobRepository:
     def __init__(self) -> None:
         self._jobs: dict[UUID, JobRead] = {}
         self._events: dict[UUID, list[JobEvent]] = {}
+        self.rollback_calls = 0
 
     def create_job(self, status: JobStatus = JobStatus.COMPLETED) -> JobRead:
         job_id = uuid4()
@@ -175,7 +178,7 @@ class RecordingJobRepository:
         return None
 
     def rollback(self) -> None:
-        return None
+        self.rollback_calls += 1
 
 
 class RecordingVerificationRepository:
@@ -469,6 +472,126 @@ def test_job_reconstruction_export_route_returns_stable_artifact_reference(
         JobProgressStage.EXPORTING,
         JobProgressStage.FINALIZING,
     ]
+
+
+def test_job_export_maps_expiry_before_exporting_event_to_410_without_service_call(
+    app: FastAPI,
+) -> None:
+    from text_verification.api.dependencies import (
+        get_job_repository,
+        get_reconstruction_export_service,
+    )
+
+    class ExpiringRepository(RecordingJobRepository):
+        def append_stage_event(
+            self,
+            job_id: UUID,
+            stage: JobProgressStage,
+            message: str,
+            *,
+            changed_at: datetime,
+        ) -> JobEvent:
+            del message, changed_at
+            assert stage is JobProgressStage.EXPORTING
+            current = self._jobs[job_id]
+            self._jobs[job_id] = current.model_copy(
+                update={"status": JobStatus.EXPIRED}
+            )
+            raise JobStateConflictError(
+                job_id=job_id,
+                expected_status=JobStatus.COMPLETED,
+                current_status=JobStatus.EXPIRED,
+            )
+
+    repository = ExpiringRepository()
+    job = repository.create_job()
+    service_calls = 0
+
+    class FakeService:
+        def export(self, *args: object, **kwargs: object) -> None:
+            nonlocal service_calls
+            service_calls += 1
+            observer = kwargs["progress_observer"]
+            assert callable(observer)
+            observer(JobProgressStage.EXPORTING)
+
+    app.dependency_overrides[get_job_repository] = lambda: repository
+    app.dependency_overrides[get_reconstruction_export_service] = FakeService
+
+    with TestClient(app, raise_server_exceptions=False) as race_client:
+        response = race_client.post(
+            f"/api/v1/jobs/{job.job_id}/exports",
+            json={"format": "docx_reconstruction"},
+        )
+
+    assert response.status_code == 410
+    assert response.json()["detail"] == {
+        "code": "job_result_expired",
+        "stage": "exporting",
+        "message": "Job result has expired.",
+        "retryable": False,
+    }
+    assert repository.rollback_calls == 1
+    assert service_calls == 0
+
+
+def test_job_export_preserves_409_for_nonexpiry_progress_conflict(
+    app: FastAPI,
+) -> None:
+    from text_verification.api.dependencies import (
+        get_job_repository,
+        get_reconstruction_export_service,
+    )
+
+    class ConflictingRepository(RecordingJobRepository):
+        def append_stage_event(
+            self,
+            job_id: UUID,
+            stage: JobProgressStage,
+            message: str,
+            *,
+            changed_at: datetime,
+        ) -> JobEvent:
+            del message, changed_at
+            assert stage is JobProgressStage.EXPORTING
+            current = self._jobs[job_id]
+            self._jobs[job_id] = current.model_copy(
+                update={"status": JobStatus.PARSING}
+            )
+            raise JobStateConflictError(
+                job_id=job_id,
+                expected_status=JobStatus.COMPLETED,
+                current_status=JobStatus.PARSING,
+            )
+
+    repository = ConflictingRepository()
+    job = repository.create_job()
+    service_calls = 0
+
+    class FakeService:
+        def export(self, *args: object, **kwargs: object) -> None:
+            nonlocal service_calls
+            service_calls += 1
+            observer = kwargs["progress_observer"]
+            assert callable(observer)
+            observer(JobProgressStage.EXPORTING)
+
+    app.dependency_overrides[get_job_repository] = lambda: repository
+    app.dependency_overrides[get_reconstruction_export_service] = FakeService
+
+    with TestClient(app, raise_server_exceptions=False) as race_client:
+        response = race_client.post(
+            f"/api/v1/jobs/{job.job_id}/exports",
+            json={"format": "docx_reconstruction"},
+        )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "job_result_pending",
+        "message": "Job result is not available yet.",
+    }
+    assert repository.rollback_calls == 1
+    assert service_calls == 0
 
 
 def test_job_export_download_rejects_cross_job_artifact(
