@@ -4,6 +4,9 @@ export type IssueState = 'pending' | 'accepted' | 'rejected'
 export type VerificationExecutionMode = 'synchronous' | 'asynchronous'
 export type VerificationAnalysisMode = 'local_only' | 'local_plus_llm'
 export type FileType = 'docx' | 'doc' | 'pdf' | 'txt' | 'rtf' | 'md' | 'csv'
+export type JsonPrimitive = string | number | boolean | null
+export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue }
+export type BoundingBox = [number, number, number, number]
 
 export interface GlossaryTerm {
   original: string
@@ -35,10 +38,12 @@ export interface VerificationIssue {
   confidence: number
   auto_fixable: boolean
   context: string
+  /** @deprecated Compatibility alias. Use start. */
   position: number
+  /** @deprecated Compatibility alias. Use end. */
   end_position: number
-  review?: string
-  review_reason?: string
+  review?: string | null
+  review_reason?: string | null
 }
 
 export interface VerificationDegradation {
@@ -48,7 +53,7 @@ export interface VerificationDegradation {
 
 export interface TextBlock {
   block_id: string
-  kind: 'paragraph' | 'heading' | 'table_cell' | 'header' | 'footer'
+  kind: 'paragraph' | 'heading' | 'table_cell' | 'header' | 'footer' | 'image'
   text: string
   global_start: number
   global_end: number
@@ -59,10 +64,96 @@ export interface TextBlock {
   table_index: number | null
   row_index: number | null
   cell_index: number | null
-  bbox: [number, number, number, number] | null
+  bbox: BoundingBox | null
   parent_id: string | null
-  style: Record<string, unknown>
-  source_locator: Record<string, unknown>
+  style: Record<string, JsonValue>
+  source_locator: Record<string, JsonValue>
+}
+
+export type PdfPageKind = 'text' | 'scanned' | 'mixed'
+export type PdfCharacterMappingState = 'glyph' | 'glyphless' | 'synthetic_space' | 'unmapped'
+export type PdfWritingMode = 0 | 1
+
+export interface PdfExtractionWarning {
+  page: number
+  stage: 'table' | 'image' | 'ocr'
+  code: 'pdf_table_extraction_failed' | 'pdf_image_extraction_failed' | 'pdf_ocr_no_text'
+  message: string
+}
+
+export interface PdfTextCharacter {
+  text: string
+  bbox: BoundingBox | null
+  source_start: number
+  source_end: number
+  mapping_state: PdfCharacterMappingState
+  group_id: string | null
+  line_direction: [number, number]
+  writing_mode: PdfWritingMode
+  raw_line_index: number
+  span_order: number | null
+}
+
+export interface PdfTextSpan {
+  text: string
+  bbox: BoundingBox
+  font_name: string
+  font_size: number
+  font_flags: number
+  color: number
+  span_index: number
+  characters: PdfTextCharacter[]
+  line_direction: [number, number]
+  writing_mode: PdfWritingMode
+  line_index: number
+  span_order: number
+}
+
+export interface PdfTableCell {
+  text: string
+  bbox: BoundingBox | null
+  table_index: number
+  row_index: number
+  cell_index: number
+  characters: PdfTextCharacter[]
+}
+
+export interface PdfTable {
+  table_index: number
+  bbox: BoundingBox
+  row_count: number
+  column_count: number
+  rows: PdfTableCell[][]
+}
+
+export interface PdfImage {
+  image_index: number
+  xref: number
+  bbox: BoundingBox
+}
+
+export interface OcrRequirement {
+  mode: 'required' | 'partial'
+  pages: number[]
+}
+
+export interface PdfPageMetadata {
+  page: number
+  kind: PdfPageKind
+  page_bbox: BoundingBox
+  text_length: number
+  text_density: number
+  image_coverage: number
+  ocr_required: boolean
+  spans: PdfTextSpan[]
+  tables: PdfTable[]
+  images: PdfImage[]
+}
+
+export interface PdfDocumentMetadata {
+  pages: PdfPageMetadata[]
+  warnings: PdfExtractionWarning[]
+  ocr_requirement: OcrRequirement | null
 }
 
 export interface VerificationStats {
@@ -81,7 +172,7 @@ export interface VerificationSummary {
   by_severity: Record<string, number>
   by_rule: Record<string, number>
   by_layer: Record<string, number>
-  llm_review?: Record<string, unknown>
+  llm_review?: Record<string, JsonValue>
 }
 
 export interface VerificationResult {
@@ -106,6 +197,26 @@ export interface VerificationResult {
   dictionary_versions: Record<string, string>
   degradation: VerificationDegradation
   scenario: Scenario
+  pdf_metadata?: PdfDocumentMetadata
+  ocr_requirement?: OcrRequirement | null
+}
+
+export type DocumentRevisionKind = 'source' | 'review' | 'manual'
+
+export interface DocumentRevision {
+  revision_id: string
+  document_id: string
+  source_version: string
+  parent_revision_id: string | null
+  kind: DocumentRevisionKind
+  text: string
+}
+
+export interface WorkspaceReviewSummary {
+  total: number
+  pending: number
+  accepted: number
+  rejected: number
 }
 
 export interface AnalyzeOptions {
