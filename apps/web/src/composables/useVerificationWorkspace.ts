@@ -521,6 +521,16 @@ export function useVerificationWorkspace() {
     createReviewRevision()
   }
 
+  function clearResult(): void {
+    result.value = null
+    safeIssues.value = Object.freeze([])
+    issueStates.value = {}
+    selectedSuggestions.value = {}
+    currentRevision.value = null
+    requiresReverification.value = false
+    batchHistory.length = 0
+  }
+
   function setIssueState(issueId: string, state: IssueState): void {
     if (requiresReverification.value || !issueIds().has(issueId)) {
       return
@@ -678,6 +688,7 @@ export function useVerificationWorkspace() {
       () => hasReplacementConflicts.value
     ),
     loadResult,
+    clearResult,
     setIssueState,
     acceptIssue,
     rejectIssue,

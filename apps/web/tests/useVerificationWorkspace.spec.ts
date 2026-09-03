@@ -1436,6 +1436,32 @@ describe('useVerificationWorkspace', () => {
     )
   })
 
+  it('clears canonical result and stable-id review state for a workspace reset', () => {
+    const issue = buildIssue()
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(buildResult([issue]))
+    workspace.acceptIssue(issue.issue_id)
+    workspace.selectSuggestion(issue.issue_id, '替代')
+
+    workspace.clearResult()
+
+    expect(workspace.result.value).toBeNull()
+    expect(workspace.visibleIssues.value).toEqual([])
+    expect(workspace.issueStates.value).toEqual({})
+    expect(workspace.selectedSuggestions.value).toEqual({})
+    expect(workspace.currentRevision.value).toBeNull()
+    expect(workspace.summary.value).toEqual({
+      total: 0,
+      pending: 0,
+      accepted: 0,
+      rejected: 0
+    })
+
+    workspace.loadResult(buildResult([issue]))
+    expect(workspace.issueStates.value).toEqual({})
+    expect(workspace.selectedSuggestions.value).toEqual({})
+  })
+
   it('defines persisted revisions separately with positive server revision numbers', () => {
     const persisted = {
       revision_id: '55555555-5555-4555-8555-555555555555',

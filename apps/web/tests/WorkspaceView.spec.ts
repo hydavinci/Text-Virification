@@ -1,12 +1,18 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { jobsApiKey, type JobsApi } from '../src/api/jobs'
 import { verificationApiKey } from '../src/api/verification'
 import SourceInputPanel from '../src/components/workspace/SourceInputPanel.vue'
+import DocumentViewer from '../src/components/workspace/DocumentViewer.vue'
+import IssueList from '../src/components/workspace/IssueList.vue'
 import TerminologyEditor from '../src/components/workspace/TerminologyEditor.vue'
 import VerificationSettings from '../src/components/workspace/VerificationSettings.vue'
-import type { AnalyzeOptions, VerificationResult } from '../src/types/verification'
+import type {
+  AnalyzeOptions,
+  VerificationIssue,
+  VerificationResult
+} from '../src/types/verification'
 import WorkspaceView from '../src/views/WorkspaceView.vue'
 
 function buildJobRead(overrides: Partial<Awaited<ReturnType<JobsApi['createJob']>>> = {}) {
@@ -50,7 +56,176 @@ function createDeferred<T>() {
   return { promise, resolve, reject }
 }
 
+function buildWorkspaceIssue(
+  overrides: Partial<VerificationIssue> = {}
+): VerificationIssue {
+  return {
+    issue_id: '33333333-3333-3333-3333-333333333333',
+    document_id: '11111111-1111-1111-1111-111111111111',
+    verification_run_id: '22222222-2222-2222-2222-222222222222',
+    block_id: 'p-0',
+    page: null,
+    start: 0,
+    end: 3,
+    block_start: 0,
+    block_end: 3,
+    type: 'typo',
+    severity: 'warning',
+    original: '甲乙丙',
+    suggestion: '修改',
+    alternatives: ['备选'],
+    layer: 'character',
+    message: '疑似错别字',
+    description: '疑似错别字',
+    rule_id: 'cn_typo',
+    rule_version: '1',
+    source: 'test',
+    source_version: '1',
+    confidence: 0.8,
+    auto_fixable: true,
+    context: '甲乙丙丁',
+    position: 99,
+    end_position: 100,
+    review: null,
+    review_reason: null,
+    ...overrides
+  }
+}
+
+function buildWorkspaceResult(
+  issues: VerificationIssue[],
+  text = '甲乙丙丁'
+): VerificationResult {
+  const length = Array.from(text).length
+  return {
+    success: true,
+    filename: 'direct.txt',
+    source_name: 'direct.txt',
+    file_type: 'txt',
+    text,
+    blocks: [
+      {
+        block_id: 'p-0',
+        kind: 'paragraph',
+        text,
+        global_start: 0,
+        global_end: length,
+        block_start: 0,
+        block_end: length,
+        page: null,
+        paragraph_index: 0,
+        table_index: null,
+        row_index: null,
+        cell_index: null,
+        bbox: null,
+        parent_id: null,
+        style: {},
+        source_locator: { paragraph_index: 0 }
+      }
+    ],
+    parser_name: 'compatibility-flat-text',
+    parser_version: '1',
+    stats: {
+      char_count: length,
+      char_count_no_space: length,
+      line_count: 1,
+      paragraph_count: 1,
+      language: 'zh',
+      primary_count: length,
+      primary_label: '总字数'
+    },
+    issues,
+    summary: {
+      total: issues.length,
+      by_type: { typo: issues.length },
+      by_severity: { warning: issues.length },
+      by_rule: { cn_typo: issues.length },
+      by_layer: { character: issues.length }
+    },
+    file_id: null,
+    file_ext: null,
+    document_id: '11111111-1111-1111-1111-111111111111',
+    verification_run_id: '22222222-2222-2222-2222-222222222222',
+    source_version: 'sha256:source',
+    execution_mode: 'synchronous',
+    analysis_mode: 'local_only',
+    dictionary_versions: {},
+    degradation: { is_degraded: false, reasons: [] },
+    scenario: 'general'
+  }
+}
+
 describe('WorkspaceView', () => {
+  beforeEach(() => {
+    sessionStorage.clear()
+  })
+
+  it('connects source and issue-list selection through stable issue ids', async () => {
+    const first = buildWorkspaceIssue()
+    const second = buildWorkspaceIssue({
+      issue_id: '44444444-4444-4444-4444-444444444444',
+      start: 2,
+      end: 4,
+      block_start: 2,
+      block_end: 4,
+      original: '丙丁',
+      severity: 'error',
+      layer: 'security'
+    })
+    const analyzeText = vi
+      .fn()
+      .mockResolvedValue(buildWorkspaceResult([first, second]))
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+      configurable: true,
+      value: vi.fn()
+    })
+    const wrapper = mount(WorkspaceView, {
+      attachTo: document.body,
+      global: {
+        provide: {
+          [jobsApiKey as symbol]: {
+            createJob: vi.fn(),
+            subscribe: vi.fn(() => vi.fn())
+          },
+          [verificationApiKey as symbol]: {
+            analyzeFile: vi.fn(),
+            analyzeText,
+            exportReport: vi.fn(),
+            exportOriginal: vi.fn()
+          }
+        }
+      }
+    })
+
+    const input = wrapper.getComponent(SourceInputPanel)
+    input.vm.$emit('submit-text', '甲乙丙丁')
+    await flushPromises()
+
+    const viewer = wrapper.getComponent(DocumentViewer)
+    const list = wrapper.getComponent(IssueList)
+    await viewer.get(`[data-issue-id="${first.issue_id}"]`).trigger('click')
+    expect(
+      list.get(`[data-issue-id="${first.issue_id}"]`).attributes('aria-current')
+    ).toBe('true')
+
+    await list.get(`[data-issue-id="${second.issue_id}"]`).trigger('click')
+    expect(
+      viewer
+        .get(`[data-issue-id="${second.issue_id}"]`)
+        .attributes('aria-current')
+    ).toBe('true')
+
+    await list.get('[aria-label="问题级别"]').setValue('warning')
+    expect(
+      wrapper
+        .getComponent(IssueList)
+        .get(`[data-issue-id="${first.issue_id}"]`)
+        .attributes('aria-current')
+    ).toBe('true')
+    wrapper.unmount()
+  })
+
   it('submits direct text with the complete settings and terminology snapshot', async () => {
     const analyzeText = vi.fn().mockRejectedValue(new Error('stop after contract check'))
     const wrapper = mount(WorkspaceView, {
@@ -439,70 +614,25 @@ describe('WorkspaceView', () => {
     )
   })
 
-  it('treats a nullable suggestion as a safe deletion in the current workspace', async () => {
-    const payload = {
-      success: true,
-      filename: 'direct.txt',
-      text: '禁用词',
-      stats: {
-        char_count: 3,
-        char_count_no_space: 3,
-        line_count: 1,
-        paragraph_count: 1,
-        language: 'zh',
-        primary_count: 3,
-        primary_label: '总字数'
-      },
-      issues: [
-        {
-          issue_id: '33333333-3333-3333-3333-333333333333',
-          document_id: '11111111-1111-1111-1111-111111111111',
-          verification_run_id: '22222222-2222-2222-2222-222222222222',
-          block_id: 'p-0',
-          page: null,
-          start: 0,
-          end: 3,
-          block_start: 0,
-          block_end: 3,
+  it('keeps a nullable suggestion as manual-only rather than deleting source text', async () => {
+    const payload = buildWorkspaceResult(
+      [
+        buildWorkspaceIssue({
+          original: '禁用词',
           type: 'banned_word',
           severity: 'error',
-          original: '禁用词',
           suggestion: null,
           alternatives: null,
           layer: 'discourse',
           message: '禁用词',
           description: '请人工处理',
           rule_id: 'banned_word',
-          rule_version: '1',
-          source: 'compatibility.analyzer',
-          source_version: '1',
-          confidence: 1,
-          auto_fixable: false,
           context: '禁用词',
-          position: 0,
-          end_position: 3,
-          review: '',
-          review_reason: ''
-        }
+          auto_fixable: false
+        })
       ],
-      summary: {
-        total: 1,
-        by_type: { banned_word: 1 },
-        by_severity: { error: 1 },
-        by_rule: { banned_word: 1 },
-        by_layer: { discourse: 1 }
-      },
-      file_id: null,
-      file_ext: null,
-      document_id: '11111111-1111-1111-1111-111111111111',
-      verification_run_id: '22222222-2222-2222-2222-222222222222',
-      source_version: 'sha256:source',
-      execution_mode: 'synchronous',
-      analysis_mode: 'local_only',
-      dictionary_versions: {},
-      degradation: { is_degraded: false, reasons: [] },
-      scenario: 'general'
-    } as unknown as VerificationResult
+      '禁用词'
+    )
     const analyzeText = vi.fn().mockResolvedValue(payload)
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
     const wrapper = mount(WorkspaceView, {
@@ -529,9 +659,80 @@ describe('WorkspaceView', () => {
     await wrapper.get('.issue-actions .accept').trigger('click')
     await wrapper.get('.review-toolbar button:nth-child(3)').trigger('click')
 
-    expect(wrapper.get('.document-content.preview').text()).toBe('')
-    expect(wrapper.text()).toContain('（删除）')
+    expect(wrapper.get('.document-content.preview').text()).toBe('禁用词')
+    expect(wrapper.text()).toContain('无自动建议')
     expect(wrapper.text()).not.toContain('null')
     confirm.mockRestore()
+  })
+
+  it('exports tracked text at canonical code-point offsets', async () => {
+    const payload = buildWorkspaceResult(
+      [
+        buildWorkspaceIssue({
+          start: 4,
+          end: 5,
+          block_start: 4,
+          block_end: 5,
+          original: '错',
+          suggestion: '正',
+          alternatives: null,
+          context: '😀甲错乙错'
+        })
+      ],
+      '😀甲错乙错'
+    )
+    const analyzeText = vi.fn().mockResolvedValue(payload)
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    let exportedBlob: Blob | null = null
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: vi.fn((blob: Blob) => {
+        exportedBlob = blob
+        return 'blob:test'
+      })
+    })
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      value: vi.fn()
+    })
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    const wrapper = mount(WorkspaceView, {
+      global: {
+        provide: {
+          [jobsApiKey as symbol]: {
+            createJob: vi.fn(),
+            subscribe: vi.fn(() => vi.fn())
+          },
+          [verificationApiKey as symbol]: {
+            analyzeFile: vi.fn(),
+            analyzeText,
+            exportReport: vi.fn(),
+            exportOriginal: vi.fn()
+          }
+        }
+      }
+    })
+
+    wrapper
+      .getComponent(SourceInputPanel)
+      .vm.$emit('submit-text', '😀甲错乙错')
+    await flushPromises()
+    await wrapper.get('.issue-actions .accept').trigger('click')
+    await wrapper.get('.top-actions .btn.primary').trigger('click')
+
+    expect(exportedBlob).not.toBeNull()
+    const blob = exportedBlob
+    if (blob === null) {
+      throw new Error('Expected an exported Blob.')
+    }
+    const exportedText = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader()
+      reader.addEventListener('load', () => resolve(String(reader.result)))
+      reader.addEventListener('error', () => reject(reader.error))
+      reader.readAsText(blob)
+    })
+    expect(exportedText).toBe(
+      '😀甲错乙【删除：错】【替换为：正】'
+    )
   })
 })

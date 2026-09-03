@@ -412,3 +412,77 @@ requiring users to choose the correct extension for their delimiter grammar.
 Task 2: fix round 1/5 (5 addressed, 0 open — complete options size, format-faithful multiline import, duplicate submission lock, Unicode manual limits, visible focus semantics; commits 537bd80..8d0e407)
 
 Task 2: complete (commits 6bbe971..8d0e407, review clean)
+
+## Task 3 implementation — 2026-09-03
+
+- Added `DocumentViewer`, `IssueList`, and `IssueDetails` as focused accessible
+  workspace components, plus `useIssueNavigation` for stable-ID selection,
+  offset selection, composed filters, deterministic fallback, and scrolling.
+- Removed the document `v-html` path. Sentence and continuous views now render
+  source exclusively through Vue text nodes and preserve exact source
+  whitespace, blank lines, newlines, and trailing newlines.
+- Converted canonical Python code-point offsets only at JavaScript string
+  boundaries. Astral-character coverage includes document segmentation and
+  tracked-text fallback export.
+- Migrated WorkspaceView review state, suggestion overrides, batch operations,
+  session serialization, component keys, and navigation from array indexes to
+  canonical `issue_id` values through `useVerificationWorkspace`.
+- Added `clearResult()` to the canonical workspace boundary so the existing
+  reset action clears result, decisions, overrides, revisions, conflict state,
+  and batch history before a later analysis.
+- Preserved existing analysis, job/progress, settings, terminology, summary,
+  search/edit controls, export entry points, theme, privacy, and session
+  behavior without implementing Task 4 or Task 5.
+
+### Task 3 TDD and validation evidence
+
+- Fresh pre-change baseline:
+  `cd apps/web && npm test -- --run --reporter=dot` passed 132 tests across
+  8 files.
+- Initial RED:
+  `npm test -- DocumentViewer.spec.ts IssueNavigation.spec.ts` failed both
+  suites on missing component imports.
+- Workspace integration RED: the focused WorkspaceView test failed because the
+  new source and issue components were not present.
+- Focused regression REDs reproduced incorrect duplicate-text tracked export
+  after an astral character, missing accepted/rejected source states, a
+  manual-only issue with one unselectable alternative, missing arbitrary
+  overlap styling, and stale canonical state after workspace reset.
+- Focused GREEN:
+  `npm test -- DocumentViewer.spec.ts IssueNavigation.spec.ts WorkspaceView.spec.ts useVerificationWorkspace.spec.ts --reporter=dot`
+  passed 87 tests across 4 files.
+- WorkspaceView GREEN:
+  `npm test -- WorkspaceView.spec.ts --reporter=dot` passed 17 tests.
+- Full frontend GREEN:
+  `npm test -- --run --reporter=dot` passed 152 tests across 10 files. Node
+  emitted the existing experimental `localStorage` warning.
+- Production build GREEN: `npm run build` passed `vue-tsc -b` and Vite 6.4.3
+  with 40 modules transformed.
+- `git diff --check` passed with no output.
+
+Ruling: Crossing and nested issue ranges are represented by deterministic
+non-crossing text segments plus one empty-text, focusable marker at each
+issue's canonical start. Segments show aggregate highlight/overlap state while
+every issue remains independently navigable through its stable marker — this
+avoids invalid crossing DOM marks, duplicated source text, and silently dropped
+issues; cost if wrong is a marker-based interaction instead of making every
+highlighted character itself a separate issue button.
+
+Ruling: Offset selection uses half-open canonical ranges and chooses the
+shortest containing issue, then ascending `start`, `end`, and `issue_id` —
+this makes boundaries and overlaps independent of backend array order; cost if
+wrong is selecting a narrow rule finding when a user expected the broader
+finding at the same character.
+
+Ruling: When filtering hides the selected issue, navigation chooses the next
+visible issue in canonical order, then the nearest prior visible issue, then
+`null`; a still-visible selection is preserved — this avoids retaining a
+hidden current item; cost if wrong is an automatic selection change when a user
+might prefer filters always clear selection.
+
+Ruling: `null` suggestions are manual-only and do not mutate source text,
+whereas `""` is the explicit deletion replacement. Alternatives are
+deduplicated against the primary suggestion and the first remaining actual
+alternative is marked recommended — this matches the Task 1 replacement
+boundary; cost if wrong is changing the legacy UI label that previously
+conflated nullable suggestions with deletion.

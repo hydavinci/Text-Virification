@@ -1,12 +1,16 @@
 <script setup lang="ts">
-import { computed, inject, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import { jobsApiKey } from '../api/jobs'
 import { verificationApiKey } from '../api/verification'
 import JobProgress from '../components/JobProgress.vue'
+import DocumentViewer from '../components/workspace/DocumentViewer.vue'
+import IssueList from '../components/workspace/IssueList.vue'
 import SourceInputPanel from '../components/workspace/SourceInputPanel.vue'
 import TerminologyEditor from '../components/workspace/TerminologyEditor.vue'
 import VerificationSettings from '../components/workspace/VerificationSettings.vue'
+import { useIssueNavigation } from '../composables/useIssueNavigation'
+import { useVerificationWorkspace } from '../composables/useVerificationWorkspace'
 import { isTerminalJobStatus, type JobProgressEvent, type JobRead, type JobStatus } from '../types/jobs'
 import type {
   AnalyzeOptions,
@@ -75,16 +79,26 @@ const enableSecurity = ref(true)
 const enableSensitive = ref(true)
 const enableAdExtreme = ref(false)
 const trackChanges = ref(true)
-const selectedLayer = ref('all')
-const selectedSeverity = ref('all')
 const settingsTab = ref<'settings' | 'terms' | 'banned'>('settings')
 const resultTab = ref<'issues' | 'summary'>('issues')
 const textInput = ref('')
 const workingText = ref('')
 const fileSource = ref<File | null>(null)
 const result = ref<VerificationResult | null>(null)
-const issueStates = reactive<Record<number, IssueState>>({})
-const selectedSuggestions = reactive<Record<number, string>>({})
+const verificationWorkspace = useVerificationWorkspace()
+const issueStates = verificationWorkspace.issueStates
+const selectedSuggestions = verificationWorkspace.selectedSuggestions
+const currentIssueStates = computed(() => issueStates.value)
+const currentSelectedSuggestions = computed(
+  () => selectedSuggestions.value
+)
+const issueNavigation = useIssueNavigation({
+  issues: () => verificationWorkspace.visibleIssues.value
+})
+const selectedLayer = issueNavigation.selectedLayer
+const selectedSeverity = issueNavigation.selectedSeverity
+const selectedIssueId = issueNavigation.selectedIssueId
+const visibleIssues = issueNavigation.visibleIssues
 const glossary = ref<AnalyzeOptions['glossary']>([])
 const bannedWords = ref<string[]>([])
 const isAnalyzing = ref(false)
@@ -101,7 +115,7 @@ const replaceText = ref('')
 const caseSensitive = ref(false)
 const showFindReplace = ref(false)
 const activeFindIndex = ref(0)
-const batchSnapshot = ref<Record<number, IssueState> | null>(null)
+const batchSnapshot = ref<Record<string, IssueState | null> | null>(null)
 const editBackup = ref('')
 const jobState = ref<JobProgressState | null>(null)
 
@@ -120,70 +134,18 @@ const currentOptions = computed<AnalyzeOptions>(() => ({
   bannedWords: bannedWords.value
 }))
 
-const visibleIssues = computed(() => {
-  if (!result.value) {
-    return []
-  }
-  return result.value.issues
-    .map((issue, index) => ({ issue, index }))
-    .filter(({ issue }) => selectedLayer.value === 'all' || issue.layer === selectedLayer.value)
-    .filter(({ issue }) => selectedSeverity.value === 'all' || issue.severity === selectedSeverity.value)
-})
-
-const pendingCount = computed(() =>
-  result.value?.issues.filter((_, index) => (issueStates[index] ?? 'pending') === 'pending').length ?? 0
-)
-const acceptedCount = computed(() =>
-  result.value?.issues.filter((_, index) => issueStates[index] === 'accepted').length ?? 0
-)
-const rejectedCount = computed(() =>
-  result.value?.issues.filter((_, index) => issueStates[index] === 'rejected').length ?? 0
-)
+const pendingCount = computed(() => verificationWorkspace.summary.value.pending)
+const acceptedCount = computed(() => verificationWorkspace.summary.value.accepted)
+const rejectedCount = computed(() => verificationWorkspace.summary.value.rejected)
 
 const modifiedText = computed(() => {
-  if (!result.value) {
+  const currentResult = result.value
+  if (!currentResult) {
     return workingText.value
   }
-  let text = workingText.value
-  const accepted = result.value.issues
-    .map((issue, index) => ({ issue, index }))
-    .filter(({ index }) => issueStates[index] === 'accepted')
-    .sort((a, b) => b.issue.position - a.issue.position)
-  for (const { issue, index } of accepted) {
-    const suggestion = selectedSuggestions[index] ?? issue.suggestion ?? ''
-    if (
-      issue.position >= 0 &&
-      issue.end_position <= text.length &&
-      text.slice(issue.position, issue.end_position) === issue.original
-    ) {
-      text = `${text.slice(0, issue.position)}${suggestion}${text.slice(issue.end_position)}`
-    }
-  }
-  return text
-})
-
-const highlightedText = computed(() => {
-  if (!result.value) {
-    return ''
-  }
-  const issues = result.value.issues
-    .map((issue, index) => ({ issue, index }))
-    .sort((a, b) => a.issue.position - b.issue.position)
-  let cursor = 0
-  let html = ''
-  for (const { issue, index } of issues) {
-    if (issue.position < cursor || issue.position < 0 || issue.end_position > workingText.value.length) {
-      continue
-    }
-    html += escapeHtml(workingText.value.slice(cursor, issue.position))
-    const state = issueStates[index] ?? 'pending'
-    html += `<mark class="issue-mark ${state} severity-${issue.severity}" data-issue="${index}">${escapeHtml(
-      workingText.value.slice(issue.position, issue.end_position)
-    )}</mark>`
-    cursor = issue.end_position
-  }
-  html += escapeHtml(workingText.value.slice(cursor))
-  return html
+  return workingText.value === currentResult.text
+    ? verificationWorkspace.modifiedText.value
+    : workingText.value
 })
 
 const findMatches = computed(() => {
@@ -330,9 +292,10 @@ async function runAnalysis(action: () => Promise<VerificationResult>) {
     if (!isRequestCurrent(generation)) {
       return
     }
-    result.value = payload
-    workingText.value = payload.text
-    resetIssueStates(payload.issues)
+    verificationWorkspace.loadResult(payload)
+    result.value = verificationWorkspace.result.value
+    workingText.value = verificationWorkspace.result.value?.text ?? ''
+    selectedIssueId.value = null
     showEditor.value = false
     showPreview.value = false
     analysisStep.value = 6
@@ -357,28 +320,22 @@ function confirmOptionalSettings() {
   return window.confirm('尚未设置自定义术语表和禁用词库，将仅执行通用规则检查。是否继续？')
 }
 
-function resetIssueStates(issues: VerificationIssue[]) {
-  for (const key of Object.keys(issueStates)) {
-    delete issueStates[Number(key)]
-  }
-  for (const key of Object.keys(selectedSuggestions)) {
-    delete selectedSuggestions[Number(key)]
-  }
-  issues.forEach((issue, index) => {
-    issueStates[index] = 'pending'
-    selectedSuggestions[index] = issue.suggestion ?? ''
-  })
-}
-
-function setIssueState(index: number, state: IssueState) {
-  issueStates[index] = state
+function setIssueState(issueId: string, state: IssueState) {
+  verificationWorkspace.setIssueState(issueId, state)
   saveSession()
 }
 
 function setAllIssues(state: IssueState) {
-  batchSnapshot.value = { ...issueStates }
-  for (const { index } of visibleIssues.value) {
-    issueStates[index] = state
+  batchSnapshot.value = Object.fromEntries(
+    visibleIssues.value.map((issue) => [
+      issue.issue_id,
+      Object.prototype.hasOwnProperty.call(issueStates.value, issue.issue_id)
+        ? issueStates.value[issue.issue_id]
+        : null
+    ])
+  )
+  for (const issue of visibleIssues.value) {
+    verificationWorkspace.setIssueState(issue.issue_id, state)
   }
   saveSession()
 }
@@ -387,11 +344,19 @@ function undoBatch() {
   if (!batchSnapshot.value) {
     return
   }
-  for (const key of Object.keys(issueStates)) {
-    delete issueStates[Number(key)]
+  for (const [issueId, state] of Object.entries(batchSnapshot.value)) {
+    if (state === null) {
+      verificationWorkspace.undoIssue(issueId)
+    } else {
+      verificationWorkspace.setIssueState(issueId, state)
+    }
   }
-  Object.assign(issueStates, batchSnapshot.value)
   batchSnapshot.value = null
+  saveSession()
+}
+
+function selectSuggestion(issueId: string, suggestion: string | null) {
+  verificationWorkspace.selectSuggestion(issueId, suggestion)
   saveSession()
 }
 
@@ -458,16 +423,23 @@ function cancelEdit() {
   showEditor.value = false
 }
 
-function handleDocumentClick(event: MouseEvent) {
-  const element = event.target as HTMLElement
-  const issueIndex = element.dataset.issue
-  if (issueIndex === undefined) {
-    return
+function utf16IndexAtCodePointOffset(
+  value: string,
+  codePointOffset: number
+): number | null {
+  if (!Number.isInteger(codePointOffset) || codePointOffset < 0) {
+    return null
   }
-  document.getElementById(`issue-card-${issueIndex}`)?.scrollIntoView({
-    behavior: 'smooth',
-    block: 'center'
-  })
+  let offset = 0
+  let utf16Index = 0
+  for (const character of value) {
+    if (offset === codePointOffset) {
+      return utf16Index
+    }
+    offset += 1
+    utf16Index += character.length
+  }
+  return offset === codePointOffset ? utf16Index : null
 }
 
 async function recheck() {
@@ -527,28 +499,47 @@ async function exportModified() {
     if (!result.value) {
       return workingText.value
     }
+    if (workingText.value !== result.value.text) {
+      return workingText.value
+    }
     let text = workingText.value
-    const accepted = result.value.issues
-      .map((issue, index) => ({ issue, index }))
-      .filter(({ index }) => issueStates[index] === 'accepted')
-      .sort((a, b) => b.issue.position - a.issue.position)
-    for (const { issue, index } of accepted) {
-      const suggestion = selectedSuggestions[index] ?? issue.suggestion ?? ''
-      if (text.slice(issue.position, issue.end_position) === issue.original) {
-        const tracked = `【删除：${issue.original}】【替换为：${suggestion || '（空）'}】`
-        text = `${text.slice(0, issue.position)}${tracked}${text.slice(issue.end_position)}`
+    const accepted = verificationWorkspace.visibleIssues.value
+      .filter(
+        (issue) => issueStates.value[issue.issue_id] === 'accepted'
+      )
+      .filter((issue) => effectiveSuggestion(issue) !== null)
+      .sort(
+        (left, right) =>
+          right.start - left.start ||
+          right.end - left.end ||
+          right.issue_id.localeCompare(left.issue_id)
+      )
+    for (const issue of accepted) {
+      const start = utf16IndexAtCodePointOffset(text, issue.start)
+      const end = utf16IndexAtCodePointOffset(text, issue.end)
+      if (
+        start === null ||
+        end === null ||
+        text.slice(start, end) !== issue.original
+      ) {
+        continue
       }
+      const suggestion = effectiveSuggestion(issue)
+      const tracked = `【删除：${issue.original}】【替换为：${
+        suggestion || '（空）'
+      }】`
+      text = `${text.slice(0, start)}${tracked}${text.slice(end)}`
     }
     return text
   }
-  const replacements = result.value.issues
-    .map((issue, index) => ({ issue, index }))
-    .filter(({ index }) => issueStates[index] === 'accepted')
-    .map(({ issue, index }) => ({
+  const replacements = verificationWorkspace.visibleIssues.value
+    .filter((issue) => issueStates.value[issue.issue_id] === 'accepted')
+    .filter((issue) => effectiveSuggestion(issue) !== null)
+    .map((issue) => ({
       original: issue.original,
-      suggestion: selectedSuggestions[index] ?? issue.suggestion ?? '',
-      position: issue.position,
-      end_position: issue.end_position
+      suggestion: effectiveSuggestion(issue) ?? '',
+      position: issue.start,
+      end_position: issue.end
     }))
   try {
     await verificationApi.exportOriginal(
@@ -572,7 +563,9 @@ function downloadText(text: string, filename: string) {
 }
 
 function resetWorkspace() {
+  verificationWorkspace.clearResult()
   result.value = null
+  selectedIssueId.value = null
   jobState.value = null
   fileSource.value = null
   textInput.value = ''
@@ -611,8 +604,8 @@ function saveSession() {
       JSON.stringify({
         result: result.value,
         workingText: workingText.value,
-        issueStates: { ...issueStates },
-        selectedSuggestions: { ...selectedSuggestions }
+        issueStates: { ...issueStates.value },
+        selectedSuggestions: { ...selectedSuggestions.value }
       })
     )
   } catch {
@@ -629,13 +622,20 @@ function restoreSession() {
     const saved = JSON.parse(raw) as {
       result: VerificationResult
       workingText: string
-      issueStates: Record<number, IssueState>
-      selectedSuggestions: Record<number, string>
+      issueStates: Record<string, IssueState>
+      selectedSuggestions: Record<string, string | null>
     }
-    result.value = saved.result
+    verificationWorkspace.loadResult(saved.result)
+    result.value = verificationWorkspace.result.value
     workingText.value = saved.workingText
-    Object.assign(issueStates, saved.issueStates)
-    Object.assign(selectedSuggestions, saved.selectedSuggestions)
+    for (const [issueId, state] of Object.entries(saved.issueStates)) {
+      verificationWorkspace.setIssueState(issueId, state)
+    }
+    for (const [issueId, suggestion] of Object.entries(
+      saved.selectedSuggestions
+    )) {
+      verificationWorkspace.selectSuggestion(issueId, suggestion)
+    }
   } catch {
     globalThis.sessionStorage?.removeItem('text-verification-session')
   }
@@ -662,13 +662,13 @@ function defaultStatusMessage(status: JobStatus) {
   return messages[status]
 }
 
-function escapeHtml(value: string) {
-  return value
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#039;')
+function effectiveSuggestion(issue: VerificationIssue): string | null {
+  return Object.prototype.hasOwnProperty.call(
+    selectedSuggestions.value,
+    issue.issue_id
+  )
+    ? selectedSuggestions.value[issue.issue_id]
+    : issue.suggestion
 }
 
 function handleKeyboard(event: KeyboardEvent) {
@@ -684,7 +684,11 @@ function handleKeyboard(event: KeyboardEvent) {
   }
 }
 
-watch([workingText, issueStates], saveSession, { deep: true })
+watch(
+  [workingText, () => issueStates.value, () => selectedSuggestions.value],
+  saveSession,
+  { deep: true }
+)
 watch([findQuery, caseSensitive], () => {
   activeFindIndex.value = 0
 })
@@ -831,7 +835,14 @@ onBeforeUnmount(() => {
           <button v-if="showEditor" class="btn accept small" @click="saveEdit">保存编辑</button>
           <button v-if="showEditor" class="btn reject small" @click="cancelEdit">取消编辑</button>
           <button class="btn ghost small" :class="{ active: showPreview }" @click="showPreview = !showPreview">修改预览</button>
-          <button class="btn ghost small" :class="{ active: segmentedView }" @click="segmentedView = !segmentedView">句段视图</button>
+          <button
+            class="btn ghost small"
+            :class="{ active: segmentedView }"
+            :aria-pressed="segmentedView"
+            @click="segmentedView = !segmentedView"
+          >
+            {{ segmentedView ? '句段视图' : '连续视图' }}
+          </button>
         </div>
         <div>
           <button class="btn accept small" @click="setAllIssues('accepted')">全部接受</button>
@@ -846,13 +857,19 @@ onBeforeUnmount(() => {
           <header><div><strong>{{ showPreview ? '修改预览' : '源文本' }}</strong><small>{{ result.filename }}</small></div></header>
           <textarea v-if="showEditor" v-model="workingText" class="document-editor" />
           <pre v-else-if="showPreview" class="document-content preview">{{ modifiedText }}</pre>
-          <pre
+          <div
             v-else
             class="document-content"
-            :class="{ segmented: segmentedView }"
-            v-html="highlightedText"
-            @click="handleDocumentClick"
-          ></pre>
+          >
+            <DocumentViewer
+              :result="result"
+              :issues="visibleIssues"
+              :issue-states="currentIssueStates"
+              :selected-issue-id="selectedIssueId"
+              :mode="segmentedView ? 'sentence' : 'continuous'"
+              @select-issue="issueNavigation.selectIssue"
+            />
+          </div>
         </section>
 
         <aside class="issues-panel">
@@ -865,56 +882,21 @@ onBeforeUnmount(() => {
           </header>
 
           <template v-if="resultTab === 'issues'">
-            <div class="filters">
-              <select v-model="selectedLayer">
-                <option value="all">全部层级</option>
-                <option v-for="layer in layers" :key="layer.id" :value="layer.id">{{ layer.name }}</option>
-              </select>
-              <select v-model="selectedSeverity">
-                <option value="all">全部级别</option>
-                <option value="error">错误</option>
-                <option value="warning">警告</option>
-                <option value="info">建议</option>
-              </select>
-            </div>
-            <div class="issue-list">
-              <article
-                v-for="{ issue, index } in visibleIssues"
-                :key="`${index}-${issue.rule_id}`"
-                :id="`issue-card-${index}`"
-                class="issue-card"
-                :class="[issue.severity, issueStates[index] ?? 'pending']"
-              >
-                <div class="issue-meta">
-                  <span>{{ typeLabels[issue.type] ?? issue.type }}</span>
-                  <span>{{ layers.find((layer) => layer.id === issue.layer)?.name ?? issue.layer }}</span>
-                  <span class="severity">{{ issue.severity }}</span>
-                </div>
-                <div class="diff">
-                  <del>{{ issue.original || '（空）' }}</del><span>→</span>
-                  <select
-                    v-if="issue.alternatives?.length"
-                    v-model="selectedSuggestions[index]"
-                    aria-label="选择修改建议"
-                  >
-                    <option :value="issue.suggestion ?? ''">{{ issue.suggestion || '（删除）' }}</option>
-                    <option v-for="alternative in issue.alternatives" :key="alternative" :value="alternative">
-                      {{ alternative }}
-                    </option>
-                  </select>
-                  <ins v-else>{{ issue.suggestion || '（删除）' }}</ins>
-                </div>
-                <p>{{ issue.description }}</p>
-                <blockquote>{{ issue.context }}</blockquote>
-                <p v-if="issue.review_reason" class="review-note">语义复核：{{ issue.review_reason }}</p>
-                <div class="issue-actions">
-                  <button class="accept" type="button" @click="setIssueState(index, 'accepted')">接受</button>
-                  <button class="reject" type="button" @click="setIssueState(index, 'rejected')">忽略</button>
-                  <button class="undo" type="button" @click="setIssueState(index, 'pending')">撤销</button>
-                </div>
-              </article>
-              <div v-if="!visibleIssues.length" class="empty-state">当前筛选条件下没有问题</div>
-            </div>
+            <IssueList
+              :issues="visibleIssues"
+              :selected-issue-id="selectedIssueId"
+              :issue-states="currentIssueStates"
+              :selected-suggestions="currentSelectedSuggestions"
+              :selected-layer="selectedLayer"
+              :selected-severity="selectedSeverity"
+              :layer-options="layers"
+              :type-labels="typeLabels"
+              @select-issue="issueNavigation.selectIssue"
+              @update:selected-layer="selectedLayer = $event"
+              @update:selected-severity="selectedSeverity = $event"
+              @update:suggestion="selectSuggestion"
+              @set-state="setIssueState"
+            />
           </template>
 
           <div v-else class="summary-panel">
@@ -1083,41 +1065,15 @@ input:focus, select:focus { border-color: var(--primary); outline: 3px solid rgb
 .document-panel > header, .issues-header { min-height: 54px; padding: 10px 15px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border); }
 .document-panel header small { display: block; margin-top: 2px; color: var(--muted); }
 .document-content, .document-editor { flex: 1; min-height: 0; margin: 0; padding: 24px 28px; overflow: auto; white-space: pre-wrap; color: var(--text); background: var(--surface); font: 15px/2 ui-monospace, SFMono-Regular, Menlo, monospace; }
-.document-content.segmented { background-image: linear-gradient(var(--border) 1px, transparent 1px); background-size: 100% 30px; line-height: 30px; }
+.document-content:not(.preview) { padding: 0; }
 .document-content.preview { color: #075985; }
 .document-editor { border: 0; border-radius: 0; resize: none; }
-:deep(.issue-mark) { padding: 2px 1px; border-radius: 4px; background: #fef3c7; color: inherit; cursor: pointer; }
-:deep(.issue-mark.severity-error) { background: #fecdd3; }
-:deep(.issue-mark.severity-info) { background: #dbeafe; }
-:deep(.issue-mark.accepted) { background: #bbf7d0; }
-:deep(.issue-mark.rejected) { opacity: .45; text-decoration: line-through; }
 .compact-tabs { padding: 3px; }
 .compact-tabs button { padding: 7px 10px; font-size: 12px; }
 .issues-header > span { color: var(--muted); font-size: 12px; }
-.filters { padding: 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; border-bottom: 1px solid var(--border); }
-.issue-list { flex: 1; min-height: 0; padding: 10px; overflow: auto; }
-.issue-card { margin-bottom: 9px; padding: 13px; border: 1px solid var(--border); border-left: 4px solid #f59e0b; border-radius: 12px; background: var(--surface); }
-.issue-card.error { border-left-color: #ef4444; }.issue-card.info { border-left-color: #3b82f6; }
-.issue-card.accepted { background: color-mix(in srgb, #dcfce7 46%, var(--surface)); }
-.issue-card.rejected { opacity: .58; }
-.issue-meta { display: flex; gap: 5px; align-items: center; }
-.issue-meta span { padding: 3px 7px; border-radius: 999px; background: var(--surface-2); color: var(--muted); font-size: 10px; font-weight: 800; }
-.issue-meta .severity { margin-left: auto; text-transform: uppercase; }
-.diff { display: flex; align-items: center; gap: 8px; margin: 11px 0; font-weight: 800; }
-.diff del { color: #dc2626; }.diff ins { color: #059669; text-decoration: none; }
-.diff select { max-width: 60%; padding: 5px; }
-.issue-card p { margin: 7px 0; font-size: 12px; }
-.issue-card blockquote { margin: 8px 0; padding: 8px 10px; border-left: 2px solid var(--border); color: var(--muted); background: var(--surface-2); font-size: 11px; }
-.review-note { color: #7c3aed; }
-.issue-actions { display: flex; gap: 7px; margin-top: 10px; }
-.issue-actions button { padding: 5px 10px; border: 0; border-radius: 7px; cursor: pointer; font-size: 11px; font-weight: 800; }
-.issue-actions .accept { color: #15803d; background: #dcfce7; }
-.issue-actions .reject { color: #be123c; background: #fff1f2; }
-.issue-actions .undo { color: var(--muted); background: var(--surface-2); }
 .summary-panel { padding: 16px; overflow: auto; }
 .summary-panel h3 { margin: 8px 0 10px; font-size: 13px; }
 .summary-row { padding: 8px 0; display: flex; justify-content: space-between; border-bottom: 1px solid var(--border); font-size: 12px; }
-.empty-state { padding: 40px 10px; text-align: center; color: var(--muted); }
 .toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); z-index: 40; padding: 11px 18px; border-radius: 10px; color: white; background: #172033; box-shadow: var(--shadow); }
 .modal-backdrop { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 20px; background: rgba(2, 6, 23, .55); }
 .modal { width: min(560px, 100%); padding: 28px; position: relative; border-radius: 18px; background: var(--surface); box-shadow: var(--shadow); }
