@@ -21,6 +21,14 @@ interface Utf16Range {
   end: number
 }
 
+export interface WorkspaceReviewStateRestore {
+  documentId: string
+  verificationRunId: string
+  sourceVersion: string
+  issueStates: unknown
+  selectedSuggestions: unknown
+}
+
 type PriorIssueState =
   | { hadValue: false }
   | { hadValue: true; value: IssueState }
@@ -44,6 +52,16 @@ function workspaceReadonlyValue<T>(
 
 function hasOwn<T extends object>(value: T, key: PropertyKey): boolean {
   return Object.prototype.hasOwnProperty.call(value, key)
+}
+
+function recordEntries(value: unknown): [string, unknown][] {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? Object.entries(value)
+    : []
+}
+
+function isIssueState(value: unknown): value is IssueState {
+  return value === 'pending' || value === 'accepted' || value === 'rejected'
 }
 
 function isInteger(value: number | null): value is number {
@@ -635,6 +653,44 @@ export function useVerificationWorkspace() {
     createReviewRevision()
   }
 
+  function restoreReviewState(saved: WorkspaceReviewStateRestore): void {
+    const currentResult = result.value
+    if (
+      currentResult === null ||
+      requiresReverification.value ||
+      saved.documentId !== currentResult.document_id ||
+      saved.verificationRunId !== currentResult.verification_run_id ||
+      saved.sourceVersion !== currentResult.source_version
+    ) {
+      return
+    }
+
+    const validIds = issueIds()
+    const nextStates: Record<string, IssueState> = {}
+    const nextSuggestions: Record<string, string | null> = {}
+
+    for (const [issueId, state] of recordEntries(saved.issueStates)) {
+      if (validIds.has(issueId) && isIssueState(state)) {
+        nextStates[issueId] = state
+      }
+    }
+    for (const [issueId, suggestion] of recordEntries(
+      saved.selectedSuggestions
+    )) {
+      if (
+        validIds.has(issueId) &&
+        (typeof suggestion === 'string' || suggestion === null)
+      ) {
+        nextSuggestions[issueId] = suggestion
+      }
+    }
+
+    issueStates.value = nextStates
+    selectedSuggestions.value = nextSuggestions
+    batchHistory.value = []
+    createReviewRevision()
+  }
+
   function saveManualEdit(text: string): Readonly<DocumentRevision> | null {
     const currentResult = result.value
     if (currentResult === null) {
@@ -696,10 +752,12 @@ export function useVerificationWorkspace() {
     acceptIssue,
     rejectIssue,
     undoIssue,
+    setIssueStates,
     acceptIssues,
     rejectIssues,
     undoLastBatch,
     selectSuggestion,
+    restoreReviewState,
     saveManualEdit
   }
 }

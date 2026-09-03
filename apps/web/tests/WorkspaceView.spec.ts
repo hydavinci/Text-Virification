@@ -200,6 +200,9 @@ function canonicalWorkspace(wrapper: ReturnType<typeof mount>) {
         issueStates: {
           readonly value: Readonly<Record<string, string>>
         }
+        selectedSuggestions: {
+          readonly value: Readonly<Record<string, string | null>>
+        }
         hasReplacementConflicts: { readonly value: boolean }
         canUndoLastBatch: { readonly value: boolean }
       }
@@ -769,6 +772,79 @@ describe('WorkspaceView', () => {
     expect(wrapper.text()).not.toContain('撤销批量操作')
   })
 
+  it('undoes reset-all before the preceding accept-all batch', async () => {
+    const first = buildWorkspaceIssue({
+      start: 0,
+      end: 1,
+      block_start: 0,
+      block_end: 1,
+      original: '甲',
+      suggestion: 'A'
+    })
+    const second = buildWorkspaceIssue({
+      issue_id: '44444444-4444-4444-4444-444444444444',
+      start: 2,
+      end: 3,
+      block_start: 2,
+      block_end: 3,
+      original: '丙',
+      suggestion: 'C'
+    })
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const wrapper = mount(WorkspaceView, {
+      global: {
+        provide: {
+          [jobsApiKey as symbol]: {
+            createJob: vi.fn(),
+            subscribe: vi.fn(() => vi.fn())
+          },
+          [verificationApiKey as symbol]: {
+            analyzeFile: vi.fn(),
+            analyzeText: vi
+              .fn()
+              .mockResolvedValue(buildWorkspaceResult([first, second])),
+            exportReport: vi.fn(),
+            exportOriginal: vi.fn()
+          }
+        }
+      }
+    })
+    wrapper
+      .getComponent(SourceInputPanel)
+      .vm.$emit('submit-text', '甲乙丙丁')
+    await flushPromises()
+    const workspace = canonicalWorkspace(wrapper)
+
+    await wrapper.get('.review-toolbar .btn.accept').trigger('click')
+    const reset = wrapper
+      .findAll('button')
+      .find((button) => button.text() === '重置状态')
+    if (!reset) {
+      throw new Error('Expected reset-all control.')
+    }
+    await reset.trigger('click')
+
+    expect(workspace.issueStates.value).toEqual({
+      [first.issue_id]: 'pending',
+      [second.issue_id]: 'pending'
+    })
+
+    const undo = wrapper
+      .findAll('button')
+      .find((button) => button.text() === '撤销批量操作')
+    if (!undo) {
+      throw new Error('Expected canonical batch undo control.')
+    }
+    await undo.trigger('click')
+
+    expect(workspace.issueStates.value).toEqual({
+      [first.issue_id]: 'accepted',
+      [second.issue_id]: 'accepted'
+    })
+    expect(workspace.canUndoLastBatch.value).toBe(true)
+    wrapper.unmount()
+  })
+
   it('restores session decisions without restoring batch undo eligibility', async () => {
     const issue = buildWorkspaceIssue({
       start: 1,
@@ -812,6 +888,114 @@ describe('WorkspaceView', () => {
     expect(canonicalWorkspace(restored).canUndoLastBatch.value).toBe(false)
     expect(restored.text()).not.toContain('撤销批量操作')
     restored.unmount()
+  })
+
+  it.each(['crossing', 'nested'] as const)(
+    'restores %s accepted conflicts without publishing a partial revision',
+    async (kind) => {
+      const issues = buildConflictIssues(kind)
+      const payload = buildWorkspaceResult(issues, 'abcdef')
+      sessionStorage.setItem(
+        'text-verification-session',
+        JSON.stringify({
+          result: payload,
+          workingText: payload.text,
+          issueStates: Object.fromEntries(
+            issues.map((issue) => [issue.issue_id, 'accepted'])
+          ),
+          selectedSuggestions: {}
+        })
+      )
+      const wrapper = mount(WorkspaceView, {
+        global: {
+          provide: {
+            [jobsApiKey as symbol]: {
+              createJob: vi.fn(),
+              subscribe: vi.fn(() => vi.fn())
+            }
+          }
+        }
+      })
+      await flushPromises()
+      const workspace = canonicalWorkspace(wrapper)
+
+      expect(workspace.issueStates.value).toEqual({
+        [issues[0].issue_id]: 'accepted',
+        [issues[1].issue_id]: 'accepted'
+      })
+      expect(workspace.hasReplacementConflicts.value).toBe(true)
+      expect(workspace.currentRevision.value).toMatchObject({
+        kind: 'source',
+        revision_id: null,
+        text: 'abcdef'
+      })
+      expect(workspace.modifiedText.value).toBe('abcdef')
+      expect(workspace.canUndoLastBatch.value).toBe(false)
+      wrapper.unmount()
+    }
+  )
+
+  it('restores nonconflicting session state into one correct revision', async () => {
+    const first = buildWorkspaceIssue({
+      start: 0,
+      end: 1,
+      block_start: 0,
+      block_end: 1,
+      original: 'a',
+      suggestion: 'A',
+      context: 'abcd'
+    })
+    const second = buildWorkspaceIssue({
+      issue_id: '44444444-4444-4444-4444-444444444444',
+      start: 2,
+      end: 3,
+      block_start: 2,
+      block_end: 3,
+      original: 'c',
+      suggestion: 'C',
+      context: 'abcd'
+    })
+    const payload = buildWorkspaceResult([first, second], 'abcd')
+    sessionStorage.setItem(
+      'text-verification-session',
+      JSON.stringify({
+        result: payload,
+        workingText: payload.text,
+        issueStates: {
+          [first.issue_id]: 'accepted',
+          [second.issue_id]: 'accepted'
+        },
+        selectedSuggestions: {
+          [first.issue_id]: '',
+          [second.issue_id]: 'SEE'
+        }
+      })
+    )
+    const wrapper = mount(WorkspaceView, {
+      global: {
+        provide: {
+          [jobsApiKey as symbol]: {
+            createJob: vi.fn(),
+            subscribe: vi.fn(() => vi.fn())
+          }
+        }
+      }
+    })
+    await flushPromises()
+    const workspace = canonicalWorkspace(wrapper)
+
+    expect(workspace.selectedSuggestions.value).toEqual({
+      [first.issue_id]: '',
+      [second.issue_id]: 'SEE'
+    })
+    expect(workspace.currentRevision.value).toMatchObject({
+      kind: 'review',
+      parent_revision_id: null,
+      text: 'bSEEd'
+    })
+    expect(workspace.modifiedText.value).toBe('bSEEd')
+    expect(workspace.canUndoLastBatch.value).toBe(false)
+    wrapper.unmount()
   })
 
   it.each(

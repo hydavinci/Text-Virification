@@ -938,6 +938,48 @@ describe('useVerificationWorkspace', () => {
     expect(workspace.canUndoLastBatch.value).toBe(false)
   })
 
+  it('treats reset-all as the latest atomic batch and retains older batch history', () => {
+    const issueA = buildIssue()
+    const issueB = buildIssue({
+      issue_id: '44444444-4444-4444-4444-444444444444',
+      start: 2,
+      end: 3,
+      block_start: 2,
+      block_end: 3,
+      original: '丙',
+      suggestion: 'C'
+    })
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(buildResult([issueA, issueB]))
+
+    workspace.setIssueStates(
+      [issueA.issue_id, issueB.issue_id],
+      'accepted'
+    )
+    workspace.setIssueStates(
+      [issueA.issue_id, issueB.issue_id],
+      'pending'
+    )
+
+    expect(workspace.issueStates.value).toEqual({
+      [issueA.issue_id]: 'pending',
+      [issueB.issue_id]: 'pending'
+    })
+
+    workspace.undoLastBatch()
+
+    expect(workspace.issueStates.value).toEqual({
+      [issueA.issue_id]: 'accepted',
+      [issueB.issue_id]: 'accepted'
+    })
+    expect(workspace.canUndoLastBatch.value).toBe(true)
+
+    workspace.undoLastBatch()
+
+    expect(workspace.issueStates.value).toEqual({})
+    expect(workspace.canUndoLastBatch.value).toBe(false)
+  })
+
   it('undoes an overlapping batch exactly without publishing a partial revision', () => {
     const earlier = buildIssue({
       issue_id: '40000000-0000-0000-0000-000000000001',
@@ -1002,6 +1044,198 @@ describe('useVerificationWorkspace', () => {
     resetWorkspace(workspace)
 
     expect(workspace.canUndoLastBatch.value).toBe(false)
+  })
+
+  it('restores decisions and explicit overrides atomically into one revision', () => {
+    const issueA = buildIssue({
+      start: 0,
+      end: 1,
+      block_start: 0,
+      block_end: 1,
+      original: 'a',
+      suggestion: 'A',
+      context: 'abcd'
+    })
+    const issueB = buildIssue({
+      issue_id: '44444444-4444-4444-4444-444444444444',
+      start: 2,
+      end: 3,
+      block_start: 2,
+      block_end: 3,
+      original: 'c',
+      suggestion: 'C',
+      context: 'abcd'
+    })
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(buildResult([issueA, issueB], { text: 'abcd' }))
+
+    workspace.restoreReviewState({
+      documentId,
+      verificationRunId: runId,
+      sourceVersion,
+      issueStates: {
+        [issueA.issue_id]: 'accepted',
+        [issueB.issue_id]: 'accepted'
+      },
+      selectedSuggestions: {
+        [issueA.issue_id]: '',
+        [issueB.issue_id]: 'SEE'
+      }
+    })
+
+    expect(workspace.issueStates.value).toEqual({
+      [issueA.issue_id]: 'accepted',
+      [issueB.issue_id]: 'accepted'
+    })
+    expect(workspace.selectedSuggestions.value).toEqual({
+      [issueA.issue_id]: '',
+      [issueB.issue_id]: 'SEE'
+    })
+    expect(workspace.currentRevision.value).toMatchObject({
+      kind: 'review',
+      parent_revision_id: null,
+      text: 'bSEEd'
+    })
+    expect(workspace.modifiedText.value).toBe('bSEEd')
+    expect(workspace.canUndoLastBatch.value).toBe(false)
+  })
+
+  it('prunes stale and malformed restored values while preserving explicit null and empty overrides', () => {
+    const issueA = buildIssue({
+      start: 0,
+      end: 1,
+      block_start: 0,
+      block_end: 1,
+      original: 'a',
+      suggestion: 'A',
+      context: 'abcd'
+    })
+    const issueB = buildIssue({
+      issue_id: '44444444-4444-4444-4444-444444444444',
+      start: 2,
+      end: 3,
+      block_start: 2,
+      block_end: 3,
+      original: 'c',
+      suggestion: 'C',
+      context: 'abcd'
+    })
+    const staleId = '55555555-5555-4555-8555-555555555555'
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(buildResult([issueA, issueB], { text: 'abcd' }))
+    workspace.setIssueStates([issueA.issue_id, issueB.issue_id], 'rejected')
+    expect(workspace.canUndoLastBatch.value).toBe(true)
+
+    workspace.restoreReviewState({
+      documentId,
+      verificationRunId: runId,
+      sourceVersion,
+      issueStates: {
+        [issueA.issue_id]: 'accepted',
+        [issueB.issue_id]: 'malformed',
+        [staleId]: 'rejected'
+      },
+      selectedSuggestions: {
+        [issueA.issue_id]: null,
+        [issueB.issue_id]: '',
+        [staleId]: 'stale',
+        malformed: 42
+      }
+    })
+
+    expect(workspace.issueStates.value).toEqual({
+      [issueA.issue_id]: 'accepted'
+    })
+    expect(workspace.selectedSuggestions.value).toEqual({
+      [issueA.issue_id]: null,
+      [issueB.issue_id]: ''
+    })
+    expect(workspace.modifiedText.value).toBe('abcd')
+    expect(workspace.canUndoLastBatch.value).toBe(false)
+  })
+
+  it('keeps the prior revision when restored accepted replacements conflict', () => {
+    const priorIssue = buildIssue({
+      start: 0,
+      end: 1,
+      block_start: 0,
+      block_end: 1,
+      original: 'a',
+      suggestion: 'A',
+      context: 'abcdefg'
+    })
+    const crossingA = buildIssue({
+      issue_id: '44444444-4444-4444-4444-444444444444',
+      start: 2,
+      end: 5,
+      block_start: 2,
+      block_end: 5,
+      original: 'cde',
+      suggestion: 'X',
+      context: 'abcdefg'
+    })
+    const crossingB = buildIssue({
+      issue_id: '55555555-5555-4555-8555-555555555555',
+      start: 4,
+      end: 7,
+      block_start: 4,
+      block_end: 7,
+      original: 'efg',
+      suggestion: 'Y',
+      context: 'abcdefg'
+    })
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(
+      buildResult([priorIssue, crossingA, crossingB], { text: 'abcdefg' })
+    )
+    workspace.acceptIssue(priorIssue.issue_id)
+    const priorRevision = workspace.currentRevision.value
+
+    workspace.restoreReviewState({
+      documentId,
+      verificationRunId: runId,
+      sourceVersion,
+      issueStates: {
+        [crossingA.issue_id]: 'accepted',
+        [crossingB.issue_id]: 'accepted'
+      },
+      selectedSuggestions: {}
+    })
+
+    expect(workspace.issueStates.value).toEqual({
+      [crossingA.issue_id]: 'accepted',
+      [crossingB.issue_id]: 'accepted'
+    })
+    expect(workspace.hasReplacementConflicts.value).toBe(true)
+    expect(workspace.currentRevision.value).toBe(priorRevision)
+    expect(workspace.modifiedText.value).toBe('Abcdefg')
+    expect(workspace.canUndoLastBatch.value).toBe(false)
+  })
+
+  it('ignores restored review state for a different loaded result identity', () => {
+    const issue = buildIssue()
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(buildResult([issue]))
+    workspace.acceptIssue(issue.issue_id)
+    const revision = workspace.currentRevision.value
+
+    workspace.restoreReviewState({
+      documentId,
+      verificationRunId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      sourceVersion,
+      issueStates: {
+        [issue.issue_id]: 'rejected'
+      },
+      selectedSuggestions: {
+        [issue.issue_id]: 'stale'
+      }
+    })
+
+    expect(workspace.issueStates.value).toEqual({
+      [issue.issue_id]: 'accepted'
+    })
+    expect(workspace.selectedSuggestions.value).toEqual({})
+    expect(workspace.currentRevision.value).toBe(revision)
   })
 
   it('supports individual accept, reject, and undo with stable-id summary counts', () => {

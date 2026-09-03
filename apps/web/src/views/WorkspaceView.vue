@@ -327,15 +327,7 @@ function setIssueState(issueId: string, state: IssueState) {
 
 function setAllIssues(state: IssueState) {
   const issueIds = visibleIssues.value.map((issue) => issue.issue_id)
-  if (state === 'accepted') {
-    verificationWorkspace.acceptIssues(issueIds)
-  } else if (state === 'rejected') {
-    verificationWorkspace.rejectIssues(issueIds)
-  } else {
-    for (const issueId of issueIds) {
-      verificationWorkspace.undoIssue(issueId)
-    }
-  }
+  verificationWorkspace.setIssueStates(issueIds, state)
   saveSession()
 }
 
@@ -615,20 +607,19 @@ function restoreSession() {
     const saved = JSON.parse(raw) as {
       result: VerificationResult
       workingText: string
-      issueStates: Record<string, IssueState>
-      selectedSuggestions: Record<string, string | null>
+      issueStates: unknown
+      selectedSuggestions: unknown
     }
     verificationWorkspace.loadResult(saved.result)
     result.value = verificationWorkspace.result.value
     workingText.value = saved.workingText
-    for (const [issueId, state] of Object.entries(saved.issueStates)) {
-      verificationWorkspace.setIssueState(issueId, state)
-    }
-    for (const [issueId, suggestion] of Object.entries(
-      saved.selectedSuggestions
-    )) {
-      verificationWorkspace.selectSuggestion(issueId, suggestion)
-    }
+    verificationWorkspace.restoreReviewState({
+      documentId: saved.result.document_id,
+      verificationRunId: saved.result.verification_run_id,
+      sourceVersion: saved.result.source_version,
+      issueStates: saved.issueStates,
+      selectedSuggestions: saved.selectedSuggestions
+    })
   } catch {
     globalThis.sessionStorage?.removeItem('text-verification-session')
   }

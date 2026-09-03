@@ -137,3 +137,72 @@ redesign or the Task 5 API/execution redesign.
 The review-fix commit remains limited to Task 3 navigation/export hardening,
 the Task 1 composable facade needed by that integration, focused regressions,
 and these evidence updates. Tasks 4-6 remain unimplemented.
+
+## Review fixes — round 2 — 2026-09-03
+
+- Exposed `setIssueStates(issueIds, state)` as the canonical general batch
+  operation. `WorkspaceView` now uses exactly one call for accept all, reject
+  all, and reset all.
+- Every valid all-action pushes one identity-bound exact snapshot. Batch
+  history is a LIFO stack: after accept all then reset all, the first undo
+  restores accepted states and the second undo restores the state before
+  accept all, including property absence versus explicit `pending`.
+- Existing new-result, clear/reset, and manual-revision boundaries continue to
+  clear the complete batch stack. Overlapping accepted batches remain one
+  atomic transition and never publish a partial replacement revision.
+- Added `restoreReviewState(...)` as the canonical versioned session-restore
+  boundary. It requires the loaded document/run/source identity, retains only
+  current safe issue IDs, validates decision values, and accepts only string
+  or `null` suggestion overrides while preserving explicit `""` and `null`.
+- Restore replaces both stable-ID maps synchronously, clears batch history,
+  and attempts revision creation only after both maps are installed.
+  Conflicting crossing or nested accepted replacements expose canonical
+  conflicts while retaining the prior/source revision and text.
+- `WorkspaceView.restoreSession()` now loads the result and invokes the atomic
+  restore API once. It no longer replays decisions or suggestions one entry at
+  a time, and no index fallback was introduced.
+
+### Fix-round-2 TDD and validation evidence
+
+- Focused pre-change baseline:
+  `npm test -- useVerificationWorkspace.spec.ts WorkspaceView.spec.ts --reporter=dot`
+  passed 82 tests across 2 files.
+- Batch RED: the same command failed 2 tests with 82 passing. One failure
+  showed the public canonical batch method was absent; the other showed reset
+  all removed properties without becoming the latest undoable batch.
+- Batch GREEN: the same command passed 84 tests across 2 files.
+- Restore RED: the same command failed 7 tests with 84 passing. The failures
+  reproduced crossing/nested partial restored revisions, a multi-revision
+  nonconflicting restore, and the missing canonical restore validation API.
+- Focused GREEN: the same command passed 91 tests across 2 files.
+- All Task 3 tests:
+  `npm test -- DocumentViewer.spec.ts IssueNavigation.spec.ts useVerificationWorkspace.spec.ts WorkspaceView.spec.ts --reporter=dot`
+  passed 120 tests across 4 files.
+- Full frontend GREEN: `npm test -- --run --reporter=dot` passed 185 tests
+  across 10 files. Node emitted the existing experimental `localStorage`
+  warning.
+- Production build GREEN: `npm run build` passed `vue-tsc -b` and Vite 6.4.3
+  with 40 modules transformed.
+- `git diff --check` passed with no output.
+
+### Ledger line semantics
+
+After review, the controller can record this wave as:
+
+`Task 3: fix round 2/5 (2 addressed, 0 open — atomic all-action history and atomic versioned session restore; commits 97303cd..<round-2-sha>)`
+
+This line records the numbered fix wave and resolved findings; it is not the
+Task 3 completion line. The controller will add completion only after the
+round-2 commit passes review.
+
+Ruling: Batch history is a LIFO stack of identity-bound exact snapshots, not a
+single undo slot — each all-action becomes the latest reversible operation,
+while a second undo intentionally reaches the preceding batch; cost if wrong
+is retaining multiple small state snapshots until a result/reset/manual-edit
+boundary clears them.
+
+Ruling: Session restore is one versioned composable transition after
+`loadResult`, with both validated maps installed before conflict detection and
+revision creation — replaying entries individually can publish a partial
+revision before a later overlap is known; cost if wrong is discarding malformed
+or stale saved entries instead of attempting best-effort index recovery.

@@ -536,3 +536,48 @@ selection composable. A scheduled scroll is valid only while its captured
 stable ID remains selected in that same component instance — this prevents
 stale rapid-selection scrolls and cross-workspace DOM effects; cost if wrong is
 duplicating a small scheduling helper in the two role-specific components.
+
+## Task 3 review fixes — round 2 — 2026-09-03
+
+- Exposed the existing exact-snapshot machinery through the canonical
+  `setIssueStates(issueIds, state)` method. Accept all, reject all, and reset
+  all now enter the same identity-bound LIFO history through one
+  `WorkspaceView` call.
+- Accept all followed by reset all now undoes reset first and accept second.
+  Exact snapshots preserve explicit `pending` versus absent properties.
+  New-result load, clear/reset, and manual revision still clear history, and
+  accepted overlap batches remain atomic.
+- Added identity-bound `restoreReviewState(...)` for untrusted session
+  decisions and explicit suggestion overrides. It prunes IDs outside current
+  safe issues, validates all values, preserves explicit `null` and empty
+  overrides, replaces both maps synchronously, clears undo history, and
+  creates at most one review revision.
+- Crossing and nested restored accepts now expose conflicts without replacing
+  the prior/source revision or modified text with an intermediate partial
+  result. Nonconflicting restored state produces one correct review revision.
+- `WorkspaceView.restoreSession()` now performs `loadResult` followed by one
+  atomic restore call. Session maps remain keyed only by stable issue IDs.
+
+### Task 3 fix-round-2 TDD and validation evidence
+
+- Focused baseline passed 82 tests across
+  `useVerificationWorkspace.spec.ts` and `WorkspaceView.spec.ts`.
+- Batch RED failed 2 tests with 82 passing; batch GREEN passed 84 tests.
+- Restore RED failed 7 tests with 84 passing; focused GREEN passed 91 tests.
+- All Task 3 tests passed 120 tests across 4 files.
+- The full frontend suite passed 185 tests across 10 files. Node emitted the
+  existing experimental `localStorage` warning.
+- `npm run build` passed `vue-tsc -b` and Vite 6.4.3 with 40 modules
+  transformed.
+- `git diff --check` passed with no output.
+
+Ruling: Every valid all-action is a separate latest batch in a LIFO history;
+undoing twice after accept all then reset all intentionally reaches the
+pre-accept state — this matches the existing stack model and exact-snapshot
+contract; cost if wrong is retaining more than one small batch snapshot.
+
+Ruling: Restored review state is accepted only for the currently loaded
+document/source/run identity and only for current safe stable IDs. Decisions
+and overrides are installed together before one revision attempt, so an
+accepted replacement conflict can retain the complete prior/source revision;
+cost if wrong is pruning malformed legacy session entries without fallback.
