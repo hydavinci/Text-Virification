@@ -5,7 +5,10 @@ import { jobsApiKey, type JobsApi } from '../src/api/jobs'
 import { verificationApiKey } from '../src/api/verification'
 import SourceInputPanel from '../src/components/workspace/SourceInputPanel.vue'
 import DocumentViewer from '../src/components/workspace/DocumentViewer.vue'
+import EditPreview from '../src/components/workspace/EditPreview.vue'
 import IssueList from '../src/components/workspace/IssueList.vue'
+import ReviewActions from '../src/components/workspace/ReviewActions.vue'
+import SearchReplacePanel from '../src/components/workspace/SearchReplacePanel.vue'
 import TerminologyEditor from '../src/components/workspace/TerminologyEditor.vue'
 import VerificationSettings from '../src/components/workspace/VerificationSettings.vue'
 import type {
@@ -205,6 +208,8 @@ function canonicalWorkspace(wrapper: ReturnType<typeof mount>) {
         }
         hasReplacementConflicts: { readonly value: boolean }
         canUndoLastBatch: { readonly value: boolean }
+        requiresReverification: { readonly value: boolean }
+        visibleIssues: { readonly value: readonly VerificationIssue[] }
       }
     }
   ).verificationWorkspace
@@ -712,12 +717,177 @@ describe('WorkspaceView', () => {
     await wrapper.get('.text-mode button').trigger('click')
     await flushPromises()
     await wrapper.get('.issue-actions .accept').trigger('click')
-    await wrapper.get('.review-toolbar button:nth-child(3)').trigger('click')
+    await wrapper.get('[data-action="toggle-preview"]').trigger('click')
 
     expect(wrapper.get('.document-content.preview').text()).toBe('禁用词')
     expect(wrapper.text()).toContain('无自动建议')
     expect(wrapper.text()).not.toContain('null')
     confirm.mockRestore()
+  })
+
+  it('creates one canonical manual revision for a replace-all action and invalidates stale navigation', async () => {
+    const issue = buildWorkspaceIssue({
+      start: 0,
+      end: 2,
+      block_start: 0,
+      block_end: 2,
+      original: 'Aa',
+      context: 'Aa😀aa'
+    })
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const wrapper = mount(WorkspaceView, {
+      global: {
+        provide: {
+          [jobsApiKey as symbol]: {
+            createJob: vi.fn(),
+            subscribe: vi.fn(() => vi.fn())
+          },
+          [verificationApiKey as symbol]: {
+            analyzeFile: vi.fn(),
+            analyzeText: vi
+              .fn()
+              .mockResolvedValue(buildWorkspaceResult([issue], 'Aa😀aa')),
+            exportReport: vi.fn(),
+            exportOriginal: vi.fn()
+          }
+        }
+      }
+    })
+    wrapper
+      .getComponent(SourceInputPanel)
+      .vm.$emit('submit-text', 'Aa😀aa')
+    await flushPromises()
+    wrapper.getComponent(DocumentViewer).vm.$emit('select-issue', issue.issue_id)
+    await wrapper.get('[data-action="toggle-search-replace"]').trigger('click')
+    const search = wrapper.getComponent(SearchReplacePanel)
+    await search.get('[data-search-input]').setValue('aa')
+    await search.get('[data-replacement-input]').setValue('X')
+    await search.get('[data-action="replace-all"]').trigger('click')
+    await flushPromises()
+
+    const workspace = canonicalWorkspace(wrapper)
+    expect(workspace.currentRevision.value).toMatchObject({
+      kind: 'manual',
+      text: 'X😀X',
+      revision_number: null
+    })
+    expect(workspace.requiresReverification.value).toBe(true)
+    expect(workspace.visibleIssues.value).toEqual([])
+    expect(wrapper.getComponent(ReviewActions).props('selectedIssueId')).toBeNull()
+    expect(wrapper.findAll('[data-issue-id]')).toHaveLength(0)
+    expect(wrapper.text()).toContain('X😀X')
+    wrapper.unmount()
+  })
+
+  it('saves, serializes, and restores a free edit as the only post-edit text source', async () => {
+    const issue = buildWorkspaceIssue()
+    const payload = buildWorkspaceResult([issue])
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const global = {
+      provide: {
+        [jobsApiKey as symbol]: {
+          createJob: vi.fn(),
+          subscribe: vi.fn(() => vi.fn())
+        },
+        [verificationApiKey as symbol]: {
+          analyzeFile: vi.fn(),
+          analyzeText: vi.fn().mockResolvedValue(payload),
+          exportReport: vi.fn(),
+          exportOriginal: vi.fn()
+        }
+      }
+    }
+    const first = mount(WorkspaceView, { global })
+    first.getComponent(SourceInputPanel).vm.$emit('submit-text', payload.text)
+    await flushPromises()
+    const editor = first.getComponent(EditPreview)
+    await editor.get('[data-action="start-edit"]').trigger('click')
+    await editor.get('[data-edit-input]').setValue('手工修改后的全文')
+    await editor.get('[data-action="save-edit"]').trigger('click')
+    await flushPromises()
+
+    const saved = JSON.parse(
+      sessionStorage.getItem('text-verification-session') ?? 'null'
+    )
+    expect(saved).toMatchObject({
+      version: 2,
+      requiresReverification: true,
+      currentRevision: {
+        kind: 'manual',
+        text: '手工修改后的全文'
+      }
+    })
+    first.unmount()
+
+    const restored = mount(WorkspaceView, { global })
+    await flushPromises()
+    const workspace = canonicalWorkspace(restored)
+    expect(workspace.currentRevision.value).toEqual(saved.currentRevision)
+    expect(workspace.requiresReverification.value).toBe(true)
+    expect(workspace.visibleIssues.value).toEqual([])
+    expect(restored.text()).toContain('手工修改后的全文')
+    expect(restored.findAll('[data-issue-id]')).toHaveLength(0)
+    restored.unmount()
+  })
+
+  it('exports the current manual revision through the text fallback without stale issue offsets', async () => {
+    const exportOriginal = vi.fn()
+    let exportedBlob: Blob | null = null
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: vi.fn((blob: Blob) => {
+        exportedBlob = blob
+        return 'blob:manual'
+      })
+    })
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      value: vi.fn()
+    })
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const payload = buildWorkspaceResult([buildWorkspaceIssue()], '甲乙丙丁', {
+      file_id: '66666666-6666-4666-8666-666666666666',
+      file_ext: 'txt'
+    })
+    const wrapper = mount(WorkspaceView, {
+      global: {
+        provide: {
+          [jobsApiKey as symbol]: {
+            createJob: vi.fn(),
+            subscribe: vi.fn(() => vi.fn())
+          },
+          [verificationApiKey as symbol]: {
+            analyzeFile: vi.fn(),
+            analyzeText: vi.fn().mockResolvedValue(payload),
+            exportReport: vi.fn(),
+            exportOriginal
+          }
+        }
+      }
+    })
+    wrapper.getComponent(SourceInputPanel).vm.$emit('submit-text', payload.text)
+    await flushPromises()
+    const editor = wrapper.getComponent(EditPreview)
+    await editor.get('[data-action="start-edit"]').trigger('click')
+    await editor.get('[data-edit-input]').setValue('最终手工文本')
+    await editor.get('[data-action="save-edit"]').trigger('click')
+    await wrapper.get('.top-actions .btn.primary').trigger('click')
+
+    expect(exportOriginal).not.toHaveBeenCalled()
+    expect(exportedBlob).not.toBeNull()
+    const blob = exportedBlob
+    if (blob === null) {
+      throw new Error('Expected a manual revision fallback Blob.')
+    }
+    const exportedText = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader()
+      reader.addEventListener('load', () => resolve(String(reader.result)))
+      reader.addEventListener('error', () => reject(reader.error))
+      reader.readAsText(blob)
+    })
+    expect(exportedText).toBe('最终手工文本')
+    wrapper.unmount()
   })
 
   it('accepts an overlapping batch atomically and undoes the exact batch', async () => {
@@ -749,7 +919,7 @@ describe('WorkspaceView', () => {
     const workspace = canonicalWorkspace(wrapper)
     const sourceRevision = workspace.currentRevision.value
 
-    await wrapper.get('.review-toolbar .btn.accept').trigger('click')
+    await wrapper.get('[data-action="accept-batch"]').trigger('click')
 
     expect(workspace.currentRevision.value).toBe(sourceRevision)
     expect(workspace.modifiedText.value).toBe('abcdef')
@@ -769,7 +939,9 @@ describe('WorkspaceView', () => {
     expect(workspace.currentRevision.value).toBe(sourceRevision)
     expect(workspace.hasReplacementConflicts.value).toBe(false)
     expect(workspace.canUndoLastBatch.value).toBe(false)
-    expect(wrapper.text()).not.toContain('撤销批量操作')
+    expect(
+      wrapper.get('[data-action="undo-batch"]').attributes('disabled')
+    ).toBeDefined()
   })
 
   it('undoes reset-all before the preceding accept-all batch', async () => {
@@ -815,7 +987,7 @@ describe('WorkspaceView', () => {
     await flushPromises()
     const workspace = canonicalWorkspace(wrapper)
 
-    await wrapper.get('.review-toolbar .btn.accept').trigger('click')
+    await wrapper.get('[data-action="accept-batch"]').trigger('click')
     const reset = wrapper
       .findAll('button')
       .find((button) => button.text() === '重置状态')
@@ -875,7 +1047,7 @@ describe('WorkspaceView', () => {
       .getComponent(SourceInputPanel)
       .vm.$emit('submit-text', 'abc')
     await flushPromises()
-    await first.get('.review-toolbar .btn.accept').trigger('click')
+    await first.get('[data-action="accept-batch"]').trigger('click')
     expect(canonicalWorkspace(first).canUndoLastBatch.value).toBe(true)
     first.unmount()
 
@@ -886,7 +1058,9 @@ describe('WorkspaceView', () => {
       [issue.issue_id]: 'accepted'
     })
     expect(canonicalWorkspace(restored).canUndoLastBatch.value).toBe(false)
-    expect(restored.text()).not.toContain('撤销批量操作')
+    expect(
+      restored.get('[data-action="undo-batch"]').attributes('disabled')
+    ).toBeDefined()
     restored.unmount()
   })
 
@@ -1051,7 +1225,7 @@ describe('WorkspaceView', () => {
       await flushPromises()
       const workspace = canonicalWorkspace(wrapper)
       const sourceRevision = workspace.currentRevision.value
-      await wrapper.get('.review-toolbar .btn.accept').trigger('click')
+      await wrapper.get('[data-action="accept-batch"]').trigger('click')
 
       await wrapper.get('.top-actions .btn.primary').trigger('click')
 

@@ -1668,6 +1668,126 @@ describe('useVerificationWorkspace', () => {
     expect(workspace.modifiedText.value).toBe('手工修改后的全文')
   })
 
+  it('parents each manual draft to the current authored revision', () => {
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(buildResult([buildIssue()]))
+    workspace.acceptIssue(buildIssue().issue_id)
+    const reviewRevision = workspace.currentRevision.value
+
+    const firstManual = workspace.saveManualEdit('第一次手工修改')
+    const secondManual = workspace.saveManualEdit('第二次手工修改')
+
+    expect(firstManual).toMatchObject({
+      kind: 'manual',
+      parent_revision_id: reviewRevision?.revision_id,
+      text: '第一次手工修改'
+    })
+    expect(secondManual).toMatchObject({
+      kind: 'manual',
+      parent_revision_id: firstManual?.revision_id,
+      text: '第二次手工修改'
+    })
+    expect(secondManual?.revision_id).not.toBe(firstManual?.revision_id)
+    expect(Object.isFrozen(secondManual)).toBe(true)
+    expect(JSON.parse(JSON.stringify(secondManual))).toEqual(secondManual)
+  })
+
+  it('atomically restores a saved manual revision without replaying stale issue offsets', () => {
+    const issue = buildIssue()
+    const original = useVerificationWorkspace()
+    original.loadResult(buildResult([issue]))
+    original.acceptIssue(issue.issue_id)
+    original.saveManualEdit('会话中的手工修订')
+    const savedRevision = JSON.parse(
+      JSON.stringify(original.currentRevision.value)
+    )
+
+    const restored = useVerificationWorkspace()
+    restored.loadResult(buildResult([issue]))
+    restored.restoreWorkspaceState({
+      documentId,
+      verificationRunId: runId,
+      sourceVersion,
+      issueStates: { [issue.issue_id]: 'accepted' },
+      selectedSuggestions: { [issue.issue_id]: '陈旧建议' },
+      requiresReverification: true,
+      currentRevision: savedRevision
+    })
+
+    expect(restored.currentRevision.value).toEqual(savedRevision)
+    expect(restored.currentRevision.value).not.toBe(savedRevision)
+    expect(Object.isFrozen(restored.currentRevision.value)).toBe(true)
+    expect(restored.requiresReverification.value).toBe(true)
+    expect(restored.issueStates.value).toEqual({})
+    expect(restored.selectedSuggestions.value).toEqual({})
+    expect(restored.visibleIssues.value).toEqual([])
+    expect(restored.modifiedText.value).toBe('会话中的手工修订')
+    expect(restored.canUndoLastBatch.value).toBe(false)
+  })
+
+  it('rejects a manual session revision from a different stable identity', () => {
+    const issue = buildIssue()
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(buildResult([issue]))
+    const source = workspace.currentRevision.value
+
+    workspace.restoreWorkspaceState({
+      documentId,
+      verificationRunId: runId,
+      sourceVersion,
+      issueStates: {},
+      selectedSuggestions: {},
+      requiresReverification: true,
+      currentRevision: {
+        revision_id: '55555555-5555-4555-8555-555555555555',
+        document_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        verification_run_id: runId,
+        source_version: sourceVersion,
+        revision_number: null,
+        created_at: '2026-09-03T02:00:00.000Z',
+        parent_revision_id: null,
+        persistence_state: 'draft',
+        kind: 'manual',
+        text: '不属于当前文档'
+      }
+    })
+
+    expect(workspace.currentRevision.value).toBe(source)
+    expect(workspace.requiresReverification.value).toBe(false)
+    expect(workspace.visibleIssues.value).toEqual([issue])
+  })
+
+  it('rejects a restored manual draft with a non-UUID revision identity', () => {
+    const issue = buildIssue()
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(buildResult([issue]))
+    const source = workspace.currentRevision.value
+
+    workspace.restoreWorkspaceState({
+      documentId,
+      verificationRunId: runId,
+      sourceVersion,
+      issueStates: {},
+      selectedSuggestions: {},
+      requiresReverification: true,
+      currentRevision: {
+        revision_id: 'not-a-stable-revision-id',
+        document_id: documentId,
+        verification_run_id: runId,
+        source_version: sourceVersion,
+        revision_number: null,
+        created_at: '2026-09-03T02:00:00.000Z',
+        parent_revision_id: null,
+        persistence_state: 'draft',
+        kind: 'manual',
+        text: '不可信修订'
+      }
+    })
+
+    expect(workspace.currentRevision.value).toBe(source)
+    expect(workspace.requiresReverification.value).toBe(false)
+  })
+
   it('distinguishes a non-persisted source from a serializable draft without inventing a number', () => {
     const issue = buildIssue()
     const workspace = useVerificationWorkspace()

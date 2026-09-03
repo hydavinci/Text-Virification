@@ -5,7 +5,10 @@ import { jobsApiKey } from '../api/jobs'
 import { verificationApiKey } from '../api/verification'
 import JobProgress from '../components/JobProgress.vue'
 import DocumentViewer from '../components/workspace/DocumentViewer.vue'
+import EditPreview from '../components/workspace/EditPreview.vue'
 import IssueList from '../components/workspace/IssueList.vue'
+import ReviewActions from '../components/workspace/ReviewActions.vue'
+import SearchReplacePanel from '../components/workspace/SearchReplacePanel.vue'
 import SourceInputPanel from '../components/workspace/SourceInputPanel.vue'
 import TerminologyEditor from '../components/workspace/TerminologyEditor.vue'
 import VerificationSettings from '../components/workspace/VerificationSettings.vue'
@@ -26,6 +29,93 @@ interface JobProgressState {
   message: string
   failureMessage: string | null
   connectionMessage: string | null
+}
+
+interface WorkspaceSessionV2 {
+  version: 2
+  result: VerificationResult
+  currentRevision: unknown
+  requiresReverification: boolean
+  issueStates: unknown
+  selectedSuggestions: unknown
+}
+
+interface LegacyWorkspaceSession {
+  result: VerificationResult
+  workingText: string
+  issueStates: unknown
+  selectedSuggestions: unknown
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function isVerificationResultSnapshot(
+  value: unknown
+): value is VerificationResult {
+  if (!isRecord(value)) {
+    return false
+  }
+  return (
+    value.success === true &&
+    typeof value.filename === 'string' &&
+    typeof value.source_name === 'string' &&
+    typeof value.file_type === 'string' &&
+    typeof value.text === 'string' &&
+    Array.isArray(value.blocks) &&
+    value.blocks.every(isRecord) &&
+    typeof value.parser_name === 'string' &&
+    typeof value.parser_version === 'string' &&
+    isRecord(value.stats) &&
+    Array.isArray(value.issues) &&
+    value.issues.every(isRecord) &&
+    isRecord(value.summary) &&
+    (typeof value.file_id === 'string' || value.file_id === null) &&
+    (typeof value.file_ext === 'string' || value.file_ext === null) &&
+    typeof value.document_id === 'string' &&
+    typeof value.verification_run_id === 'string' &&
+    typeof value.source_version === 'string' &&
+    typeof value.execution_mode === 'string' &&
+    typeof value.analysis_mode === 'string' &&
+    isRecord(value.dictionary_versions) &&
+    isRecord(value.degradation) &&
+    typeof value.scenario === 'string'
+  )
+}
+
+function isWorkspaceSessionV2(value: unknown): value is WorkspaceSessionV2 {
+  return (
+    isRecord(value) &&
+    value.version === 2 &&
+    isVerificationResultSnapshot(value.result) &&
+    typeof value.requiresReverification === 'boolean' &&
+    'currentRevision' in value &&
+    'issueStates' in value &&
+    'selectedSuggestions' in value
+  )
+}
+
+function isLegacyWorkspaceSession(
+  value: unknown
+): value is LegacyWorkspaceSession {
+  return (
+    isRecord(value) &&
+    !('version' in value) &&
+    isVerificationResultSnapshot(value.result) &&
+    typeof value.workingText === 'string' &&
+    'issueStates' in value &&
+    'selectedSuggestions' in value
+  )
+}
+
+function workspaceSession(
+  value: unknown
+): WorkspaceSessionV2 | LegacyWorkspaceSession | null {
+  if (isWorkspaceSessionV2(value) || isLegacyWorkspaceSession(value)) {
+    return value
+  }
+  return null
 }
 
 const layers = [
@@ -82,13 +172,14 @@ const trackChanges = ref(true)
 const settingsTab = ref<'settings' | 'terms' | 'banned'>('settings')
 const resultTab = ref<'issues' | 'summary'>('issues')
 const textInput = ref('')
-const workingText = ref('')
 const fileSource = ref<File | null>(null)
 const result = ref<VerificationResult | null>(null)
 const verificationWorkspace = useVerificationWorkspace()
 const issueStates = verificationWorkspace.issueStates
 const selectedSuggestions = verificationWorkspace.selectedSuggestions
-const canUndoLastBatch = verificationWorkspace.canUndoLastBatch
+const canUndoLastBatch = computed(
+  () => verificationWorkspace.canUndoLastBatch.value
+)
 const currentIssueStates = computed(() => issueStates.value)
 const currentSelectedSuggestions = computed(
   () => selectedSuggestions.value
@@ -108,15 +199,8 @@ const errorMessage = ref<string | null>(null)
 const toast = ref<string | null>(null)
 const showHelp = ref(false)
 const showPrivacy = ref(false)
-const showEditor = ref(false)
-const showPreview = ref(false)
 const segmentedView = ref(true)
-const findQuery = ref('')
-const replaceText = ref('')
-const caseSensitive = ref(false)
 const showFindReplace = ref(false)
-const activeFindIndex = ref(0)
-const editBackup = ref('')
 const jobState = ref<JobProgressState | null>(null)
 
 let unsubscribe: (() => void) | null = null
@@ -138,32 +222,24 @@ const pendingCount = computed(() => verificationWorkspace.summary.value.pending)
 const acceptedCount = computed(() => verificationWorkspace.summary.value.accepted)
 const rejectedCount = computed(() => verificationWorkspace.summary.value.rejected)
 
-const modifiedText = computed(() => {
-  const currentResult = result.value
-  if (!currentResult) {
-    return workingText.value
-  }
-  return workingText.value === currentResult.text
-    ? verificationWorkspace.modifiedText.value
-    : workingText.value
+const modifiedText = computed(() => verificationWorkspace.modifiedText.value)
+const currentRevisionText = computed(
+  () =>
+    verificationWorkspace.currentRevision.value?.text ??
+    verificationWorkspace.result.value?.text ??
+    ''
+)
+const selectedIssueState = computed<IssueState | null>(() => {
+  const issueId = selectedIssueId.value
+  return issueId === null
+    ? null
+    : issueStates.value[issueId] ?? 'pending'
 })
-
-const findMatches = computed(() => {
-  const query = findQuery.value
-  if (!query) {
-    return [] as Array<{ start: number; end: number }>
-  }
-  const source = caseSensitive.value ? workingText.value : workingText.value.toLowerCase()
-  const needle = caseSensitive.value ? query : query.toLowerCase()
-  const matches: Array<{ start: number; end: number }> = []
-  let offset = 0
-  while ((offset = source.indexOf(needle, offset)) >= 0) {
-    matches.push({ start: offset, end: offset + needle.length })
-    offset += Math.max(needle.length, 1)
-  }
-  return matches
-})
-const findCount = computed(() => findMatches.value.length)
+const reviewActionsDisabled = computed(
+  () =>
+    verificationWorkspace.requiresReverification.value ||
+    verificationWorkspace.visibleIssues.value.length === 0
+)
 
 function closeSubscription() {
   unsubscribe?.()
@@ -294,10 +370,9 @@ async function runAnalysis(action: () => Promise<VerificationResult>) {
     }
     verificationWorkspace.loadResult(payload)
     result.value = verificationWorkspace.result.value
-    workingText.value = verificationWorkspace.result.value?.text ?? ''
     selectedIssueId.value = null
-    showEditor.value = false
-    showPreview.value = false
+    selectedLayer.value = 'all'
+    selectedSeverity.value = 'all'
     analysisStep.value = 6
     saveSession()
     await nextTick()
@@ -325,9 +400,13 @@ function setIssueState(issueId: string, state: IssueState) {
   saveSession()
 }
 
-function setAllIssues(state: IssueState) {
-  const issueIds = visibleIssues.value.map((issue) => issue.issue_id)
+function setVisibleIssueStates(issueIds: string[], state: IssueState) {
   verificationWorkspace.setIssueStates(issueIds, state)
+  saveSession()
+}
+
+function undoIssue(issueId: string) {
+  verificationWorkspace.undoIssue(issueId)
   saveSession()
 }
 
@@ -350,58 +429,37 @@ function applyOptions(options: AnalyzeOptions) {
   bannedWords.value = [...options.bannedWords]
 }
 
-function replaceAll() {
-  if (!findQuery.value) {
+function invalidateSourceNavigation(): void {
+  selectedIssueId.value = null
+  selectedLayer.value = 'all'
+  selectedSeverity.value = 'all'
+}
+
+function saveSearchReplacement(
+  text: string,
+  kind: 'current' | 'all',
+  count: number
+): void {
+  const revision = verificationWorkspace.saveManualEdit(text)
+  if (revision === null) {
     return
   }
-
-  const escaped = findQuery.value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const flags = caseSensitive.value ? 'g' : 'gi'
-  const count = findCount.value
-  workingText.value = workingText.value.replace(new RegExp(escaped, flags), replaceText.value)
-  activeFindIndex.value = 0
-  notify(`已替换 ${count} 处，请重新检查以刷新问题位置`)
+  invalidateSourceNavigation()
+  saveSession()
+  notify(
+    kind === 'all'
+      ? `已替换 ${count} 处，请重新检查以刷新问题位置`
+      : '已替换当前匹配，请重新检查以刷新问题位置'
+  )
 }
 
-function replaceCurrent() {
-  const matches = findMatches.value
-  if (!matches.length) {
+function saveFreeEdit(text: string): void {
+  const revision = verificationWorkspace.saveManualEdit(text)
+  if (revision === null) {
     return
   }
-  const match = matches[Math.min(activeFindIndex.value, matches.length - 1)]
-  if (!match) {
-    return
-  }
-  workingText.value =
-    workingText.value.slice(0, match.start) + replaceText.value + workingText.value.slice(match.end)
-  activeFindIndex.value = Math.min(activeFindIndex.value, Math.max(findMatches.value.length - 1, 0))
-  notify('已替换当前匹配，请重新检查以刷新问题位置')
-}
-
-function moveFind(direction: 1 | -1) {
-  if (!findCount.value) {
-    activeFindIndex.value = 0
-    return
-  }
-  activeFindIndex.value =
-    (activeFindIndex.value + direction + findCount.value) % findCount.value
-}
-
-function startEdit() {
-  editBackup.value = workingText.value
-  showEditor.value = true
-}
-
-function saveEdit() {
-  showEditor.value = false
-  editBackup.value = ''
-  notify('原文已更新，请重新检查以刷新问题位置')
-}
-
-function cancelEdit() {
-  workingText.value = editBackup.value
-  editBackup.value = ''
-  showEditor.value = false
+  invalidateSourceNavigation()
+  saveSession()
 }
 
 function utf16IndexAtCodePointOffset(
@@ -470,8 +528,11 @@ async function exportModified() {
     notify('存在重叠的已接受修改，请先解决冲突后再导出')
     return
   }
-  if (workingText.value !== result.value.text && acceptedCount.value > 0) {
-    notify('手工编辑与已接受建议同时存在，请先重新检查后再导出原格式文件')
+  if (verificationWorkspace.requiresReverification.value) {
+    downloadText(
+      currentRevisionText.value,
+      `修改版_${result.value.filename.replace(/\.[^.]+$/, '')}.txt`
+    )
     return
   }
   if (!result.value.file_id || !verificationApi) {
@@ -482,12 +543,9 @@ async function exportModified() {
 
   function buildTrackedText() {
     if (!result.value) {
-      return workingText.value
+      return currentRevisionText.value
     }
-    if (workingText.value !== result.value.text) {
-      return workingText.value
-    }
-    let text = workingText.value
+    let text = result.value.text
     const accepted = verificationWorkspace.visibleIssues.value
       .filter(
         (issue) => issueStates.value[issue.issue_id] === 'accepted'
@@ -554,7 +612,6 @@ function resetWorkspace() {
   jobState.value = null
   fileSource.value = null
   textInput.value = ''
-  workingText.value = ''
   errorMessage.value = null
   globalThis.sessionStorage?.removeItem('text-verification-session')
 }
@@ -587,8 +644,11 @@ function saveSession() {
     globalThis.sessionStorage?.setItem(
       'text-verification-session',
       JSON.stringify({
+        version: 2,
         result: result.value,
-        workingText: workingText.value,
+        currentRevision: verificationWorkspace.currentRevision.value,
+        requiresReverification:
+          verificationWorkspace.requiresReverification.value,
         issueStates: { ...issueStates.value },
         selectedSuggestions: { ...selectedSuggestions.value }
       })
@@ -604,22 +664,37 @@ function restoreSession() {
     return
   }
   try {
-    const saved = JSON.parse(raw) as {
-      result: VerificationResult
-      workingText: string
-      issueStates: unknown
-      selectedSuggestions: unknown
+    const parsed: unknown = JSON.parse(raw)
+    const saved = workspaceSession(parsed)
+    if (saved === null) {
+      throw new Error('Invalid workspace session')
     }
     verificationWorkspace.loadResult(saved.result)
     result.value = verificationWorkspace.result.value
-    workingText.value = saved.workingText
-    verificationWorkspace.restoreReviewState({
-      documentId: saved.result.document_id,
-      verificationRunId: saved.result.verification_run_id,
-      sourceVersion: saved.result.source_version,
-      issueStates: saved.issueStates,
-      selectedSuggestions: saved.selectedSuggestions
-    })
+    if ('version' in saved) {
+      verificationWorkspace.restoreWorkspaceState({
+        documentId: saved.result.document_id,
+        verificationRunId: saved.result.verification_run_id,
+        sourceVersion: saved.result.source_version,
+        issueStates: saved.issueStates,
+        selectedSuggestions: saved.selectedSuggestions,
+        requiresReverification: saved.requiresReverification,
+        currentRevision: saved.currentRevision
+      })
+    } else if (saved.workingText !== saved.result.text) {
+      verificationWorkspace.saveManualEdit(saved.workingText)
+    } else {
+      verificationWorkspace.restoreReviewState({
+        documentId: saved.result.document_id,
+        verificationRunId: saved.result.verification_run_id,
+        sourceVersion: saved.result.source_version,
+        issueStates: saved.issueStates,
+        selectedSuggestions: saved.selectedSuggestions
+      })
+    }
+    if (verificationWorkspace.requiresReverification.value) {
+      invalidateSourceNavigation()
+    }
   } catch {
     globalThis.sessionStorage?.removeItem('text-verification-session')
   }
@@ -669,13 +744,14 @@ function handleKeyboard(event: KeyboardEvent) {
 }
 
 watch(
-  [workingText, () => issueStates.value, () => selectedSuggestions.value],
+  [
+    () => verificationWorkspace.currentRevision.value,
+    () => issueStates.value,
+    () => selectedSuggestions.value
+  ],
   saveSession,
   { deep: true }
 )
-watch([findQuery, caseSensitive], () => {
-  activeFindIndex.value = 0
-})
 
 onMounted(() => {
   theme.value = globalThis.localStorage?.getItem('text-verification-theme') === 'dark' ? 'dark' : 'light'
@@ -800,27 +876,27 @@ onBeforeUnmount(() => {
         <article><small>文件</small><strong class="filename">{{ result.filename }}</strong></article>
       </section>
 
-      <section v-if="showFindReplace" class="find-panel">
-        <input v-model="findQuery" placeholder="查找内容" />
-        <input v-model="replaceText" placeholder="替换为（可留空）" />
-        <label><input v-model="caseSensitive" type="checkbox" /> 区分大小写</label>
-        <span>{{ findCount ? activeFindIndex + 1 : 0 }} / {{ findCount }}</span>
-        <button class="btn ghost small" @click="moveFind(-1)">上一个</button>
-        <button class="btn ghost small" @click="moveFind(1)">下一个</button>
-        <button class="btn ghost small" @click="replaceCurrent">替换当前</button>
-        <button class="btn primary small" @click="replaceAll">全部替换</button>
-        <button class="btn ghost small" @click="showFindReplace = false">关闭</button>
-      </section>
+      <SearchReplacePanel
+        v-if="showFindReplace"
+        :text="currentRevisionText"
+        @replace-text="saveSearchReplacement"
+        @close="showFindReplace = false"
+      />
 
       <section class="review-toolbar">
         <div>
-          <button class="btn ghost small" @click="showFindReplace = !showFindReplace">查找替换</button>
-          <button v-if="!showEditor" class="btn ghost small" @click="startEdit">编辑原文</button>
-          <button v-if="showEditor" class="btn accept small" @click="saveEdit">保存编辑</button>
-          <button v-if="showEditor" class="btn reject small" @click="cancelEdit">取消编辑</button>
-          <button class="btn ghost small" :class="{ active: showPreview }" @click="showPreview = !showPreview">修改预览</button>
           <button
             class="btn ghost small"
+            type="button"
+            data-action="toggle-search-replace"
+            :aria-expanded="showFindReplace"
+            @click="showFindReplace = !showFindReplace"
+          >
+            查找替换
+          </button>
+          <button
+            class="btn ghost small"
+            type="button"
             :class="{ active: segmentedView }"
             :aria-pressed="segmentedView"
             @click="segmentedView = !segmentedView"
@@ -828,24 +904,50 @@ onBeforeUnmount(() => {
             {{ segmentedView ? '句段视图' : '连续视图' }}
           </button>
         </div>
-        <div>
-          <button class="btn accept small" @click="setAllIssues('accepted')">全部接受</button>
-          <button class="btn reject small" @click="setAllIssues('rejected')">全部忽略</button>
-          <button class="btn ghost small" @click="setAllIssues('pending')">重置状态</button>
-          <button v-if="canUndoLastBatch" class="btn ghost small" @click="undoBatch">撤销批量操作</button>
-        </div>
+        <ReviewActions
+          :selected-issue-id="selectedIssueId"
+          :selected-issue-state="selectedIssueState"
+          :visible-issue-ids="visibleIssues.map((issue) => issue.issue_id)"
+          :summary="verificationWorkspace.summary.value"
+          :has-conflicts="verificationWorkspace.hasReplacementConflicts.value"
+          :conflict-issue-ids="
+            verificationWorkspace.replacementConflictIssueIds.value
+          "
+          :can-undo-last-batch="canUndoLastBatch"
+          :disabled="reviewActionsDisabled"
+          @set-issue-state="setIssueState"
+          @undo-issue="undoIssue"
+          @set-visible-state="setVisibleIssueStates"
+          @undo-batch="undoBatch"
+        />
       </section>
 
       <div class="review-grid">
         <section class="document-panel">
-          <header><div><strong>{{ showPreview ? '修改预览' : '源文本' }}</strong><small>{{ result.filename }}</small></div></header>
-          <textarea v-if="showEditor" v-model="workingText" class="document-editor" />
-          <pre v-else-if="showPreview" class="document-content preview">{{ modifiedText }}</pre>
-          <div
-            v-else
-            class="document-content"
+          <header>
+            <div>
+              <strong>
+                {{
+                  verificationWorkspace.requiresReverification.value
+                    ? '当前手工修订'
+                    : '源文本'
+                }}
+              </strong>
+              <small>{{ result.filename }}</small>
+            </div>
+          </header>
+          <EditPreview
+            :text="currentRevisionText"
+            :preview-text="modifiedText"
+            @save="saveFreeEdit"
           >
+            <pre
+              v-if="verificationWorkspace.requiresReverification.value"
+              class="current-revision-text"
+              data-current-revision
+            >{{ currentRevisionText }}</pre>
             <DocumentViewer
+              v-else
               :result="result"
               :issues="visibleIssues"
               :issue-states="currentIssueStates"
@@ -853,7 +955,7 @@ onBeforeUnmount(() => {
               :mode="segmentedView ? 'sentence' : 'continuous'"
               @select-issue="issueNavigation.selectIssue"
             />
-          </div>
+          </EditPreview>
         </section>
 
         <aside class="issues-panel">
@@ -865,7 +967,17 @@ onBeforeUnmount(() => {
             <span>{{ visibleIssues.length }} 项</span>
           </header>
 
-          <template v-if="resultTab === 'issues'">
+          <div
+            v-if="
+              resultTab === 'issues' &&
+              verificationWorkspace.requiresReverification.value
+            "
+            class="reverification-state"
+            role="status"
+          >
+            文本已修改。请重新检查后再使用问题筛选、定位和审阅操作。
+          </div>
+          <template v-else-if="resultTab === 'issues'">
             <IssueList
               :issues="visibleIssues"
               :selected-issue-id="selectedIssueId"
@@ -1042,7 +1154,7 @@ input:focus, select:focus { border-color: var(--primary); outline: 3px solid rgb
 .stats-strip .filename { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 .success { color: #059669; }.warning { color: #d97706; }.muted-text { color: var(--muted); }
 .review-toolbar, .find-panel { padding: 9px; display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
-.review-toolbar > div { display: flex; gap: 7px; }
+.review-toolbar > div:first-child { display: flex; gap: 7px; }
 .find-panel { justify-content: flex-start; }
 .review-grid { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(370px, .75fr); gap: 12px; }
 .document-panel, .issues-panel { min-height: 0; display: flex; flex-direction: column; }
@@ -1052,6 +1164,25 @@ input:focus, select:focus { border-color: var(--primary); outline: 3px solid rgb
 .document-content:not(.preview) { padding: 0; }
 .document-content.preview { color: #075985; }
 .document-editor { border: 0; border-radius: 0; resize: none; }
+.current-revision-text {
+  min-height: 100%;
+  margin: 0;
+  padding: 24px 28px;
+  white-space: pre-wrap;
+  color: var(--text);
+  background: var(--surface);
+  font: 15px/2 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.reverification-state {
+  margin: 14px;
+  padding: 16px;
+  border: 1px solid #f59e0b;
+  border-radius: 12px;
+  color: #92400e;
+  background: #fffbeb;
+  line-height: 1.7;
+  font-size: 12px;
+}
 .compact-tabs { padding: 3px; }
 .compact-tabs button { padding: 7px 10px; font-size: 12px; }
 .issues-header > span { color: var(--muted); font-size: 12px; }

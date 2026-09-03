@@ -587,3 +587,85 @@ Task 3: fix round 1/5 (4 addressed, 0 open — conflict-safe export, canonical a
 Task 3: fix round 2/5 (2 addressed, 0 open — atomic all-action history and atomic versioned session restore; commits 97303cd..11c2812)
 
 Task 3: complete (commits 3afe0ce..11c2812, review clean)
+
+## Task 4 implementation — 2026-09-03
+
+- Added `ReviewActions` as a presentation-only stable-ID action surface.
+  Selected accept/reject/undo, visible-filter accept/reject/reset, and LIFO
+  batch undo delegate to `useVerificationWorkspace`; the component owns no
+  decision map, index identity, or history.
+- Added `useSearchReplace` with explicit Unicode code-point match offsets,
+  literal matching, a fixed `und` case-insensitive collator, deterministic
+  left-to-right non-overlapping matches, cyclic navigation, empty replacement
+  deletion, replace-current, and replace-all.
+- Added `SearchReplacePanel` with explicit labels, stable `data-action`
+  selectors, native keyboard controls, visible focus states, and one concise
+  polite live status.
+- Added `EditPreview` with a temporary edit-only draft. Cancel discards it,
+  unchanged save is a deterministic no-op, whitespace-only/empty save is
+  rejected, and a changed save emits one exact text value for canonical manual
+  revision creation.
+- Removed `WorkspaceView`'s persistent parallel `workingText` review model.
+  Search and free-edit saves call `saveManualEdit` exactly once, after which the
+  frozen manual draft is the current and modified text source.
+- Manual/search revisions clear stable-ID decisions, explicit suggestion
+  overrides, batch history, issue selection, and filters; issue filters,
+  highlights, navigation, and review actions are replaced by the
+  re-verification state until a new result is loaded.
+- Preserved overlap conflict gating before every modified export. A manual or
+  search revision bypasses stale source-format replacement offsets and
+  downloads the current revision text; Task 6 remains responsible for
+  persisted original-format revision export.
+- Added frontend session schema version 2 with current revision and
+  `requiresReverification`. `restoreWorkspaceState` accepts only a matching,
+  frozen, serializable manual UUID draft and atomically clears stale decisions.
+  Legacy sessions with differing `workingText` migrate to one manual revision;
+  legacy source-text sessions retain atomic stable-ID review restoration.
+
+### Task 4 TDD and validation evidence
+
+- Fresh baseline:
+  `npm test -- --run --reporter=dot` passed 185 tests across 10 files.
+- Initial RED:
+  `npm test -- ReviewActions.spec.ts SearchReplacePanel.spec.ts EditPreview.spec.ts useSearchReplace.spec.ts useVerificationWorkspace.spec.ts WorkspaceView.spec.ts --reporter=dot`
+  failed 6 files: five missing planned modules and two missing
+  `restoreWorkspaceState` regressions; 63 existing tests passed.
+- Restored-ID RED:
+  `npm test -- useVerificationWorkspace.spec.ts --reporter=dot` failed 1 test
+  with 65 passing because a non-UUID restored manual revision was accepted.
+- Focused GREEN:
+  `npm test -- ReviewActions.spec.ts SearchReplacePanel.spec.ts EditPreview.spec.ts useSearchReplace.spec.ts useVerificationWorkspace.spec.ts WorkspaceView.spec.ts --reporter=dot`
+  passed 115 tests across 6 files.
+- Full frontend GREEN:
+  `npm test -- --run --reporter=dot` passed 209 tests across 14 files. Node
+  emitted the existing experimental `localStorage` warning.
+- Production build GREEN: `npm run build` passed `vue-tsc -b` and Vite 6.4.3
+  with 50 modules transformed.
+- `git diff --check` passed with no output.
+
+Ruling: Search offsets are Unicode code-point offsets and replacements rebuild
+the text from code-point arrays. Case-insensitive comparison uses a fixed
+`Intl.Collator('und', { usage: 'search', sensitivity: 'accent' })`, while
+matches advance by the full query length after a match — this avoids
+lowercasing offset drift and infinite loops while making overlapping-looking
+queries deterministic; cost if wrong is not matching canonically equivalent
+strings with a different code-point count.
+
+Ruling: `workingText` is retained only as a legacy session input, never as live
+workspace state. Search and free-edit actions create one manual draft through
+the canonical workspace API, and that revision is the only post-edit source
+for preview, recheck, session, and fallback export; cost if wrong is requiring
+re-verification before source-bound issue actions can resume.
+
+Ruling: Session version 2 restores a manual draft only when its document,
+source, run, UUID revision, timestamp, draft discriminant, and optional parent
+UUID are valid. Stale decisions and overrides are discarded atomically for
+that revision — this preserves authored text without replaying old offsets;
+cost if wrong is dropping malformed local session edits instead of guessing at
+their ancestry.
+
+Ruling: Until Task 6 persists authored revisions, modified export for a
+re-verification-required draft intentionally falls back to a UTF-8 text
+download of the current revision even when the original file is available —
+this is functional and offset-safe, but does not claim original-format
+persistence.

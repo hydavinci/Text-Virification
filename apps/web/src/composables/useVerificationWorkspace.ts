@@ -29,6 +29,11 @@ export interface WorkspaceReviewStateRestore {
   selectedSuggestions: unknown
 }
 
+export interface WorkspaceStateRestore extends WorkspaceReviewStateRestore {
+  requiresReverification: unknown
+  currentRevision: unknown
+}
+
 type PriorIssueState =
   | { hadValue: false }
   | { hadValue: true; value: IssueState }
@@ -58,6 +63,16 @@ function recordEntries(value: unknown): [string, unknown][] {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? Object.entries(value)
     : []
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function isUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    value
+  )
 }
 
 function isIssueState(value: unknown): value is IssueState {
@@ -343,6 +358,50 @@ function sourceRevision(result: VerificationResult): Readonly<DocumentRevision> 
     persistence_state: 'source',
     kind: 'source',
     text: result.text
+  })
+}
+
+function restoredManualRevision(
+  value: unknown,
+  result: VerificationResult
+): Readonly<DocumentRevision> | null {
+  const revision = isRecord(value) ? value : null
+  if (
+    revision === null ||
+    typeof revision.revision_id !== 'string' ||
+    !isUuid(revision.revision_id) ||
+    revision.document_id !== result.document_id ||
+    revision.verification_run_id !== result.verification_run_id ||
+    revision.source_version !== result.source_version ||
+    revision.revision_number !== null ||
+    typeof revision.created_at !== 'string' ||
+    (revision.parent_revision_id !== null &&
+      (typeof revision.parent_revision_id !== 'string' ||
+        !isUuid(revision.parent_revision_id))) ||
+    revision.persistence_state !== 'draft' ||
+    revision.kind !== 'manual' ||
+    typeof revision.text !== 'string'
+  ) {
+    return null
+  }
+  const createdAt = new Date(revision.created_at)
+  if (
+    Number.isNaN(createdAt.valueOf()) ||
+    createdAt.toISOString() !== revision.created_at
+  ) {
+    return null
+  }
+  return freezeRecursively({
+    revision_id: revision.revision_id,
+    document_id: result.document_id,
+    verification_run_id: result.verification_run_id,
+    source_version: result.source_version,
+    revision_number: null,
+    created_at: revision.created_at,
+    parent_revision_id: revision.parent_revision_id,
+    persistence_state: 'draft' as const,
+    kind: 'manual' as const,
+    text: revision.text
   })
 }
 
@@ -691,6 +750,36 @@ export function useVerificationWorkspace() {
     createReviewRevision()
   }
 
+  function restoreWorkspaceState(saved: WorkspaceStateRestore): void {
+    const currentResult = result.value
+    if (
+      currentResult === null ||
+      saved.documentId !== currentResult.document_id ||
+      saved.verificationRunId !== currentResult.verification_run_id ||
+      saved.sourceVersion !== currentResult.source_version
+    ) {
+      return
+    }
+    if (saved.requiresReverification === true) {
+      const manualRevision = restoredManualRevision(
+        saved.currentRevision,
+        currentResult
+      )
+      if (manualRevision === null) {
+        return
+      }
+      currentRevision.value = manualRevision
+      requiresReverification.value = true
+      issueStates.value = {}
+      selectedSuggestions.value = {}
+      batchHistory.value = []
+      return
+    }
+    if (saved.requiresReverification === false) {
+      restoreReviewState(saved)
+    }
+  }
+
   function saveManualEdit(text: string): Readonly<DocumentRevision> | null {
     const currentResult = result.value
     if (currentResult === null) {
@@ -758,6 +847,7 @@ export function useVerificationWorkspace() {
     undoLastBatch,
     selectSuggestion,
     restoreReviewState,
+    restoreWorkspaceState,
     saveManualEdit
   }
 }
