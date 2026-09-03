@@ -237,6 +237,7 @@ function createHarness(overrides: {
   result?: VerificationResult
   getResult?: JobsApi['getResult']
   verificationApi?: VerificationApi | null
+  fileExecutionMode?: 'direct' | 'jobs'
 } = {}) {
   let onEvent: ((event: JobProgressEvent) => void) | null = null
   let onError: ((error: JobSubscriptionError) => void) | null = null
@@ -264,7 +265,11 @@ function createHarness(overrides: {
     overrides.verificationApi === undefined
       ? null
       : overrides.verificationApi
-  const execution = useVerificationExecution({ jobsApi, verificationApi })
+  const execution = useVerificationExecution({
+    jobsApi,
+    verificationApi,
+    fileExecutionMode: overrides.fileExecutionMode
+  })
   return {
     execution,
     jobsApi,
@@ -636,7 +641,9 @@ describe('useVerificationExecution', () => {
       analyzeText: vi.fn().mockReturnValue(pending.promise),
       analyzeFile: vi.fn(),
       exportReport: vi.fn(),
-      exportOriginal: vi.fn()
+      exportOriginal: vi.fn(),
+      persistRevision: vi.fn(),
+      exportReconstruction: vi.fn()
     }
     const harness = createHarness({ verificationApi })
 
@@ -653,6 +660,28 @@ describe('useVerificationExecution', () => {
     expect(transformResult).not.toHaveBeenCalled()
     expect(harness.execution.state.value).toBe('idle')
     expect(harness.execution.result.value).toBeNull()
+  })
+
+  it('uses jobs for files when the workspace requests asynchronous execution', async () => {
+    const verificationApi: VerificationApi = {
+      analyzeText: vi.fn(),
+      analyzeFile: vi.fn(),
+      exportReport: vi.fn(),
+      exportOriginal: vi.fn(),
+      persistRevision: vi.fn(),
+      exportReconstruction: vi.fn()
+    }
+    const harness = createHarness({
+      verificationApi,
+      fileExecutionMode: 'jobs'
+    })
+    const file = new File(['pdf'], 'sample.pdf')
+
+    await harness.execution.analyzeFile(file, options)
+
+    expect(harness.jobsApi.createJob).toHaveBeenCalledWith(file, options)
+    expect(verificationApi.analyzeFile).not.toHaveBeenCalled()
+    expect(harness.execution.state.value).toBe('processing')
   })
 
   it('disposes subscriptions with the owning Vue scope and ignores late results', async () => {
@@ -694,7 +723,9 @@ describe('useVerificationExecution', () => {
       analyzeText: vi.fn().mockReturnValue(pending.promise),
       analyzeFile: vi.fn(),
       exportReport: vi.fn(),
-      exportOriginal: vi.fn()
+      exportOriginal: vi.fn(),
+      persistRevision: vi.fn(),
+      exportReconstruction: vi.fn()
     }
     const harness = createHarness({ verificationApi })
 
@@ -729,7 +760,9 @@ describe('useVerificationExecution', () => {
       analyzeText: vi.fn().mockResolvedValue(textResult),
       analyzeFile: vi.fn().mockResolvedValue(fileResult),
       exportReport: vi.fn(),
-      exportOriginal: vi.fn()
+      exportOriginal: vi.fn(),
+      persistRevision: vi.fn(),
+      exportReconstruction: vi.fn()
     }
     const harness = createHarness({ verificationApi })
 
@@ -753,7 +786,9 @@ describe('useVerificationExecution', () => {
       analyzeText: vi.fn().mockResolvedValue(directPayload),
       analyzeFile: vi.fn(),
       exportReport: vi.fn(),
-      exportOriginal: vi.fn()
+      exportOriginal: vi.fn(),
+      persistRevision: vi.fn(),
+      exportReconstruction: vi.fn()
     }
     const direct = createHarness({ verificationApi })
 
@@ -803,7 +838,9 @@ describe('useVerificationExecution', () => {
           analyzeText: vi.fn().mockResolvedValue(invalidResult),
           analyzeFile: vi.fn(),
           exportReport: vi.fn(),
-          exportOriginal: vi.fn()
+          exportOriginal: vi.fn(),
+          persistRevision: vi.fn(),
+          exportReconstruction: vi.fn()
         }
         const harness = createHarness({ verificationApi })
 
@@ -838,7 +875,9 @@ describe('useVerificationExecution', () => {
       analyzeText: vi.fn().mockResolvedValue(buildResult()),
       analyzeFile: vi.fn().mockResolvedValue(buildResult()),
       exportReport: vi.fn(),
-      exportOriginal: vi.fn()
+      exportOriginal: vi.fn(),
+      persistRevision: vi.fn(),
+      exportReconstruction: vi.fn()
     }
     const direct = createHarness({ verificationApi })
     const directOptions: AnalyzeOptions = structuredClone(options)

@@ -66,7 +66,7 @@ export function createJobsApi(
   overrides: Partial<JobsApiDependencies> = {}
 ): JobsApi {
   const dependencies: JobsApiDependencies = {
-    fetch: overrides.fetch ?? fetch,
+    fetch: overrides.fetch ?? globalThis.fetch.bind(globalThis),
     eventSourceFactory: overrides.eventSourceFactory ?? ((url) => new EventSource(url))
   }
 

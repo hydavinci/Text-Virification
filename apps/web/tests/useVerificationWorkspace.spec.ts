@@ -2247,6 +2247,82 @@ describe('useVerificationWorkspace', () => {
     expect(JSON.parse(JSON.stringify(secondManual))).toEqual(secondManual)
   })
 
+  it('retains the complete immutable revision chain for server persistence', () => {
+    const issue = buildIssue()
+    const result = buildResult([issue])
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(result)
+
+    workspace.acceptIssue(issue.issue_id)
+    const review = workspace.currentRevision.value
+    workspace.saveManualEdit('手工修订')
+
+    expect(workspace.revisionChain.value).toHaveLength(3)
+    expect(workspace.revisionChain.value[0]).toEqual(sourceRevisionFor(result))
+    expect(workspace.revisionChain.value[1]).toBe(review)
+    expect(workspace.revisionChain.value[2]).toBe(
+      workspace.currentRevision.value
+    )
+    expect(Object.isFrozen(workspace.revisionChain.value)).toBe(true)
+    expect(workspace.revisionChain.value[2]).toMatchObject({
+      parent_revision_id: review?.revision_id,
+      persistence_state: 'draft'
+    })
+  })
+
+  it('hydrates only a matching draft with the server allocated revision number', () => {
+    const issue = buildIssue()
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(buildResult([issue]))
+    workspace.acceptIssue(issue.issue_id)
+    const draft = workspace.currentRevision.value
+    if (draft?.revision_id === null || draft?.revision_id === undefined) {
+      throw new Error('Expected a draft revision.')
+    }
+
+    expect(
+      workspace.hydratePersistedRevision({
+        ...draft,
+        revision_number: 7,
+        created_at: '2026-09-03T04:00:00.000Z',
+        persistence_state: 'persisted'
+      })
+    ).toBe(true)
+
+    expect(workspace.currentRevision.value).toMatchObject({
+      revision_id: draft.revision_id,
+      revision_number: 7,
+      created_at: '2026-09-03T04:00:00.000Z',
+      persistence_state: 'persisted'
+    })
+    expect(workspace.revisionChain.value[1]).toBe(
+      workspace.currentRevision.value
+    )
+  })
+
+  it('rejects mismatched persisted hydration without changing the chain', () => {
+    const issue = buildIssue()
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(buildResult([issue]))
+    workspace.acceptIssue(issue.issue_id)
+    const before = workspace.revisionChain.value
+    const draft = workspace.currentRevision.value
+    if (draft?.revision_id === null || draft?.revision_id === undefined) {
+      throw new Error('Expected a draft revision.')
+    }
+
+    expect(
+      workspace.hydratePersistedRevision({
+        ...draft,
+        text: 'different',
+        revision_number: 1,
+        persistence_state: 'persisted'
+      })
+    ).toBe(false)
+    expect(workspace.revisionChain.value).toBe(before)
+    expect(workspace.currentRevision.value).toBe(draft)
+  })
+
   it('atomically restores a saved manual revision without replaying stale issue offsets', () => {
     const issue = buildIssue()
     const original = useVerificationWorkspace()

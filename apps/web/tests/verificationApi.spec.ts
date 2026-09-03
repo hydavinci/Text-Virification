@@ -248,6 +248,126 @@ describe('createVerificationApi', () => {
     })
   })
 
+  it('persists a draft revision without sending a client revision number', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        revision_id: '44444444-4444-4444-8444-444444444444',
+        document_id: resultPayload.document_id,
+        verification_run_id: resultPayload.verification_run_id,
+        source_version: resultPayload.source_version,
+        revision_number: 3,
+        created_at: '2026-09-03T04:00:00Z',
+        parent_revision_id: null,
+        persistence_state: 'persisted',
+        kind: 'review',
+        text: '账号测试。'
+      })
+    })
+    const api = createVerificationApi(fetchMock as typeof fetch)
+
+    const persisted = await api.persistRevision(
+      '55555555-5555-4555-8555-555555555555',
+      {
+        revision_id: '44444444-4444-4444-8444-444444444444',
+        document_id: resultPayload.document_id,
+        verification_run_id: resultPayload.verification_run_id,
+        source_version: resultPayload.source_version,
+        revision_number: null,
+        created_at: '2026-09-03T03:59:00.000Z',
+        parent_revision_id: null,
+        persistence_state: 'draft',
+        kind: 'review',
+        text: '账号测试。'
+      }
+    )
+
+    expect(persisted).toMatchObject({
+      revision_number: 3,
+      persistence_state: 'persisted',
+      created_at: '2026-09-03T04:00:00.000Z'
+    })
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/jobs/55555555-5555-4555-8555-555555555555/revisions',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          revision_id: '44444444-4444-4444-8444-444444444444',
+          document_id: resultPayload.document_id,
+          verification_run_id: resultPayload.verification_run_id,
+          source_version: resultPayload.source_version,
+          parent_revision_id: null,
+          kind: 'review',
+          text: '账号测试。'
+        })
+      })
+    )
+  })
+
+  it('submits reconstruction export by persisted revision id and downloads it', async () => {
+    const anchorClick = vi
+      .spyOn(HTMLAnchorElement.prototype, 'click')
+      .mockImplementation(() => {})
+    const artifactId = '66666666-6666-4666-8666-666666666666'
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          export_artifact_id: artifactId,
+          job_id: '55555555-5555-4555-8555-555555555555',
+          verification_run_id: resultPayload.verification_run_id,
+          format: 'docx_reconstruction',
+          file_type: 'docx',
+          file_name: 'sample-reconstructed.docx',
+          media_type:
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          size_bytes: 12,
+          content_sha256: 'a'.repeat(64),
+          status: 'ready',
+          created_at: '2026-09-03T04:00:00Z'
+        })
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        blob: async () => new Blob(['docx']),
+        headers: new Headers({
+          'content-disposition':
+            "attachment; filename*=UTF-8''sample-reconstructed.docx"
+        })
+      })
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: vi.fn(() => 'blob:reconstruction')
+    })
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      value: vi.fn()
+    })
+    const api = createVerificationApi(fetchMock as typeof fetch)
+
+    await api.exportReconstruction(
+      '55555555-5555-4555-8555-555555555555',
+      '44444444-4444-4444-8444-444444444444'
+    )
+
+    expect(fetchMock.mock.calls[0]).toEqual([
+      '/api/v1/jobs/55555555-5555-4555-8555-555555555555/exports',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          format: 'docx_reconstruction',
+          revision_id: '44444444-4444-4444-8444-444444444444'
+        })
+      }
+    ])
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(
+      `/api/v1/jobs/55555555-5555-4555-8555-555555555555/exports/${artifactId}`
+    )
+    anchorClick.mockRestore()
+  })
+
   it('exports the complete edited text with positioned replacements', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,

@@ -1,6 +1,9 @@
 import type {
   AnalyzeOptions,
+  DraftDocumentRevision,
+  ExportArtifactReference,
   ExportReplacement,
+  PersistedDocumentRevision,
   VerificationResult
 } from '../types/verification'
 import type { InjectionKey } from 'vue'
@@ -25,6 +28,14 @@ export interface VerificationApi {
     replacements: ExportReplacement[],
     modifiedText: string,
     trackChanges: boolean
+  ): Promise<void>
+  persistRevision(
+    jobId: string,
+    revision: DraftDocumentRevision
+  ): Promise<PersistedDocumentRevision>
+  exportReconstruction(
+    jobId: string,
+    revisionId: string | null
   ): Promise<void>
 }
 
@@ -79,8 +90,143 @@ export function createVerificationApi(fetchImpl: typeof fetch = fetch): Verifica
         })
       })
       await downloadResponse(response, `修改版_${result.filename}`)
+    },
+    persistRevision: async (jobId, revision) => {
+      const response = await fetchImpl(`${API_BASE}/jobs/${jobId}/revisions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          revision_id: revision.revision_id,
+          document_id: revision.document_id,
+          verification_run_id: revision.verification_run_id,
+          source_version: revision.source_version,
+          parent_revision_id: revision.parent_revision_id,
+          kind: revision.kind,
+          text: revision.text
+        })
+      })
+      if (!response.ok) {
+        throw await readApiRequestError(response)
+      }
+      const persisted = persistedRevisionResponse(
+        await response.json(),
+        revision
+      )
+      if (persisted === null) {
+        throw new ApiResponseValidationError(
+          'Invalid persisted revision response.'
+        )
+      }
+      return persisted
+    },
+    exportReconstruction: async (jobId, revisionId) => {
+      const response = await fetchImpl(`${API_BASE}/jobs/${jobId}/exports`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          format: 'docx_reconstruction',
+          revision_id: revisionId
+        })
+      })
+      if (!response.ok) {
+        throw await readApiRequestError(response)
+      }
+      const artifact = exportArtifactResponse(await response.json(), jobId)
+      if (artifact === null) {
+        throw new ApiResponseValidationError(
+          'Invalid reconstruction export response.'
+        )
+      }
+      const download = await fetchImpl(
+        `${API_BASE}/jobs/${jobId}/exports/${artifact.export_artifact_id}`
+      )
+      await downloadResponse(download, artifact.file_name)
     }
   }
+}
+
+function persistedRevisionResponse(
+  value: unknown,
+  draft: DraftDocumentRevision
+): PersistedDocumentRevision | null {
+  if (!isRecord(value)) {
+    return null
+  }
+  const createdAt = parseIsoDate(value.created_at)
+  if (
+    value.revision_id !== draft.revision_id ||
+    value.document_id !== draft.document_id ||
+    value.verification_run_id !== draft.verification_run_id ||
+    value.source_version !== draft.source_version ||
+    value.parent_revision_id !== draft.parent_revision_id ||
+    value.kind !== draft.kind ||
+    value.text !== draft.text ||
+    value.persistence_state !== 'persisted' ||
+    !Number.isInteger(value.revision_number) ||
+    Number(value.revision_number) <= 0 ||
+    createdAt === null
+  ) {
+    return null
+  }
+  return Object.freeze({
+    revision_id: draft.revision_id,
+    document_id: draft.document_id,
+    verification_run_id: draft.verification_run_id,
+    source_version: draft.source_version,
+    revision_number: Number(value.revision_number),
+    created_at: createdAt,
+    parent_revision_id: draft.parent_revision_id,
+    persistence_state: 'persisted',
+    kind: draft.kind,
+    text: draft.text
+  })
+}
+
+function exportArtifactResponse(
+  value: unknown,
+  jobId: string
+): ExportArtifactReference | null {
+  if (
+    !isRecord(value) ||
+    !isUuid(value.export_artifact_id) ||
+    value.job_id !== jobId ||
+    !isUuid(value.verification_run_id) ||
+    value.format !== 'docx_reconstruction' ||
+    value.file_type !== 'docx' ||
+    typeof value.file_name !== 'string' ||
+    value.file_name.length === 0 ||
+    typeof value.media_type !== 'string' ||
+    !Number.isInteger(value.size_bytes) ||
+    Number(value.size_bytes) < 0 ||
+    typeof value.content_sha256 !== 'string' ||
+    !/^[0-9a-f]{64}$/.test(value.content_sha256) ||
+    value.status !== 'ready' ||
+    parseIsoDate(value.created_at) === null
+  ) {
+    return null
+  }
+  return value as unknown as ExportArtifactReference
+}
+
+function parseIsoDate(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null
+  }
+  const date = new Date(value)
+  return Number.isNaN(date.valueOf()) ? null : date.toISOString()
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function isUuid(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      value
+    )
+  )
 }
 
 async function downloadResponse(response: Response, fallbackName: string) {

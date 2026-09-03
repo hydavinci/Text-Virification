@@ -1698,12 +1698,13 @@ function restoredRevision(
   } as DocumentRevision)
 }
 
-interface PreparedWorkspaceRestore {
+export interface PreparedWorkspaceRestore {
   result: VerificationResult
   safeIssues: readonly VerificationIssue[]
   issueStates: Record<string, IssueState>
   selectedSuggestions: Record<string, string | null>
   currentRevision: Readonly<DocumentRevision>
+  revisionChain: readonly Readonly<DocumentRevision>[]
   requiresReverification: boolean
 }
 
@@ -1820,7 +1821,54 @@ function legacyReviewRevision(
   })
 }
 
-function prepareWorkspaceRestore(
+function restoredRevisionChain(
+  value: unknown,
+  result: VerificationResult,
+  currentRevision: Readonly<DocumentRevision>
+): readonly Readonly<DocumentRevision>[] | null {
+  if (!Array.isArray(value) || value.length === 0) {
+    const source = sourceRevision(result)
+    return Object.freeze(
+      currentRevision.persistence_state === 'source'
+        ? [source]
+        : [source, currentRevision]
+    )
+  }
+  const chain: Readonly<DocumentRevision>[] = []
+  const ids = new Set<string>()
+  for (const [index, candidate] of value.entries()) {
+    const revision = restoredRevision(candidate, result)
+    if (revision === null) {
+      return null
+    }
+    if (index === 0) {
+      if (revision.persistence_state !== 'source') {
+        return null
+      }
+    } else {
+      const prior = chain[index - 1]
+      if (
+        revision.persistence_state === 'source' ||
+        revision.parent_revision_id !== prior.revision_id ||
+        ids.has(revision.revision_id)
+      ) {
+        return null
+      }
+      ids.add(revision.revision_id)
+    }
+    chain.push(revision)
+  }
+  const last = chain.at(-1)
+  if (
+    last === undefined ||
+    JSON.stringify(last) !== JSON.stringify(currentRevision)
+  ) {
+    return null
+  }
+  return Object.freeze(chain)
+}
+
+export function prepareWorkspaceRestore(
   saved: unknown
 ): PreparedWorkspaceRestore | null {
   if (!isRecord(saved) || !hasOwn(saved, 'result')) {
@@ -1849,23 +1897,29 @@ function prepareWorkspaceRestore(
       return null
     }
     if (saved.workingText !== result.text) {
+      const currentRevision = Object.freeze({
+        revision_id: globalThis.crypto.randomUUID(),
+        document_id: result.document_id,
+        verification_run_id: result.verification_run_id,
+        source_version: result.source_version,
+        revision_number: null,
+        created_at: new Date().toISOString(),
+        parent_revision_id: null,
+        persistence_state: 'draft' as const,
+        kind: 'manual' as const,
+        text: saved.workingText
+      })
       return {
         result,
         safeIssues,
         issueStates: nullRecord<IssueState>(),
         selectedSuggestions: nullRecord<string | null>(),
-        currentRevision: Object.freeze({
-          revision_id: globalThis.crypto.randomUUID(),
-          document_id: result.document_id,
-          verification_run_id: result.verification_run_id,
-          source_version: result.source_version,
-          revision_number: null,
-          created_at: new Date().toISOString(),
-          parent_revision_id: null,
-          persistence_state: 'draft',
-          kind: 'manual',
-          text: saved.workingText
-        }),
+        currentRevision,
+        revisionChain: restoredRevisionChain(
+          undefined,
+          result,
+          currentRevision
+        ) ?? Object.freeze([]),
         requiresReverification: true
       }
     }
@@ -1880,14 +1934,20 @@ function prepareWorkspaceRestore(
       issueStates,
       selectedSuggestions
     )
+    const currentRevision = conflicts
+      ? sourceRevision(result)
+      : legacyReviewRevision(result, text)
     return {
       result,
       safeIssues,
       issueStates,
       selectedSuggestions,
-      currentRevision: conflicts
-        ? sourceRevision(result)
-        : legacyReviewRevision(result, text),
+      currentRevision,
+      revisionChain: restoredRevisionChain(
+        undefined,
+        result,
+        currentRevision
+      ) ?? Object.freeze([]),
       requiresReverification: false
     }
   }
@@ -1903,6 +1963,14 @@ function prepareWorkspaceRestore(
   if (currentRevision === null) {
     return null
   }
+  const revisionChain = restoredRevisionChain(
+    saved.revisionChain,
+    result,
+    currentRevision
+  )
+  if (revisionChain === null) {
+    return null
+  }
   if (saved.requiresReverification) {
     if (currentRevision.kind !== 'manual') {
       return null
@@ -1913,6 +1981,7 @@ function prepareWorkspaceRestore(
       issueStates: nullRecord<IssueState>(),
       selectedSuggestions: nullRecord<string | null>(),
       currentRevision,
+      revisionChain,
       requiresReverification: true
     }
   }
@@ -1944,6 +2013,7 @@ function prepareWorkspaceRestore(
     issueStates,
     selectedSuggestions,
     currentRevision,
+    revisionChain,
     requiresReverification: false
   }
 }
@@ -1954,6 +2024,9 @@ export function useVerificationWorkspace() {
   const selectedSuggestions = ref<Record<string, string | null>>({})
   const safeIssues = shallowRef<readonly VerificationIssue[]>(Object.freeze([]))
   const currentRevision = shallowRef<Readonly<DocumentRevision> | null>(null)
+  const revisionChain = shallowRef<readonly Readonly<DocumentRevision>[]>(
+    Object.freeze([])
+  )
   const requiresReverification = ref(false)
   const batchHistory = ref<BatchStateSnapshot[]>([])
 
@@ -2089,7 +2162,7 @@ export function useVerificationWorkspace() {
       currentRevision.value = sourceRevision(currentResult)
       return
     }
-    currentRevision.value = Object.freeze({
+    const revision = Object.freeze({
       revision_id: globalThis.crypto.randomUUID(),
       document_id: currentResult.document_id,
       verification_run_id: currentResult.verification_run_id,
@@ -2101,6 +2174,8 @@ export function useVerificationWorkspace() {
       kind: 'review',
       text
     })
+    currentRevision.value = revision
+    revisionChain.value = Object.freeze([...revisionChain.value, revision])
   }
 
   function loadResult(nextResult: VerificationResult): void {
@@ -2141,7 +2216,9 @@ export function useVerificationWorkspace() {
     requiresReverification.value = false
     batchHistory.value = []
     if (!sameSourceRevision) {
-      currentRevision.value = sourceRevision(canonicalResult)
+      const source = sourceRevision(canonicalResult)
+      currentRevision.value = source
+      revisionChain.value = Object.freeze([source])
       return
     }
     createReviewRevision()
@@ -2153,6 +2230,7 @@ export function useVerificationWorkspace() {
     issueStates.value = {}
     selectedSuggestions.value = {}
     currentRevision.value = null
+    revisionChain.value = Object.freeze([])
     requiresReverification.value = false
     batchHistory.value = []
   }
@@ -2304,14 +2382,19 @@ export function useVerificationWorkspace() {
     if (prepared === null) {
       return false
     }
+    commitWorkspaceRestore(prepared)
+    return true
+  }
+
+  function commitWorkspaceRestore(prepared: PreparedWorkspaceRestore): void {
     result.value = prepared.result
     safeIssues.value = prepared.safeIssues
     issueStates.value = prepared.issueStates
     selectedSuggestions.value = prepared.selectedSuggestions
     currentRevision.value = prepared.currentRevision
+    revisionChain.value = prepared.revisionChain
     requiresReverification.value = prepared.requiresReverification
     batchHistory.value = []
-    return true
   }
 
   function saveManualEdit(text: string): Readonly<DocumentRevision> | null {
@@ -2336,11 +2419,58 @@ export function useVerificationWorkspace() {
       text
     })
     currentRevision.value = revision
+    revisionChain.value = Object.freeze([...revisionChain.value, revision])
     requiresReverification.value = true
     issueStates.value = {}
     selectedSuggestions.value = {}
     batchHistory.value = []
     return revision
+  }
+
+  function hydratePersistedRevision(value: unknown): boolean {
+    const currentResult = result.value
+    if (currentResult === null) {
+      return false
+    }
+    const persisted = restoredRevision(value, currentResult)
+    if (
+      persisted === null ||
+      persisted.persistence_state !== 'persisted'
+    ) {
+      return false
+    }
+    const index = revisionChain.value.findIndex(
+      (revision) => revision.revision_id === persisted.revision_id
+    )
+    if (index < 0) {
+      return false
+    }
+    const draft = revisionChain.value[index]
+    if (
+      draft.persistence_state === 'source' ||
+      draft.document_id !== persisted.document_id ||
+      draft.verification_run_id !== persisted.verification_run_id ||
+      draft.source_version !== persisted.source_version ||
+      draft.parent_revision_id !== persisted.parent_revision_id ||
+      draft.kind !== persisted.kind ||
+      draft.text !== persisted.text
+    ) {
+      return false
+    }
+    if (
+      draft.persistence_state === 'persisted' &&
+      (draft.revision_number !== persisted.revision_number ||
+        draft.created_at !== persisted.created_at)
+    ) {
+      return false
+    }
+    const next = [...revisionChain.value]
+    next[index] = persisted
+    revisionChain.value = Object.freeze(next)
+    if (currentRevision.value?.revision_id === persisted.revision_id) {
+      currentRevision.value = persisted
+    }
+    return true
   }
 
   const issueStateSnapshots = computed(() =>
@@ -2357,6 +2487,7 @@ export function useVerificationWorkspace() {
       () => selectedSuggestionSnapshots.value
     ),
     currentRevision: workspaceReadonlyValue(() => currentRevision.value),
+    revisionChain: workspaceReadonlyValue(() => revisionChain.value),
     requiresReverification: workspaceReadonlyValue(
       () => requiresReverification.value
     ),
@@ -2385,6 +2516,9 @@ export function useVerificationWorkspace() {
     selectSuggestion,
     restoreReviewState,
     restoreWorkspaceState,
-    saveManualEdit
+    prepareWorkspaceRestore,
+    commitWorkspaceRestore,
+    saveManualEdit,
+    hydratePersistedRevision
   }
 }

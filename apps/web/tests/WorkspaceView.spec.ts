@@ -396,15 +396,17 @@ describe('WorkspaceView', () => {
     await flushPromises()
   })
 
-  it('synchronously ignores a second file submission while direct analysis is pending', async () => {
-    const pending = createDeferred<VerificationResult>()
-    const analyzeFile = vi.fn().mockReturnValue(pending.promise)
+  it('synchronously ignores a second file submission while async job creation is pending', async () => {
+    const pending = createDeferred<Awaited<ReturnType<JobsApi['createJob']>>>()
+    const createJob = vi.fn().mockReturnValue(pending.promise)
+    const analyzeFile = vi.fn()
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
     const wrapper = mount(WorkspaceView, {
       global: {
         provide: {
           [jobsApiKey as symbol]: {
-            createJob: vi.fn(),
+            createJob,
+            getResult: vi.fn(),
             subscribe: vi.fn(() => vi.fn())
           },
           [verificationApiKey as symbol]: {
@@ -425,8 +427,9 @@ describe('WorkspaceView', () => {
     await flushPromises()
 
     expect(confirm).toHaveBeenCalledTimes(1)
-    expect(analyzeFile).toHaveBeenCalledTimes(1)
-    expect(analyzeFile).toHaveBeenCalledWith(first, expect.any(Object))
+    expect(createJob).toHaveBeenCalledTimes(1)
+    expect(createJob).toHaveBeenCalledWith(first, expect.any(Object))
+    expect(analyzeFile).not.toHaveBeenCalled()
 
     pending.reject(new Error('finish'))
     await flushPromises()
@@ -554,7 +557,7 @@ describe('WorkspaceView', () => {
     expect(
       JSON.parse(
         sessionStorage.getItem('text-verification-session') ?? 'null'
-      ).result.document_id
+      ).workspace.result.document_id
     ).toBe(result.document_id)
     wrapper.unmount()
   })
@@ -1102,11 +1105,13 @@ describe('WorkspaceView', () => {
       sessionStorage.getItem('text-verification-session') ?? 'null'
     )
     expect(saved).toMatchObject({
-      version: 2,
-      requiresReverification: true,
-      currentRevision: {
-        kind: 'manual',
-        text: '手工修改后的全文'
+      version: 3,
+      workspace: {
+        requiresReverification: true,
+        currentRevision: {
+          kind: 'manual',
+          text: '手工修改后的全文'
+        }
       }
     })
     first.unmount()
@@ -1114,7 +1119,9 @@ describe('WorkspaceView', () => {
     const restored = mount(WorkspaceView, { global })
     await flushPromises()
     const workspace = canonicalWorkspace(restored)
-    expect(workspace.currentRevision.value).toEqual(saved.currentRevision)
+    expect(workspace.currentRevision.value).toEqual(
+      saved.workspace.currentRevision
+    )
     expect(workspace.requiresReverification.value).toBe(true)
     expect(workspace.visibleIssues.value).toEqual([])
     expect(restored.text()).toContain('手工修改后的全文')
@@ -1122,15 +1129,11 @@ describe('WorkspaceView', () => {
     restored.unmount()
   })
 
-  it('exports the current manual revision through the text fallback without stale issue offsets', async () => {
+  it('blocks the current manual revision export until stale offsets are rechecked', async () => {
     const exportOriginal = vi.fn()
-    let exportedBlob: Blob | null = null
     Object.defineProperty(URL, 'createObjectURL', {
       configurable: true,
-      value: vi.fn((blob: Blob) => {
-        exportedBlob = blob
-        return 'blob:manual'
-      })
+      value: vi.fn(() => 'blob:manual')
     })
     Object.defineProperty(URL, 'revokeObjectURL', {
       configurable: true,
@@ -1164,21 +1167,13 @@ describe('WorkspaceView', () => {
     await editor.get('[data-action="start-edit"]').trigger('click')
     await editor.get('[data-edit-input]').setValue('最终手工文本')
     await editor.get('[data-action="save-edit"]').trigger('click')
-    await wrapper.get('.top-actions .btn.primary').trigger('click')
+    const exportButton = wrapper.get<HTMLButtonElement>(
+      '[data-action="export-modified"]'
+    )
 
+    expect(exportButton.element.disabled).toBe(true)
     expect(exportOriginal).not.toHaveBeenCalled()
-    expect(exportedBlob).not.toBeNull()
-    const blob = exportedBlob
-    if (blob === null) {
-      throw new Error('Expected a manual revision fallback Blob.')
-    }
-    const exportedText = await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader()
-      reader.addEventListener('load', () => resolve(String(reader.result)))
-      reader.addEventListener('error', () => reject(reader.error))
-      reader.readAsText(blob)
-    })
-    expect(exportedText).toBe('最终手工文本')
+    expect(wrapper.get('.blocked-reason').text()).toContain('重新检查')
     wrapper.unmount()
   })
 
@@ -1727,10 +1722,13 @@ describe('WorkspaceView', () => {
       const sourceRevision = workspace.currentRevision.value
       await wrapper.get('[data-action="accept-batch"]').trigger('click')
 
-      await wrapper.get('.top-actions .btn.primary').trigger('click')
+      const exportButton = wrapper.get<HTMLButtonElement>(
+        '[data-action="export-modified"]'
+      )
 
-      expect(wrapper.get('.toast').text()).toBe(
-        '存在重叠的已接受修改，请先解决冲突后再导出'
+      expect(exportButton.element.disabled).toBe(true)
+      expect(wrapper.get('.blocked-reason').text()).toContain(
+        '存在重叠的已接受修改'
       )
       expect(createObjectURL).not.toHaveBeenCalled()
       expect(anchorClick).not.toHaveBeenCalled()

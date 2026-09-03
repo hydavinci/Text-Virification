@@ -37,6 +37,7 @@ export type VerificationExecutionState =
 export interface UseVerificationExecutionDependencies {
   jobsApi: JobsApi
   verificationApi?: VerificationApi | null
+  fileExecutionMode?: 'direct' | 'jobs'
 }
 
 export type VerificationResultTransform = (
@@ -45,7 +46,8 @@ export type VerificationResultTransform = (
 
 export function useVerificationExecution({
   jobsApi,
-  verificationApi = null
+  verificationApi = null,
+  fileExecutionMode = 'direct'
 }: UseVerificationExecutionDependencies) {
   const state = ref<VerificationExecutionState>('idle')
   const result = ref<VerificationResult | null>(null)
@@ -183,7 +185,7 @@ export function useVerificationExecution({
     }
     try {
       const snapshot = createAnalyzeOptionsSnapshot(options)
-      if (verificationApi) {
+      if (verificationApi && fileExecutionMode === 'direct') {
         await runDirect(
           generation,
           () => verificationApi.analyzeFile(file, snapshot),

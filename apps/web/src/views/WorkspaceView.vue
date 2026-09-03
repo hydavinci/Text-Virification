@@ -6,17 +6,26 @@ import { verificationApiKey } from '../api/verification'
 import JobProgress from '../components/JobProgress.vue'
 import DocumentViewer from '../components/workspace/DocumentViewer.vue'
 import EditPreview from '../components/workspace/EditPreview.vue'
+import ExportPanel from '../components/workspace/ExportPanel.vue'
 import IssueList from '../components/workspace/IssueList.vue'
+import PrivacyDialog from '../components/workspace/PrivacyDialog.vue'
 import ReviewActions from '../components/workspace/ReviewActions.vue'
 import SearchReplacePanel from '../components/workspace/SearchReplacePanel.vue'
 import SourceInputPanel from '../components/workspace/SourceInputPanel.vue'
 import TerminologyEditor from '../components/workspace/TerminologyEditor.vue'
 import VerificationSettings from '../components/workspace/VerificationSettings.vue'
+import WorkspaceHeader from '../components/workspace/WorkspaceHeader.vue'
 import { useIssueNavigation } from '../composables/useIssueNavigation'
 import { useVerificationExecution } from '../composables/useVerificationExecution'
+import { useWorkspaceSession } from '../composables/useWorkspaceSession'
+import {
+  applyStoredWorkspaceTheme,
+  persistWorkspaceTheme
+} from '../composables/useWorkspaceTheme'
 import { useVerificationWorkspace } from '../composables/useVerificationWorkspace'
 import type {
   AnalyzeOptions,
+  DraftDocumentRevision,
   IssueState,
   VerificationIssue,
   VerificationResult
@@ -78,7 +87,15 @@ const resultTab = ref<'issues' | 'summary'>('issues')
 const textInput = ref('')
 const fileSource = ref<File | null>(null)
 const verificationWorkspace = useVerificationWorkspace()
-const execution = useVerificationExecution({ jobsApi, verificationApi })
+const workspaceSession = useWorkspaceSession(
+  window.sessionStorage,
+  verificationWorkspace
+)
+const execution = useVerificationExecution({
+  jobsApi,
+  verificationApi,
+  fileExecutionMode: 'jobs'
+})
 const result = computed(() => verificationWorkspace.result.value)
 const issueStates = verificationWorkspace.issueStates
 const selectedSuggestions = verificationWorkspace.selectedSuggestions
@@ -106,6 +123,8 @@ const showHelp = ref(false)
 const showPrivacy = ref(false)
 const segmentedView = ref(true)
 const showFindReplace = ref(false)
+const activeJobId = ref<string | null>(null)
+const isExporting = ref(false)
 const jobState = computed(() => {
   const job = execution.job.value
   const status = execution.jobStatus.value
@@ -161,6 +180,27 @@ const reviewActionsDisabled = computed(
     verificationWorkspace.requiresReverification.value ||
     verificationWorkspace.visibleIssues.value.length === 0
 )
+const exportBlockedReason = computed(() => {
+  if (verificationWorkspace.hasReplacementConflicts.value) {
+    return '存在重叠的已接受修改，请先解决冲突'
+  }
+  if (verificationWorkspace.requiresReverification.value) {
+    return '当前文本已修改，请重新检查后再导出'
+  }
+  return null
+})
+const statusAnnouncement = computed(() => {
+  if (execution.isActive.value) {
+    return execution.message.value || '正在执行文档检查'
+  }
+  if (toast.value) {
+    return toast.value
+  }
+  if (result.value) {
+    return `检查结果已就绪，共 ${result.value.summary.total} 项问题`
+  }
+  return '工作区已就绪'
+})
 
 async function handleUpload(file: File) {
   if (execution.isActive.value) {
@@ -310,6 +350,10 @@ async function exportReport() {
     notify('当前文本已修改，请重新检查后再导出报告')
     return
   }
+  if (verificationWorkspace.hasReplacementConflicts.value) {
+    notify('存在重叠的已接受修改，请先解决冲突后再导出')
+    return
+  }
   try {
     await verificationApi.exportReport(result.value)
   } catch (error) {
@@ -326,10 +370,30 @@ async function exportModified() {
     return
   }
   if (verificationWorkspace.requiresReverification.value) {
-    downloadText(
-      currentRevisionText.value,
-      `修改版_${result.value.filename.replace(/\.[^.]+$/, '')}.txt`
-    )
+    notify('当前文本已修改，请重新检查后再导出')
+    return
+  }
+  if (
+    result.value.execution_mode === 'asynchronous' &&
+    result.value.file_type === 'pdf'
+  ) {
+    if (!verificationApi || activeJobId.value === null) {
+      notify('异步文档缺少可验证的任务身份，无法导出')
+      return
+    }
+    isExporting.value = true
+    try {
+      const revisionId = await persistDraftRevisionChain(activeJobId.value)
+      await verificationApi.exportReconstruction(
+        activeJobId.value,
+        revisionId
+      )
+      notify('导出文件已生成')
+    } catch (error) {
+      notify(error instanceof Error ? error.message : '修改文件导出失败')
+    } finally {
+      isExporting.value = false
+    }
     return
   }
   if (!result.value.file_id || !verificationApi) {
@@ -393,6 +457,32 @@ async function exportModified() {
   }
 }
 
+async function persistDraftRevisionChain(
+  jobId: string
+): Promise<string | null> {
+  if (!verificationApi) {
+    throw new Error('修订持久化服务不可用')
+  }
+  const chain = [...verificationWorkspace.revisionChain.value]
+  for (const revision of chain) {
+    if (revision.persistence_state !== 'draft') {
+      continue
+    }
+    const persisted = await verificationApi.persistRevision(
+      jobId,
+      revision as DraftDocumentRevision
+    )
+    if (!verificationWorkspace.hydratePersistedRevision(persisted)) {
+      throw new Error('服务端修订与当前工作区不一致')
+    }
+  }
+  saveSession()
+  const current = verificationWorkspace.currentRevision.value
+  return current?.persistence_state === 'persisted'
+    ? current.revision_id
+    : null
+}
+
 function downloadText(text: string, filename: string) {
   const url = URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' }))
   const anchor = document.createElement('a')
@@ -412,7 +502,8 @@ function resetWorkspace() {
   fileSource.value = null
   textInput.value = ''
   analysisStep.value = 0
-  globalThis.sessionStorage?.removeItem('text-verification-session')
+  activeJobId.value = null
+  workspaceSession.clear()
 }
 
 function toggleTheme() {
@@ -421,8 +512,11 @@ function toggleTheme() {
 }
 
 function applyTheme() {
-  document.documentElement.dataset.theme = theme.value
-  globalThis.localStorage?.setItem('text-verification-theme', theme.value)
+  persistWorkspaceTheme(
+    theme.value,
+    window.localStorage,
+    document.documentElement
+  )
 }
 
 function notify(message: string) {
@@ -439,41 +533,41 @@ function saveSession() {
   if (!result.value) {
     return
   }
-  try {
-    globalThis.sessionStorage?.setItem(
-      'text-verification-session',
-      JSON.stringify({
-        version: 2,
-        result: result.value,
-        currentRevision: verificationWorkspace.currentRevision.value,
-        requiresReverification:
-          verificationWorkspace.requiresReverification.value,
-        issueStates: { ...issueStates.value },
-        selectedSuggestions: { ...selectedSuggestions.value }
-      })
-    )
-  } catch {
-    // Large documents may exceed sessionStorage; the active in-memory session remains usable.
-  }
+  workspaceSession.save({
+    options: currentOptions.value,
+    filters: {
+      layer: selectedLayer.value,
+      severity: selectedSeverity.value
+    },
+    viewMode: segmentedView.value ? 'sentence' : 'continuous',
+    ui: {
+      settingsTab: settingsTab.value,
+      resultTab: resultTab.value,
+      showFindReplace: showFindReplace.value,
+      trackChanges: trackChanges.value,
+      selectedIssueId: selectedIssueId.value
+    },
+    jobId: activeJobId.value
+  })
 }
 
 function restoreSession() {
-  const raw = globalThis.sessionStorage?.getItem('text-verification-session')
-  if (!raw) {
+  const restored = workspaceSession.restore()
+  if (restored === null) {
     return
   }
-  try {
-    const parsed: unknown = JSON.parse(raw)
-    if (!verificationWorkspace.restoreWorkspaceState(parsed)) {
-      throw new Error('Invalid workspace session')
-    }
-    if (verificationWorkspace.requiresReverification.value) {
-      invalidateSourceNavigation()
-    }
-  } catch {
-    verificationWorkspace.clearResult()
+  applyOptions(restored.options)
+  selectedLayer.value = restored.filters.layer
+  selectedSeverity.value = restored.filters.severity
+  segmentedView.value = restored.viewMode === 'sentence'
+  settingsTab.value = restored.ui.settingsTab
+  resultTab.value = restored.ui.resultTab
+  showFindReplace.value = restored.ui.showFindReplace
+  trackChanges.value = restored.ui.trackChanges
+  selectedIssueId.value = restored.ui.selectedIssueId
+  activeJobId.value = restored.jobId
+  if (verificationWorkspace.requiresReverification.value) {
     invalidateSourceNavigation()
-    globalThis.sessionStorage?.removeItem('text-verification-session')
   }
 }
 
@@ -510,6 +604,22 @@ watch(
 )
 
 watch(
+  [
+    () => currentOptions.value,
+    () => selectedLayer.value,
+    () => selectedSeverity.value,
+    () => segmentedView.value,
+    () => settingsTab.value,
+    () => resultTab.value,
+    () => showFindReplace.value,
+    () => trackChanges.value,
+    () => selectedIssueId.value
+  ],
+  saveSession,
+  { deep: true }
+)
+
+watch(
   [() => execution.state.value, () => execution.result.value],
   ([executionState, executionResult]) => {
     if (executionState === 'submitting') {
@@ -525,6 +635,7 @@ watch(
     }
     loadedExecutionResult = executionResult
     verificationWorkspace.loadResult(executionResult)
+    activeJobId.value = execution.job.value?.job_id ?? null
     invalidateSourceNavigation()
     resultTab.value = 'issues'
     showFindReplace.value = false
@@ -551,7 +662,10 @@ watch(
 )
 
 onMounted(() => {
-  theme.value = globalThis.localStorage?.getItem('text-verification-theme') === 'dark' ? 'dark' : 'light'
+  theme.value = applyStoredWorkspaceTheme(
+    window.localStorage,
+    document.documentElement
+  )
   applyTheme()
   restoreSession()
   document.addEventListener('keydown', handleKeyboard)
@@ -571,42 +685,54 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="shell">
-    <header class="topbar">
-      <button class="brand" type="button" @click="resetWorkspace">
-        <span class="brand-mark">啄</span>
-        <span>
-          <strong>啄木鸟</strong>
-          <small>中英文字智能检查</small>
-        </span>
-      </button>
-      <div class="top-actions">
-        <template v-if="result">
-          <button class="btn ghost" type="button" data-action="recheck" @click="recheck">重新检查</button>
-          <button
-            class="btn ghost"
-            type="button"
-            data-action="export-report"
-            :disabled="verificationWorkspace.requiresReverification.value"
-            @click="exportReport"
-          >
-            检查报告
-          </button>
-          <button class="btn primary" type="button" @click="exportModified">导出修改文件</button>
-          <label class="switch compact">
-            <input v-model="trackChanges" type="checkbox" />
-            <span>保留修订</span>
-          </label>
-          <small v-if="result.file_ext === 'pdf'" class="pdf-export-note">
-            PDF 原格式导出支持替换和删除，不支持纯插入
-          </small>
-        </template>
-        <button class="icon-btn" type="button" title="隐私政策" @click="showPrivacy = true">隐</button>
-        <button class="icon-btn" type="button" title="帮助" @click="showHelp = true">?</button>
-        <button class="icon-btn" type="button" title="切换主题" @click="toggleTheme">
-          {{ theme === 'light' ? '☾' : '☀' }}
-        </button>
-      </div>
-    </header>
+    <WorkspaceHeader
+      :theme="theme"
+      :has-result="result !== null"
+      @reset="resetWorkspace"
+      @open-privacy="showPrivacy = true"
+      @open-help="showHelp = true"
+      @toggle-theme="toggleTheme"
+    >
+      <template #exports>
+        <ExportPanel
+          :track-changes="trackChanges"
+          :report-disabled="exportBlockedReason !== null"
+          :modified-disabled="exportBlockedReason !== null"
+          :recheck-disabled="isAnalyzing"
+          :busy="isExporting"
+          :blocked-reason="exportBlockedReason"
+          @update:track-changes="trackChanges = $event"
+          @recheck="recheck"
+          @export-report="exportReport"
+          @export-modified="exportModified"
+        />
+        <small
+          v-if="result?.file_ext === 'pdf'"
+          class="pdf-export-note"
+        >
+          PDF 原格式导出支持替换和删除，不支持纯插入
+        </small>
+      </template>
+    </WorkspaceHeader>
+
+    <p
+      class="visually-hidden"
+      data-workspace-status
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+    >
+      {{ statusAnnouncement }}
+    </p>
+    <p
+      v-if="workspaceSession.warning.value"
+      class="session-warning"
+      data-session-warning
+      role="alert"
+      aria-live="assertive"
+    >
+      {{ workspaceSession.warning.value }}
+    </p>
 
     <main v-if="!result" class="landing">
       <section class="hero">
@@ -833,20 +959,14 @@ onBeforeUnmount(() => {
       </div>
     </main>
 
-    <div v-if="toast" class="toast" role="status">{{ toast }}</div>
-    <div v-if="showHelp || showPrivacy" class="modal-backdrop" @click.self="showHelp = showPrivacy = false">
-      <section class="modal">
-        <button class="modal-close" @click="showHelp = showPrivacy = false">×</button>
-        <template v-if="showPrivacy">
-          <h2>隐私政策</h2>
-          <p>上传文件仅用于执行文档检查和导出。服务端按任务隔离存储，并在保留期结束后自动清理。</p>
-          <p>启用云端语义复核时，仅发送规则命中位置附近的局部文本；未配置模型密钥时不会调用外部服务。</p>
-        </template>
-        <template v-else>
-          <h2>使用帮助</h2>
-          <p>选择文档场景和检查开关，可选配置术语表及禁用词，然后上传文件或粘贴文本。</p>
-          <p>检查完成后可逐条接受、忽略或撤销建议，并通过查找替换和原文编辑完成最终校订。</p>
-        </template>
+    <div v-if="toast" class="toast" role="status" aria-live="polite">{{ toast }}</div>
+    <PrivacyDialog :open="showPrivacy" @close="showPrivacy = false" />
+    <div v-if="showHelp" class="modal-backdrop" @click.self="showHelp = false">
+      <section class="modal" role="dialog" aria-modal="true" aria-labelledby="help-title">
+        <button class="modal-close" type="button" aria-label="关闭使用帮助" @click="showHelp = false">×</button>
+        <h2 id="help-title">使用帮助</h2>
+        <p>选择文档场景和检查开关，可选配置术语表及禁用词，然后上传文件或粘贴文本。</p>
+        <p>检查完成后可逐条接受、忽略或撤销建议，并通过查找替换和原文编辑完成最终校订。</p>
       </section>
     </div>
   </div>
@@ -986,6 +1106,25 @@ input:focus, select:focus { border-color: var(--primary); outline: 3px solid rgb
 }
 .execution-warning { border: 1px solid #f59e0b; color: #92400e; background: #fffbeb; }
 .execution-error { border: 1px solid #ef4444; color: #991b1b; background: #fef2f2; }
+.session-warning {
+  margin: 12px 18px 0;
+  padding: 10px 13px;
+  border: 1px solid #ef4444;
+  border-radius: 12px;
+  color: #991b1b;
+  background: #fef2f2;
+  font-size: 12px;
+}
+.visually-hidden {
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  position: absolute;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
 .review-toolbar, .find-panel { padding: 9px; display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
 .review-toolbar > div:first-child { display: flex; gap: 7px; }
 .find-panel { justify-content: flex-start; }

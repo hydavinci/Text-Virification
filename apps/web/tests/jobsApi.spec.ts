@@ -164,6 +164,56 @@ class FakeEventSource {
 }
 
 describe('createJobsApi', () => {
+  it('binds the default browser fetch receiver for job submission', async () => {
+    const originalFetch = globalThis.fetch
+    const strictFetch = vi.fn(async function (this: unknown) {
+      if (this !== globalThis) {
+        throw new TypeError('Illegal invocation')
+      }
+      return {
+        ok: true,
+        json: async () => ({
+          job_id: '6d96fe0f-f4fc-4b43-90fd-68e5bd09f21f',
+          source_name: 'sample.pdf',
+          file_type: 'pdf',
+          size_bytes: 3,
+          status: 'queued',
+          stage: 'queued',
+          progress: 0,
+          error_code: null,
+          error_message: null,
+          error_stage: null,
+          error_retryable: null,
+          created_at: '2026-09-03T04:00:00Z',
+          expires_at: '2026-09-04T04:00:00Z'
+        })
+      } as Response
+    })
+    Object.defineProperty(globalThis, 'fetch', {
+      configurable: true,
+      value: strictFetch
+    })
+    try {
+      const api = createJobsApi()
+
+      await api.createJob(new File(['pdf'], 'sample.pdf'), {
+        scenario: 'general',
+        enableSecurity: true,
+        enableSensitive: true,
+        enableAdExtreme: false,
+        glossary: [],
+        bannedWords: []
+      })
+
+      expect(strictFetch).toHaveBeenCalledTimes(1)
+    } finally {
+      Object.defineProperty(globalThis, 'fetch', {
+        configurable: true,
+        value: originalFetch
+      })
+    }
+  })
+
   it.each(ALL_JOB_FILE_TYPES)(
     'posts %s uploads with the exact immutable options contract',
     async (fileType) => {

@@ -265,3 +265,17 @@ export interface ExportReplacement {
   position: number
   end_position: number
 }
+
+export interface ExportArtifactReference {
+  export_artifact_id: string
+  job_id: string
+  verification_run_id: string
+  format: 'docx_reconstruction'
+  file_type: 'docx'
+  file_name: string
+  media_type: string
+  size_bytes: number
+  content_sha256: string
+  status: 'ready'
+  created_at: string
+}
