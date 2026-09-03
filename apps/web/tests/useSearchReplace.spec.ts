@@ -198,6 +198,48 @@ describe('useSearchReplace', () => {
     expect(onReplace).not.toHaveBeenCalled()
   })
 
+  it('safely rejects an oversized single-grapheme query', () => {
+    const onReplace = vi.fn()
+    const search = useSearchReplace({ text: () => 'a', onReplace })
+
+    search.query.value = `a${'\u0301'.repeat(150_000)}`
+
+    expect(search.matches.value).toEqual([])
+    expect(search.replaceAll()).toBe(false)
+    expect(onReplace).not.toHaveBeenCalled()
+  })
+
+  it('stops retaining a many-grapheme query when folding exceeds the limit', () => {
+    const originalNormalize = String.prototype.normalize
+    const normalizeSpy = vi
+      .spyOn(String.prototype, 'normalize')
+      .mockImplementation(function (
+        this: string,
+        form?: string
+      ) {
+        return originalNormalize.call(this, form)
+      })
+    const search = useSearchReplace({ text: () => 'office' })
+
+    try {
+      search.query.value = '\uFB03'.repeat(2_000)
+      expect(search.matches.value).toEqual([])
+      expect(normalizeSpy).toHaveBeenCalledTimes(2 * 1_366)
+    } finally {
+      normalizeSpy.mockRestore()
+    }
+  })
+
+  it('does not match inside a huge source grapheme or overflow the stack', () => {
+    const search = useSearchReplace({
+      text: () => `a${'\u0301'.repeat(150_000)}`
+    })
+
+    search.query.value = 'a'
+
+    expect(search.matches.value).toEqual([])
+  })
+
   it('folds every text and query grapheme exactly once', () => {
     const originalNormalize = String.prototype.normalize
     const normalizeSpy = vi

@@ -12,6 +12,8 @@ Fix round 3 was completed on 2026-09-03 from Task 4 fix-round-2 HEAD
 `85b5e4592a6d4cabaa8f2104084e4fa1ac7a6a2f`.
 Fix round 4 was completed on 2026-09-03 from Task 4 fix-round-3 HEAD
 `6212a58f4b798c23c1db5c1e89cee259341703a1`.
+Fix round 5 was completed on 2026-09-03 from Task 4 fix-round-4 HEAD
+`63860dece82c2bc1c4cf810408cb5dbb62c3997d`.
 
 ## Files
 
@@ -258,3 +260,45 @@ was included in fix round 3.
 
 No Task 5 result-loading/API work or Task 6 backend revision persistence work
 was included in fix round 4.
+
+## Fix round 5
+
+- Removed unbounded spread from both query and source folding. Folded grapheme
+  strings are now traversed code point by code point and appended iteratively,
+  so a single grapheme containing 150,000 combining marks cannot overflow the
+  JavaScript call stack.
+- Query folding enforces the 4,096-folded-code-point limit while consuming
+  each folded segment. It returns the existing no-match result before
+  appending a 4,097th code point and stops segmenting later query graphemes;
+  oversized single clusters and many-cluster expansions therefore have the
+  same safe behavior without invoking replacement callbacks.
+- Insensitive-query emptiness and grapheme code-point offsets no longer
+  allocate complete code-point arrays. Huge source clusters are still folded
+  linearly, with only full grapheme start/end mappings eligible for KMP
+  matches, so small queries cannot match a partial cluster.
+- Focused regressions cover a 150,000-combining-mark query, a 2,000-ligature
+  query whose fold crosses the limit after 1,366 graphemes, and a huge source
+  grapheme. Existing native/fallback, sigma, canonical reorder, expansion,
+  offset, and complexity coverage remains green.
+
+### Fix round 5 TDD and validation evidence
+
+- Search RED:
+  `npm test -- --run tests/useSearchReplace.spec.ts --reporter=dot` failed the
+  3 new regressions with 22 passing. The oversized query and huge source each
+  threw `RangeError: Maximum call stack size exceeded` at the corresponding
+  spread append, while the expansion query normalized all 2,000 graphemes
+  (4,000 calls) instead of stopping after 1,366 (2,732 calls).
+- Focused search GREEN: the same command passed 25 tests in 1 file.
+- Task 4/workspace GREEN:
+  `npm test -- --run tests/ReviewActions.spec.ts tests/SearchReplacePanel.spec.ts tests/EditPreview.spec.ts tests/useSearchReplace.spec.ts tests/useVerificationWorkspace.spec.ts tests/WorkspaceView.spec.ts --reporter=dot`
+  passed 200 tests across 6 files. Node emitted the existing experimental
+  `localStorage` warning.
+- Full frontend GREEN: `npm test -- --run --reporter=dot` passed 294 tests
+  across 14 files with the same existing warning.
+- Production build GREEN: `npm run build` passed `vue-tsc -b` and Vite 6.4.3
+  with 53 modules transformed.
+- `git diff --check` passed with no output.
+
+No Task 5 result-loading/API work or Task 6 backend revision persistence work
+was included in fix round 5.

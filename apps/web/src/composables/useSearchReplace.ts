@@ -42,27 +42,50 @@ function* segmentGraphemes(value: string): Generator<GraphemeSegment> {
   let start = 0
 
   for (const { segment } of segments) {
-    const end = start + Array.from(segment).length
+    let end = start
+    for (const _character of segment) {
+      end += 1
+    }
     yield { segment, start, end }
     start = end
   }
 }
 
-function foldSearchValue(value: string): string[] {
-  return Array.from(
-    value
-      .normalize('NFKD')
-      .toLocaleUpperCase('und')
-      .toLocaleLowerCase('und')
-      .normalize('NFKD')
-  )
+function foldSearchValue(value: string): string {
+  return value
+    .normalize('NFKD')
+    .toLocaleUpperCase('und')
+    .toLocaleLowerCase('und')
+    .normalize('NFKD')
 }
 
-function foldValueByGrapheme(value: string): string[] {
+function appendFoldedSearchValue(
+  characters: string[],
+  value: string,
+  maximumLength = Number.POSITIVE_INFINITY
+): boolean {
+  for (const character of foldSearchValue(value)) {
+    if (characters.length >= maximumLength) {
+      return false
+    }
+    characters.push(character)
+  }
+  return true
+}
+
+function foldValueByGrapheme(value: string): string[] | null {
   const characters: string[] = []
 
   for (const { segment } of segmentGraphemes(value)) {
-    characters.push(...foldSearchValue(segment))
+    if (
+      !appendFoldedSearchValue(
+        characters,
+        segment,
+        MAX_FOLDED_QUERY_LENGTH
+      )
+    ) {
+      return null
+    }
   }
 
   return characters
@@ -82,7 +105,7 @@ function foldTextByGrapheme(value: string): FoldedGraphemeText {
   for (const { segment, start, end } of segmentGraphemes(value)) {
     const foldedStart = characters.length
     originalStarts[foldedStart] = start
-    characters.push(...foldSearchValue(segment))
+    appendFoldedSearchValue(characters, segment)
     originalEnds[characters.length] = end
   }
 
@@ -172,13 +195,13 @@ export function useSearchReplace({
   const activeMatchIndex = ref(0)
 
   const matches = computed<readonly SearchMatch[]>(() => {
-    const queryCharacters = Array.from(query.value)
-    if (queryCharacters.length === 0) {
+    if (query.value.length === 0) {
       return Object.freeze([])
     }
 
     const originalText = toValue(text)
     if (caseSensitive.value) {
+      const queryCharacters = Array.from(query.value)
       const textCharacters = Array.from(originalText)
       const found: SearchMatch[] = []
       let start = 0
@@ -200,10 +223,7 @@ export function useSearchReplace({
     }
 
     const foldedQuery = foldValueByGrapheme(query.value)
-    if (
-      foldedQuery.length === 0 ||
-      foldedQuery.length > MAX_FOLDED_QUERY_LENGTH
-    ) {
+    if (foldedQuery === null || foldedQuery.length === 0) {
       return Object.freeze([])
     }
     return Object.freeze(

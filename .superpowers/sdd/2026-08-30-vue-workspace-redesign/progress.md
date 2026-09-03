@@ -917,3 +917,50 @@ startup failure in older browsers.
 Task 4: fix round 4/5 (2 addressed, 0 open — context-stable grapheme query
 folding and portable extended-grapheme segmentation; commit
 `fix: support portable grapheme search`)
+
+## Task 4 fix round 5 — 2026-09-03
+
+- Replaced both unbounded folded-array spread appends with iterative
+  code-point consumption of folded grapheme strings. Query and source paths
+  now handle a single grapheme with 150,000 combining marks without exhausting
+  the JavaScript argument stack.
+- Enforced `MAX_FOLDED_QUERY_LENGTH` while consuming each folded query segment.
+  The query path returns the existing safe no-match sentinel before retaining
+  or appending a 4,097th folded code point and does not fold later graphemes.
+  A single oversized cluster and many small expanding clusters therefore use
+  identical limit semantics and never publish replacement actions.
+- Counted source grapheme offsets iteratively and deferred code-point-array
+  construction to the case-sensitive branch. A huge source grapheme remains a
+  single mapped unit during linear folding and KMP, preventing a normal query
+  from matching only part of the cluster.
+- Added regressions for the 150,000-combining-mark query, a 2,000-ligature
+  expansion query that must stop after 1,366 folds, and a huge source grapheme.
+  Tests construct the large strings with `repeat` and do not spread them.
+
+### Task 4 fix round 5 TDD and validation evidence
+
+- Search RED:
+  `npm test -- --run tests/useSearchReplace.spec.ts --reporter=dot` failed 3
+  tests with 22 passing. Both huge single-grapheme paths threw
+  `RangeError: Maximum call stack size exceeded`; the many-grapheme query made
+  4,000 normalization calls rather than the bounded 2,732.
+- Focused search GREEN: the same command passed 25 tests in 1 file.
+- Task 4/workspace GREEN:
+  `npm test -- --run tests/ReviewActions.spec.ts tests/SearchReplacePanel.spec.ts tests/EditPreview.spec.ts tests/useSearchReplace.spec.ts tests/useVerificationWorkspace.spec.ts tests/WorkspaceView.spec.ts --reporter=dot`
+  passed 200 tests across 6 files. Node emitted the existing experimental
+  `localStorage` warning.
+- Full frontend GREEN: `npm test -- --run --reporter=dot` passed 294 tests
+  across 14 files with the same existing warning.
+- Production build GREEN: `npm run build` passed `vue-tsc -b` and Vite 6.4.3
+  with 53 modules transformed.
+- `git diff --check` passed with no output.
+
+Ruling: Grapheme folding may produce arbitrarily many code points, so neither
+query nor source append operations may use spread/apply. Query accumulation is
+bounded during folded-code-point iteration; source accumulation remains
+linear and preserves only complete-grapheme match boundaries. Cost if wrong
+would be either a stack overflow before the query guard or unsafe partial
+grapheme matches.
+
+Task 4: fix round 5/5 (1 addressed, 0 open — bounded iterative grapheme
+folding; commit `fix: bound oversized grapheme folding`)
