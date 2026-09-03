@@ -63,9 +63,9 @@ function buildWorkspaceIssue(
   overrides: Partial<VerificationIssue> = {}
 ): VerificationIssue {
   return {
-    issue_id: '33333333-3333-3333-3333-333333333333',
-    document_id: '11111111-1111-1111-1111-111111111111',
-    verification_run_id: '22222222-2222-2222-2222-222222222222',
+    issue_id: '33333333-3333-3333-8333-333333333333',
+    document_id: '11111111-1111-1111-8111-111111111111',
+    verification_run_id: '22222222-2222-2222-8222-222222222222',
     block_id: 'p-0',
     page: null,
     start: 0,
@@ -148,8 +148,8 @@ function buildWorkspaceResult(
     },
     file_id: null,
     file_ext: null,
-    document_id: '11111111-1111-1111-1111-111111111111',
-    verification_run_id: '22222222-2222-2222-2222-222222222222',
+    document_id: '11111111-1111-1111-8111-111111111111',
+    verification_run_id: '22222222-2222-2222-8222-222222222222',
     source_version: 'sha256:source',
     execution_mode: 'synchronous',
     analysis_mode: 'local_only',
@@ -181,8 +181,8 @@ function buildConflictIssues(
     buildWorkspaceIssue({
       issue_id:
         index === 0
-          ? '33333333-3333-3333-3333-333333333333'
-          : '44444444-4444-4444-4444-444444444444',
+          ? '33333333-3333-3333-8333-333333333333'
+          : '44444444-4444-4444-8444-444444444444',
       start: range.start,
       end: range.end,
       block_start: range.start,
@@ -198,6 +198,7 @@ function canonicalWorkspace(wrapper: ReturnType<typeof mount>) {
   return (
     wrapper.vm as unknown as {
       verificationWorkspace: {
+        result: { readonly value: VerificationResult | null }
         currentRevision: { readonly value: unknown }
         modifiedText: { readonly value: string }
         issueStates: {
@@ -223,7 +224,7 @@ describe('WorkspaceView', () => {
   it('connects source and issue-list selection through stable issue ids', async () => {
     const first = buildWorkspaceIssue()
     const second = buildWorkspaceIssue({
-      issue_id: '44444444-4444-4444-4444-444444444444',
+      issue_id: '44444444-4444-4444-8444-444444444444',
       start: 2,
       end: 4,
       block_start: 2,
@@ -779,6 +780,117 @@ describe('WorkspaceView', () => {
     wrapper.unmount()
   })
 
+  it('keeps accepted decisions and batch history when a search replacement is a no-op', async () => {
+    const issue = buildWorkspaceIssue({
+      start: 0,
+      end: 1,
+      block_start: 0,
+      block_end: 1,
+      original: '甲',
+      suggestion: 'A'
+    })
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const wrapper = mount(WorkspaceView, {
+      global: {
+        provide: {
+          [jobsApiKey as symbol]: {
+            createJob: vi.fn(),
+            subscribe: vi.fn(() => vi.fn())
+          },
+          [verificationApiKey as symbol]: {
+            analyzeFile: vi.fn(),
+            analyzeText: vi
+              .fn()
+              .mockResolvedValue(buildWorkspaceResult([issue])),
+            exportReport: vi.fn(),
+            exportOriginal: vi.fn()
+          }
+        }
+      }
+    })
+    wrapper
+      .getComponent(SourceInputPanel)
+      .vm.$emit('submit-text', '甲乙丙丁')
+    await flushPromises()
+    await wrapper.get('[data-action="accept-batch"]').trigger('click')
+    const workspace = canonicalWorkspace(wrapper)
+    const revision = workspace.currentRevision.value
+    const states = workspace.issueStates.value
+
+    await wrapper.get('[data-action="toggle-search-replace"]').trigger('click')
+    const search = wrapper.getComponent(SearchReplacePanel)
+    await search.get('[data-search-input]').setValue('甲')
+    await search.get('[data-replacement-input]').setValue('甲')
+    await search.get('[data-action="replace-current"]').trigger('click')
+    await flushPromises()
+
+    expect(workspace.currentRevision.value).toBe(revision)
+    expect(workspace.issueStates.value).toBe(states)
+    expect(workspace.canUndoLastBatch.value).toBe(true)
+    expect(workspace.requiresReverification.value).toBe(false)
+    expect(wrapper.find('.toast').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('never lets a stale free-edit draft overwrite a newer workspace revision', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const host = document.createElement('div')
+    document.body.append(host)
+    const wrapper = mount(WorkspaceView, {
+      attachTo: host,
+      global: {
+        provide: {
+          [jobsApiKey as symbol]: {
+            createJob: vi.fn(),
+            subscribe: vi.fn(() => vi.fn())
+          },
+          [verificationApiKey as symbol]: {
+            analyzeFile: vi.fn(),
+            analyzeText: vi
+              .fn()
+              .mockResolvedValue(buildWorkspaceResult([], 'same same')),
+            exportReport: vi.fn(),
+            exportOriginal: vi.fn()
+          }
+        }
+      }
+    })
+    wrapper.getComponent(SourceInputPanel).vm.$emit('submit-text', 'same same')
+    await flushPromises()
+    const editor = wrapper.getComponent(EditPreview)
+    await editor.get('[data-action="start-edit"]').trigger('click')
+    await editor.get('[data-edit-input]').setValue('stale draft')
+
+    await wrapper.get('[data-action="toggle-search-replace"]').trigger('click')
+    const search = wrapper.getComponent(SearchReplacePanel)
+    await search.get('[data-search-input]').setValue('same')
+    await search.get('[data-replacement-input]').setValue('new')
+    await search.get('[data-action="replace-current"]').trigger('click')
+    await flushPromises()
+
+    const workspace = canonicalWorkspace(wrapper)
+    expect(workspace.currentRevision.value).toMatchObject({
+      kind: 'manual',
+      text: 'new same'
+    })
+    expect(editor.get('[data-edit-status]').text()).toBe(
+      '文档已更新，请取消后重新编辑'
+    )
+    expect(
+      editor.get<HTMLButtonElement>('[data-action="save-edit"]').element
+        .disabled
+    ).toBe(true)
+    expect(editor.emitted('save')).toBeUndefined()
+
+    await editor.get('[data-action="cancel-edit"]').trigger('click')
+    expect(document.activeElement).toBe(
+      editor.get('[data-action="start-edit"]').element
+    )
+    expect(workspace.currentRevision.value).toMatchObject({ text: 'new same' })
+    wrapper.unmount()
+    host.remove()
+  })
+
   it('saves, serializes, and restores a free edit as the only post-edit text source', async () => {
     const issue = buildWorkspaceIssue()
     const payload = buildWorkspaceResult([issue])
@@ -890,6 +1002,172 @@ describe('WorkspaceView', () => {
     wrapper.unmount()
   })
 
+  it('disables and guards report export while the current revision needs rechecking', async () => {
+    const exportReport = vi.fn()
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const wrapper = mount(WorkspaceView, {
+      global: {
+        provide: {
+          [jobsApiKey as symbol]: {
+            createJob: vi.fn(),
+            subscribe: vi.fn(() => vi.fn())
+          },
+          [verificationApiKey as symbol]: {
+            analyzeFile: vi.fn(),
+            analyzeText: vi
+              .fn()
+              .mockResolvedValue(buildWorkspaceResult([], '原始文本')),
+            exportReport,
+            exportOriginal: vi.fn()
+          }
+        }
+      }
+    })
+    wrapper.getComponent(SourceInputPanel).vm.$emit('submit-text', '原始文本')
+    await flushPromises()
+    const editor = wrapper.getComponent(EditPreview)
+    await editor.get('[data-action="start-edit"]').trigger('click')
+    await editor.get('[data-edit-input]').setValue('已修改文本')
+    await editor.get('[data-action="save-edit"]').trigger('click')
+    await flushPromises()
+
+    expect(
+      wrapper.get<HTMLButtonElement>('[data-action="export-report"]').element
+        .disabled
+    ).toBe(true)
+    await (
+      wrapper.vm as unknown as { exportReport: () => Promise<void> }
+    ).exportReport()
+
+    expect(exportReport).not.toHaveBeenCalled()
+    expect(wrapper.get('.toast').text()).toBe(
+      '当前文本已修改，请重新检查后再导出报告'
+    )
+    wrapper.unmount()
+  })
+
+  it('keeps a rechecked manual revision text-sourced and never reuses the old binary export', async () => {
+    const original = buildWorkspaceResult([], '原始文件文本', {
+      filename: 'original.docx',
+      source_name: 'original.docx',
+      file_type: 'docx',
+      file_id: '66666666-6666-4666-8666-666666666666',
+      file_ext: 'docx'
+    })
+    const checked = buildWorkspaceResult([], '手工修改文本', {
+      filename: 'direct.txt',
+      source_name: 'direct.txt',
+      file_type: 'txt',
+      file_id: null,
+      file_ext: null,
+      document_id: '77777777-7777-4777-8777-777777777777',
+      verification_run_id: '88888888-8888-4888-8888-888888888888',
+      source_version: 'sha256:rechecked'
+    })
+    const analyzeText = vi
+      .fn()
+      .mockResolvedValueOnce(original)
+      .mockResolvedValueOnce(checked)
+    const exportOriginal = vi.fn()
+    let exportedBlob: Blob | null = null
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: vi.fn((blob: Blob) => {
+        exportedBlob = blob
+        return 'blob:rechecked'
+      })
+    })
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      value: vi.fn()
+    })
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const wrapper = mount(WorkspaceView, {
+      global: {
+        provide: {
+          [jobsApiKey as symbol]: {
+            createJob: vi.fn(),
+            subscribe: vi.fn(() => vi.fn())
+          },
+          [verificationApiKey as symbol]: {
+            analyzeFile: vi.fn(),
+            analyzeText,
+            exportReport: vi.fn(),
+            exportOriginal
+          }
+        }
+      }
+    })
+    wrapper
+      .getComponent(SourceInputPanel)
+      .vm.$emit('submit-text', '原始文件文本')
+    await flushPromises()
+    const editor = wrapper.getComponent(EditPreview)
+    await editor.get('[data-action="start-edit"]').trigger('click')
+    await editor.get('[data-edit-input]').setValue('手工修改文本')
+    await editor.get('[data-action="save-edit"]').trigger('click')
+    await wrapper.get('[data-action="recheck"]').trigger('click')
+    await flushPromises()
+
+    const restoredResult = canonicalWorkspace(wrapper).result.value
+    expect(restoredResult).toMatchObject({
+      filename: 'original.docx',
+      file_id: null,
+      file_ext: null,
+      text: '手工修改文本'
+    })
+
+    await wrapper.get('.top-actions .btn.primary').trigger('click')
+    expect(exportOriginal).not.toHaveBeenCalled()
+    expect(exportedBlob).not.toBeNull()
+    wrapper.unmount()
+  })
+
+  it('removes a malformed stored session without exposing a partial result', async () => {
+    const payload = buildWorkspaceResult([buildWorkspaceIssue()])
+    const saved = {
+      version: 2,
+      result: JSON.parse(JSON.stringify(payload)),
+      currentRevision: {
+        revision_id: null,
+        document_id: payload.document_id,
+        verification_run_id: payload.verification_run_id,
+        source_version: payload.source_version,
+        revision_number: null,
+        created_at: null,
+        parent_revision_id: null,
+        persistence_state: 'source',
+        kind: 'source',
+        text: payload.text
+      },
+      requiresReverification: false,
+      issueStates: {},
+      selectedSuggestions: {}
+    }
+    delete saved.result.blocks[0].source_locator
+    sessionStorage.setItem(
+      'text-verification-session',
+      JSON.stringify(saved)
+    )
+    const wrapper = mount(WorkspaceView, {
+      global: {
+        provide: {
+          [jobsApiKey as symbol]: {
+            createJob: vi.fn(),
+            subscribe: vi.fn(() => vi.fn())
+          }
+        }
+      }
+    })
+    await flushPromises()
+
+    expect(sessionStorage.getItem('text-verification-session')).toBeNull()
+    expect(canonicalWorkspace(wrapper).result.value).toBeNull()
+    expect(wrapper.find('[data-current-revision]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it('accepts an overlapping batch atomically and undoes the exact batch', async () => {
     const payload = buildWorkspaceResult(
       buildConflictIssues('crossing'),
@@ -954,7 +1232,7 @@ describe('WorkspaceView', () => {
       suggestion: 'A'
     })
     const second = buildWorkspaceIssue({
-      issue_id: '44444444-4444-4444-4444-444444444444',
+      issue_id: '44444444-4444-4444-8444-444444444444',
       start: 2,
       end: 3,
       block_start: 2,
@@ -1120,7 +1398,7 @@ describe('WorkspaceView', () => {
       context: 'abcd'
     })
     const second = buildWorkspaceIssue({
-      issue_id: '44444444-4444-4444-4444-444444444444',
+      issue_id: '44444444-4444-4444-8444-444444444444',
       start: 2,
       end: 3,
       block_start: 2,

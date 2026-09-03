@@ -31,93 +31,6 @@ interface JobProgressState {
   connectionMessage: string | null
 }
 
-interface WorkspaceSessionV2 {
-  version: 2
-  result: VerificationResult
-  currentRevision: unknown
-  requiresReverification: boolean
-  issueStates: unknown
-  selectedSuggestions: unknown
-}
-
-interface LegacyWorkspaceSession {
-  result: VerificationResult
-  workingText: string
-  issueStates: unknown
-  selectedSuggestions: unknown
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function isVerificationResultSnapshot(
-  value: unknown
-): value is VerificationResult {
-  if (!isRecord(value)) {
-    return false
-  }
-  return (
-    value.success === true &&
-    typeof value.filename === 'string' &&
-    typeof value.source_name === 'string' &&
-    typeof value.file_type === 'string' &&
-    typeof value.text === 'string' &&
-    Array.isArray(value.blocks) &&
-    value.blocks.every(isRecord) &&
-    typeof value.parser_name === 'string' &&
-    typeof value.parser_version === 'string' &&
-    isRecord(value.stats) &&
-    Array.isArray(value.issues) &&
-    value.issues.every(isRecord) &&
-    isRecord(value.summary) &&
-    (typeof value.file_id === 'string' || value.file_id === null) &&
-    (typeof value.file_ext === 'string' || value.file_ext === null) &&
-    typeof value.document_id === 'string' &&
-    typeof value.verification_run_id === 'string' &&
-    typeof value.source_version === 'string' &&
-    typeof value.execution_mode === 'string' &&
-    typeof value.analysis_mode === 'string' &&
-    isRecord(value.dictionary_versions) &&
-    isRecord(value.degradation) &&
-    typeof value.scenario === 'string'
-  )
-}
-
-function isWorkspaceSessionV2(value: unknown): value is WorkspaceSessionV2 {
-  return (
-    isRecord(value) &&
-    value.version === 2 &&
-    isVerificationResultSnapshot(value.result) &&
-    typeof value.requiresReverification === 'boolean' &&
-    'currentRevision' in value &&
-    'issueStates' in value &&
-    'selectedSuggestions' in value
-  )
-}
-
-function isLegacyWorkspaceSession(
-  value: unknown
-): value is LegacyWorkspaceSession {
-  return (
-    isRecord(value) &&
-    !('version' in value) &&
-    isVerificationResultSnapshot(value.result) &&
-    typeof value.workingText === 'string' &&
-    'issueStates' in value &&
-    'selectedSuggestions' in value
-  )
-}
-
-function workspaceSession(
-  value: unknown
-): WorkspaceSessionV2 | LegacyWorkspaceSession | null {
-  if (isWorkspaceSessionV2(value) || isLegacyWorkspaceSession(value)) {
-    return value
-  }
-  return null
-}
-
 const layers = [
   { id: 'character', name: '字符层', icon: 'A文', color: '#ef4444' },
   { id: 'vocabulary', name: '词汇层', icon: '词', color: '#f97316' },
@@ -494,14 +407,11 @@ async function recheck() {
     fileSource.value = null
     await runAnalysis(async () => {
       const checked = await verificationApi.analyzeText(textInput.value, currentOptions.value)
-      if (!source.file_id) {
-        return checked
-      }
       return {
         ...checked,
         filename: source.filename,
-        file_id: source.file_id,
-        file_ext: source.file_ext
+        file_id: null,
+        file_ext: null
       }
     })
   } finally {
@@ -511,6 +421,10 @@ async function recheck() {
 
 async function exportReport() {
   if (!verificationApi || !result.value) {
+    return
+  }
+  if (verificationWorkspace.requiresReverification.value) {
+    notify('当前文本已修改，请重新检查后再导出报告')
     return
   }
   try {
@@ -665,37 +579,17 @@ function restoreSession() {
   }
   try {
     const parsed: unknown = JSON.parse(raw)
-    const saved = workspaceSession(parsed)
-    if (saved === null) {
+    if (!verificationWorkspace.restoreWorkspaceState(parsed)) {
       throw new Error('Invalid workspace session')
     }
-    verificationWorkspace.loadResult(saved.result)
     result.value = verificationWorkspace.result.value
-    if ('version' in saved) {
-      verificationWorkspace.restoreWorkspaceState({
-        documentId: saved.result.document_id,
-        verificationRunId: saved.result.verification_run_id,
-        sourceVersion: saved.result.source_version,
-        issueStates: saved.issueStates,
-        selectedSuggestions: saved.selectedSuggestions,
-        requiresReverification: saved.requiresReverification,
-        currentRevision: saved.currentRevision
-      })
-    } else if (saved.workingText !== saved.result.text) {
-      verificationWorkspace.saveManualEdit(saved.workingText)
-    } else {
-      verificationWorkspace.restoreReviewState({
-        documentId: saved.result.document_id,
-        verificationRunId: saved.result.verification_run_id,
-        sourceVersion: saved.result.source_version,
-        issueStates: saved.issueStates,
-        selectedSuggestions: saved.selectedSuggestions
-      })
-    }
     if (verificationWorkspace.requiresReverification.value) {
       invalidateSourceNavigation()
     }
   } catch {
+    verificationWorkspace.clearResult()
+    result.value = null
+    invalidateSourceNavigation()
     globalThis.sessionStorage?.removeItem('text-verification-session')
   }
 }
@@ -783,8 +677,16 @@ onBeforeUnmount(() => {
       </button>
       <div class="top-actions">
         <template v-if="result">
-          <button class="btn ghost" type="button" @click="recheck">重新检查</button>
-          <button class="btn ghost" type="button" @click="exportReport">检查报告</button>
+          <button class="btn ghost" type="button" data-action="recheck" @click="recheck">重新检查</button>
+          <button
+            class="btn ghost"
+            type="button"
+            data-action="export-report"
+            :disabled="verificationWorkspace.requiresReverification.value"
+            @click="exportReport"
+          >
+            检查报告
+          </button>
           <button class="btn primary" type="button" @click="exportModified">导出修改文件</button>
           <label class="switch compact">
             <input v-model="trackChanges" type="checkbox" />

@@ -13,12 +13,16 @@ const emit = defineEmits<{
 const editing = ref(false)
 const previewing = ref(false)
 const draft = ref(props.text)
+const baseText = ref(props.text)
+const conflicted = ref(false)
 const status = ref('')
 const editor = ref<HTMLTextAreaElement | null>(null)
 const startButton = ref<HTMLButtonElement | null>(null)
 
 async function startEdit(): Promise<void> {
+  baseText.value = props.text
   draft.value = props.text
+  conflicted.value = false
   status.value = ''
   previewing.value = false
   editing.value = true
@@ -34,18 +38,25 @@ async function finishEditing(): Promise<void> {
 
 async function cancelEdit(): Promise<void> {
   draft.value = props.text
+  conflicted.value = false
   status.value = '已取消编辑'
   await finishEditing()
 }
 
 async function saveEdit(): Promise<void> {
+  if (conflicted.value) {
+    status.value = '文档已更新，请取消后重新编辑'
+    await nextTick()
+    editor.value?.focus()
+    return
+  }
   if (draft.value.trim().length === 0) {
     status.value = '内容不能为空'
     await nextTick()
     editor.value?.focus()
     return
   }
-  if (draft.value === props.text) {
+  if (draft.value === baseText.value) {
     status.value = '内容未发生变化'
     await finishEditing()
     return
@@ -63,9 +74,15 @@ function togglePreview(): void {
 watch(
   () => props.text,
   (text) => {
-    if (!editing.value) {
-      draft.value = text
+    if (editing.value) {
+      if (text !== baseText.value) {
+        conflicted.value = true
+        status.value = '文档已更新，请取消后重新编辑'
+      }
+      return
     }
+    draft.value = text
+    baseText.value = text
   }
 )
 </script>
@@ -87,6 +104,7 @@ watch(
         class="accept"
         type="button"
         data-action="save-edit"
+        :disabled="conflicted"
         @click="saveEdit"
       >
         保存编辑
@@ -165,6 +183,11 @@ button {
   cursor: pointer;
   font-size: 12px;
   font-weight: 700;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 button.accept {

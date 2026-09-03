@@ -9,15 +9,15 @@ import type {
   VerificationResult
 } from '../src/types/verification'
 
-const documentId = '11111111-1111-1111-1111-111111111111'
-const runId = '22222222-2222-2222-2222-222222222222'
+const documentId = '11111111-1111-1111-8111-111111111111'
+const runId = '22222222-2222-2222-8222-222222222222'
 const sourceVersion = 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 const uuidPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
 function buildIssue(overrides: Partial<VerificationIssue> = {}): VerificationIssue {
   return {
-    issue_id: '33333333-3333-3333-3333-333333333333',
+    issue_id: '33333333-3333-3333-8333-333333333333',
     document_id: documentId,
     verification_run_id: runId,
     block_id: 'p-0',
@@ -124,6 +124,36 @@ function buildResult(
       reasons: []
     },
     scenario: 'general',
+    ...overrides
+  }
+}
+
+function sourceRevisionFor(result: VerificationResult) {
+  return {
+    revision_id: null,
+    document_id: result.document_id,
+    verification_run_id: result.verification_run_id,
+    source_version: result.source_version,
+    revision_number: null,
+    created_at: null,
+    parent_revision_id: null,
+    persistence_state: 'source',
+    kind: 'source',
+    text: result.text
+  }
+}
+
+function buildSessionV2(
+  result: VerificationResult,
+  overrides: Record<string, unknown> = {}
+) {
+  return {
+    version: 2,
+    result,
+    currentRevision: sourceRevisionFor(result),
+    requiresReverification: false,
+    issueStates: {},
+    selectedSuggestions: {},
     ...overrides
   }
 }
@@ -1668,6 +1698,26 @@ describe('useVerificationWorkspace', () => {
     expect(workspace.modifiedText.value).toBe('手工修改后的全文')
   })
 
+  it('treats a manual edit equal to the current revision as a defensive no-op', () => {
+    const issue = buildIssue()
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(buildResult([issue]))
+    workspace.acceptIssues([issue.issue_id])
+    const revision = workspace.currentRevision.value
+    const states = workspace.issueStates.value
+
+    expect(workspace.canUndoLastBatch.value).toBe(true)
+    expect(workspace.saveManualEdit(revision?.text ?? '')).toBeNull()
+
+    expect(workspace.currentRevision.value).toBe(revision)
+    expect(workspace.issueStates.value).toBe(states)
+    expect(workspace.issueStates.value).toEqual({
+      [issue.issue_id]: 'accepted'
+    })
+    expect(workspace.requiresReverification.value).toBe(false)
+    expect(workspace.canUndoLastBatch.value).toBe(true)
+  })
+
   it('parents each manual draft to the current authored revision', () => {
     const workspace = useVerificationWorkspace()
     workspace.loadResult(buildResult([buildIssue()]))
@@ -1702,17 +1752,14 @@ describe('useVerificationWorkspace', () => {
       JSON.stringify(original.currentRevision.value)
     )
 
+    const result = buildResult([issue])
     const restored = useVerificationWorkspace()
-    restored.loadResult(buildResult([issue]))
-    restored.restoreWorkspaceState({
-      documentId,
-      verificationRunId: runId,
-      sourceVersion,
+    expect(restored.restoreWorkspaceState(buildSessionV2(result, {
       issueStates: { [issue.issue_id]: 'accepted' },
       selectedSuggestions: { [issue.issue_id]: '陈旧建议' },
       requiresReverification: true,
       currentRevision: savedRevision
-    })
+    }))).toBe(true)
 
     expect(restored.currentRevision.value).toEqual(savedRevision)
     expect(restored.currentRevision.value).not.toBe(savedRevision)
@@ -1728,13 +1775,9 @@ describe('useVerificationWorkspace', () => {
   it('rejects a manual session revision from a different stable identity', () => {
     const issue = buildIssue()
     const workspace = useVerificationWorkspace()
-    workspace.loadResult(buildResult([issue]))
-    const source = workspace.currentRevision.value
+    const result = buildResult([issue])
 
-    workspace.restoreWorkspaceState({
-      documentId,
-      verificationRunId: runId,
-      sourceVersion,
+    expect(workspace.restoreWorkspaceState(buildSessionV2(result, {
       issueStates: {},
       selectedSuggestions: {},
       requiresReverification: true,
@@ -1750,23 +1793,18 @@ describe('useVerificationWorkspace', () => {
         kind: 'manual',
         text: '不属于当前文档'
       }
-    })
+    }))).toBe(false)
 
-    expect(workspace.currentRevision.value).toBe(source)
-    expect(workspace.requiresReverification.value).toBe(false)
-    expect(workspace.visibleIssues.value).toEqual([issue])
+    expect(workspace.result.value).toBeNull()
+    expect(workspace.currentRevision.value).toBeNull()
   })
 
   it('rejects a restored manual draft with a non-UUID revision identity', () => {
     const issue = buildIssue()
     const workspace = useVerificationWorkspace()
-    workspace.loadResult(buildResult([issue]))
-    const source = workspace.currentRevision.value
+    const result = buildResult([issue])
 
-    workspace.restoreWorkspaceState({
-      documentId,
-      verificationRunId: runId,
-      sourceVersion,
+    expect(workspace.restoreWorkspaceState(buildSessionV2(result, {
       issueStates: {},
       selectedSuggestions: {},
       requiresReverification: true,
@@ -1782,10 +1820,292 @@ describe('useVerificationWorkspace', () => {
         kind: 'manual',
         text: '不可信修订'
       }
+    }))).toBe(false)
+
+    expect(workspace.result.value).toBeNull()
+  })
+
+  it('atomically restores a valid source snapshot', () => {
+    const result = buildResult([buildIssue()])
+    const workspace = useVerificationWorkspace()
+
+    expect(workspace.restoreWorkspaceState(buildSessionV2(result))).toBe(true)
+
+    expect(workspace.result.value).toEqual(result)
+    expect(workspace.currentRevision.value).toEqual(sourceRevisionFor(result))
+    expect(workspace.requiresReverification.value).toBe(false)
+    expect(workspace.canUndoLastBatch.value).toBe(false)
+  })
+
+  it('atomically restores and preserves a valid review draft identity', () => {
+    const issue = buildIssue()
+    const result = buildResult([issue])
+    const revisionId = '55555555-5555-4555-8555-555555555555'
+    const workspace = useVerificationWorkspace()
+
+    expect(workspace.restoreWorkspaceState(buildSessionV2(result, {
+      issueStates: { [issue.issue_id]: 'accepted' },
+      currentRevision: {
+        revision_id: revisionId,
+        document_id: documentId,
+        verification_run_id: runId,
+        source_version: sourceVersion,
+        revision_number: null,
+        created_at: '2026-09-03T02:00:00.000Z',
+        parent_revision_id: null,
+        persistence_state: 'draft',
+        kind: 'review',
+        text: '甲B丙丁'
+      }
+    }))).toBe(true)
+
+    expect(workspace.currentRevision.value).toMatchObject({
+      revision_id: revisionId,
+      kind: 'review',
+      text: '甲B丙丁'
+    })
+    expect(workspace.issueStates.value).toEqual({
+      [issue.issue_id]: 'accepted'
+    })
+    expect(workspace.requiresReverification.value).toBe(false)
+  })
+
+  it('restores a valid accepted-range conflict without publishing a partial revision', () => {
+    const first = buildIssue({
+      issue_id: '40000000-0000-4000-8000-000000000001',
+      start: 0,
+      end: 3,
+      block_start: 0,
+      block_end: 3,
+      original: 'abc',
+      suggestion: 'X',
+      context: 'abcdef'
+    })
+    const second = buildIssue({
+      issue_id: '40000000-0000-4000-8000-000000000002',
+      start: 2,
+      end: 5,
+      block_start: 2,
+      block_end: 5,
+      original: 'cde',
+      suggestion: 'Y',
+      context: 'abcdef'
+    })
+    const result = buildResult([first, second], { text: 'abcdef' })
+    const workspace = useVerificationWorkspace()
+
+    expect(workspace.restoreWorkspaceState(buildSessionV2(result, {
+      issueStates: {
+        [first.issue_id]: 'accepted',
+        [second.issue_id]: 'accepted'
+      }
+    }))).toBe(true)
+
+    expect(workspace.hasReplacementConflicts.value).toBe(true)
+    expect(workspace.currentRevision.value).toEqual(sourceRevisionFor(result))
+    expect(workspace.modifiedText.value).toBe('abcdef')
+  })
+
+  it('preserves the last valid review revision when restored decisions now conflict', () => {
+    const first = buildIssue({
+      issue_id: '40000000-0000-4000-8000-000000000001',
+      start: 0,
+      end: 3,
+      block_start: 0,
+      block_end: 3,
+      original: 'abc',
+      suggestion: 'X',
+      context: 'abcdef'
+    })
+    const second = buildIssue({
+      issue_id: '40000000-0000-4000-8000-000000000002',
+      start: 2,
+      end: 5,
+      block_start: 2,
+      block_end: 5,
+      original: 'cde',
+      suggestion: 'Y',
+      context: 'abcdef'
+    })
+    const result = buildResult([first, second], { text: 'abcdef' })
+    const revisionId = '55555555-5555-4555-8555-555555555555'
+    const workspace = useVerificationWorkspace()
+
+    expect(workspace.restoreWorkspaceState(buildSessionV2(result, {
+      issueStates: {
+        [first.issue_id]: 'accepted',
+        [second.issue_id]: 'accepted'
+      },
+      currentRevision: {
+        revision_id: revisionId,
+        document_id: documentId,
+        verification_run_id: runId,
+        source_version: sourceVersion,
+        revision_number: null,
+        created_at: '2026-09-03T02:00:00.000Z',
+        parent_revision_id: null,
+        persistence_state: 'draft',
+        kind: 'review',
+        text: 'Xdef'
+      }
+    }))).toBe(true)
+
+    expect(workspace.hasReplacementConflicts.value).toBe(true)
+    expect(workspace.currentRevision.value).toMatchObject({
+      revision_id: revisionId,
+      text: 'Xdef'
+    })
+    expect(workspace.modifiedText.value).toBe('Xdef')
+  })
+
+  it('fully validates legacy sessions before one atomic migration', () => {
+    const issue = buildIssue()
+    const result = buildResult([issue])
+    const reviewWorkspace = useVerificationWorkspace()
+    const manualWorkspace = useVerificationWorkspace()
+
+    expect(reviewWorkspace.restoreWorkspaceState({
+      result,
+      workingText: result.text,
+      issueStates: { [issue.issue_id]: 'accepted' },
+      selectedSuggestions: { [issue.issue_id]: '' }
+    })).toBe(true)
+    expect(reviewWorkspace.currentRevision.value).toMatchObject({
+      kind: 'review',
+      text: '甲丙丁'
     })
 
-    expect(workspace.currentRevision.value).toBe(source)
-    expect(workspace.requiresReverification.value).toBe(false)
+    expect(manualWorkspace.restoreWorkspaceState({
+      result,
+      workingText: '旧会话手工文本',
+      issueStates: { [issue.issue_id]: 'accepted' },
+      selectedSuggestions: { [issue.issue_id]: '陈旧建议' }
+    })).toBe(true)
+    expect(manualWorkspace.currentRevision.value).toMatchObject({
+      kind: 'manual',
+      text: '旧会话手工文本'
+    })
+    expect(manualWorkspace.issueStates.value).toEqual({})
+    expect(manualWorkspace.requiresReverification.value).toBe(true)
+  })
+
+  it.each([
+    ['shallow block', (saved: any) => {
+      delete saved.result.blocks[0].source_locator
+    }],
+    ['invalid document UUID', (saved: any) => {
+      saved.result.document_id = 'not-a-uuid'
+    }],
+    ['invalid run UUID', (saved: any) => {
+      saved.result.verification_run_id = 'not-a-uuid'
+    }],
+    ['invalid file UUID', (saved: any) => {
+      saved.result.file_id = 'file-1'
+    }],
+    ['invalid issue ownership UUID', (saved: any) => {
+      saved.result.issues[0].document_id =
+        'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    }],
+    ['invalid result discriminant', (saved: any) => {
+      saved.result.execution_mode = 'sometimes'
+    }],
+    ['invalid issue discriminant', (saved: any) => {
+      saved.result.issues[0].severity = 'critical'
+    }],
+    ['invalid timestamp', (saved: any) => {
+      saved.requiresReverification = true
+      saved.currentRevision = {
+        revision_id: '55555555-5555-4555-8555-555555555555',
+        document_id: documentId,
+        verification_run_id: runId,
+        source_version: sourceVersion,
+        revision_number: null,
+        created_at: '2026-09-03',
+        parent_revision_id: null,
+        persistence_state: 'draft',
+        kind: 'manual',
+        text: '手工文本'
+      }
+    }],
+    ['self parent', (saved: any) => {
+      saved.requiresReverification = true
+      saved.currentRevision = {
+        revision_id: '55555555-5555-4555-8555-555555555555',
+        document_id: documentId,
+        verification_run_id: runId,
+        source_version: sourceVersion,
+        revision_number: null,
+        created_at: '2026-09-03T02:00:00.000Z',
+        parent_revision_id: '55555555-5555-4555-8555-555555555555',
+        persistence_state: 'draft',
+        kind: 'manual',
+        text: '手工文本'
+      }
+    }],
+    ['invalid revision discriminant', (saved: any) => {
+      saved.currentRevision.persistence_state = 'temporary'
+    }],
+    ['invalid persisted number', (saved: any) => {
+      saved.currentRevision = {
+        revision_id: '55555555-5555-4555-8555-555555555555',
+        document_id: documentId,
+        verification_run_id: runId,
+        source_version: sourceVersion,
+        revision_number: 0,
+        created_at: '2026-09-03T02:00:00.000Z',
+        parent_revision_id: null,
+        persistence_state: 'persisted',
+        kind: 'review',
+        text: '甲乙丙丁'
+      }
+    }]
+  ])('rejects an untrusted %s session without partial publication', (_label, mutate) => {
+    const result = buildResult([buildIssue()])
+    const saved: any = JSON.parse(JSON.stringify(buildSessionV2(result)))
+    mutate(saved)
+    const workspace = useVerificationWorkspace()
+
+    expect(workspace.restoreWorkspaceState(saved)).toBe(false)
+    expect(workspace.result.value).toBeNull()
+    expect(workspace.currentRevision.value).toBeNull()
+    expect(workspace.issueStates.value).toEqual({})
+  })
+
+  it('leaves an existing workspace unchanged when atomic session preparation fails', () => {
+    const issue = buildIssue()
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(buildResult([issue]))
+    workspace.acceptIssue(issue.issue_id)
+    const priorResult = workspace.result.value
+    const priorRevision = workspace.currentRevision.value
+    const priorStates = workspace.issueStates.value
+    const invalid = JSON.parse(
+      JSON.stringify(buildSessionV2(buildResult([issue])))
+    )
+    invalid.result.blocks[0].kind = 'unknown'
+
+    expect(workspace.restoreWorkspaceState(invalid)).toBe(false)
+    expect(workspace.result.value).toBe(priorResult)
+    expect(workspace.currentRevision.value).toBe(priorRevision)
+    expect(workspace.issueStates.value).toBe(priorStates)
+  })
+
+  it('prunes hostile stable state keys without prototype pollution', () => {
+    const result = buildResult([buildIssue()])
+    const saved = JSON.parse(
+      JSON.stringify(buildSessionV2(result))
+        .replace('"issueStates":{}', '"issueStates":{"__proto__":"accepted"}')
+        .replace(
+          '"selectedSuggestions":{}',
+          '"selectedSuggestions":{"constructor":"poison"}'
+        )
+    )
+    const workspace = useVerificationWorkspace()
+
+    expect(workspace.restoreWorkspaceState(saved)).toBe(true)
+    expect(workspace.issueStates.value).toEqual({})
+    expect(workspace.selectedSuggestions.value).toEqual({})
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined()
   })
 
   it('distinguishes a non-persisted source from a serializable draft without inventing a number', () => {

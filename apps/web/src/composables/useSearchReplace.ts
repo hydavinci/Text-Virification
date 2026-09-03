@@ -21,10 +21,56 @@ interface UseSearchReplaceOptions {
   onReplace?: (text: string, replacement: SearchReplacement) => void
 }
 
-const caseInsensitiveCollator = new Intl.Collator('und', {
-  usage: 'search',
-  sensitivity: 'accent'
-})
+interface FoldedSearchBuffer {
+  characters: readonly string[]
+  originalBoundaryByFoldedOffset: ReadonlyMap<number, number>
+}
+
+function foldCodePoint(character: string): string[] {
+  return Array.from(
+    character
+      .normalize('NFKD')
+      .toLocaleUpperCase('und')
+      .toLocaleLowerCase('und')
+      .normalize('NFKD')
+  )
+}
+
+function foldSearchValue(value: string): FoldedSearchBuffer {
+  const characters: string[] = []
+  const originalBoundaryByFoldedOffset = new Map<number, number>()
+  const originalCharacters = Array.from(value)
+
+  for (let index = 0; index < originalCharacters.length; index += 1) {
+    originalBoundaryByFoldedOffset.set(characters.length, index)
+    characters.push(...foldCodePoint(originalCharacters[index]))
+  }
+  originalBoundaryByFoldedOffset.set(
+    characters.length,
+    originalCharacters.length
+  )
+
+  return {
+    characters,
+    originalBoundaryByFoldedOffset
+  }
+}
+
+function foldedMatchAt(
+  haystack: readonly string[],
+  needle: readonly string[],
+  start: number
+): boolean {
+  if (start + needle.length > haystack.length) {
+    return false
+  }
+  for (let offset = 0; offset < needle.length; offset += 1) {
+    if (haystack[start + offset] !== needle[offset]) {
+      return false
+    }
+  }
+  return true
+}
 
 export function useSearchReplace({
   text,
@@ -43,23 +89,57 @@ export function useSearchReplace({
 
     const textCharacters = Array.from(toValue(text))
     const found: SearchMatch[] = []
-    let start = 0
-    while (start + queryCharacters.length <= textCharacters.length) {
-      const candidate = textCharacters
-        .slice(start, start + queryCharacters.length)
-        .join('')
-      const isMatch = caseSensitive.value
-        ? candidate === query.value
-        : caseInsensitiveCollator.compare(candidate, query.value) === 0
-      if (isMatch) {
-        found.push({
-          start,
-          end: start + queryCharacters.length
-        })
-        start += queryCharacters.length
-      } else {
-        start += 1
+    if (caseSensitive.value) {
+      let start = 0
+      while (start + queryCharacters.length <= textCharacters.length) {
+        const candidate = textCharacters
+          .slice(start, start + queryCharacters.length)
+          .join('')
+        if (candidate === query.value) {
+          found.push({
+            start,
+            end: start + queryCharacters.length
+          })
+          start += queryCharacters.length
+        } else {
+          start += 1
+        }
       }
+      return Object.freeze(found.map((match) => Object.freeze(match)))
+    }
+
+    const foldedText = foldSearchValue(toValue(text))
+    const foldedQuery = foldSearchValue(query.value).characters
+    if (foldedQuery.length === 0) {
+      return Object.freeze([])
+    }
+    let foldedStart = 0
+    while (
+      foldedStart + foldedQuery.length <=
+      foldedText.characters.length
+    ) {
+      if (
+        !foldedMatchAt(
+          foldedText.characters,
+          foldedQuery,
+          foldedStart
+        )
+      ) {
+        foldedStart += 1
+        continue
+      }
+
+      const foldedEnd = foldedStart + foldedQuery.length
+      const originalStart =
+        foldedText.originalBoundaryByFoldedOffset.get(foldedStart)
+      const originalEnd =
+        foldedText.originalBoundaryByFoldedOffset.get(foldedEnd)
+      if (originalStart === undefined || originalEnd === undefined) {
+        foldedStart += 1
+        continue
+      }
+      found.push({ start: originalStart, end: originalEnd })
+      foldedStart = foldedEnd
     }
     return Object.freeze(found.map((match) => Object.freeze(match)))
   })
@@ -109,6 +189,9 @@ export function useSearchReplace({
       replacement.value,
       ...characters.slice(match.end)
     ].join('')
+    if (nextText === toValue(text)) {
+      return false
+    }
     onReplace(nextText, { kind: 'current', count: 1 })
     activeMatchIndex.value = 0
     return true
@@ -130,7 +213,11 @@ export function useSearchReplace({
       cursor = match.end
     }
     segments.push(characters.slice(cursor).join(''))
-    onReplace(segments.join(''), {
+    const nextText = segments.join('')
+    if (nextText === toValue(text)) {
+      return false
+    }
+    onReplace(nextText, {
       kind: 'all',
       count: currentMatches.length
     })

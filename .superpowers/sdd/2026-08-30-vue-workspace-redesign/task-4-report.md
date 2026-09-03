@@ -4,6 +4,8 @@
 
 Completed on 2026-09-03 from base
 `8bd4e6bfd61f526c23763380a2af85622234aacd`.
+Independent review findings were fixed on 2026-09-03 from Task 4 HEAD
+`b4964e9293bb1654d8ab30b41043784eab35de9b`.
 
 ## Files
 
@@ -69,3 +71,42 @@ Completed on 2026-09-03 from base
 
 No Task 5 result-loading/API changes or Task 6 backend revision persistence
 were implemented.
+
+## Independent review fixes
+
+- Replaced fixed-code-point-window collation with deterministic per-code-point
+  NFKD and locale-stable case folding. Folded boundaries map back to original
+  code-point ranges, supporting ligatures, sharp-s, and composed/decomposed
+  equivalents while rejecting half-expansion matches.
+- Made identical replace-current, replace-all, and manual-edit operations true
+  no-ops. They create no revision, notification, decision reset, or undo reset.
+- Added immutable edit-base tracking. A prop/revision change during editing
+  marks a conflict, disables save, preserves the newer revision, and requires
+  cancel/reopen with focus restoration.
+- Replaced shallow staged session restoration with one canonical atomic
+  `restoreWorkspaceState` path. It constructs fresh deeply frozen result,
+  block, issue, metadata, revision, and null-prototype map values; validates
+  UUIDs, enums, discriminants, timestamps, ownership, revision ancestry, and
+  source/review/manual consistency; preserves valid draft identities; migrates
+  legacy sessions atomically; and commits refs only after complete success.
+- Disabled and defensively guarded report export while re-verification is
+  required.
+- Rechecks now retain only a safe display filename. They explicitly clear old
+  `file_id` and `file_ext`, so later modified export uses the text fallback and
+  cannot target the old binary.
+
+## Independent review TDD and validation evidence
+
+- Pre-fix focused baseline passed 108 tests across
+  `useSearchReplace`, `EditPreview`, `useVerificationWorkspace`, and
+  `WorkspaceView`.
+- Initial review RED failed 30 tests with 106 passing. Failures covered
+  length-changing folds, expansion boundaries, replacement/manual no-ops,
+  stale drafts, atomic untrusted restore, report gating, and recheck identity.
+- Conflict-history RED failed 1 test with 84 passing before restoration was
+  updated to preserve the last valid review revision under newly conflicting
+  decisions.
+- Final focused, full-suite, build, and whitespace evidence is recorded in the
+  Task 4 independent-review section of `progress.md`.
+
+No Task 5 or Task 6 implementation was included in the fix wave.

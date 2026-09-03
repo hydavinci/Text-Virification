@@ -84,4 +84,32 @@ describe('EditPreview', () => {
     wrapper.unmount()
     host.remove()
   })
+
+  it('blocks a stale draft when the current revision changes during editing', async () => {
+    const { host, wrapper } = mountEditor()
+
+    await wrapper.get('[data-action="start-edit"]').trigger('click')
+    await wrapper.get('[data-edit-input]').setValue('基于旧修订的草稿')
+    await wrapper.setProps({ text: '并发产生的新修订' })
+
+    expect(wrapper.get('[data-edit-status]').text()).toBe(
+      '文档已更新，请取消后重新编辑'
+    )
+    expect(
+      wrapper.get<HTMLButtonElement>('[data-action="save-edit"]').element
+        .disabled
+    ).toBe(true)
+    expect(wrapper.emitted('save')).toBeUndefined()
+
+    await wrapper.get('[data-action="cancel-edit"]').trigger('click')
+    expect(document.activeElement).toBe(
+      wrapper.get('[data-action="start-edit"]').element
+    )
+    await wrapper.get('[data-action="start-edit"]').trigger('click')
+    expect(
+      wrapper.get<HTMLTextAreaElement>('[data-edit-input]').element.value
+    ).toBe('并发产生的新修订')
+    wrapper.unmount()
+    host.remove()
+  })
 })

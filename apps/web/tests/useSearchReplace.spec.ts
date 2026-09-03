@@ -45,6 +45,70 @@ describe('useSearchReplace', () => {
     ])
   })
 
+  it('maps length-changing Unicode folds back to original code-point ranges', () => {
+    const ligatures = useSearchReplace({ text: () => 'oﬃce office' })
+    ligatures.query.value = 'office'
+    expect(ligatures.matches.value).toEqual([
+      { start: 0, end: 4 },
+      { start: 5, end: 11 }
+    ])
+    ligatures.query.value = 'oﬃce'
+    expect(ligatures.matches.value).toEqual([
+      { start: 0, end: 4 },
+      { start: 5, end: 11 }
+    ])
+
+    const sharpS = useSearchReplace({ text: () => 'Straße STRASSE' })
+    sharpS.query.value = 'STRASSE'
+    expect(sharpS.matches.value).toEqual([
+      { start: 0, end: 6 },
+      { start: 7, end: 14 }
+    ])
+    sharpS.query.value = 'Straße'
+    expect(sharpS.matches.value).toEqual([
+      { start: 0, end: 6 },
+      { start: 7, end: 14 }
+    ])
+  })
+
+  it('matches composed and decomposed equivalents in both directions', () => {
+    const search = useSearchReplace({ text: () => 'é e\u0301' })
+
+    search.query.value = 'e\u0301'
+    expect(search.matches.value).toEqual([
+      { start: 0, end: 1 },
+      { start: 2, end: 4 }
+    ])
+
+    search.query.value = 'é'
+    expect(search.matches.value).toEqual([
+      { start: 0, end: 1 },
+      { start: 2, end: 4 }
+    ])
+  })
+
+  it('rejects matches ending inside a folded expansion and keeps exact case-sensitive matching', () => {
+    const search = useSearchReplace({ text: () => 'ﬃ ffi' })
+
+    search.query.value = 'f'
+    expect(search.matches.value).toEqual([
+      { start: 2, end: 3 },
+      { start: 3, end: 4 }
+    ])
+
+    search.query.value = 'fi'
+    expect(search.matches.value).toEqual([{ start: 3, end: 5 }])
+
+    search.query.value = 'ffi'
+    expect(search.matches.value).toEqual([
+      { start: 0, end: 1 },
+      { start: 2, end: 5 }
+    ])
+
+    search.caseSensitive.value = true
+    expect(search.matches.value).toEqual([{ start: 2, end: 5 }])
+  })
+
   it('cycles previous and next navigation at document boundaries', () => {
     const search = useSearchReplace({ text: () => 'a-a-a' })
     search.query.value = 'a'
@@ -94,5 +158,18 @@ describe('useSearchReplace', () => {
       kind: 'all',
       count: 2
     })
+  })
+
+  it('does not publish replace-current or replace-all actions when text is unchanged', () => {
+    const text = ref('same same')
+    const onReplace = vi.fn()
+    const search = useSearchReplace({ text, onReplace })
+    search.query.value = 'same'
+    search.replacement.value = 'same'
+
+    expect(search.replaceCurrent()).toBe(false)
+    expect(search.replaceAll()).toBe(false)
+    expect(onReplace).not.toHaveBeenCalled()
+    expect(search.activeMatchIndex.value).toBe(0)
   })
 })

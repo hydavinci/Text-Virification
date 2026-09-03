@@ -669,3 +669,86 @@ re-verification-required draft intentionally falls back to a UTF-8 text
 download of the current revision even when the original file is available —
 this is functional and offset-safe, but does not claim original-format
 persistence.
+
+## Task 4 independent review fixes — 2026-09-03
+
+- Case-insensitive search now folds each original code point with NFKD plus
+  stable `und` locale case transforms, searches the folded code-point buffer,
+  accepts only folded ranges whose ends map to original boundaries, and maps
+  accepted matches back to original code-point offsets. Ligature, sharp-s,
+  canonical-equivalence, both-direction, and half-expansion regressions are
+  covered. Case-sensitive matching remains exact.
+- Replace-current and replace-all compare the complete next text before
+  publishing. `saveManualEdit` independently rejects text equal to the current
+  revision, preserving accepted decisions, explicit suggestions, revision
+  identity, and batch undo history.
+- `EditPreview` captures an immutable base text at edit start. A changed text
+  prop marks a deterministic conflict and disables save until cancel/reopen;
+  stale drafts cannot overwrite newer search/manual revisions, and cancel
+  restores focus.
+- Session JSON is handled only by the composable's atomic restore boundary.
+  It builds fresh result, block, issue, PDF/OCR metadata, stable state, and
+  revision values; uses null-prototype records for untrusted maps; validates
+  UUIDs, ownership, enums, nested fields, canonical ranges, timestamps,
+  source/draft/persisted discriminants, parent identity, and state/revision
+  consistency; deep-freezes the graph; and commits every internal ref only
+  after complete success.
+- Valid source, review, manual, conflict, and legacy states restore atomically.
+  Valid draft UUIDs are retained, conflicting decisions retain the last valid
+  source/review revision, explicit null/empty suggestions survive, hostile keys
+  are pruned, batch undo is cleared, and invalid snapshots publish no partial
+  result. `WorkspaceView` removes invalid storage and clears its workspace.
+- Report export is disabled and guarded while re-verification is required,
+  with one deterministic notification for programmatic invocation.
+- Rechecking authored text never copies the prior binary `file_id` or
+  `file_ext`; only the display filename is retained. Subsequent modified export
+  uses the safe text fallback and never calls original-format export.
+
+### Task 4 independent review TDD and validation evidence
+
+- Focused pre-fix baseline:
+  `npm test -- --run tests/useSearchReplace.spec.ts tests/EditPreview.spec.ts tests/useVerificationWorkspace.spec.ts tests/WorkspaceView.spec.ts --reporter=dot`
+  passed 108 tests across 4 files.
+- Initial RED: the same command failed 30 tests with 106 passing across 4
+  failing files.
+- Intermediate focused GREEN passed 136 tests across the same 4 files.
+- Conflict-history RED:
+  `npm test -- --run tests/useVerificationWorkspace.spec.ts --reporter=dot`
+  failed 1 test with 84 passing; focused GREEN then passed all 85 tests.
+- Final focused workflow GREEN:
+  `npm test -- --run tests/ReviewActions.spec.ts tests/SearchReplacePanel.spec.ts tests/EditPreview.spec.ts tests/useSearchReplace.spec.ts tests/useVerificationWorkspace.spec.ts tests/WorkspaceView.spec.ts --reporter=dot`
+  passed 144 tests across 6 files.
+- Full frontend GREEN: `npm test -- --run --reporter=dot` passed 238 tests
+  across 14 files. Node emitted the existing experimental `localStorage`
+  warning.
+- Production build GREEN: `npm run build` passed `vue-tsc -b` and Vite 6.4.3
+  with 50 modules transformed.
+- `git diff --check` passed with no output.
+
+Ruling: Length-changing insensitive search uses compatibility decomposition
+and an uppercase-then-lowercase `und` transform per original code point.
+Matches are literal in the folded buffer but valid only at original
+code-point boundaries — this supports required Unicode equivalences without
+offset drift or half-expansion replacement; cost if wrong is compatibility
+folding treating a small set of presentation distinctions as equivalent only
+in insensitive mode.
+
+Ruling: Session restoration is a prepare-then-commit transaction owned by
+`useVerificationWorkspace`. `WorkspaceView` only parses JSON, delegates the
+untrusted value, and publishes its local result after success — this prevents
+any valid-looking outer envelope from exposing a partially loaded source;
+cost if wrong is a larger explicit runtime validator at the canonical state
+boundary.
+
+Ruling: A conflict snapshot may retain a structurally valid source or review
+revision because conflict creation deliberately keeps the last valid revision;
+a manual revision remains incompatible with `requiresReverification: false`.
+Cost if wrong is trusting the validated authored review text when prior
+decision history is not serialized, necessary to restore the existing
+last-valid-revision rule.
+
+Ruling: Rechecking current authored text starts a new text-sourced result even
+when the display filename came from a prior upload. The old binary identity is
+never attached to the new run — this prevents stale original-format export;
+cost if wrong is text fallback export after recheck until Task 6 persists a
+new binary-backed revision.
