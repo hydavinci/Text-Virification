@@ -29,6 +29,15 @@ class ScriptedReservationRepository:
     read_error: Exception | None = None
     commit_calls: int = 0
     rollback_calls: int = 0
+    current_snapshot: object | None = None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.reservation, application.ArtifactReservation):
+            values = asdict(self.reservation)
+            self.current_snapshot = application.ArtifactSnapshot(
+                **values,
+                ready_at=None,
+            )
 
     def reserve_export_artifact(self, **values: object):
         del values
@@ -45,7 +54,41 @@ class ScriptedReservationRepository:
             self.after_consistency()
         if self.finalize_error is not None:
             raise self.finalize_error
+        self.current_snapshot = self.ready_snapshot
         return self.ready_snapshot
+
+    def authorize_export_artifact_publication(
+        self,
+        reservation,
+        *,
+        publish,
+    ):
+        snapshot = self.current_snapshot
+        if (
+            not isinstance(snapshot, application.ArtifactSnapshot)
+            or snapshot.status is not reservation.status
+            or snapshot.reservation_version != reservation.reservation_version
+        ):
+            return None
+        return publish()
+
+    def compensate_pending_export_artifact(
+        self,
+        reservation,
+        *,
+        delete_file,
+    ) -> bool:
+        snapshot = self.current_snapshot
+        if (
+            not isinstance(snapshot, application.ArtifactSnapshot)
+            or snapshot.status is not application.ArtifactLifecycleStatus.PENDING
+            or snapshot.reservation_version != reservation.reservation_version
+        ):
+            return False
+        if not delete_file():
+            return False
+        self.current_snapshot = None
+        return True
 
     def read_export_artifact(self, export_artifact_id):
         del export_artifact_id
@@ -65,11 +108,14 @@ class ScriptedReservationRepository:
 def _repository_factory(
     *repositories: ScriptedReservationRepository,
 ):
-    remaining = iter(repositories)
+    index = 0
 
     @contextmanager
     def factory() -> Iterator[ScriptedReservationRepository]:
-        yield next(remaining)
+        nonlocal index
+        repository = repositories[min(index, len(repositories) - 1)]
+        index += 1
+        yield repository
 
     return factory
 
@@ -184,7 +230,7 @@ def test_artifact_service_reserves_publishes_finalizes_and_commits(
     assert result.size_bytes == len(request.data)
     assert len(result.content_sha256) == 64
     assert result.created is True
-    assert repository.commit_calls == 2
+    assert repository.commit_calls == 3
     assert repository.rollback_calls == 0
 
 
@@ -214,7 +260,7 @@ def test_reservation_rejection_occurs_before_filesystem_publication(
     assert repository.rollback_calls == 1
 
 
-def test_finalize_failure_compensates_new_file_but_keeps_pending_reservation(
+def test_finalize_failure_compensates_new_file_and_owned_pending_reservation(
     tmp_path: Path,
 ) -> None:
     storage = JobStorage(tmp_path, max_upload_bytes=1024)
@@ -231,7 +277,7 @@ def test_finalize_failure_compensates_new_file_but_keeps_pending_reservation(
         ).persist(request)
 
     assert not (tmp_path / request.storage_key).exists()
-    assert repository.commit_calls == 1
+    assert repository.commit_calls == 3
     assert repository.rollback_calls == 1
 
 
@@ -310,6 +356,15 @@ def test_stale_repair_request_does_not_unlink_another_requests_ready_artifact(
             assert new_revision_committed.is_set()
             return ArtifactFinalizationRejection.STALE_REVISION
 
+        def authorize_export_artifact_publication(
+            self,
+            prepared,
+            *,
+            publish,
+        ):
+            assert prepared == reservation
+            return publish()
+
         def commit(self) -> None:
             return None
 
@@ -346,12 +401,140 @@ def test_stale_repair_request_does_not_unlink_another_requests_ready_artifact(
     assert ready.status is application.ArtifactLifecycleStatus.READY
 
 
+@pytest.mark.parametrize("ready_writer", ["creator", "adopter"])
+def test_stale_creator_compensation_preserves_an_adopted_ready_inode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ready_writer: str,
+) -> None:
+    storage = JobStorage(tmp_path, max_upload_bytes=1024)
+    request = _request()
+    digest = sha256(request.data).hexdigest()
+    reservation, ready = _reservation_and_snapshot(
+        request,
+        status=application.ArtifactLifecycleStatus.READY,
+        digest=digest,
+    )
+    creator_opened = Event()
+    adopter_opened = Event()
+    first_finalized = Event()
+    allow_creator = Event()
+    real_publish = storage.publish_verified_artifact
+
+    @contextmanager
+    def interleaved_publish(*args, **kwargs):
+        with real_publish(*args, **kwargs) as handle:
+            if handle.created:
+                creator_opened.set()
+                if ready_writer == "adopter":
+                    if not allow_creator.wait(timeout=3):
+                        raise TimeoutError("timed out waiting for adopter finalization")
+                else:
+                    if not adopter_opened.wait(timeout=3):
+                        raise TimeoutError("timed out waiting for adopter publication")
+            else:
+                adopter_opened.set()
+                if ready_writer == "creator" and not first_finalized.wait(timeout=3):
+                    raise TimeoutError("timed out waiting for creator finalization")
+            yield handle
+
+    monkeypatch.setattr(
+        storage,
+        "publish_verified_artifact",
+        interleaved_publish,
+    )
+
+    class InterleavedRepository:
+        finalize_calls = 0
+        status = application.ArtifactLifecycleStatus.PENDING
+
+        def finalize_export_artifact(self, prepared, **values):
+            assert prepared == reservation
+            values["consistency_check"]()
+            self.finalize_calls += 1
+            if self.finalize_calls == 1:
+                self.status = application.ArtifactLifecycleStatus.READY
+                first_finalized.set()
+                return ready
+            return ArtifactFinalizationRejection.STALE_REVISION
+
+        def authorize_export_artifact_publication(
+            self,
+            prepared,
+            *,
+            publish,
+        ):
+            assert prepared == reservation
+            return publish()
+
+        def compensate_pending_export_artifact(
+            self,
+            prepared,
+            *,
+            delete_file,
+        ) -> bool:
+            assert prepared == reservation
+            if self.status is not application.ArtifactLifecycleStatus.PENDING:
+                return False
+            return delete_file()
+
+        def commit(self) -> None:
+            return None
+
+        def rollback(self) -> None:
+            return None
+
+    repository = InterleavedRepository()
+
+    @contextmanager
+    def repository_factory():
+        yield repository
+
+    service = application.ArtifactPersistenceService(
+        storage,
+        repository_factory,
+        require_current_result=True,
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        creator = executor.submit(
+            service.persist,
+            request,
+            reservation=reservation,
+        )
+        assert creator_opened.wait(timeout=2)
+        adopter = executor.submit(
+            service.persist,
+            request,
+            reservation=reservation,
+        )
+        assert adopter_opened.wait(timeout=2)
+        if ready_writer == "adopter":
+            adopter_result = adopter.result(timeout=5)
+            allow_creator.set()
+            stale = creator
+        else:
+            creator_result = creator.result(timeout=5)
+            stale = adopter
+        with pytest.raises(application.ArtifactFinalizationRejectedError):
+            stale.result(timeout=5)
+
+    ready_result = (
+        creator_result
+        if ready_writer == "creator"
+        else adopter_result
+    )
+    assert ready_result.created is (ready_writer == "creator")
+    assert (tmp_path / request.storage_key).read_bytes() == request.data
+    assert ready.status is application.ArtifactLifecycleStatus.READY
+
+
 def test_finalize_commit_succeeded_then_raised_is_proven_ready(
     tmp_path: Path,
 ) -> None:
     storage = JobStorage(tmp_path, max_upload_bytes=1024)
     request = _request()
-    primary = _scripted_repository(request, commit_error_on_call=2)
+    primary = _scripted_repository(request, commit_error_on_call=3)
     fresh = _scripted_repository(
         request,
         read_status=application.ArtifactLifecycleStatus.READY,
@@ -359,7 +542,7 @@ def test_finalize_commit_succeeded_then_raised_is_proven_ready(
 
     result = application.ArtifactPersistenceService(
         storage,
-        _repository_factory(primary, primary, fresh),
+        _repository_factory(primary, primary, primary, fresh),
     ).persist(request)
 
     assert result.storage_key == request.storage_key
@@ -372,7 +555,7 @@ def test_finalize_commit_failed_before_commit_compensates_pending(
 ) -> None:
     storage = JobStorage(tmp_path, max_upload_bytes=1024)
     request = _request()
-    primary = _scripted_repository(request, commit_error_on_call=2)
+    primary = _scripted_repository(request, commit_error_on_call=3)
     fresh = _scripted_repository(
         request,
         read_status=application.ArtifactLifecycleStatus.PENDING,
@@ -381,7 +564,7 @@ def test_finalize_commit_failed_before_commit_compensates_pending(
     with pytest.raises(RuntimeError, match="commit outcome unknown"):
         application.ArtifactPersistenceService(
             storage,
-            _repository_factory(primary, primary, fresh),
+            _repository_factory(primary, primary, primary, fresh),
         ).persist(request)
 
     assert not (tmp_path / request.storage_key).exists()
@@ -397,7 +580,7 @@ def test_unprovable_finalize_commit_retains_file_and_reservation(
 ) -> None:
     storage = JobStorage(tmp_path, max_upload_bytes=1024)
     request = _request()
-    primary = _scripted_repository(request, commit_error_on_call=2)
+    primary = _scripted_repository(request, commit_error_on_call=3)
     fresh = _scripted_repository(
         request,
         read_status=application.ArtifactLifecycleStatus.READY,
@@ -407,7 +590,7 @@ def test_unprovable_finalize_commit_retains_file_and_reservation(
     with pytest.raises(application.ArtifactReconciliationRequiredError):
         application.ArtifactPersistenceService(
             storage,
-            _repository_factory(primary, primary, fresh),
+            _repository_factory(primary, primary, primary, fresh),
         ).persist(request)
 
     assert (tmp_path / request.storage_key).read_bytes() == request.data
@@ -419,14 +602,14 @@ def test_failed_outcome_probe_raises_typed_reconciliation_error(
 ) -> None:
     storage = JobStorage(tmp_path, max_upload_bytes=1024)
     request = _request()
-    primary = _scripted_repository(request, commit_error_on_call=2)
+    primary = _scripted_repository(request, commit_error_on_call=3)
     fresh = _scripted_repository(request)
     fresh.read_error = RuntimeError("database unavailable")
 
     with pytest.raises(application.ArtifactReconciliationRequiredError):
         application.ArtifactPersistenceService(
             storage,
-            _repository_factory(primary, primary, fresh),
+            _repository_factory(primary, primary, primary, fresh),
         ).persist(request)
 
     assert (tmp_path / request.storage_key).read_bytes() == request.data

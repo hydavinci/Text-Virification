@@ -155,6 +155,7 @@ function verificationApi(
   return {
     analyzeFile: vi.fn(),
     analyzeText: vi.fn(),
+    recheckJob: vi.fn(),
     exportReport: vi.fn(),
     exportOriginal: vi.fn(),
     persistRevision: vi.fn(),
@@ -444,9 +445,13 @@ describe('WorkspaceView Task 6 integration', () => {
         persistence_state: 'persisted' as const
       }))
       const exportJob = vi.fn()
+      const recheckGrant = 'server-issued-opaque-grant'
       const wrapper = mountWorkspace(
         verificationApi({
-          analyzeText: vi.fn().mockResolvedValue(checked),
+          recheckJob: vi.fn().mockResolvedValue({
+            result: checked,
+            grant: recheckGrant
+          }),
           persistRevision,
           exportJob
         })
@@ -490,7 +495,14 @@ describe('WorkspaceView Task 6 integration', () => {
           parent_revision_id: null,
           kind: 'manual',
           text: '手工修改文本'
-        })
+        }),
+        {
+          grant: recheckGrant,
+          result_document_id: checked.document_id,
+          result_verification_run_id: checked.verification_run_id,
+          result_source_version: checked.source_version,
+          recheck_text: checked.text
+        }
       )
       const persistedDraft = persistRevision.mock.calls[0]?.[1]
       expect(exportJob).toHaveBeenCalledWith(
@@ -498,7 +510,14 @@ describe('WorkspaceView Task 6 integration', () => {
         expectedFormat,
         persistedDraft?.revision_id,
         true,
-        expect.any(Function)
+        expect.any(Function),
+        {
+          grant: recheckGrant,
+          result_document_id: checked.document_id,
+          result_verification_run_id: checked.verification_run_id,
+          result_source_version: checked.source_version,
+          recheck_text: checked.text
+        }
       )
     }
   )
@@ -549,7 +568,10 @@ describe('WorkspaceView Task 6 integration', () => {
     const exportJob = vi.fn()
     const wrapper = mountWorkspace(
       verificationApi({
-        analyzeText: vi.fn().mockResolvedValue(unrelated),
+        recheckJob: vi.fn().mockResolvedValue({
+          result: unrelated,
+          grant: 'server-issued-opaque-grant'
+        }),
         persistRevision,
         exportJob
       })

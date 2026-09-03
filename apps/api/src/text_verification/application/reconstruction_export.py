@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from bisect import bisect_right
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -18,6 +19,11 @@ from text_verification.application.artifact_service import (
     ArtifactRepositoryFactory,
 )
 from text_verification.application.errors import VerificationError
+from text_verification.application.recheck_provenance import (
+    RecheckGrantBinding,
+    RecheckGrantError,
+    RecheckProvenanceGrantService,
+)
 from text_verification.compatibility.exporters import ExportError
 from text_verification.domain.artifacts import (
     ArtifactFinalizationRejection,
@@ -39,13 +45,13 @@ from text_verification.domain.text_edits import (
     MAX_REVISION_TEXT_UTF8_BYTES,
     MAX_TEXT_DIFF_WORK,
     MAX_TEXT_EDIT_OPERATIONS,
-    BoundedTextEdit,
+    CheckedTextWorkBudget,
     TextDiffLimitError,
-    build_bounded_text_edits,
     validate_revision_text,
 )
 from text_verification.domain.verification import (
     PersistedDocumentRevision,
+    RecheckProvenance,
     StaleReviewRevisionError,
     VerificationResult,
 )
@@ -55,6 +61,8 @@ from text_verification.exporters.registry import ExporterRegistry
 from text_verification.infrastructure.artifact_storage import (
     ArtifactNotFoundError,
     ArtifactRepairPreparation,
+    ArtifactRepairQuarantine,
+    ArtifactRepairState,
     ArtifactVerificationHandle,
 )
 from text_verification.infrastructure.storage import (
@@ -78,6 +86,9 @@ MEDIA_TYPES = {
     FileType.RTF: "application/rtf",
     FileType.TXT: "text/plain",
 }
+MAX_REVISION_PROJECTION_BLOCKS = 20_000
+MAX_REVISION_PROJECTION_TOTAL_CODEPOINTS = 3 * MAX_REVISION_TEXT_CODEPOINTS
+MAX_REVISION_PROJECTION_TOTAL_UTF8_BYTES = 3 * MAX_REVISION_TEXT_UTF8_BYTES
 ExportProgressObserver = Callable[[JobProgressStage], None]
 ExporterRegistryFactory = Callable[[AnchoredSourcePathResolver], ExporterRegistry]
 
@@ -123,7 +134,7 @@ class ArtifactDownload:
 @dataclass(frozen=True)
 class _PreparedRepair:
     reservation: ArtifactReservation
-    quarantine_owned: bool
+    quarantine: ArtifactRepairQuarantine | None
 
 
 class ReconstructionExportService:
@@ -136,6 +147,7 @@ class ReconstructionExportService:
         now_factory: Callable[[], datetime] | None = None,
         max_revision_bytes: int | None = None,
         max_revision_codepoints: int = MAX_REVISION_TEXT_CODEPOINTS,
+        recheck_grant_service: RecheckProvenanceGrantService | None = None,
     ) -> None:
         self._storage = storage
         self._repository_factory = repository_factory
@@ -154,6 +166,7 @@ class ReconstructionExportService:
             max_revision_codepoints,
             MAX_REVISION_TEXT_CODEPOINTS,
         )
+        self._recheck_grant_service = recheck_grant_service
 
     def export(
         self,
@@ -162,6 +175,7 @@ class ReconstructionExportService:
         *,
         review_revision_id: UUID | None = None,
         track_changes: bool = False,
+        recheck_provenance: RecheckProvenance | None = None,
         progress_observer: ExportProgressObserver | None = None,
     ) -> ExportArtifactReference:
         if export_format not in {
@@ -184,6 +198,12 @@ class ReconstructionExportService:
         if revision is not None:
             _validate_revision_identity(revision, result)
             self._validate_revision_text(revision.text)
+        if recheck_provenance is not None:
+            self._verify_recheck_provenance(
+                job.job_id,
+                result,
+                recheck_provenance,
+            )
         if export_format is ExportFormat.DOCX_RECONSTRUCTION:
             if revision is not None:
                 document = _document_with_revision_text(document, revision.text)
@@ -237,12 +257,6 @@ class ReconstructionExportService:
             except InvalidUpload:
                 pass
             else:
-                self._delete_repair_quarantine(
-                    existing.job_id,
-                    existing.export_artifact_id,
-                    existing.storage_key,
-                    existing.file_type,
-                )
                 self._assert_current_result(job.job_id, result)
                 self._load_export_revision(
                     job.job_id,
@@ -354,13 +368,10 @@ class ReconstructionExportService:
             if error.reason is ArtifactFinalizationRejection.STALE_REVISION:
                 if (
                     prepared_repair is not None
-                    and prepared_repair.quarantine_owned
+                    and prepared_repair.quarantine is not None
                 ):
                     self._delete_repair_quarantine(
-                        request.job_id,
-                        request.export_artifact_id,
-                        request.storage_key,
-                        request.file_type,
+                        prepared_repair.quarantine,
                     )
                 raise VerificationError(
                     "revision_export_stale",
@@ -409,12 +420,11 @@ class ReconstructionExportService:
                 "The export artifact could not be persisted.",
                 True,
             ) from error
-        self._delete_repair_quarantine(
-            persisted.job_id,
-            persisted.export_artifact_id,
-            persisted.storage_key,
-            persisted.file_type,
-        )
+        if (
+            prepared_repair is not None
+            and prepared_repair.quarantine is not None
+        ):
+            self._delete_repair_quarantine(prepared_repair.quarantine)
         return ExportArtifactReference(
             export_artifact_id=persisted.export_artifact_id,
             job_id=persisted.job_id,
@@ -564,6 +574,43 @@ class ReconstructionExportService:
             )
         return snapshot.result
 
+    def _verify_recheck_provenance(
+        self,
+        job_id: UUID,
+        result: VerificationResult,
+        provenance: RecheckProvenance,
+    ) -> None:
+        if self._recheck_grant_service is None:
+            raise VerificationError(
+                "recheck_provenance_unavailable",
+                "exporting",
+                "Secure recheck provenance is not configured.",
+                True,
+            )
+        try:
+            self._recheck_grant_service.verify(
+                provenance.grant,
+                RecheckGrantBinding(
+                    job_id=job_id,
+                    original_document_id=result.document_id,
+                    original_verification_run_id=result.verification_run_id,
+                    original_source_version=result.source_version,
+                    submitted_text=provenance.recheck_text,
+                    result_document_id=provenance.result_document_id,
+                    result_verification_run_id=(
+                        provenance.result_verification_run_id
+                    ),
+                    result_source_version=provenance.result_source_version,
+                ),
+            )
+        except RecheckGrantError as error:
+            raise VerificationError(
+                "recheck_provenance_invalid",
+                "exporting",
+                "The recheck provenance grant is invalid or expired.",
+                False,
+            ) from error
+
     def _assert_current_result(
         self,
         job_id: UUID,
@@ -673,8 +720,15 @@ class ReconstructionExportService:
                 repository.commit()
                 return _PreparedRepair(
                     reservation=reservation,
-                    quarantine_owned=(
-                        preparation is ArtifactRepairPreparation.QUARANTINED
+                    quarantine=(
+                        preparation.quarantine
+                        if preparation is not None
+                        and preparation.state
+                        in {
+                            ArtifactRepairState.QUARANTINED,
+                            ArtifactRepairState.REUSED_QUARANTINE,
+                        }
+                        else None
                     ),
                 )
             except StaleReviewRevisionError as error:
@@ -712,18 +766,10 @@ class ReconstructionExportService:
 
     def _delete_repair_quarantine(
         self,
-        job_id: UUID,
-        export_artifact_id: UUID,
-        storage_key: str,
-        file_type: FileType,
+        quarantine: ArtifactRepairQuarantine,
     ) -> None:
         try:
-            self._storage.delete_artifact_repair_quarantine(
-                job_id,
-                export_artifact_id,
-                storage_key,
-                file_type,
-            )
+            self._storage.delete_artifact_repair_quarantine(quarantine)
         except (InvalidUpload, OSError) as error:
             raise VerificationError(
                 "export_artifact_repair_cleanup_failed",
@@ -786,12 +832,53 @@ def _validate_revision_identity(
         )
 
 
+def _preflight_revision_projection(
+    document: DocumentModel,
+    revised_text: str,
+) -> None:
+    if len(document.blocks) > MAX_REVISION_PROJECTION_BLOCKS:
+        raise _revision_diff_too_complex()
+    try:
+        validate_revision_text(
+            document.text,
+            max_codepoints=MAX_REVISION_TEXT_CODEPOINTS,
+            max_utf8_bytes=MAX_REVISION_TEXT_UTF8_BYTES,
+        )
+        validate_revision_text(
+            revised_text,
+            max_codepoints=MAX_REVISION_TEXT_CODEPOINTS,
+            max_utf8_bytes=MAX_REVISION_TEXT_UTF8_BYTES,
+        )
+        total_codepoints = len(document.text) + len(revised_text)
+        total_utf8_bytes = len(document.text.encode("utf-8")) + len(
+            revised_text.encode("utf-8")
+        )
+        for block in document.blocks:
+            total_codepoints += len(block.text)
+            total_utf8_bytes += len(block.text.encode("utf-8"))
+            if (
+                total_codepoints > MAX_REVISION_PROJECTION_TOTAL_CODEPOINTS
+                or total_utf8_bytes > MAX_REVISION_PROJECTION_TOTAL_UTF8_BYTES
+            ):
+                raise TextDiffLimitError(
+                    "Revision projection text exceeds the total text limit."
+                )
+    except (TextDiffLimitError, UnicodeEncodeError) as error:
+        raise VerificationError(
+            "revision_text_too_large",
+            "exporting",
+            "The persisted revision exceeds the configured size limit.",
+            False,
+        ) from error
+
+
 def _document_with_revision_text(
     document: DocumentModel,
     revised_text: str,
 ) -> DocumentModel:
     if revised_text == document.text:
         return document
+    _preflight_revision_projection(document, revised_text)
     if not document.blocks:
         raise VerificationError(
             "revision_text_unmappable",
@@ -799,6 +886,14 @@ def _document_with_revision_text(
             "The persisted revision cannot be mapped to canonical document blocks.",
             False,
         )
+    budget = CheckedTextWorkBudget(
+        MAX_TEXT_DIFF_WORK,
+        MAX_TEXT_EDIT_OPERATIONS,
+    )
+    try:
+        budget.charge_work(len(document.blocks))
+    except TextDiffLimitError as error:
+        raise _revision_diff_too_complex() from error
     block_index_by_id = {
         block.block_id: index for index, block in enumerate(document.blocks)
     }
@@ -807,20 +902,37 @@ def _document_with_revision_text(
         if block.parent_id is not None:
             children_by_id.setdefault(block.parent_id, []).append(index)
     text_kinds = {"paragraph", "heading", "table_cell"}
-    for block in document.blocks:
-        if block.kind not in text_kinds:
-            continue
-        parent_id = block.parent_id
-        while parent_id is not None:
-            parent = document.blocks[block_index_by_id[parent_id]]
-            if parent.kind in text_kinds:
+    renderable_ancestor_by_id: dict[str, bool] = {}
+    try:
+        for block in document.blocks:
+            if block.kind not in text_kinds:
+                continue
+            parent_id = block.parent_id
+            path: list[str] = []
+            has_renderable_ancestor = False
+            while parent_id is not None:
+                budget.charge_work(1)
+                cached = renderable_ancestor_by_id.get(parent_id)
+                if cached is not None:
+                    has_renderable_ancestor = cached
+                    break
+                parent = document.blocks[block_index_by_id[parent_id]]
+                path.append(parent_id)
+                if parent.kind in text_kinds:
+                    has_renderable_ancestor = True
+                    break
+                parent_id = parent.parent_id
+            for ancestor_id in path:
+                renderable_ancestor_by_id[ancestor_id] = has_renderable_ancestor
+            if has_renderable_ancestor:
                 raise VerificationError(
                     "revision_text_unmappable",
                     "exporting",
                     "The persisted revision cannot be mapped to canonical document blocks.",
                     False,
                 )
-            parent_id = parent.parent_id
+    except TextDiffLimitError as error:
+        raise _revision_diff_too_complex() from error
     owner_indexes = [
         index
         for index, block in enumerate(document.blocks)
@@ -837,6 +949,12 @@ def _document_with_revision_text(
             "The persisted revision cannot be mapped to canonical document blocks.",
             False,
         )
+    try:
+        budget.charge_work(
+            len(owner_indexes) * max(1, len(owner_indexes).bit_length())
+        )
+    except TextDiffLimitError as error:
+        raise _revision_diff_too_complex() from error
     owner_indexes.sort(
         key=lambda index: (
             document.blocks[index].global_start,
@@ -853,38 +971,22 @@ def _document_with_revision_text(
         right = document.blocks[right_index]
         if left.global_end > right.global_start:
             raise _revision_structure_conflict()
-
-    ranges: list[list[int] | None] = [None] * len(document.blocks)
     try:
-        edits = build_bounded_text_edits(
+        budget.charge_work(max(0, len(owner_indexes) - 1))
+        owner_text = _project_revision_owner_text(
             document.text,
             revised_text,
-            max_work=MAX_TEXT_DIFF_WORK,
-            max_operations=MAX_TEXT_EDIT_OPERATIONS,
+            owner_indexes,
+            document.blocks,
+            budget,
+        )
+        budget.charge_work(
+            len(document.text) + len(revised_text) + len(owner_indexes)
         )
     except TextDiffLimitError as error:
-        raise VerificationError(
-            "revision_diff_too_complex",
-            "exporting",
-            "The persisted revision exceeds the configured edit work budget.",
-            False,
-        ) from error
+        raise _revision_diff_too_complex() from error
 
-    owner_edits: dict[int, list[BoundedTextEdit]] = {
-        owner_index: [] for owner_index in owner_indexes
-    }
-    for edit in edits:
-        owner_index = _edit_owner(edit, owner_indexes, document.blocks)
-        if owner_index is None:
-            raise _revision_structure_conflict()
-        block = document.blocks[owner_index]
-        owner_edits[owner_index].append(
-            BoundedTextEdit(
-                edit.start - block.global_start,
-                edit.end - block.global_start,
-                edit.replacement,
-            )
-        )
+    ranges: list[list[int] | None] = [None] * len(document.blocks)
 
     anchored_ranges: list[tuple[int, int, int, int]] = []
     rebuilt_parts: list[str] = []
@@ -905,10 +1007,7 @@ def _document_with_revision_text(
         )
         target_cursor = structural_end
 
-        block_text = _apply_bounded_text_edits(
-            block.text,
-            owner_edits[owner_index],
-        )
+        block_text = owner_text[owner_index]
         start = target_cursor
         end = start + len(block_text)
         ranges[owner_index] = [start, end]
@@ -929,24 +1028,35 @@ def _document_with_revision_text(
     if "".join(rebuilt_parts) != revised_text:
         raise _revision_structure_conflict()
 
+    anchored_starts = [source_start for source_start, _, _, _ in anchored_ranges]
     for index, block in enumerate(document.blocks):
         if ranges[index] is not None:
             continue
-        for source_start, source_end, target_start, _ in anchored_ranges:
-            if (
-                source_start <= block.global_start
-                and block.global_end <= source_end
-            ):
-                ranges[index] = [
-                    target_start + block.global_start - source_start,
-                    target_start + block.global_end - source_start,
-                ]
-                break
+        try:
+            budget.charge_work(1)
+        except TextDiffLimitError as error:
+            raise _revision_diff_too_complex() from error
+        anchor_index = bisect_right(anchored_starts, block.global_start) - 1
+        if anchor_index < 0:
+            continue
+        source_start, source_end, target_start, _ = anchored_ranges[anchor_index]
+        if block.global_end <= source_end:
+            ranges[index] = [
+                target_start + block.global_start - source_start,
+                target_start + block.global_end - source_start,
+            ]
 
-    depths = {
-        block.block_id: _block_depth(block, document.blocks, block_index_by_id)
-        for block in document.blocks
-    }
+    try:
+        depths = _block_depths(
+            document.blocks,
+            block_index_by_id,
+            budget,
+        )
+        budget.charge_work(
+            len(document.blocks) * max(1, len(document.blocks).bit_length())
+        )
+    except TextDiffLimitError as error:
+        raise _revision_diff_too_complex() from error
     for index in sorted(
         range(len(document.blocks)),
         key=lambda candidate: depths[document.blocks[candidate].block_id],
@@ -966,6 +1076,10 @@ def _document_with_revision_text(
             parent_range[0] = min(parent_range[0], child_range[0])
             parent_range[1] = max(parent_range[1], child_range[1])
 
+    try:
+        budget.charge_work(len(document.blocks))
+    except TextDiffLimitError as error:
+        raise _revision_diff_too_complex() from error
     blocks = []
     for block, mapped_range in zip(document.blocks, ranges, strict=True):
         if mapped_range is None:
@@ -1003,66 +1117,214 @@ def _document_with_revision_text(
         raise _revision_structure_conflict() from error
 
 
-def _edit_owner(
-    edit: BoundedTextEdit,
+def _project_revision_owner_text(
+    source_text: str,
+    revised_text: str,
     owner_indexes: list[int],
     blocks: list[TextBlock],
-) -> int | None:
-    if edit.start < edit.end:
-        owners = [
-            owner_index
-            for owner_index in owner_indexes
-            if (
-                blocks[owner_index].global_start <= edit.start
-                and edit.end <= blocks[owner_index].global_end
-            )
-        ]
-        return owners[0] if len(owners) == 1 else None
+    budget: CheckedTextWorkBudget,
+) -> dict[int, str]:
+    owner_starts = [blocks[index].global_start for index in owner_indexes]
+    owner_ends = [blocks[index].global_end for index in owner_indexes]
 
-    containing_owners = [
-        owner_index
-        for owner_index in owner_indexes
-        if (
-            blocks[owner_index].global_start < edit.start
-            < blocks[owner_index].global_end
-        )
-    ]
-    if len(containing_owners) == 1:
-        return containing_owners[0]
-    if containing_owners:
+    def owner_at(position: int) -> int | None:
+        budget.charge_work(1)
+        candidate = bisect_right(owner_starts, position) - 1
+        if candidate < 0 or position >= owner_ends[candidate]:
+            return None
+        return owner_indexes[candidate]
+
+    def insertion_owner(boundary: int) -> int | None:
+        if boundary > 0:
+            left = owner_at(boundary - 1)
+            if left is not None:
+                return left
+        if boundary < len(source_text):
+            return owner_at(boundary)
         return None
-    ending_owner = next(
-        (
-            owner_index
-            for owner_index in reversed(owner_indexes)
-            if blocks[owner_index].global_end == edit.start
-        ),
-        None,
+
+    prefix_length = _common_prefix_length(
+        source_text,
+        revised_text,
+        budget,
     )
-    if ending_owner is not None:
-        return ending_owner
-    return next(
-        (
-            owner_index
-            for owner_index in owner_indexes
-            if blocks[owner_index].global_start == edit.start
-        ),
-        None,
+    suffix_length = _common_suffix_length(
+        source_text,
+        revised_text,
+        prefix_length,
+        budget,
     )
+    source_end = len(source_text) - suffix_length
+    revised_end = len(revised_text) - suffix_length
+    source_middle = source_text[prefix_length:source_end]
+    revised_middle = revised_text[prefix_length:revised_end]
+    work = (
+        len(source_middle) * len(revised_middle)
+        if source_middle and revised_middle
+        else max(len(source_middle), len(revised_middle))
+    )
+    budget.charge_work(work)
+
+    width = len(revised_middle) + 1
+    directions = bytearray((len(source_middle) + 1) * width)
+    unreachable = work + len(source_middle) + len(revised_middle) + 1
+    previous = [unreachable] * width
+    previous[0] = 0
+    first_insertion_owner = insertion_owner(prefix_length)
+    if first_insertion_owner is not None:
+        for revised_index in range(1, width):
+            previous[revised_index] = revised_index
+            directions[revised_index] = 3
+
+    for source_index, source_character in enumerate(source_middle, start=1):
+        source_position = prefix_length + source_index - 1
+        source_owner = owner_at(source_position)
+        current = [unreachable] * width
+        row_offset = source_index * width
+        if source_owner is not None and previous[0] < unreachable:
+            current[0] = previous[0] + 1
+            directions[row_offset] = 2
+        boundary_owner = insertion_owner(source_position + 1)
+        for revised_index, revised_character in enumerate(
+            revised_middle,
+            start=1,
+        ):
+            best_cost = unreachable
+            best_priority = 4
+            best_direction = 0
+
+            if previous[revised_index - 1] < unreachable and (
+                source_owner is not None
+                or source_character == revised_character
+            ):
+                substitution = int(source_character != revised_character)
+                best_cost = previous[revised_index - 1] + substitution
+                best_priority = substitution
+                best_direction = 1
+
+            if source_owner is not None and previous[revised_index] < unreachable:
+                deletion_cost = previous[revised_index] + 1
+                if (deletion_cost, 2) < (best_cost, best_priority):
+                    best_cost = deletion_cost
+                    best_priority = 2
+                    best_direction = 2
+
+            if boundary_owner is not None and current[revised_index - 1] < unreachable:
+                insertion_cost = current[revised_index - 1] + 1
+                if (insertion_cost, 3) < (best_cost, best_priority):
+                    best_cost = insertion_cost
+                    best_priority = 3
+                    best_direction = 3
+
+            current[revised_index] = best_cost
+            directions[row_offset + revised_index] = best_direction
+        previous = current
+
+    if previous[-1] >= unreachable:
+        raise _revision_structure_conflict()
+
+    source_index = len(source_middle)
+    revised_index = len(revised_middle)
+    middle_owners: list[int | None] = []
+    edit_steps: list[tuple[str | None, int | None]] = []
+    while source_index > 0 or revised_index > 0:
+        direction = directions[source_index * width + revised_index]
+        if direction == 1:
+            source_position = prefix_length + source_index - 1
+            owner = owner_at(source_position)
+            changed = (
+                source_middle[source_index - 1]
+                != revised_middle[revised_index - 1]
+            )
+            middle_owners.append(owner)
+            edit_steps.append(("replace" if changed else None, owner))
+            source_index -= 1
+            revised_index -= 1
+        elif direction == 2:
+            source_position = prefix_length + source_index - 1
+            owner = owner_at(source_position)
+            edit_steps.append(("delete", owner))
+            source_index -= 1
+        elif direction == 3:
+            owner = insertion_owner(prefix_length + source_index)
+            middle_owners.append(owner)
+            edit_steps.append(("insert", owner))
+            revised_index -= 1
+        else:
+            raise _revision_structure_conflict()
+
+    previous_edit_owner: int | None = None
+    previous_was_edit = False
+    for operation, owner in reversed(edit_steps):
+        is_edit = operation is not None
+        if is_edit and (
+            not previous_was_edit
+            or owner is None
+            or owner != previous_edit_owner
+        ):
+            budget.charge_operation()
+        previous_was_edit = is_edit
+        previous_edit_owner = owner if is_edit else None
+
+    budget.charge_work(
+        prefix_length
+        + suffix_length
+        + len(middle_owners)
+        + len(revised_text)
+    )
+    target_owners = [
+        owner_at(position)
+        for position in range(prefix_length)
+    ]
+    target_owners.extend(reversed(middle_owners))
+    target_owners.extend(
+        owner_at(position)
+        for position in range(source_end, len(source_text))
+    )
+    if len(target_owners) != len(revised_text):
+        raise _revision_structure_conflict()
+
+    owner_parts: dict[int, list[str]] = {
+        index: [] for index in owner_indexes
+    }
+    for character, owner in zip(revised_text, target_owners, strict=True):
+        if owner is not None:
+            owner_parts[owner].append(character)
+    return {
+        owner_index: "".join(owner_parts[owner_index])
+        for owner_index in owner_indexes
+    }
 
 
-def _apply_bounded_text_edits(
-    text: str,
-    edits: list[BoundedTextEdit],
-) -> str:
-    revised = text
-    for edit in reversed(edits):
-        revised = (
-            f"{revised[:edit.start]}"
-            f"{edit.replacement}"
-            f"{revised[edit.end:]}"
-        )
-    return revised
+def _common_prefix_length(
+    left: str,
+    right: str,
+    budget: CheckedTextWorkBudget,
+) -> int:
+    limit = min(len(left), len(right))
+    index = 0
+    while index < limit:
+        budget.charge_work(1)
+        if left[index] != right[index]:
+            break
+        index += 1
+    return index
+
+
+def _common_suffix_length(
+    left: str,
+    right: str,
+    prefix_length: int,
+    budget: CheckedTextWorkBudget,
+) -> int:
+    limit = min(len(left), len(right)) - prefix_length
+    count = 0
+    while count < limit:
+        budget.charge_work(1)
+        if left[-count - 1] != right[-count - 1]:
+            break
+        count += 1
+    return count
 
 
 def _revision_structure_conflict() -> VerificationError:
@@ -1074,18 +1336,41 @@ def _revision_structure_conflict() -> VerificationError:
     )
 
 
-def _block_depth(
-    block: TextBlock,
+def _revision_diff_too_complex() -> VerificationError:
+    return VerificationError(
+        "revision_diff_too_complex",
+        "exporting",
+        "The persisted revision exceeds the configured edit work budget.",
+        False,
+    )
+
+
+def _block_depths(
     blocks: list[TextBlock],
     block_index_by_id: dict[str, int],
-) -> int:
-    depth = 0
-    parent_id = block.parent_id
-    while parent_id is not None:
-        depth += 1
-        parent = blocks[block_index_by_id[parent_id]]
-        parent_id = parent.parent_id
-    return depth
+    budget: CheckedTextWorkBudget,
+) -> dict[str, int]:
+    depths: dict[str, int] = {}
+    for block in blocks:
+        if block.block_id in depths:
+            continue
+        path: list[str] = []
+        current_id = block.block_id
+        while current_id not in depths:
+            budget.charge_work(1)
+            path.append(current_id)
+            parent_id = blocks[block_index_by_id[current_id]].parent_id
+            if parent_id is None:
+                break
+            current_id = parent_id
+        for block_id in reversed(path):
+            parent_id = blocks[block_index_by_id[block_id]].parent_id
+            depths[block_id] = (
+                0
+                if parent_id is None
+                else depths[parent_id] + 1
+            )
+    return depths
 
 
 def _uncovered_ranges(

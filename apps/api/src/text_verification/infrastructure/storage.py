@@ -14,6 +14,7 @@ from text_verification.infrastructure import document_storage
 from text_verification.infrastructure.artifact_storage import (
     ArtifactOrphanCandidate,
     ArtifactRepairPreparation,
+    ArtifactRepairQuarantine,
     ArtifactStorage,
     ArtifactVerificationHandle,
 )
@@ -120,17 +121,9 @@ class JobStorage(DocumentStorage):
 
     def delete_artifact_repair_quarantine(
         self,
-        job_id: UUID,
-        artifact_id: UUID,
-        storage_key: str,
-        file_type: FileType | str,
+        quarantine: ArtifactRepairQuarantine,
     ) -> bool:
-        return self._artifact_storage.delete_repair_quarantine(
-            job_id,
-            artifact_id,
-            storage_key,
-            file_type,
-        )
+        return self._artifact_storage.delete_repair_quarantine(quarantine)
 
     def artifact_repair_quarantine_path(
         self,
@@ -140,6 +133,20 @@ class JobStorage(DocumentStorage):
     ) -> Path:
         storage_key = build_artifact_storage_key(job_id, artifact_id, file_type)
         return self._artifact_storage.repair_quarantine_path(
+            job_id,
+            artifact_id,
+            storage_key,
+            file_type,
+        )
+
+    def artifact_repair_quarantine_paths(
+        self,
+        job_id: UUID,
+        artifact_id: UUID,
+        file_type: FileType | str,
+    ) -> tuple[Path, ...]:
+        storage_key = build_artifact_storage_key(job_id, artifact_id, file_type)
+        return self._artifact_storage.repair_quarantine_paths(
             job_id,
             artifact_id,
             storage_key,
@@ -263,7 +270,19 @@ class JobStorage(DocumentStorage):
         if relative_path.name.startswith(".") and relative_path.name.endswith(
             repair_suffix
         ):
-            canonical_name = relative_path.name[1 : -len(repair_suffix)]
+            quarantine_identity = relative_path.name[1 : -len(repair_suffix)]
+            canonical_name = quarantine_identity
+            token_candidate_name, separator, token_text = (
+                quarantine_identity.rpartition(".")
+            )
+            if separator:
+                try:
+                    token = UUID(token_text)
+                except ValueError:
+                    pass
+                else:
+                    if token.hex == token_text:
+                        canonical_name = token_candidate_name
             artifact_text, separator, file_type_text = canonical_name.rpartition(".")
             if not separator:
                 raise InvalidUpload(

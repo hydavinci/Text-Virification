@@ -8,10 +8,15 @@ from uuid import UUID
 import pytest
 
 from text_verification.application.errors import VerificationError
+from text_verification.application.recheck_provenance import (
+    RecheckGrantBinding,
+    RecheckProvenanceGrantService,
+)
 from text_verification.application.review_revision import ReviewRevisionService
 from text_verification.domain.verification import (
     DocumentRevisionKind,
     PersistedDocumentRevision,
+    RecheckProvenance,
     ReviewRevisionDraft,
 )
 
@@ -75,6 +80,7 @@ def service(
     repository: RecordingRepository,
     *,
     max_revision_bytes: int = 25 * 1024 * 1024,
+    grant_service: RecheckProvenanceGrantService | None = None,
 ) -> ReviewRevisionService:
     @contextmanager
     def factory() -> Iterator[RecordingRepository]:
@@ -84,6 +90,7 @@ def service(
         factory,
         now_factory=lambda: CREATED_AT,
         max_revision_bytes=max_revision_bytes,
+        recheck_grant_service=grant_service,
     )
 
 
@@ -138,3 +145,108 @@ def test_rejects_revision_text_above_the_configured_byte_limit_before_persistenc
     assert repository.calls == []
     assert repository.commit_calls == 0
     assert repository.rollback_calls == 0
+
+
+def test_valid_recheck_grant_authorizes_revision_persistence_idempotently() -> None:
+    repository = RecordingRepository()
+    grants = RecheckProvenanceGrantService(
+        "server-owned-recheck-grant-secret-32-bytes",
+        now_factory=lambda: CREATED_AT,
+    )
+    expected = RecheckGrantBinding(
+        job_id=JOB_ID,
+        original_document_id=DOCUMENT_ID,
+        original_verification_run_id=RUN_ID,
+        original_source_version="sha256:source",
+        submitted_text="重新检查基线",
+        result_document_id=UUID("50000000-0000-4000-8000-000000000005"),
+        result_verification_run_id=UUID(
+            "60000000-0000-4000-8000-000000000006"
+        ),
+        result_source_version="sha256:" + "b" * 64,
+    )
+    provenance = RecheckProvenance(
+        grant=grants.issue(expected),
+        result_document_id=expected.result_document_id,
+        result_verification_run_id=expected.result_verification_run_id,
+        result_source_version=expected.result_source_version,
+        recheck_text=expected.submitted_text,
+    )
+
+    first = service(repository, grant_service=grants).persist(
+        JOB_ID,
+        draft(),
+        recheck_provenance=provenance,
+    )
+    second = service(repository, grant_service=grants).persist(
+        JOB_ID,
+        draft(),
+        recheck_provenance=provenance,
+    )
+
+    assert first == second
+    assert len(repository.calls) == 2
+
+
+def test_forged_recheck_grant_is_rejected_before_revision_persistence() -> None:
+    repository = RecordingRepository()
+    grants = RecheckProvenanceGrantService(
+        "server-owned-recheck-grant-secret-32-bytes",
+        now_factory=lambda: CREATED_AT,
+    )
+    provenance = RecheckProvenance(
+        grant="client-recomputed-value",
+        result_document_id=UUID("50000000-0000-4000-8000-000000000005"),
+        result_verification_run_id=UUID(
+            "60000000-0000-4000-8000-000000000006"
+        ),
+        result_source_version="sha256:" + "b" * 64,
+        recheck_text=draft().text,
+    )
+
+    with pytest.raises(VerificationError) as raised:
+        service(repository, grant_service=grants).persist(
+            JOB_ID,
+            draft(),
+            recheck_provenance=provenance,
+        )
+
+    assert raised.value.code == "recheck_provenance_invalid"
+    assert repository.calls == []
+
+
+def test_recheck_grant_rejects_a_different_submitted_recheck_text() -> None:
+    repository = RecordingRepository()
+    grants = RecheckProvenanceGrantService(
+        "server-owned-recheck-grant-secret-32-bytes",
+        now_factory=lambda: CREATED_AT,
+    )
+    expected = RecheckGrantBinding(
+        job_id=JOB_ID,
+        original_document_id=DOCUMENT_ID,
+        original_verification_run_id=RUN_ID,
+        original_source_version="sha256:source",
+        submitted_text="重新检查基线",
+        result_document_id=UUID("50000000-0000-4000-8000-000000000005"),
+        result_verification_run_id=UUID(
+            "60000000-0000-4000-8000-000000000006"
+        ),
+        result_source_version="sha256:" + "b" * 64,
+    )
+    provenance = RecheckProvenance(
+        grant=grants.issue(expected),
+        result_document_id=expected.result_document_id,
+        result_verification_run_id=expected.result_verification_run_id,
+        result_source_version=expected.result_source_version,
+        recheck_text="篡改后的基线",
+    )
+
+    with pytest.raises(VerificationError) as raised:
+        service(repository, grant_service=grants).persist(
+            JOB_ID,
+            draft(),
+            recheck_provenance=provenance,
+        )
+
+    assert raised.value.code == "recheck_provenance_invalid"
+    assert repository.calls == []

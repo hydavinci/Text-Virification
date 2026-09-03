@@ -69,6 +69,13 @@ class ArtifactRepository(Protocol):
         require_current_result: bool,
     ) -> ArtifactSnapshot | ArtifactFinalizationRejection | None: ...
 
+    def authorize_export_artifact_publication(
+        self,
+        reservation: ArtifactReservation,
+        *,
+        publish: Callable[[], ArtifactVerificationHandle],
+    ) -> ArtifactVerificationHandle | None: ...
+
     def begin_export_artifact_repair(
         self,
         expected: ArtifactReservation,
@@ -83,6 +90,13 @@ class ArtifactRepository(Protocol):
         ready_at: datetime,
         consistency_check: Callable[[], None],
     ) -> ArtifactSnapshot | None: ...
+
+    def compensate_pending_export_artifact(
+        self,
+        reservation: ArtifactReservation,
+        *,
+        delete_file: Callable[[], bool],
+    ) -> bool: ...
 
     def read_export_artifact(
         self,
@@ -207,13 +221,7 @@ class ArtifactPersistenceService:
         ):
             raise ValueError("Prepared artifact reservation does not match the request.")
 
-        with self._storage.publish_verified_artifact(
-            request.job_id,
-            request.export_artifact_id,
-            request.storage_key,
-            request.file_type,
-            request.data,
-        ) as handle:
+        with self._publish_reserved(request, reservation) as handle:
             if (
                 handle.size_bytes != reservation.size_bytes
                 or handle.content_sha256 != reservation.content_sha256
@@ -233,6 +241,40 @@ class ArtifactPersistenceService:
                 content_sha256=reservation.content_sha256,
                 created=handle.created,
             )
+
+    def _publish_reserved(
+        self,
+        request: ArtifactPersistenceRequest,
+        reservation: ArtifactReservation,
+    ) -> ArtifactVerificationHandle:
+        handle: ArtifactVerificationHandle | None = None
+        with self._repository_factory() as repository:
+            try:
+                handle = repository.authorize_export_artifact_publication(
+                    reservation,
+                    publish=lambda: self._storage.publish_verified_artifact(
+                        request.job_id,
+                        request.export_artifact_id,
+                        request.storage_key,
+                        request.file_type,
+                        request.data,
+                    ),
+                )
+                if handle is None:
+                    raise ArtifactReconciliationRequiredError(
+                        request.export_artifact_id,
+                        "Artifact reservation changed before publication.",
+                    )
+                repository.commit()
+                return handle
+            except Exception:
+                repository.rollback()
+                if handle is not None:
+                    try:
+                        self._compensate_known_pending(handle, reservation)
+                    finally:
+                        handle.close()
+                raise
 
     def _reserve(
         self,
@@ -385,7 +427,16 @@ class ArtifactPersistenceService:
         if not handle.created:
             return
         try:
-            handle.unlink_created_if_current()
+            with self._repository_factory() as repository:
+                try:
+                    repository.compensate_pending_export_artifact(
+                        reservation,
+                        delete_file=handle.unlink_created_if_current,
+                    )
+                    repository.commit()
+                except Exception:
+                    repository.rollback()
+                    raise
         except Exception as error:
             raise ArtifactReconciliationRequiredError(
                 reservation.export_artifact_id,
@@ -420,6 +471,7 @@ def _reservation_from_snapshot(
         status=snapshot.status,
         reserved_at=snapshot.reserved_at,
         created_at=snapshot.created_at,
+        reservation_version=snapshot.reservation_version,
     )
 
 

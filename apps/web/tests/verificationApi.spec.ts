@@ -248,6 +248,60 @@ describe('createVerificationApi', () => {
     })
   })
 
+  it('performs a job-bound recheck and returns the opaque server grant', async () => {
+    const rechecked = {
+      ...resultPayload,
+      document_id: '77777777-7777-4777-8777-777777777777',
+      verification_run_id: '88888888-8888-4888-8888-888888888888',
+      source_version:
+        'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      issues: [],
+      summary: {
+        total: 0,
+        by_type: {},
+        by_severity: {},
+        by_rule: {},
+        by_layer: {}
+      }
+    }
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        result: rechecked,
+        grant: 'server-issued-opaque-grant'
+      })
+    })
+    const api = createVerificationApi(fetchMock as typeof fetch)
+
+    const response = await api.recheckJob(
+      '55555555-5555-4555-8555-555555555555',
+      rechecked.text,
+      {
+        scenario: 'technical',
+        enableSecurity: true,
+        enableSensitive: false,
+        enableAdExtreme: true,
+        glossary: [],
+        bannedWords: []
+      }
+    )
+
+    expect(response).toEqual({
+      result: expect.objectContaining({
+        document_id: rechecked.document_id,
+        verification_run_id: rechecked.verification_run_id,
+        source_version: rechecked.source_version
+      }),
+      grant: 'server-issued-opaque-grant'
+    })
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/jobs/55555555-5555-4555-8555-555555555555/recheck',
+      expect.objectContaining({ method: 'POST' })
+    )
+    const body = fetchMock.mock.calls[0]?.[1]?.body as FormData
+    expect(body.get('text')).toBe(rechecked.text)
+  })
+
   it('persists a draft revision without sending a client revision number', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
@@ -302,6 +356,82 @@ describe('createVerificationApi', () => {
         })
       })
     )
+  })
+
+  it('forwards opaque recheck provenance for revision persistence and export', async () => {
+    const provenance = {
+      grant: 'server-issued-opaque-grant',
+      result_document_id: '77777777-7777-4777-8777-777777777777',
+      result_verification_run_id: '88888888-8888-4888-8888-888888888888',
+      result_source_version:
+        'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      recheck_text: resultPayload.text
+    }
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          revision_id: '44444444-4444-4444-8444-444444444444',
+          document_id: resultPayload.document_id,
+          verification_run_id: resultPayload.verification_run_id,
+          source_version: resultPayload.source_version,
+          revision_number: 1,
+          created_at: '2026-09-03T04:00:00Z',
+          parent_revision_id: null,
+          persistence_state: 'persisted',
+          kind: 'manual',
+          text: resultPayload.text
+        })
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 409,
+        json: async () => ({
+          detail: {
+            code: 'recheck_provenance_invalid',
+            stage: 'exporting',
+            message: 'The recheck provenance grant is invalid.',
+            retryable: false
+          }
+        })
+      })
+    const api = createVerificationApi(fetchMock as typeof fetch)
+    const draft = {
+      revision_id: '44444444-4444-4444-8444-444444444444',
+      document_id: resultPayload.document_id,
+      verification_run_id: resultPayload.verification_run_id,
+      source_version: resultPayload.source_version,
+      revision_number: null,
+      created_at: '2026-09-03T03:59:00.000Z',
+      parent_revision_id: null,
+      persistence_state: 'draft' as const,
+      kind: 'manual' as const,
+      text: resultPayload.text
+    }
+
+    await api.persistRevision(
+      '55555555-5555-4555-8555-555555555555',
+      draft,
+      provenance
+    )
+    await expect(
+      api.exportJob(
+        '55555555-5555-4555-8555-555555555555',
+        'original_format',
+        draft.revision_id,
+        false,
+        () => true,
+        provenance
+      )
+    ).rejects.toMatchObject({ code: 'recheck_provenance_invalid' })
+
+    expect(JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string)).toMatchObject({
+      recheck_provenance: provenance
+    })
+    expect(JSON.parse(fetchMock.mock.calls[1]?.[1]?.body as string)).toMatchObject({
+      recheck_provenance: provenance
+    })
   })
 
   it('submits a guarded job export by persisted revision id and downloads it', async () => {

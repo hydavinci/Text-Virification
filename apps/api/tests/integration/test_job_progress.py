@@ -545,6 +545,69 @@ def test_job_original_format_export_route_preserves_job_owned_options(
     ]
 
 
+def test_job_export_route_forwards_opaque_recheck_provenance(
+    client,
+    app: FastAPI,
+    completed_job: JobRead,
+) -> None:
+    from text_verification.api.dependencies import get_reconstruction_export_service
+    from text_verification.domain.verification import RecheckProvenance
+
+    provenance_payload = {
+        "grant": "server-issued-opaque-grant",
+        "result_document_id": str(uuid4()),
+        "result_verification_run_id": str(uuid4()),
+        "result_source_version": "sha256:" + "b" * 64,
+        "recheck_text": "重新检查文本",
+    }
+    calls: list[RecheckProvenance] = []
+
+    class FakeService:
+        def export(
+            self,
+            job,
+            export_format,
+            *,
+            review_revision_id=None,
+            track_changes=False,
+            recheck_provenance=None,
+            progress_observer=None,
+        ):
+            del job, review_revision_id, track_changes, progress_observer
+            assert export_format is ExportFormat.ORIGINAL_FORMAT
+            assert recheck_provenance is not None
+            calls.append(recheck_provenance)
+            return ExportArtifactReference(
+                export_artifact_id=uuid4(),
+                job_id=completed_job.job_id,
+                verification_run_id=uuid4(),
+                format=ExportFormat.ORIGINAL_FORMAT,
+                file_type=FileType.DOCX,
+                file_name="sample-modified.docx",
+                media_type=(
+                    "application/vnd.openxmlformats-officedocument."
+                    "wordprocessingml.document"
+                ),
+                size_bytes=42,
+                content_sha256="a" * 64,
+                status=ArtifactLifecycleStatus.READY,
+                created_at=completed_job.created_at,
+            )
+
+    app.dependency_overrides[get_reconstruction_export_service] = FakeService
+
+    response = client.post(
+        f"/api/v1/jobs/{completed_job.job_id}/exports",
+        json={
+            "format": "original_format",
+            "recheck_provenance": provenance_payload,
+        },
+    )
+
+    assert response.status_code == 200
+    assert calls == [RecheckProvenance.model_validate(provenance_payload)]
+
+
 def test_job_export_maps_stale_revision_to_typed_409(
     client,
     app: FastAPI,

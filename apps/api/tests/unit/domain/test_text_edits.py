@@ -1,5 +1,6 @@
 import pytest
 
+from text_verification.domain import text_edits as text_edits_module
 from text_verification.domain.text_edits import (
     TextDiffLimitError,
     build_bounded_text_edits,
@@ -28,11 +29,11 @@ def test_revision_text_limits_are_inclusive_for_code_points_and_utf8_bytes() -> 
         )
 
 
-def test_bounded_diff_accepts_the_exact_work_boundary() -> None:
+def test_bounded_diff_accepts_the_exact_cumulative_work_boundary() -> None:
     edits = build_bounded_text_edits(
         "a" * 10,
         "b" * 10,
-        max_work=100,
+        max_work=113,
         max_operations=2,
     )
 
@@ -64,6 +65,25 @@ def test_bounded_diff_rejects_adversarial_repeated_text_without_timing_assertion
 
 
 def test_bounded_diff_rejects_too_many_edit_operations() -> None:
+    with pytest.raises(TextDiffLimitError, match="operation budget"):
+        build_bounded_text_edits(
+            "abc",
+            "axc",
+            max_work=100,
+            max_operations=0,
+        )
+
+
+def test_bounded_diff_rejects_zero_operation_budget_before_matching(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UnexpectedMatcher:
+        def __init__(self, **values: object) -> None:
+            del values
+            raise AssertionError("matcher must not start")
+
+    monkeypatch.setattr(text_edits_module, "SequenceMatcher", UnexpectedMatcher)
+
     with pytest.raises(TextDiffLimitError, match="operation budget"):
         build_bounded_text_edits(
             "abc",

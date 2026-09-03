@@ -32,6 +32,19 @@ def test_finalize_export_artifact_locks_run_job_artifact_in_canonical_order() ->
     assert order == ["run", "job", "artifact", "run-query"]
 
 
+def test_authorize_artifact_publication_locks_run_job_artifact_in_canonical_order() -> None:
+    repository, reservation, order = _repository()
+    marker = object()
+
+    handle = repository.authorize_export_artifact_publication(
+        reservation,
+        publish=lambda: cast(Any, marker),
+    )
+
+    assert handle is marker
+    assert order == ["run", "job", "artifact"]
+
+
 def test_finalize_stale_artifact_locks_run_job_artifact_in_canonical_order() -> None:
     repository, reservation, order = _repository()
 
@@ -51,6 +64,18 @@ def test_delete_stale_artifact_locks_run_job_artifact_in_canonical_order() -> No
     deleted = repository.delete_stale_pending_export_artifact(
         reservation,
         missing_check=lambda: True,
+    )
+
+    assert deleted is True
+    assert order == ["run", "job", "artifact"]
+
+
+def test_compensate_pending_artifact_locks_run_job_artifact_in_canonical_order() -> None:
+    repository, reservation, order = _repository()
+
+    deleted = repository.compensate_pending_export_artifact(
+        reservation,
+        delete_file=lambda: True,
     )
 
     assert deleted is True
@@ -141,6 +166,7 @@ def _repository() -> tuple[
         content_sha256="a" * 64,
         status=ArtifactLifecycleStatus.PENDING.value,
         reserved_at=created_at,
+        reservation_version=1,
         ready_at=None,
         created_at=created_at,
     )
@@ -159,6 +185,7 @@ def _repository() -> tuple[
         status=ArtifactLifecycleStatus.PENDING,
         reserved_at=created_at,
         created_at=created_at,
+        reservation_version=1,
     )
     order: list[str] = []
     session = cast(Session, _RecordingSession(run, order))

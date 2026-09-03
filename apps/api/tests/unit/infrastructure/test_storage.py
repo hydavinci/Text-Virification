@@ -14,7 +14,7 @@ import pytest
 from text_verification.domain.documents import FileType
 from text_verification.infrastructure import storage as storage_module
 from text_verification.infrastructure.artifact_storage import (
-    ArtifactRepairPreparation,
+    ArtifactRepairState,
 )
 from text_verification.infrastructure.storage import (
     InvalidUpload,
@@ -261,7 +261,98 @@ def test_artifact_repair_does_not_claim_quarantine_renamed_by_another_request(
         expected_digest=hashlib.sha256(original).hexdigest(),
     )
 
-    assert preparation is ArtifactRepairPreparation.REUSED_QUARANTINE
+    assert preparation is not None
+    assert preparation.state is ArtifactRepairState.REUSED_QUARANTINE
+
+
+def test_repair_quarantine_cleanup_is_bound_to_its_unique_inode_descriptor(
+    tmp_path: Path,
+) -> None:
+    storage = JobStorage(tmp_path / "storage", max_upload_bytes=1024)
+    job_id = uuid4()
+    artifact_id = uuid4()
+    storage_key = storage_module.build_artifact_storage_key(
+        job_id,
+        artifact_id,
+        FileType.DOCX,
+    )
+    original = make_docx_bytes()
+    with storage.publish_verified_artifact(
+        job_id,
+        artifact_id,
+        storage_key,
+        FileType.DOCX,
+        original,
+    ) as handle:
+        artifact_path = handle.path
+        artifact_path.write_bytes(b"first corrupt")
+    first = storage.prepare_artifact_repair(
+        job_id,
+        artifact_id,
+        storage_key,
+        FileType.DOCX,
+        expected_size=len(original),
+        expected_digest=hashlib.sha256(original).hexdigest(),
+    )
+    assert first is not None
+    assert first.state is ArtifactRepairState.QUARANTINED
+    assert first.quarantine is not None
+
+    artifact_path.write_bytes(b"second corrupt")
+    second = storage.prepare_artifact_repair(
+        job_id,
+        artifact_id,
+        storage_key,
+        FileType.DOCX,
+        expected_size=len(original),
+        expected_digest=hashlib.sha256(original).hexdigest(),
+    )
+    assert second is not None
+    assert second.state is ArtifactRepairState.QUARANTINED
+    assert second.quarantine is not None
+    assert first.quarantine.path != second.quarantine.path
+
+    assert storage.delete_artifact_repair_quarantine(first.quarantine) is True
+    assert not first.quarantine.path.exists()
+    assert second.quarantine.path.read_bytes() == b"second corrupt"
+
+
+def test_old_quarantine_owner_does_not_delete_replacement_at_its_token_path(
+    tmp_path: Path,
+) -> None:
+    storage = JobStorage(tmp_path / "storage", max_upload_bytes=1024)
+    job_id = uuid4()
+    artifact_id = uuid4()
+    storage_key = storage_module.build_artifact_storage_key(
+        job_id,
+        artifact_id,
+        FileType.DOCX,
+    )
+    original = make_docx_bytes()
+    with storage.publish_verified_artifact(
+        job_id,
+        artifact_id,
+        storage_key,
+        FileType.DOCX,
+        original,
+    ) as handle:
+        handle.path.write_bytes(b"corrupt")
+    preparation = storage.prepare_artifact_repair(
+        job_id,
+        artifact_id,
+        storage_key,
+        FileType.DOCX,
+        expected_size=len(original),
+        expected_digest=hashlib.sha256(original).hexdigest(),
+    )
+    assert preparation is not None
+    assert preparation.quarantine is not None
+    quarantine = preparation.quarantine
+    quarantine.path.unlink()
+    quarantine.path.write_bytes(b"new owner")
+
+    assert storage.delete_artifact_repair_quarantine(quarantine) is False
+    assert quarantine.path.read_bytes() == b"new owner"
 
 
 def test_repair_quarantine_is_discovered_as_exact_canonical_artifact_candidate(

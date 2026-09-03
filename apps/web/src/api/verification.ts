@@ -4,6 +4,7 @@ import type {
   ExportArtifactReference,
   ExportReplacement,
   PersistedDocumentRevision,
+  RecheckProvenance,
   VerificationResult
 } from '../types/verification'
 import type { InjectionKey } from 'vue'
@@ -22,6 +23,11 @@ const API_BASE = '/api/v1'
 export interface VerificationApi {
   analyzeFile(file: File, options: AnalyzeOptions): Promise<VerificationResult>
   analyzeText(text: string, options: AnalyzeOptions): Promise<VerificationResult>
+  recheckJob(
+    jobId: string,
+    text: string,
+    options: AnalyzeOptions
+  ): Promise<{ result: VerificationResult; grant: string }>
   exportReport(result: VerificationResult): Promise<void>
   exportOriginal(
     result: VerificationResult,
@@ -31,14 +37,16 @@ export interface VerificationApi {
   ): Promise<void>
   persistRevision(
     jobId: string,
-    revision: DraftDocumentRevision
+    revision: DraftDocumentRevision,
+    recheckProvenance?: RecheckProvenance
   ): Promise<PersistedDocumentRevision>
   exportJob(
     jobId: string,
     format: ExportArtifactReference['format'],
     revisionId: string | null,
     trackChanges: boolean,
-    isCurrent: () => boolean
+    isCurrent: () => boolean,
+    recheckProvenance?: RecheckProvenance
   ): Promise<void>
 }
 
@@ -72,6 +80,36 @@ export function createVerificationApi(fetchImpl: typeof fetch = fetch): Verifica
   return {
     analyzeFile: (file, options) => analyze({ file }, options),
     analyzeText: (text, options) => analyze({ text }, options),
+    recheckJob: async (jobId, text, options) => {
+      const body = new FormData()
+      body.append('text', text)
+      appendAnalyzeOptions(body, createAnalyzeOptionsSnapshot(options))
+      const response = await fetchImpl(
+        `${API_BASE}/jobs/${jobId}/recheck`,
+        { method: 'POST', body }
+      )
+      if (!response.ok) {
+        throw await readApiRequestError(response)
+      }
+      const payload = await response.json()
+      if (
+        !isRecord(payload) ||
+        typeof payload.grant !== 'string' ||
+        payload.grant.length === 0 ||
+        payload.grant.length > 8 * 1024
+      ) {
+        throw new ApiResponseValidationError(
+          'Invalid job recheck response.'
+        )
+      }
+      const result = createVerificationResultSnapshot(payload.result)
+      if (result === null) {
+        throw new ApiResponseValidationError(
+          'Invalid job recheck response.'
+        )
+      }
+      return Object.freeze({ result, grant: payload.grant })
+    },
     exportReport: async (result) => {
       const response = await fetchImpl(`${API_BASE}/export`, {
         method: 'POST',
@@ -94,7 +132,7 @@ export function createVerificationApi(fetchImpl: typeof fetch = fetch): Verifica
       })
       await downloadResponse(response, `修改版_${result.filename}`)
     },
-    persistRevision: async (jobId, revision) => {
+    persistRevision: async (jobId, revision, recheckProvenance) => {
       const response = await fetchImpl(`${API_BASE}/jobs/${jobId}/revisions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -105,7 +143,10 @@ export function createVerificationApi(fetchImpl: typeof fetch = fetch): Verifica
           source_version: revision.source_version,
           parent_revision_id: revision.parent_revision_id,
           kind: revision.kind,
-          text: revision.text
+          text: revision.text,
+          ...(recheckProvenance === undefined
+            ? {}
+            : { recheck_provenance: recheckProvenance })
         })
       })
       if (!response.ok) {
@@ -127,7 +168,8 @@ export function createVerificationApi(fetchImpl: typeof fetch = fetch): Verifica
       format,
       revisionId,
       trackChanges,
-      isCurrent
+      isCurrent,
+      recheckProvenance
     ) => {
       const response = await fetchImpl(`${API_BASE}/jobs/${jobId}/exports`, {
         method: 'POST',
@@ -135,7 +177,10 @@ export function createVerificationApi(fetchImpl: typeof fetch = fetch): Verifica
         body: JSON.stringify({
           format,
           revision_id: revisionId,
-          track_changes: trackChanges
+          track_changes: trackChanges,
+          ...(recheckProvenance === undefined
+            ? {}
+            : { recheck_provenance: recheckProvenance })
         })
       })
       if (!isCurrent()) {

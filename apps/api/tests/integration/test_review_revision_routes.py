@@ -95,6 +95,54 @@ def test_revision_route_persists_browser_uuid_without_accepting_a_number(
     assert source_sentinel.status_code == 422
 
 
+def test_revision_route_forwards_opaque_recheck_provenance(
+    client,
+    app: FastAPI,
+) -> None:
+    from text_verification.api.dependencies import get_review_revision_service
+    from text_verification.domain.verification import RecheckProvenance
+
+    calls: list[tuple[UUID, ReviewRevisionDraft, RecheckProvenance]] = []
+    provenance_payload = {
+        "grant": "opaque.server.grant",
+        "result_document_id": "50000000-0000-4000-8000-000000000005",
+        "result_verification_run_id": "60000000-0000-4000-8000-000000000006",
+        "result_source_version": "sha256:" + "b" * 64,
+        "recheck_text": "修订文本",
+    }
+
+    class FakeService:
+        def persist(
+            self,
+            job_id: UUID,
+            draft: ReviewRevisionDraft,
+            *,
+            recheck_provenance: RecheckProvenance | None = None,
+        ) -> PersistedDocumentRevision:
+            assert recheck_provenance is not None
+            calls.append((job_id, draft, recheck_provenance))
+            return persisted()
+
+    app.dependency_overrides[get_review_revision_service] = FakeService
+
+    response = client.post(
+        f"/api/v1/jobs/{JOB_ID}/revisions",
+        json={
+            **payload(),
+            "recheck_provenance": provenance_payload,
+        },
+    )
+
+    assert response.status_code == 200
+    assert calls == [
+        (
+            JOB_ID,
+            ReviewRevisionDraft.model_validate(payload()),
+            RecheckProvenance.model_validate(provenance_payload),
+        )
+    ]
+
+
 @pytest.mark.parametrize(
     ("error", "status_code", "code"),
     [

@@ -24,7 +24,7 @@ class ArtifactNotFoundError(InvalidUpload):
     pass
 
 
-class ArtifactRepairPreparation(Enum):
+class ArtifactRepairState(Enum):
     ALREADY_CURRENT = "already_current"
     QUARANTINED = "quarantined"
     REUSED_QUARANTINE = "reused_quarantine"
@@ -53,6 +53,24 @@ class ArtifactOrphanCandidate:
     file_type: FileType
     storage_key: str
     path_storage_key: str
+
+
+@dataclass(frozen=True)
+class ArtifactRepairQuarantine:
+    job_id: UUID
+    artifact_id: UUID
+    storage_key: str
+    file_type: FileType
+    token: UUID
+    path: Path
+    device: int
+    inode: int
+
+
+@dataclass(frozen=True)
+class ArtifactRepairPreparation:
+    state: ArtifactRepairState
+    quarantine: ArtifactRepairQuarantine | None = None
 
 
 class ArtifactVerificationHandle:
@@ -414,7 +432,6 @@ class ArtifactStorage:
             resolved_file_type,
             storage_key,
         )
-        quarantine_name = _repair_quarantine_name(relative_path.name)
         try:
             _, directory_fds, parent_fd = self._open_directory_chain(
                 relative_path,
@@ -431,10 +448,22 @@ class ArtifactStorage:
                     dir_fd=parent_fd,
                 )
             except FileNotFoundError:
+                quarantine = self._adopt_repair_quarantine(
+                    parent_fd,
+                    job_id=job_id,
+                    artifact_id=artifact_id,
+                    storage_key=storage_key,
+                    file_type=resolved_file_type,
+                    relative_path=relative_path,
+                    expected_inode=None,
+                )
                 return (
-                    ArtifactRepairPreparation.REUSED_QUARANTINE
-                    if _validate_existing_quarantine(parent_fd, quarantine_name)
-                    else None
+                    None
+                    if quarantine is None
+                    else ArtifactRepairPreparation(
+                        ArtifactRepairState.REUSED_QUARANTINE,
+                        quarantine,
+                    )
                 )
             except OSError as error:
                 if error.errno in {errno.ELOOP, errno.ENOTDIR}:
@@ -450,7 +479,9 @@ class ArtifactStorage:
                 )
             size_bytes, content_sha256, file_signature = _hash_stable_file(file_fd)
             if size_bytes == expected_size and content_sha256 == expected_digest:
-                return ArtifactRepairPreparation.ALREADY_CURRENT
+                return ArtifactRepairPreparation(
+                    ArtifactRepairState.ALREADY_CURRENT
+                )
 
             try:
                 named = os.stat(
@@ -459,12 +490,23 @@ class ArtifactStorage:
                     follow_symlinks=False,
                 )
             except FileNotFoundError:
-                quarantine_inode = _quarantine_inode(parent_fd, quarantine_name)
-                if quarantine_inode == (
-                    file_signature.device,
-                    file_signature.inode,
-                ):
-                    return ArtifactRepairPreparation.REUSED_QUARANTINE
+                quarantine = self._adopt_repair_quarantine(
+                    parent_fd,
+                    job_id=job_id,
+                    artifact_id=artifact_id,
+                    storage_key=storage_key,
+                    file_type=resolved_file_type,
+                    relative_path=relative_path,
+                    expected_inode=(
+                        file_signature.device,
+                        file_signature.inode,
+                    ),
+                )
+                if quarantine is not None:
+                    return ArtifactRepairPreparation(
+                        ArtifactRepairState.REUSED_QUARANTINE,
+                        quarantine,
+                    )
                 raise InvalidUpload(
                     "Artifact repair target changed before quarantine."
                 ) from None
@@ -477,16 +519,11 @@ class ArtifactStorage:
                 raise InvalidUpload(
                     "Artifact repair target changed before quarantine."
                 )
-            try:
-                os.stat(
-                    quarantine_name,
-                    dir_fd=parent_fd,
-                    follow_symlinks=False,
-                )
-            except FileNotFoundError:
-                pass
-            else:
-                raise InvalidUpload("Artifact repair quarantine is already occupied.")
+            token = uuid4()
+            quarantine_name = _repair_quarantine_name(
+                relative_path.name,
+                token,
+            )
             os.rename(
                 relative_path.name,
                 quarantine_name,
@@ -498,7 +535,22 @@ class ArtifactStorage:
                 file_signature.inode,
             ):
                 raise InvalidUpload("Artifact repair quarantine changed unexpectedly.")
-            return ArtifactRepairPreparation.QUARANTINED
+            return ArtifactRepairPreparation(
+                ArtifactRepairState.QUARANTINED,
+                _repair_quarantine_descriptor(
+                    self._root,
+                    job_id=job_id,
+                    artifact_id=artifact_id,
+                    storage_key=storage_key,
+                    file_type=resolved_file_type,
+                    relative_path=relative_path,
+                    token=token,
+                    inode=(
+                        file_signature.device,
+                        file_signature.inode,
+                    ),
+                ),
+            )
         finally:
             if file_fd >= 0:
                 os.close(file_fd)
@@ -507,19 +559,27 @@ class ArtifactStorage:
 
     def delete_repair_quarantine(
         self,
-        job_id: UUID,
-        artifact_id: UUID,
-        storage_key: str,
-        file_type: FileType | str,
+        quarantine: ArtifactRepairQuarantine,
     ) -> bool:
-        resolved_file_type = file_type if isinstance(file_type, FileType) else FileType(file_type)
+        resolved_file_type = quarantine.file_type
         relative_path = validate_artifact_identity(
-            job_id,
-            artifact_id,
+            quarantine.job_id,
+            quarantine.artifact_id,
             resolved_file_type,
-            storage_key,
+            quarantine.storage_key,
         )
-        quarantine_name = _repair_quarantine_name(relative_path.name)
+        quarantine_name = _repair_quarantine_name(
+            relative_path.name,
+            quarantine.token,
+        )
+        expected_path = self._root.joinpath(
+            *relative_path.parts[:-1],
+            quarantine_name,
+        )
+        if quarantine.path != expected_path:
+            raise InvalidUpload(
+                "Artifact repair quarantine descriptor has an invalid path."
+            )
         try:
             _, directory_fds, parent_fd = self._open_directory_chain(
                 relative_path,
@@ -527,41 +587,13 @@ class ArtifactStorage:
             )
         except ArtifactNotFoundError:
             return False
-        file_fd = -1
         try:
-            try:
-                file_fd = os.open(
-                    quarantine_name,
-                    os.O_RDONLY | os.O_NOFOLLOW,
-                    dir_fd=parent_fd,
-                )
-            except FileNotFoundError:
-                return False
-            except OSError as error:
-                if error.errno in {errno.ELOOP, errno.ENOTDIR}:
-                    raise InvalidUpload(
-                        "Artifact repair quarantine is an unsafe filesystem entry."
-                    ) from error
-                raise
-            file_stat = os.fstat(file_fd)
-            if not stat.S_ISREG(file_stat.st_mode):
-                raise InvalidUpload(
-                    "Artifact repair quarantine must be an unlinked regular file."
-                )
-            if file_stat.st_nlink == 0:
-                return False
-            if file_stat.st_nlink != 1:
-                raise InvalidUpload(
-                    "Artifact repair quarantine must not have additional hard links."
-                )
             return _unlink_named_inode(
                 parent_fd,
                 quarantine_name,
-                (file_stat.st_dev, file_stat.st_ino),
+                (quarantine.device, quarantine.inode),
             )
         finally:
-            if file_fd >= 0:
-                os.close(file_fd)
             for descriptor in reversed(directory_fds):
                 os.close(descriptor)
 
@@ -579,9 +611,109 @@ class ArtifactStorage:
             resolved_file_type,
             storage_key,
         )
+        existing = self.repair_quarantine_paths(
+            job_id,
+            artifact_id,
+            storage_key,
+            resolved_file_type,
+        )
+        if len(existing) == 1:
+            return existing[0]
         return self._root.joinpath(
             *relative_path.parts[:-1],
-            _repair_quarantine_name(relative_path.name),
+            _legacy_repair_quarantine_name(relative_path.name),
+        )
+
+    def repair_quarantine_paths(
+        self,
+        job_id: UUID,
+        artifact_id: UUID,
+        storage_key: str,
+        file_type: FileType | str,
+    ) -> tuple[Path, ...]:
+        resolved_file_type = file_type if isinstance(file_type, FileType) else FileType(file_type)
+        relative_path = validate_artifact_identity(
+            job_id,
+            artifact_id,
+            resolved_file_type,
+            storage_key,
+        )
+        directory = self._root.joinpath(*relative_path.parts[:-1])
+        if not directory.is_dir():
+            return ()
+        return tuple(
+            sorted(
+                (
+                    candidate
+                    for candidate in directory.iterdir()
+                    if _repair_quarantine_token(
+                        relative_path.name,
+                        candidate.name,
+                    )
+                    is not None
+                ),
+                key=lambda candidate: candidate.name,
+            )
+        )
+
+    def _adopt_repair_quarantine(
+        self,
+        parent_fd: int,
+        *,
+        job_id: UUID,
+        artifact_id: UUID,
+        storage_key: str,
+        file_type: FileType,
+        relative_path: PurePosixPath,
+        expected_inode: tuple[int, int] | None,
+    ) -> ArtifactRepairQuarantine | None:
+        candidates: list[tuple[str, tuple[int, int]]] = []
+        for candidate_name in os.listdir(parent_fd):
+            token = _repair_quarantine_token(
+                relative_path.name,
+                candidate_name,
+            )
+            if token is None and candidate_name != _legacy_repair_quarantine_name(
+                relative_path.name
+            ):
+                continue
+            inode = _quarantine_inode(parent_fd, candidate_name)
+            if inode is None or (
+                expected_inode is not None
+                and inode != expected_inode
+            ):
+                continue
+            candidates.append((candidate_name, inode))
+        if not candidates:
+            return None
+        if len(candidates) != 1:
+            raise InvalidUpload("Artifact repair quarantine ownership is ambiguous.")
+        candidate_name, inode = candidates[0]
+        token = uuid4()
+        quarantine_name = _repair_quarantine_name(
+            relative_path.name,
+            token,
+        )
+        try:
+            os.rename(
+                candidate_name,
+                quarantine_name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+            )
+        except FileNotFoundError:
+            return None
+        if _quarantine_inode(parent_fd, quarantine_name) != inode:
+            raise InvalidUpload("Artifact repair quarantine changed unexpectedly.")
+        return _repair_quarantine_descriptor(
+            self._root,
+            job_id=job_id,
+            artifact_id=artifact_id,
+            storage_key=storage_key,
+            file_type=file_type,
+            relative_path=relative_path,
+            token=token,
+            inode=inode,
         )
 
     def delete_owned(self, job_id: UUID, storage_key: str) -> bool:
@@ -858,7 +990,15 @@ def _orphan_candidate_relative_path(
         return candidate_path
     if (
         candidate_path.parts[:-1] == canonical_path.parts[:-1]
-        and candidate_path.name == _repair_quarantine_name(canonical_path.name)
+        and (
+            candidate_path.name
+            == _legacy_repair_quarantine_name(canonical_path.name)
+            or _repair_quarantine_token(
+                canonical_path.name,
+                candidate_path.name,
+            )
+            is not None
+        )
     ):
         return candidate_path
     temporary_prefix = f".{canonical_path.name}."
@@ -951,8 +1091,54 @@ def _unlink_named_inode(
     return True
 
 
-def _repair_quarantine_name(canonical_name: str) -> str:
+def _repair_quarantine_name(canonical_name: str, token: UUID) -> str:
+    return f".{canonical_name}.{token.hex}.repair-corrupt"
+
+
+def _legacy_repair_quarantine_name(canonical_name: str) -> str:
     return f".{canonical_name}.repair-corrupt"
+
+
+def _repair_quarantine_token(
+    canonical_name: str,
+    candidate_name: str,
+) -> UUID | None:
+    prefix = f".{canonical_name}."
+    suffix = ".repair-corrupt"
+    if not candidate_name.startswith(prefix) or not candidate_name.endswith(suffix):
+        return None
+    token_text = candidate_name[len(prefix) : -len(suffix)]
+    try:
+        token = UUID(token_text)
+    except ValueError:
+        return None
+    return token if token.hex == token_text else None
+
+
+def _repair_quarantine_descriptor(
+    root: Path,
+    *,
+    job_id: UUID,
+    artifact_id: UUID,
+    storage_key: str,
+    file_type: FileType,
+    relative_path: PurePosixPath,
+    token: UUID,
+    inode: tuple[int, int],
+) -> ArtifactRepairQuarantine:
+    return ArtifactRepairQuarantine(
+        job_id=job_id,
+        artifact_id=artifact_id,
+        storage_key=storage_key,
+        file_type=file_type,
+        token=token,
+        path=root.joinpath(
+            *relative_path.parts[:-1],
+            _repair_quarantine_name(relative_path.name, token),
+        ),
+        device=inode[0],
+        inode=inode[1],
+    )
 
 
 def _quarantine_inode(
@@ -972,10 +1158,3 @@ def _quarantine_inode(
             "Artifact repair quarantine must be an unlinked regular file."
         )
     return quarantine.st_dev, quarantine.st_ino
-
-
-def _validate_existing_quarantine(
-    parent_fd: int,
-    quarantine_name: str,
-) -> bool:
-    return _quarantine_inode(parent_fd, quarantine_name) is not None

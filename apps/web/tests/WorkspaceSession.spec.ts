@@ -222,7 +222,8 @@ describe('useWorkspaceSession', () => {
     const exportAuthority = bindWorkspaceExportAuthority(
       authoritySource,
       rechecked,
-      rechecked.text
+      rechecked.text,
+      'server-issued-opaque-grant'
     )
     expect(exportAuthority).not.toBeNull()
     const state = {
@@ -246,7 +247,7 @@ describe('useWorkspaceSession', () => {
     expect(restoredWorkspace.result.value).toEqual(rechecked)
   })
 
-  it('rejects cross-job restored authority atomically', () => {
+  it('persists only the bounded opaque server grant for rechecked export authority', () => {
     const storage = new MemoryStorage()
     const rechecked = {
       ...result,
@@ -280,7 +281,77 @@ describe('useWorkspaceSession', () => {
         persistedText: null
       },
       rechecked,
-      rechecked.text
+      rechecked.text,
+      'server-issued-opaque-grant'
+    )
+    expect(exportAuthority).not.toBeNull()
+    expect(exportAuthority).toMatchObject({
+      recheckGrant: 'server-issued-opaque-grant'
+    })
+    expect(exportAuthority).not.toHaveProperty('provenance')
+
+    expect(
+      session.save({
+        ...uiState(),
+        jobId: null,
+        ui: { ...uiState().ui, selectedIssueId: null },
+        exportAuthority
+      })
+    ).toBe(true)
+    const saved = JSON.parse(
+      storage.getItem('text-verification-session') ?? '{}'
+    )
+    expect(saved.version).toBe(6)
+    expect(saved.exportAuthority.recheckGrant).toBe(
+      'server-issued-opaque-grant'
+    )
+    expect(saved.exportAuthority).not.toHaveProperty('provenance')
+
+    const restoredWorkspace = useVerificationWorkspace()
+    const restored = useWorkspaceSession(
+      storage,
+      restoredWorkspace
+    ).restore()
+
+    expect(restored?.exportAuthority).toEqual(exportAuthority)
+  })
+
+  it('restores cross-job opaque authority for backend validation', () => {
+    const storage = new MemoryStorage()
+    const rechecked = {
+      ...result,
+      document_id: '77777777-7777-4777-8777-777777777777',
+      verification_run_id: '88888888-8888-4888-8888-888888888888',
+      source_version:
+        'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      execution_mode: 'synchronous' as const,
+      issues: [],
+      summary: {
+        total: 0,
+        by_type: {},
+        by_severity: {},
+        by_rule: {},
+        by_layer: {}
+      }
+    }
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(rechecked)
+    const session = useWorkspaceSession(storage, workspace)
+    const exportAuthority = bindWorkspaceExportAuthority(
+      {
+        jobId: result.document_id,
+        documentId: result.document_id,
+        verificationRunId: result.verification_run_id,
+        sourceVersion: result.source_version,
+        fileType: 'docx',
+        requiresOcrReconstruction: false,
+        latestRevisionId: null,
+        latestRevisionNumber: 0,
+        persistedText: null
+      },
+      rechecked,
+      rechecked.text,
+      'server-issued-opaque-grant'
     )
     expect(exportAuthority).not.toBeNull()
     expect(
@@ -303,16 +374,13 @@ describe('useWorkspaceSession', () => {
     const current = useVerificationWorkspace()
     current.loadResult(result)
     current.acceptIssue(issue.issue_id)
-    const currentResult = current.result.value
-    const currentRevision = current.currentRevision.value
     const restored = useWorkspaceSession(storage, current).restore()
 
-    expect(restored).toBeNull()
-    expect(current.result.value).toBe(currentResult)
-    expect(current.currentRevision.value).toBe(currentRevision)
-    expect(current.issueStates.value).toEqual({
-      [issue.issue_id]: 'accepted'
+    expect(restored?.exportAuthority).toMatchObject({
+      jobId: '99999999-9999-4999-8999-999999999999',
+      recheckGrant: 'server-issued-opaque-grant'
     })
+    expect(current.result.value).toEqual(rechecked)
   })
 
   it('rejects a tampered recheck result bound to retained authority atomically', () => {
@@ -349,7 +417,8 @@ describe('useWorkspaceSession', () => {
         persistedText: null
       },
       rechecked,
-      rechecked.text
+      rechecked.text,
+      'server-issued-opaque-grant'
     )
     expect(exportAuthority).not.toBeNull()
     expect(
@@ -410,7 +479,8 @@ describe('useWorkspaceSession', () => {
         persistedText: null
       },
       rechecked,
-      rechecked.text
+      rechecked.text,
+      'server-issued-opaque-grant'
     )
     expect(exportAuthority).not.toBeNull()
     expect(
@@ -425,7 +495,77 @@ describe('useWorkspaceSession', () => {
       storage.getItem('text-verification-session') ?? '{}'
     )
     saved.version = 4
-    delete saved.exportAuthority.provenance
+    delete saved.exportAuthority.recheckGrant
+    storage.setItem('text-verification-session', JSON.stringify(saved))
+
+    const restoredWorkspace = useVerificationWorkspace()
+    const restored = useWorkspaceSession(
+      storage,
+      restoredWorkspace
+    ).restore()
+
+    expect(restored?.exportAuthority).toBeNull()
+    expect(restoredWorkspace.result.value).toEqual(rechecked)
+  })
+
+  it('migrates version-5 client provenance without trusting its authority', () => {
+    const storage = new MemoryStorage()
+    const rechecked = {
+      ...result,
+      document_id: '77777777-7777-4777-8777-777777777777',
+      verification_run_id: '88888888-8888-4888-8888-888888888888',
+      source_version:
+        'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      execution_mode: 'synchronous' as const,
+      issues: [],
+      summary: {
+        total: 0,
+        by_type: {},
+        by_severity: {},
+        by_rule: {},
+        by_layer: {}
+      }
+    }
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(rechecked)
+    const session = useWorkspaceSession(storage, workspace)
+    const legacyAuthority = bindWorkspaceExportAuthority(
+      {
+        jobId: result.document_id,
+        documentId: result.document_id,
+        verificationRunId: result.verification_run_id,
+        sourceVersion: result.source_version,
+        fileType: 'docx',
+        requiresOcrReconstruction: false,
+        latestRevisionId: null,
+        latestRevisionNumber: 0,
+        persistedText: null
+      },
+      rechecked,
+      rechecked.text,
+      'server-issued-opaque-grant'
+    )
+    expect(legacyAuthority).not.toBeNull()
+    expect(
+      session.save({
+        ...uiState(),
+        jobId: null,
+        ui: { ...uiState().ui, selectedIssueId: null },
+        exportAuthority: legacyAuthority
+      })
+    ).toBe(true)
+    const saved = JSON.parse(
+      storage.getItem('text-verification-session') ?? '{}'
+    )
+    saved.version = 5
+    delete saved.exportAuthority.recheckGrant
+    saved.exportAuthority.provenance = {
+      resultDocumentId: rechecked.document_id,
+      resultVerificationRunId: rechecked.verification_run_id,
+      resultSourceVersion: rechecked.source_version,
+      resultTextFingerprint: 'textfp-v1:12:7880a927d855313b',
+      binding: 'textfp-v1:401:8695ff8d2837fdc9'
+    }
     storage.setItem('text-verification-session', JSON.stringify(saved))
 
     const restoredWorkspace = useVerificationWorkspace()

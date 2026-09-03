@@ -30,16 +30,21 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from text_verification.api.dependencies import (
     get_db_session,
+    get_job_recheck_service,
     get_job_repository,
     get_job_storage,
     get_reconstruction_export_service,
     get_review_revision_service,
 )
 from text_verification.application.errors import VerificationError
+from text_verification.application.job_recheck import JobRecheckService
 from text_verification.application.reconstruction_export import (
     ReconstructionExportService,
 )
 from text_verification.application.review_revision import ReviewRevisionService
+from text_verification.compatibility.adapters import (
+    verification_result_to_legacy_response,
+)
 from text_verification.compatibility.service import (
     AnalysisInputError,
     build_verification_options,
@@ -61,7 +66,8 @@ from text_verification.domain.jobs import (
 )
 from text_verification.domain.verification import (
     PersistedDocumentRevision,
-    ReviewRevisionDraft,
+    RecheckProvenance,
+    ReviewRevisionSubmission,
     Scenario,
     VerificationResult,
 )
@@ -122,6 +128,7 @@ class JobExportRequest(BaseModel):
     format: ExportFormat
     revision_id: UUID | None = None
     track_changes: bool = False
+    recheck_provenance: RecheckProvenance | None = None
 
 
 def dispatch_process_job(job_id: str) -> None:
@@ -177,19 +184,68 @@ def get_job_result(
 
 
 @router.post(
+    "/jobs/{job_id}/recheck",
+)
+def recheck_job_text(
+    job_id: UUID,
+    service: Annotated[
+        JobRecheckService,
+        Depends(get_job_recheck_service),
+    ],
+    text: Annotated[str, Form()],
+    scenario: Annotated[Scenario, Form()] = Scenario.GENERAL,
+    enable_security: Annotated[bool, Form()] = True,
+    enable_sensitive: Annotated[bool, Form()] = True,
+    enable_ad_extreme: Annotated[bool, Form()] = False,
+    custom_glossary: Annotated[str, Form()] = "",
+    banned_words: Annotated[str, Form()] = "",
+) -> dict[str, object]:
+    try:
+        options = build_verification_options(
+            scenario=scenario,
+            custom_glossary=parse_glossary(custom_glossary),
+            banned_words=parse_banned_words(banned_words),
+            enable_security=enable_security,
+            enable_sensitive=enable_sensitive,
+            enable_ad_extreme=enable_ad_extreme,
+        )
+        outcome = service.recheck(job_id, text, options)
+    except AnalysisInputError as error:
+        raise _typed_http_error(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "invalid_verification_options",
+            "validation",
+            str(error),
+            False,
+        ) from error
+    except VerificationError as error:
+        raise _recheck_http_error(error) from error
+    return {
+        "result": verification_result_to_legacy_response(outcome.result),
+        "grant": outcome.grant,
+    }
+
+
+@router.post(
     "/jobs/{job_id}/revisions",
     response_model=PersistedDocumentRevision,
 )
 def create_review_revision(
     job_id: UUID,
-    payload: ReviewRevisionDraft,
+    payload: ReviewRevisionSubmission,
     service: Annotated[
         ReviewRevisionService,
         Depends(get_review_revision_service),
     ],
 ) -> PersistedDocumentRevision:
     try:
-        return service.persist(job_id, payload)
+        if payload.recheck_provenance is None:
+            return service.persist(job_id, payload.draft())
+        return service.persist(
+            job_id,
+            payload.draft(),
+            recheck_provenance=payload.recheck_provenance,
+        )
     except VerificationError as error:
         raise _revision_http_error(error) from error
 
@@ -270,11 +326,20 @@ def create_job_export(
             record(stage)
 
     try:
+        if payload.recheck_provenance is None:
+            return service.export(
+                job,
+                payload.format,
+                review_revision_id=payload.revision_id,
+                track_changes=payload.track_changes,
+                progress_observer=record_remaining,
+            )
         return service.export(
             job,
             payload.format,
             review_revision_id=payload.revision_id,
             track_changes=payload.track_changes,
+            recheck_provenance=payload.recheck_provenance,
             progress_observer=record_remaining,
         )
     except TerminalJobStateError as error:
@@ -662,6 +727,8 @@ def _export_http_error(error: VerificationError) -> HTTPException:
         "revision_structure_conflict": status.HTTP_409_CONFLICT,
         "revision_text_too_large": status.HTTP_413_CONTENT_TOO_LARGE,
         "revision_diff_too_complex": status.HTTP_422_UNPROCESSABLE_CONTENT,
+        "recheck_provenance_invalid": status.HTTP_409_CONFLICT,
+        "recheck_provenance_unavailable": status.HTTP_503_SERVICE_UNAVAILABLE,
         "export_artifact_repair_cleanup_failed": status.HTTP_409_CONFLICT,
         "export_artifact_repair_pending": status.HTTP_409_CONFLICT,
         "export_artifact_repair_unsafe": status.HTTP_409_CONFLICT,
@@ -684,7 +751,29 @@ def _revision_http_error(error: VerificationError) -> HTTPException:
         "revision_identity_not_found": status.HTTP_404_NOT_FOUND,
         "revision_conflict": status.HTTP_409_CONFLICT,
         "revision_text_too_large": status.HTTP_413_CONTENT_TOO_LARGE,
+        "recheck_provenance_invalid": status.HTTP_409_CONFLICT,
+        "recheck_provenance_unavailable": status.HTTP_503_SERVICE_UNAVAILABLE,
         "revision_persistence_failed": status.HTTP_503_SERVICE_UNAVAILABLE,
+    }.get(error.code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+    return _typed_http_error(
+        status_code,
+        error.code,
+        error.stage,
+        error.message,
+        error.retryable,
+    )
+
+
+def _recheck_http_error(error: VerificationError) -> HTTPException:
+    status_code = {
+        "job_not_found": status.HTTP_404_NOT_FOUND,
+        "job_result_expired": status.HTTP_410_GONE,
+        "job_result_unavailable": status.HTTP_409_CONFLICT,
+        "recheck_identity_mismatch": status.HTTP_409_CONFLICT,
+        "recheck_text_invalid": status.HTTP_422_UNPROCESSABLE_CONTENT,
+        "recheck_result_mismatch": status.HTTP_409_CONFLICT,
+        "revision_text_too_large": status.HTTP_413_CONTENT_TOO_LARGE,
+        "recheck_provenance_unavailable": status.HTTP_503_SERVICE_UNAVAILABLE,
     }.get(error.code, status.HTTP_500_INTERNAL_SERVER_ERROR)
     return _typed_http_error(
         status_code,

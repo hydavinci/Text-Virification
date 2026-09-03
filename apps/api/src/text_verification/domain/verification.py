@@ -23,6 +23,7 @@ BoundedOptionText = Annotated[str, Field(strict=True, min_length=1, max_length=2
 MAX_CUSTOM_GLOSSARY_TERMS = 500
 MAX_BANNED_WORDS = 500
 MAX_VERIFICATION_OPTIONS_JSON_BYTES = 64 * 1024
+MAX_RECHECK_GRANT_CHARS = 8 * 1024
 
 LEGACY_TYPE_LABELS = {
     "typo": "错别字",
@@ -205,6 +206,30 @@ class ReviewRevisionDraft(BaseModel):
             raise ValueError("revision cannot be its own parent")
         validate_revision_text(self.text)
         return self
+
+
+class RecheckProvenance(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    grant: str = Field(min_length=1, max_length=MAX_RECHECK_GRANT_CHARS)
+    result_document_id: UUID
+    result_verification_run_id: UUID
+    result_source_version: str = Field(min_length=1, max_length=500)
+    recheck_text: str = Field(max_length=MAX_REVISION_TEXT_CODEPOINTS)
+
+    @model_validator(mode="after")
+    def validate_recheck_text(self) -> RecheckProvenance:
+        validate_revision_text(self.recheck_text)
+        return self
+
+
+class ReviewRevisionSubmission(ReviewRevisionDraft):
+    recheck_provenance: RecheckProvenance | None = None
+
+    def draft(self) -> ReviewRevisionDraft:
+        return ReviewRevisionDraft.model_validate(
+            self.model_dump(exclude={"recheck_provenance"})
+        )
 
 
 class PersistedDocumentRevision(ReviewRevisionDraft):

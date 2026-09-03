@@ -472,6 +472,10 @@ class ExportArtifactRow(Base):
             "status <> 'pending' OR content_sha256 IS NOT NULL",
             name="ck_export_artifacts_pending_digest",
         ),
+        CheckConstraint(
+            "reservation_version >= 0",
+            name="ck_export_artifacts_reservation_version",
+        ),
     )
 
     export_artifact_id: Mapped[UUID] = mapped_column(
@@ -492,6 +496,7 @@ class ExportArtifactRow(Base):
     content_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     status: Mapped[str] = mapped_column(String(16))
     reserved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    reservation_version: Mapped[int] = mapped_column(BigInteger)
     ready_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,

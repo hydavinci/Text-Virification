@@ -7,6 +7,11 @@ from typing import Protocol
 from uuid import UUID
 
 from text_verification.application.errors import VerificationError
+from text_verification.application.recheck_provenance import (
+    RecheckGrantBinding,
+    RecheckGrantError,
+    RecheckProvenanceGrantService,
+)
 from text_verification.domain.text_edits import (
     MAX_REVISION_TEXT_CODEPOINTS,
     MAX_REVISION_TEXT_UTF8_BYTES,
@@ -15,6 +20,7 @@ from text_verification.domain.text_edits import (
 )
 from text_verification.domain.verification import (
     PersistedDocumentRevision,
+    RecheckProvenance,
     ReviewRevisionDraft,
 )
 
@@ -47,6 +53,7 @@ class ReviewRevisionService:
         now_factory: Callable[[], datetime] | None = None,
         max_revision_bytes: int = MAX_REVISION_TEXT_UTF8_BYTES,
         max_revision_codepoints: int = MAX_REVISION_TEXT_CODEPOINTS,
+        recheck_grant_service: RecheckProvenanceGrantService | None = None,
     ) -> None:
         self._repository_factory = repository_factory
         self._now_factory = now_factory or (lambda: datetime.now(UTC))
@@ -55,11 +62,14 @@ class ReviewRevisionService:
             MAX_REVISION_TEXT_UTF8_BYTES,
         )
         self._max_revision_codepoints = max_revision_codepoints
+        self._recheck_grant_service = recheck_grant_service
 
     def persist(
         self,
         job_id: UUID,
         draft: ReviewRevisionDraft,
+        *,
+        recheck_provenance: RecheckProvenance | None = None,
     ) -> PersistedDocumentRevision:
         try:
             validate_revision_text(
@@ -74,6 +84,39 @@ class ReviewRevisionService:
                 "The revision text exceeds the configured size limit.",
                 False,
             ) from error
+        if recheck_provenance is not None:
+            if self._recheck_grant_service is None:
+                raise VerificationError(
+                    "recheck_provenance_unavailable",
+                    "revision_persistence",
+                    "Secure recheck provenance is not configured.",
+                    True,
+                )
+            try:
+                self._recheck_grant_service.verify(
+                    recheck_provenance.grant,
+                    RecheckGrantBinding(
+                        job_id=job_id,
+                        original_document_id=draft.document_id,
+                        original_verification_run_id=draft.verification_run_id,
+                        original_source_version=draft.source_version,
+                        submitted_text=recheck_provenance.recheck_text,
+                        result_document_id=recheck_provenance.result_document_id,
+                        result_verification_run_id=(
+                            recheck_provenance.result_verification_run_id
+                        ),
+                        result_source_version=(
+                            recheck_provenance.result_source_version
+                        ),
+                    ),
+                )
+            except RecheckGrantError as error:
+                raise VerificationError(
+                    "recheck_provenance_invalid",
+                    "revision_persistence",
+                    "The recheck provenance grant is invalid or expired.",
+                    False,
+                ) from error
         with self._repository_factory() as repository:
             try:
                 persisted = repository.persist_review_revision(

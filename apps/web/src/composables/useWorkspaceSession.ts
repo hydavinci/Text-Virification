@@ -13,7 +13,7 @@ import {
   type useVerificationWorkspace
 } from './useVerificationWorkspace'
 
-export const WORKSPACE_SESSION_VERSION = 5
+export const WORKSPACE_SESSION_VERSION = 6
 export const WORKSPACE_SESSION_KEY = 'text-verification-session'
 export const MAX_WORKSPACE_SESSION_RAW_BYTES = 32 * 1024 * 1024
 export const MAX_WORKSPACE_RESULT_BLOCKS = 20_000
@@ -24,6 +24,7 @@ const MAX_WORKSPACE_ISSUE_ALTERNATIVES = 100
 const MAX_WORKSPACE_ISSUE_TEXT_CODE_POINTS = 10_000
 const MAX_WORKSPACE_TERMINOLOGY_ITEMS = 500
 const MAX_WORKSPACE_TERMINOLOGY_CODE_POINTS = 200
+const MAX_RECHECK_GRANT_CODE_POINTS = 8 * 1024
 
 export type WorkspaceViewMode = 'sentence' | 'continuous'
 export type WorkspaceSettingsTab = 'settings' | 'terms' | 'banned'
@@ -42,17 +43,9 @@ export interface WorkspaceExportAuthoritySource {
   persistedText: string | null
 }
 
-export interface WorkspaceExportProvenance {
-  resultDocumentId: string
-  resultVerificationRunId: string
-  resultSourceVersion: string
-  resultTextFingerprint: string
-  binding: string
-}
-
 export interface WorkspaceExportAuthority
   extends WorkspaceExportAuthoritySource {
-  provenance: WorkspaceExportProvenance
+  recheckGrant: string
 }
 
 export interface WorkspaceSessionUiState {
@@ -100,6 +93,7 @@ const VERSION_3_SESSION_KEYS = [
   'jobId'
 ] as const
 const VERSION_4_SESSION_KEYS = SESSION_KEYS
+const VERSION_5_SESSION_KEYS = SESSION_KEYS
 const WORKSPACE_KEYS = [
   'result',
   'currentRevision',
@@ -145,7 +139,7 @@ const EXPORT_AUTHORITY_KEYS = [
   'latestRevisionId',
   'latestRevisionNumber',
   'persistedText',
-  'provenance'
+  'recheckGrant'
 ] as const
 const LEGACY_EXPORT_AUTHORITY_KEYS = [
   'jobId',
@@ -158,7 +152,7 @@ const LEGACY_EXPORT_AUTHORITY_KEYS = [
   'latestRevisionNumber',
   'persistedText'
 ] as const
-const EXPORT_PROVENANCE_KEYS = [
+const LEGACY_EXPORT_PROVENANCE_KEYS = [
   'resultDocumentId',
   'resultVerificationRunId',
   'resultSourceVersion',
@@ -172,30 +166,23 @@ const SHA256_SOURCE_VERSION_PATTERN = /^sha256:[0-9a-f]{64}$/
 export function bindWorkspaceExportAuthority(
   source: WorkspaceExportAuthoritySource,
   result: VerificationResult,
-  submittedText: string
+  submittedText: string,
+  recheckGrant: string
 ): WorkspaceExportAuthority | null {
   const preparedSource = preparedExportAuthoritySource(source)
   if (
     preparedSource === undefined ||
     result.execution_mode !== 'synchronous' ||
     result.text !== submittedText ||
-    !SHA256_SOURCE_VERSION_PATTERN.test(result.source_version)
+    !SHA256_SOURCE_VERSION_PATTERN.test(result.source_version) ||
+    !isBoundedText(recheckGrant, MAX_RECHECK_GRANT_CODE_POINTS) ||
+    recheckGrant.length === 0
   ) {
     return null
   }
-  const provenanceBase = {
-    resultDocumentId: result.document_id,
-    resultVerificationRunId: result.verification_run_id,
-    resultSourceVersion: result.source_version,
-    resultTextFingerprint: textFingerprint(submittedText)
-  }
-  const provenance = Object.freeze({
-    ...provenanceBase,
-    binding: exportAuthorityBinding(preparedSource, provenanceBase)
-  })
   return Object.freeze({
     ...preparedSource,
-    provenance
+    recheckGrant
   })
 }
 
@@ -291,6 +278,7 @@ export function useWorkspaceSession(
       }
       const prepared =
         prepareSession(parsed, workspace) ??
+        prepareVersion5Session(parsed, workspace) ??
         prepareVersion4Session(parsed, workspace) ??
         prepareVersion3Session(parsed, workspace) ??
         prepareLegacySession(parsed, workspace)
@@ -599,6 +587,26 @@ function prepareVersion4Session(
   return prepared
 }
 
+function prepareVersion5Session(
+  value: unknown,
+  workspace: VerificationWorkspace
+): PreparedSession | null {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, VERSION_5_SESSION_KEYS) ||
+    value.version !== 5 ||
+    !isRecord(value.workspace) ||
+    !hasExactKeys(value.workspace, WORKSPACE_KEYS) ||
+    (
+      value.exportAuthority !== null &&
+      preparedVersion5ExportAuthority(value.exportAuthority) === undefined
+    )
+  ) {
+    return null
+  }
+  return prepareSessionState(value, workspace, null)
+}
+
 function prepareSessionState(
   value: Record<string, unknown>,
   workspace: VerificationWorkspace,
@@ -708,8 +716,8 @@ function preparedExportAuthority(
   if (
     !isRecord(value) ||
     !hasExactKeys(value, EXPORT_AUTHORITY_KEYS) ||
-    !isRecord(value.provenance) ||
-    !hasExactKeys(value.provenance, EXPORT_PROVENANCE_KEYS)
+    !isBoundedText(value.recheckGrant, MAX_RECHECK_GRANT_CODE_POINTS) ||
+    value.recheckGrant.length === 0
   ) {
     return undefined
   }
@@ -717,22 +725,35 @@ function preparedExportAuthority(
   if (source === undefined) {
     return undefined
   }
-  const expected = bindWorkspaceExportAuthority(source, result, result.text)
+  return bindWorkspaceExportAuthority(
+    source,
+    result,
+    result.text,
+    value.recheckGrant
+  ) ?? undefined
+}
+
+function preparedVersion5ExportAuthority(
+  value: unknown
+): WorkspaceExportAuthoritySource | null | undefined {
+  if (value === null) {
+    return null
+  }
   if (
-    expected === null ||
-    value.provenance.resultDocumentId !==
-      expected.provenance.resultDocumentId ||
-    value.provenance.resultVerificationRunId !==
-      expected.provenance.resultVerificationRunId ||
-    value.provenance.resultSourceVersion !==
-      expected.provenance.resultSourceVersion ||
-    value.provenance.resultTextFingerprint !==
-      expected.provenance.resultTextFingerprint ||
-    value.provenance.binding !== expected.provenance.binding
+    !isRecord(value) ||
+    !hasExactKeys(value, [
+      ...LEGACY_EXPORT_AUTHORITY_KEYS,
+      'provenance'
+    ]) ||
+    !isRecord(value.provenance) ||
+    !hasExactKeys(value.provenance, LEGACY_EXPORT_PROVENANCE_KEYS) ||
+    !Object.values(value.provenance).every((item) =>
+      isBoundedText(item, 1000)
+    )
   ) {
     return undefined
   }
-  return expected
+  return preparedExportAuthoritySource(value)
 }
 
 function preparedLegacyExportAuthority(
@@ -802,44 +823,6 @@ function preparedExportAuthoritySource(
     latestRevisionNumber: Number(value.latestRevisionNumber),
     persistedText: value.persistedText
   })
-}
-
-function exportAuthorityBinding(
-  source: WorkspaceExportAuthoritySource,
-  result: Omit<WorkspaceExportProvenance, 'binding'>
-): string {
-  return textFingerprint(
-    JSON.stringify([
-      source.jobId,
-      source.documentId,
-      source.verificationRunId,
-      source.sourceVersion,
-      source.fileType,
-      source.requiresOcrReconstruction,
-      source.latestRevisionId,
-      source.latestRevisionNumber,
-      source.persistedText === null
-        ? null
-        : textFingerprint(source.persistedText),
-      result.resultDocumentId,
-      result.resultVerificationRunId,
-      result.resultSourceVersion,
-      result.resultTextFingerprint
-    ])
-  )
-}
-
-function textFingerprint(value: string): string {
-  const bytes = new TextEncoder().encode(value)
-  let first = 0x811c9dc5
-  let second = 0x9e3779b9
-  for (const byte of bytes) {
-    first = Math.imul(first ^ byte, 0x01000193)
-    second = Math.imul(second ^ byte, 0x85ebca6b)
-  }
-  const hex = (part: number) =>
-    (part >>> 0).toString(16).padStart(8, '0')
-  return `textfp-v1:${bytes.byteLength}:${hex(first)}${hex(second)}`
 }
 
 function preparedOptions(value: unknown): AnalyzeOptions | null {

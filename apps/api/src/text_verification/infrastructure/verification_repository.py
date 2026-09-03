@@ -43,6 +43,8 @@ from text_verification.domain.verification import (
 )
 from text_verification.infrastructure.artifact_storage import (
     ArtifactRepairPreparation,
+    ArtifactRepairState,
+    ArtifactVerificationHandle,
 )
 from text_verification.infrastructure.orm import (
     DocumentBlockRow,
@@ -515,6 +517,7 @@ class VerificationRepository:
                 is ArtifactLifecycleStatus.PENDING
             ):
                 existing.reserved_at = reserved_at
+                existing.reservation_version += 1
                 self._session.flush()
             return _artifact_reservation_from_row(
                 existing,
@@ -545,6 +548,7 @@ class VerificationRepository:
                         content_sha256=content_sha256,
                         status=ArtifactLifecycleStatus.PENDING.value,
                         reserved_at=reserved_at,
+                        reservation_version=1,
                         ready_at=None,
                         created_at=created_at,
                     )
@@ -581,15 +585,15 @@ class VerificationRepository:
             require_current_result
             and not self._artifact_revision_is_latest(run, row)
         ):
-            if (
-                ArtifactLifecycleStatus(row.status)
-                is ArtifactLifecycleStatus.PENDING
-                and _artifact_row_matches_reservation(row, reservation)
-            ):
-                self._session.delete(row)
-                self._session.flush()
-                return ArtifactFinalizationRejection.STALE_REVISION
-            return None
+            return (
+                ArtifactFinalizationRejection.STALE_REVISION
+                if (
+                    ArtifactLifecycleStatus(row.status)
+                    is ArtifactLifecycleStatus.PENDING
+                    and _artifact_row_matches_reservation(row, reservation)
+                )
+                else None
+            )
         if require_current_result and not _artifact_finalization_is_authorized(
             job,
             run,
@@ -597,19 +601,37 @@ class VerificationRepository:
             reservation,
             ready_at,
         ):
-            if (
-                ArtifactLifecycleStatus(row.status)
-                is ArtifactLifecycleStatus.PENDING
-                and _artifact_row_matches_reservation(row, reservation)
-            ):
-                self._session.delete(row)
-                self._session.flush()
             return None
         _assert_artifact_row_matches_reservation(row, reservation)
         consistency_check()
         snapshot = _finalize_artifact_row(row, reservation, ready_at)
         self._session.flush()
         return snapshot
+
+    def authorize_export_artifact_publication(
+        self,
+        reservation: ArtifactReservation,
+        *,
+        publish: Callable[[], ArtifactVerificationHandle],
+    ) -> ArtifactVerificationHandle | None:
+        run = self._lock_run(reservation.verification_run_id)
+        if run.job_id != reservation.job_id:
+            raise ValueError("Artifact reservation does not belong to the requested job.")
+        self._lock_job(run.job_id)
+        row = self._lock_artifact_or_none(reservation.export_artifact_id)
+        if row is None or not _artifact_row_matches_reservation(
+            row,
+            reservation,
+        ):
+            return None
+        if (
+            reservation.status is ArtifactLifecycleStatus.PENDING
+            and not _pending_artifact_row_matches_reservation(row, reservation)
+        ):
+            return None
+        if ArtifactLifecycleStatus(row.status) is not reservation.status:
+            return None
+        return publish()
 
     def begin_export_artifact_repair(
         self,
@@ -659,11 +681,13 @@ class VerificationRepository:
             )
         repair_state = consistency_check()
         if (
-            repair_state is not ArtifactRepairPreparation.ALREADY_CURRENT
+            repair_state is None
+            or repair_state.state is not ArtifactRepairState.ALREADY_CURRENT
             or ArtifactLifecycleStatus(row.status) is ArtifactLifecycleStatus.PENDING
         ):
             row.status = ArtifactLifecycleStatus.PENDING.value
             row.reserved_at = expected.reserved_at
+            row.reservation_version += 1
             row.ready_at = None
             self._session.flush()
         return _artifact_reservation_from_row(
@@ -692,6 +716,28 @@ class VerificationRepository:
         snapshot = _finalize_artifact_row(row, reservation, ready_at)
         self._session.flush()
         return snapshot
+
+    def compensate_pending_export_artifact(
+        self,
+        reservation: ArtifactReservation,
+        *,
+        delete_file: Callable[[], bool],
+    ) -> bool:
+        run = self._lock_run(reservation.verification_run_id)
+        if run.job_id != reservation.job_id:
+            raise ValueError("Artifact reservation does not belong to the requested job.")
+        self._lock_job(run.job_id)
+        row = self._lock_artifact_or_none(reservation.export_artifact_id)
+        if row is None or not _pending_artifact_row_matches_reservation(
+            row,
+            reservation,
+        ):
+            return False
+        if not delete_file():
+            return False
+        self._session.delete(row)
+        self._session.flush()
+        return True
 
     def read_export_artifact(
         self,
@@ -1239,6 +1285,7 @@ def _artifact_reservation_from_row(
         status=ArtifactLifecycleStatus(row.status),
         reserved_at=row.reserved_at,
         created_at=row.created_at,
+        reservation_version=row.reservation_version,
     )
 
 
@@ -1259,6 +1306,7 @@ def _artifact_snapshot_from_row(row: ExportArtifactRow) -> ArtifactSnapshot:
         reserved_at=row.reserved_at,
         ready_at=row.ready_at,
         created_at=row.created_at,
+        reservation_version=row.reservation_version,
     )
 
 
@@ -1300,6 +1348,7 @@ def _artifact_row_matches_reservation(
         row.storage_key,
         row.size_bytes,
         row.created_at,
+        row.reservation_version,
     )
     expected = (
         reservation.export_artifact_id,
@@ -1313,6 +1362,7 @@ def _artifact_row_matches_reservation(
         reservation.storage_key,
         reservation.size_bytes,
         reservation.created_at,
+        reservation.reservation_version,
     )
     return (
         persisted == expected

@@ -35,6 +35,7 @@ class ArtifactReservation:
     status: ArtifactLifecycleStatus
     reserved_at: datetime
     created_at: datetime
+    reservation_version: int = 0
 
 
 @dataclass(frozen=True)
@@ -54,6 +55,7 @@ class ArtifactSnapshot:
     reserved_at: datetime
     ready_at: datetime | None
     created_at: datetime
+    reservation_version: int = 0
 
 
 class ExportArtifactReference(BaseModel):

@@ -22,6 +22,10 @@ from text_verification.application import (
 from text_verification.application import reconstruction_export as reconstruction_export_module
 from text_verification.application.artifact_service import ArtifactPersistenceService
 from text_verification.application.factory import build_default_exporter_registry
+from text_verification.application.recheck_provenance import (
+    RecheckGrantBinding,
+    RecheckProvenanceGrantService,
+)
 from text_verification.application.reconstruction_export import (
     ReconstructionExportService,
     _document_with_revision_text,
@@ -39,6 +43,7 @@ from text_verification.domain.jobs import JobProgressStage, JobRead, JobStatus
 from text_verification.domain.verification import (
     DocumentRevisionKind,
     PersistedDocumentRevision,
+    RecheckProvenance,
     Scenario,
     StaleReviewRevisionError,
     VerificationAnalysisMode,
@@ -49,6 +54,9 @@ from text_verification.domain.verification import (
     VerificationSummary,
 )
 from text_verification.exporters.registry import ExporterRegistry
+from text_verification.infrastructure.artifact_storage import (
+    ArtifactRepairQuarantine,
+)
 from text_verification.infrastructure.storage import (
     JobOwnedSourcePathResolver,
     JobStorage,
@@ -165,6 +173,7 @@ class _InMemoryExportRepository:
                 existing,
                 status=ArtifactLifecycleStatus.PENDING,
                 reserved_at=expected.reserved_at,
+                reservation_version=existing.reservation_version + 1,
                 ready_at=None,
             )
             self._state.artifacts[expected.export_artifact_id] = pending
@@ -208,6 +217,13 @@ class _InMemoryExportRepository:
             existing = self._state.artifacts.get(artifact_id)
             if existing is not None:
                 assert existing.content_sha256 == values["content_sha256"]
+                if existing.status is ArtifactLifecycleStatus.PENDING:
+                    existing = replace(
+                        existing,
+                        reserved_at=values["reserved_at"],
+                        reservation_version=existing.reservation_version + 1,
+                    )
+                    self._state.artifacts[artifact_id] = existing
                 return ArtifactReservation(
                     **{
                         key: value
@@ -219,6 +235,7 @@ class _InMemoryExportRepository:
                 job_id=job_id,
                 **values,
                 status=ArtifactLifecycleStatus.PENDING,
+                reservation_version=1,
             )
             snapshot_values = asdict(reservation)
             self._state.artifacts[artifact_id] = ArtifactSnapshot(
@@ -256,19 +273,13 @@ class _InMemoryExportRepository:
                         and reservation.review_revision_id != latest.revision_id
                     )
                 ):
-                    self._state.artifacts.pop(
-                        reservation.export_artifact_id,
-                        None,
-                    )
                     return ArtifactFinalizationRejection.STALE_REVISION
             if self._state.stale_revision_on_finalize is not None:
                 stale = self._state.stale_revision_on_finalize
                 self._state.revisions[stale.revision_id] = stale
-                self._state.artifacts.pop(reservation.export_artifact_id, None)
                 return ArtifactFinalizationRejection.STALE_REVISION
             if self._state.reject_finalize_once:
                 self._state.reject_finalize_once = False
-                self._state.artifacts.pop(reservation.export_artifact_id, None)
                 return None
             snapshot_values = asdict(reservation)
             snapshot_values["status"] = ArtifactLifecycleStatus.READY
@@ -278,6 +289,47 @@ class _InMemoryExportRepository:
             )
             self._state.artifacts[reservation.export_artifact_id] = snapshot
             return snapshot
+
+    def authorize_export_artifact_publication(
+        self,
+        reservation: ArtifactReservation,
+        *,
+        publish,
+    ):
+        with self._state.lock:
+            existing = self._state.artifacts.get(
+                reservation.export_artifact_id
+            )
+            if (
+                existing is None
+                or existing.status is not reservation.status
+                or existing.reservation_version
+                != reservation.reservation_version
+            ):
+                return None
+            return publish()
+
+    def compensate_pending_export_artifact(
+        self,
+        reservation: ArtifactReservation,
+        *,
+        delete_file,
+    ) -> bool:
+        with self._state.lock:
+            existing = self._state.artifacts.get(
+                reservation.export_artifact_id
+            )
+            if (
+                existing is None
+                or existing.status is not ArtifactLifecycleStatus.PENDING
+                or existing.reservation_version
+                != reservation.reservation_version
+            ):
+                return False
+            if not delete_file():
+                return False
+            self._state.artifacts.pop(reservation.export_artifact_id, None)
+            return True
 
     def read_export_artifact(self, export_artifact_id: UUID) -> ArtifactSnapshot | None:
         with self._state.lock:
@@ -370,6 +422,7 @@ def _service(
     registry_calls: list[object] | None = None,
     max_revision_bytes: int | None = None,
     max_revision_codepoints: int | None = None,
+    recheck_grant_service: RecheckProvenanceGrantService | None = None,
 ) -> ReconstructionExportService:
     def registry_factory(resolver):
         if registry_calls is not None:
@@ -387,6 +440,7 @@ def _service(
         _repository_factory(state),
         exporter_registry_factory=registry_factory,
         max_revision_bytes=max_revision_bytes,
+        recheck_grant_service=recheck_grant_service,
         **kwargs,
     )
 
@@ -596,6 +650,51 @@ def test_reconstruction_exports_source_anchored_paragraph_edits_exactly(
     assert tables == []
 
 
+@pytest.mark.parametrize(
+    ("source", "revised", "expected_paragraphs"),
+    [
+        ("a\na", "\naa", ["", "aa"]),
+        ("a\na", "aa\n", ["aa", ""]),
+        ("same\nsame", "\nsamesame", ["", "samesame"]),
+        ("same\nsame", "samesame\n", ["samesame", ""]),
+        ("😀\n😀", "\n😀😀", ["", "😀😀"]),
+        ("😀\n😀", "😀😀\n", ["😀😀", ""]),
+    ],
+)
+def test_reconstruction_exports_repeated_adjacent_blocks_without_crossing_separator(
+    tmp_path: Path,
+    source: str,
+    revised: str,
+    expected_paragraphs: list[str],
+) -> None:
+    first_text, second_text = source.split("\n")
+    paragraphs, tables = _export_projected_revision(
+        tmp_path,
+        source=source,
+        revised=revised,
+        blocks=[
+            _projection_block(
+                "first",
+                "paragraph",
+                first_text,
+                0,
+                len(first_text),
+            ),
+            _projection_block(
+                "second",
+                "paragraph",
+                second_text,
+                len(first_text) + 1,
+                len(source),
+            ),
+        ],
+    )
+
+    assert paragraphs == expected_paragraphs
+    assert "\n".join(paragraphs) == revised
+    assert tables == []
+
+
 def test_reconstruction_exports_boundary_edits_around_table_structure_exactly(
     tmp_path: Path,
 ) -> None:
@@ -700,6 +799,121 @@ def test_revision_projection_rejects_cumulative_edit_operations_before_next_matc
         _document_with_revision_text(document, "b|b~b^b")
 
     assert raised.value.code == "revision_diff_too_complex"
+
+
+def test_revision_projection_preflights_block_count_before_owner_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        reconstruction_export_module,
+        "MAX_REVISION_PROJECTION_BLOCKS",
+        2,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        reconstruction_export_module,
+        "_project_revision_owner_text",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("owner projection must not start")
+        ),
+    )
+    document = _projection_document(
+        "a\nb\nc",
+        [
+            _projection_block("a", "paragraph", "a", 0, 1),
+            _projection_block("b", "paragraph", "b", 2, 3),
+            _projection_block("c", "paragraph", "c", 4, 5),
+        ],
+    )
+
+    with pytest.raises(VerificationError) as raised:
+        _document_with_revision_text(document, "a\nb\nC")
+
+    assert raised.value.code == "revision_diff_too_complex"
+
+
+def test_revision_projection_preflights_source_text_before_owner_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        reconstruction_export_module,
+        "MAX_REVISION_TEXT_CODEPOINTS",
+        2,
+    )
+    monkeypatch.setattr(
+        reconstruction_export_module,
+        "_project_revision_owner_text",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("owner projection must not start")
+        ),
+    )
+    document = _projection_document(
+        "abc",
+        [_projection_block("only", "paragraph", "abc", 0, 3)],
+    )
+
+    with pytest.raises(VerificationError) as raised:
+        _document_with_revision_text(document, "abd")
+
+    assert raised.value.code == "revision_text_too_large"
+
+
+def test_revision_projection_charges_prefix_and_structural_projection_to_one_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        reconstruction_export_module,
+        "MAX_TEXT_DIFF_WORK",
+        5,
+    )
+    document = _projection_document(
+        "aaaaaaaaaa",
+        [_projection_block("only", "paragraph", "aaaaaaaaaa", 0, 10)],
+    )
+
+    with pytest.raises(VerificationError) as raised:
+        _document_with_revision_text(document, "aaaaaaaaab")
+
+    assert raised.value.code == "revision_diff_too_complex"
+
+
+def test_revision_projection_owner_lookup_is_indexed_not_edit_times_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lookup_calls = 0
+    real_bisect_right = reconstruction_export_module.bisect_right
+
+    def counted_bisect_right(values, target):
+        nonlocal lookup_calls
+        lookup_calls += 1
+        return real_bisect_right(values, target)
+
+    monkeypatch.setattr(
+        reconstruction_export_module,
+        "bisect_right",
+        counted_bisect_right,
+    )
+    block_count = 200
+    source = "|".join("a" for _ in range(block_count))
+    revised = source.replace("a", "b", 1)
+    blocks = [
+        _projection_block(
+            f"p-{index}",
+            "paragraph",
+            "a",
+            index * 2,
+            index * 2 + 1,
+        )
+        for index in range(block_count)
+    ]
+
+    projected = _document_with_revision_text(
+        _projection_document(source, blocks),
+        revised,
+    )
+
+    assert projected.text == revised
+    assert lookup_calls < block_count * 5
 
 
 @pytest.mark.parametrize(
@@ -1097,6 +1311,107 @@ def test_reconstructs_the_persisted_revision_text_and_keys_artifact_by_revision(
     assert "reviewed@example.com" in text
     assert "test@example.com" not in text
     download.handle.close()
+
+
+def test_valid_recheck_grant_authorizes_revision_export(
+    tmp_path: Path,
+) -> None:
+    storage = JobStorage(tmp_path / "jobs", max_upload_bytes=5 * 1024 * 1024)
+    job, result = _job_and_result(storage)
+    revision_id = uuid4()
+    revision = PersistedDocumentRevision(
+        revision_id=revision_id,
+        document_id=result.document_id,
+        verification_run_id=result.verification_run_id,
+        source_version=result.source_version,
+        revision_number=1,
+        created_at=job.created_at + timedelta(minutes=1),
+        parent_revision_id=None,
+        persistence_state="persisted",
+        kind=DocumentRevisionKind.MANUAL,
+        text=result.text.replace("test@example.com", "rechecked@example.com"),
+    )
+    state = _RepositoryState(
+        {job.job_id: result},
+        revisions={revision_id: revision},
+    )
+    grants = RecheckProvenanceGrantService(
+        "server-owned-recheck-grant-secret-32-bytes",
+        now_factory=lambda: job.created_at + timedelta(minutes=2),
+    )
+    binding = RecheckGrantBinding(
+        job_id=job.job_id,
+        original_document_id=result.document_id,
+        original_verification_run_id=result.verification_run_id,
+        original_source_version=result.source_version,
+        submitted_text="重新检查基线",
+        result_document_id=uuid4(),
+        result_verification_run_id=uuid4(),
+        result_source_version="sha256:" + "b" * 64,
+    )
+    provenance = RecheckProvenance(
+        grant=grants.issue(binding),
+        result_document_id=binding.result_document_id,
+        result_verification_run_id=binding.result_verification_run_id,
+        result_source_version=binding.result_source_version,
+        recheck_text=binding.submitted_text,
+    )
+
+    artifact = _service(
+        storage,
+        state,
+        recheck_grant_service=grants,
+    ).export(
+        job,
+        ExportFormat.DOCX_RECONSTRUCTION,
+        review_revision_id=revision_id,
+        recheck_provenance=provenance,
+    )
+
+    assert state.artifacts[artifact.export_artifact_id].review_revision_id == revision_id
+
+
+def test_tampered_recheck_grant_result_is_rejected_before_export_artifact(
+    tmp_path: Path,
+) -> None:
+    storage = JobStorage(tmp_path / "jobs", max_upload_bytes=5 * 1024 * 1024)
+    job, result = _job_and_result(storage)
+    grants = RecheckProvenanceGrantService(
+        "server-owned-recheck-grant-secret-32-bytes",
+        now_factory=lambda: job.created_at + timedelta(minutes=2),
+    )
+    binding = RecheckGrantBinding(
+        job_id=job.job_id,
+        original_document_id=result.document_id,
+        original_verification_run_id=result.verification_run_id,
+        original_source_version=result.source_version,
+        submitted_text=result.text,
+        result_document_id=uuid4(),
+        result_verification_run_id=uuid4(),
+        result_source_version="sha256:" + "b" * 64,
+    )
+    provenance = RecheckProvenance(
+        grant=grants.issue(binding),
+        result_document_id=uuid4(),
+        result_verification_run_id=binding.result_verification_run_id,
+        result_source_version=binding.result_source_version,
+        recheck_text=binding.submitted_text,
+    )
+    state = _RepositoryState({job.job_id: result})
+
+    with pytest.raises(VerificationError) as raised:
+        _service(
+            storage,
+            state,
+            recheck_grant_service=grants,
+        ).export(
+            job,
+            ExportFormat.DOCX_RECONSTRUCTION,
+            recheck_provenance=provenance,
+        )
+
+    assert raised.value.code == "recheck_provenance_invalid"
+    assert state.artifacts == {}
 
 
 def test_reconstruction_rejects_a_revision_from_another_result(
@@ -1772,15 +2087,33 @@ def test_concurrent_corrupt_ready_repairs_converge(
     snapshot = state.artifacts[first.export_artifact_id]
     (storage._root / snapshot.storage_key).write_bytes(b"corrupt")
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        repaired = list(
-            executor.map(
-                lambda _: service.export(job, ExportFormat.DOCX_RECONSTRUCTION),
-                range(2),
-            )
-        )
+    def repair():
+        try:
+            return service.export(job, ExportFormat.DOCX_RECONSTRUCTION)
+        except VerificationError as error:
+            return error
 
-    assert repaired == [first, first]
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        repaired = list(executor.map(lambda _: repair(), range(2)))
+
+    references = [
+        result
+        for result in repaired
+        if not isinstance(result, VerificationError)
+    ]
+    conflicts = [
+        result
+        for result in repaired
+        if isinstance(result, VerificationError)
+    ]
+    assert references
+    assert all(reference == first for reference in references)
+    assert len(references) + len(conflicts) == 2
+    assert all(
+        conflict.code == "export_artifact_repair_pending"
+        and conflict.retryable is True
+        for conflict in conflicts
+    )
     concurrent_download = service.download(job.job_id, first.export_artifact_id)
     with concurrent_download.handle:
         assert concurrent_download.handle.read_bytes()
@@ -1899,7 +2232,7 @@ def test_repair_stale_interleaving_leaves_no_pending_metadata_or_quarantine(
     assert not (storage._root / snapshot.storage_key).exists()
 
 
-def test_two_repairs_only_let_the_quarantine_owner_clean_up_after_stale_revision(
+def test_two_repairs_only_clean_their_exact_quarantine_after_stale_revision(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1937,7 +2270,7 @@ def test_two_repairs_only_let_the_quarantine_owner_clean_up_after_stale_revision
     allow_reuser_persist = Event()
     persist_lock = RLock()
     persist_calls = 0
-    delete_calls = 0
+    deleted_quarantines: list[ArtifactRepairQuarantine] = []
     real_persist = ArtifactPersistenceService.persist
     real_delete = storage.delete_artifact_repair_quarantine
 
@@ -1957,8 +2290,7 @@ def test_two_repairs_only_let_the_quarantine_owner_clean_up_after_stale_revision
         return real_persist(self, request, reservation=reservation)
 
     def record_delete(*args, **kwargs):
-        nonlocal delete_calls
-        delete_calls += 1
+        deleted_quarantines.append(args[0])
         return real_delete(*args, **kwargs)
 
     monkeypatch.setattr(ArtifactPersistenceService, "persist", interleaved_persist)
@@ -2000,13 +2332,16 @@ def test_two_repairs_only_let_the_quarantine_owner_clean_up_after_stale_revision
         try:
             allow_reuser_persist.set()
             assert reuser_future.result(timeout=5).code == "revision_export_stale"
-            assert delete_calls == 0
+            assert len(deleted_quarantines) == 1
         finally:
             allow_reuser_persist.set()
             allow_owner_persist.set()
-        assert owner_future.result(timeout=5).code == "revision_export_stale"
+        assert (
+            owner_future.result(timeout=5).code
+            == "export_artifact_repair_pending"
+        )
 
-    assert delete_calls == 1
+    assert len(deleted_quarantines) == 1
     assert first.export_artifact_id not in state.artifacts
     assert not storage.artifact_repair_quarantine_path(
         job.job_id,

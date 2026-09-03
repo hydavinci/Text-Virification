@@ -364,10 +364,7 @@ async function recheck() {
   let boundAuthority: WorkspaceExportAuthority | null = null
   textInput.value = submittedText
   fileSource.value = null
-  await execution.analyzeText(
-    textInput.value,
-    currentOptions.value,
-    (checked) => {
+  const transform = (checked: VerificationResult, grant?: string) => {
       const transformed = {
         ...checked,
         filename: source.filename,
@@ -375,18 +372,35 @@ async function recheck() {
         file_ext: null
       }
       if (exportAuthoritySource !== null) {
+        if (grant === undefined) {
+          throw new Error('重新检查未返回服务端授权')
+        }
         boundAuthority = bindWorkspaceExportAuthority(
           exportAuthoritySource,
           transformed,
-          submittedText
+          submittedText,
+          grant
         )
         if (boundAuthority === null) {
           throw new Error('重新检查结果与提交文本或保留任务身份不匹配')
         }
       }
       return transformed
-    }
-  )
+  }
+  if (exportAuthoritySource === null) {
+    await execution.analyzeText(
+      textInput.value,
+      currentOptions.value,
+      transform
+    )
+  } else {
+    await execution.recheckJob(
+      exportAuthoritySource.jobId,
+      textInput.value,
+      currentOptions.value,
+      transform
+    )
+  }
   fileExportAuthority.value = exportAuthoritySource === null
     ? null
     : execution.state.value === 'completed'
@@ -628,23 +642,24 @@ async function exportRecheckedFile(): Promise<void> {
         kind: 'manual',
         text: currentRevisionText.value
       })
-      const persisted = await verificationApi.persistRevision(
-        operation.authority.jobId,
-        draft
-      )
-      assertCurrentRecheckedExportOperation(operation)
       const currentResult = result.value
       if (currentResult === null) {
         throw new StaleExportOperationError(
           'Export operation was superseded.'
         )
       }
+      const persisted = await verificationApi.persistRevision(
+        operation.authority.jobId,
+        draft,
+        recheckProvenance(operation.authority, currentResult)
+      )
+      assertCurrentRecheckedExportOperation(operation)
       const nextAuthority = bindWorkspaceExportAuthority({
         ...operation.authority,
         latestRevisionId: persisted.revision_id,
         latestRevisionNumber: persisted.revision_number,
         persistedText: persisted.text
-      }, currentResult, currentResult.text)
+      }, currentResult, currentResult.text, operation.authority.recheckGrant)
       if (nextAuthority === null) {
         throw new Error('保留的任务导出身份与重新检查结果不匹配')
       }
@@ -662,7 +677,8 @@ async function exportRecheckedFile(): Promise<void> {
         : 'original_format',
       revisionId,
       operation.trackChanges,
-      () => isCurrentRecheckedExportOperation(operation)
+      () => isCurrentRecheckedExportOperation(operation),
+      recheckProvenance(operation.authority, result.value)
     )
     assertCurrentRecheckedExportOperation(operation)
     exportError.value = null
@@ -769,12 +785,24 @@ function exportAuthorityFingerprint(
     value.latestRevisionId,
     value.latestRevisionNumber,
     value.persistedText,
-    value.provenance.resultDocumentId,
-    value.provenance.resultVerificationRunId,
-    value.provenance.resultSourceVersion,
-    value.provenance.resultTextFingerprint,
-    value.provenance.binding
+    value.recheckGrant
   ])
+}
+
+function recheckProvenance(
+  authority: WorkspaceExportAuthority,
+  currentResult: VerificationResult | null
+) {
+  if (currentResult === null) {
+    throw new StaleExportOperationError('Export operation was superseded.')
+  }
+  return Object.freeze({
+    grant: authority.recheckGrant,
+    result_document_id: currentResult.document_id,
+    result_verification_run_id: currentResult.verification_run_id,
+    result_source_version: currentResult.source_version,
+    recheck_text: currentResult.text
+  })
 }
 
 function jobExportFormat(

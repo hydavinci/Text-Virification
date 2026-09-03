@@ -43,6 +43,10 @@ export interface UseVerificationExecutionDependencies {
 export type VerificationResultTransform = (
   result: VerificationResult
 ) => VerificationResult
+export type RecheckResultTransform = (
+  result: VerificationResult,
+  grant: string
+) => VerificationResult
 
 export function useVerificationExecution({
   jobsApi,
@@ -171,6 +175,45 @@ export function useVerificationExecution({
         generation,
         () => verificationApi.analyzeText(text, snapshot),
         transformResult
+      )
+    } catch (caught) {
+      finishWithError(generation, 'failed', toError(caught))
+    }
+  }
+
+  async function recheckJob(
+    jobId: string,
+    text: string,
+    options: AnalyzeOptions,
+    transformResult: RecheckResultTransform = identityResult
+  ): Promise<void> {
+    const generation = beginRequest()
+    if (generation === null) {
+      return
+    }
+    if (!verificationApi) {
+      finishWithError(
+        generation,
+        'failed',
+        new Error('Job recheck is unavailable.')
+      )
+      return
+    }
+    try {
+      const snapshot = createAnalyzeOptionsSnapshot(options)
+      const response = await verificationApi.recheckJob(
+        jobId,
+        text,
+        snapshot
+      )
+      if (!isCurrent(generation)) {
+        return
+      }
+      finishDirect(
+        generation,
+        requireVerificationResultSnapshot(
+          transformResult(response.result, response.grant)
+        )
       )
     } catch (caught) {
       finishWithError(generation, 'failed', toError(caught))
@@ -422,6 +465,7 @@ export function useVerificationExecution({
       () => state.value === 'submitting' || state.value === 'processing'
     ),
     analyzeText,
+    recheckJob,
     analyzeFile,
     restoreJobContext,
     reset,

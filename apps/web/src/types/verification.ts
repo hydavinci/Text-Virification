@@ -266,6 +266,14 @@ export interface ExportReplacement {
   end_position: number
 }
 
+export interface RecheckProvenance {
+  grant: string
+  result_document_id: string
+  result_verification_run_id: string
+  result_source_version: string
+  recheck_text: string
+}
+
 export interface ExportArtifactReference {
   export_artifact_id: string
   job_id: string

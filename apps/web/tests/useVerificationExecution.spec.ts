@@ -639,6 +639,7 @@ describe('useVerificationExecution', () => {
     const transformResult = vi.fn((result: VerificationResult) => result)
     const verificationApi: VerificationApi = {
       analyzeText: vi.fn().mockReturnValue(pending.promise),
+      recheckJob: vi.fn(),
       analyzeFile: vi.fn(),
       exportReport: vi.fn(),
       exportOriginal: vi.fn(),
@@ -665,6 +666,7 @@ describe('useVerificationExecution', () => {
   it('uses jobs for files when the workspace requests asynchronous execution', async () => {
     const verificationApi: VerificationApi = {
       analyzeText: vi.fn(),
+      recheckJob: vi.fn(),
       analyzeFile: vi.fn(),
       exportReport: vi.fn(),
       exportOriginal: vi.fn(),
@@ -721,6 +723,7 @@ describe('useVerificationExecution', () => {
     const pending = createDeferred<VerificationResult>()
     const verificationApi: VerificationApi = {
       analyzeText: vi.fn().mockReturnValue(pending.promise),
+      recheckJob: vi.fn(),
       analyzeFile: vi.fn(),
       exportReport: vi.fn(),
       exportOriginal: vi.fn(),
@@ -758,6 +761,7 @@ describe('useVerificationExecution', () => {
     const fileResult = buildResult({ filename: 'direct.docx', file_type: 'docx' })
     const verificationApi: VerificationApi = {
       analyzeText: vi.fn().mockResolvedValue(textResult),
+      recheckJob: vi.fn(),
       analyzeFile: vi.fn().mockResolvedValue(fileResult),
       exportReport: vi.fn(),
       exportOriginal: vi.fn(),
@@ -784,6 +788,7 @@ describe('useVerificationExecution', () => {
     const directPayload = buildResult()
     const verificationApi: VerificationApi = {
       analyzeText: vi.fn().mockResolvedValue(directPayload),
+      recheckJob: vi.fn(),
       analyzeFile: vi.fn(),
       exportReport: vi.fn(),
       exportOriginal: vi.fn(),
@@ -836,6 +841,7 @@ describe('useVerificationExecution', () => {
       if (source === 'direct') {
         const verificationApi: VerificationApi = {
           analyzeText: vi.fn().mockResolvedValue(invalidResult),
+          recheckJob: vi.fn(),
           analyzeFile: vi.fn(),
           exportReport: vi.fn(),
           exportOriginal: vi.fn(),
@@ -873,6 +879,7 @@ describe('useVerificationExecution', () => {
   it('passes one immutable cloned options snapshot to direct and asynchronous APIs', async () => {
     const verificationApi: VerificationApi = {
       analyzeText: vi.fn().mockResolvedValue(buildResult()),
+      recheckJob: vi.fn(),
       analyzeFile: vi.fn().mockResolvedValue(buildResult()),
       exportReport: vi.fn(),
       exportOriginal: vi.fn(),

@@ -312,6 +312,7 @@ def test_export_artifact_orm_defines_pending_ready_lifecycle() -> None:
 
     assert columns.status.nullable is False
     assert columns.reserved_at.nullable is False
+    assert columns.reservation_version.nullable is False
     assert columns.ready_at.nullable is True
     assert {
         constraint.name
@@ -321,6 +322,7 @@ def test_export_artifact_orm_defines_pending_ready_lifecycle() -> None:
         "ck_export_artifacts_status",
         "ck_export_artifacts_ready_state",
         "ck_export_artifacts_pending_digest",
+        "ck_export_artifacts_reservation_version",
     }
     assert {index.name for index in ExportArtifactRow.__table__.indexes} >= {
         "ix_export_artifacts_status_reserved_at"
@@ -443,6 +445,7 @@ def test_database_schema_contains_normalized_verification_tables(db_engine: Engi
     assert artifact_columns["content_sha256"]["nullable"] is True
     assert artifact_columns["status"]["nullable"] is False
     assert artifact_columns["reserved_at"]["nullable"] is False
+    assert artifact_columns["reservation_version"]["nullable"] is False
     assert artifact_columns["ready_at"]["nullable"] is True
     assert {
         constraint["name"]
@@ -452,6 +455,7 @@ def test_database_schema_contains_normalized_verification_tables(db_engine: Engi
         "ck_export_artifacts_status",
         "ck_export_artifacts_ready_state",
         "ck_export_artifacts_pending_digest",
+        "ck_export_artifacts_reservation_version",
     }
     assert {
         index["name"] for index in inspector.get_indexes("export_artifacts")
@@ -950,7 +954,7 @@ def test_reserve_export_artifact_rejects_a_superseded_review_revision(
         )
 
 
-def test_finalize_export_artifact_deletes_reservation_if_revision_became_stale(
+def test_finalize_export_artifact_retains_owned_pending_reservation_for_compensation(
     db_session: Session,
 ) -> None:
     _create_job(db_session)
@@ -1005,7 +1009,10 @@ def test_finalize_export_artifact_deletes_reservation_if_revision_became_stale(
     )
 
     assert result is ArtifactFinalizationRejection.STALE_REVISION
-    assert repository.read_export_artifact(ARTIFACT_ID) is None
+    pending = repository.read_export_artifact(ARTIFACT_ID)
+    assert pending is not None
+    assert pending.status is ArtifactLifecycleStatus.PENDING
+    assert pending.reservation_version == reservation.reservation_version
 
 
 def test_reserve_export_artifact_rejects_key_for_another_job(
@@ -1185,6 +1192,7 @@ def test_legacy_ready_artifact_with_null_digest_is_lazily_fingerprinted(
                 content_sha256=None,
                 status="ready",
                 reserved_at=request.created_at,
+                reservation_version=0,
                 ready_at=request.created_at,
                 created_at=request.created_at,
             )
@@ -1229,7 +1237,7 @@ def test_identical_pending_reservation_refreshes_activity_timestamp(
     first_reserved_at = CREATED_AT + timedelta(minutes=1)
     second_reserved_at = CREATED_AT + timedelta(minutes=2)
 
-    repository.reserve_export_artifact(
+    first = repository.reserve_export_artifact(
         export_artifact_id=request.export_artifact_id,
         verification_run_id=request.verification_run_id,
         review_revision_id=request.review_revision_id,
@@ -1262,6 +1270,7 @@ def test_identical_pending_reservation_refreshes_activity_timestamp(
 
     assert reservation.status is ArtifactLifecycleStatus.PENDING
     assert reservation.reserved_at == second_reserved_at
+    assert reservation.reservation_version == first.reservation_version + 1
 
 
 def test_postgres_finalize_and_reserve_follow_same_lock_order_without_deadlock(

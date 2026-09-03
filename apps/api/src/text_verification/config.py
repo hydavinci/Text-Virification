@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     llm_context_radius: int = Field(default=50, ge=0, le=2_000)
     llm_timeout: float = Field(default=60.0, gt=0, le=300)
     llm_json_mode: bool = False
+    recheck_grant_secret: SecretStr = SecretStr("")
+    recheck_grant_ttl_seconds: int = Field(default=900, ge=60, le=86_400)
 
 
 @lru_cache
