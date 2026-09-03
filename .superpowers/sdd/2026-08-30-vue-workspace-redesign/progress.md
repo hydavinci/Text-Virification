@@ -964,3 +964,5 @@ grapheme matches.
 
 Task 4: fix round 5/5 (1 addressed, 0 open — bounded iterative grapheme
 folding; commit `fix: bound oversized grapheme folding`)
+
+Task 4: complete (commits 8bd4e6b..1b064dd, review clean)
