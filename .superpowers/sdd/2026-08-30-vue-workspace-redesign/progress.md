@@ -581,3 +581,9 @@ document/source/run identity and only for current safe stable IDs. Decisions
 and overrides are installed together before one revision attempt, so an
 accepted replacement conflict can retain the complete prior/source revision;
 cost if wrong is pruning malformed legacy session entries without fallback.
+
+Task 3: fix round 1/5 (4 addressed, 0 open — conflict-safe export, canonical atomic batch actions, canonical filter fallback, component-scoped remount-safe scrolling; commits 4307bc5..97303cd)
+
+Task 3: fix round 2/5 (2 addressed, 0 open — atomic all-action history and atomic versioned session restore; commits 97303cd..11c2812)
+
+Task 3: complete (commits 3afe0ce..11c2812, review clean)
