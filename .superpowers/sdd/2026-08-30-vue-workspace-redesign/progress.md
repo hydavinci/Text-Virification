@@ -1064,3 +1064,51 @@ identity into the canonical workspace; cost if wrong is a small result-copy
 step on recheck.
 
 Task 5: complete (base cd61497, implementation ready for commit)
+
+## Task 5 review fix round 1 — 2026-09-03
+
+- Accepted findings 1–6 after checking the frontend against backend
+  `VerificationOptions`, `JobRead`, canonical `VerificationResult`, job-result
+  route, and SSE replay implementation.
+- The shared AnalyzeOptions snapshot now enforces the backend's canonical
+  retained-list limits (500 each), 200-Unicode-code-point value limits, and
+  compact UTF-8 64 KiB ceiling after backend-equivalent normalization. Exact
+  64 KiB passes; one byte over fails.
+- Successful job creation and direct/async verification responses now cross a
+  runtime validation boundary. The async canonical transport is adapted to the
+  existing strict workspace model without duplicating that large validator.
+- Fatal SSE protocol errors are distinct from transient EventSource reconnect
+  errors. Replay IDs are strict safe nonnegative integers; duplicate and
+  decreasing events cannot mutate progress or repeat terminal effects.
+- Deferred result HTTP 410 replaces completed/partial presentation with
+  coherent expired status, stage, message, and job error metadata.
+- Failed rechecks preserve the existing result and render an assertive review
+  alert/live region.
+- Pushback on the minor session item: partial status/message is ephemeral SSE
+  state, while canonical degradation/OCR metadata already lives in the saved
+  result. Adding execution metadata to version-2 sessions is later persistence
+  scope; no Task 6 schema work was added. The backend currently has no
+  production transition to `JobStatus.PARTIAL`.
+
+### Task 5 review fix round 1 TDD evidence
+
+- AnalyzeOptions RED: 7 failed, 2 passed; GREEN: 9 passed.
+- Response validation RED: 4 failed, 36 passed; combined API/workspace
+  validator GREEN: 166 passed across 3 files.
+- Canonical backend issue alias regression: focused RED then GREEN.
+- SSE regressions exposed error-kind, invalid-ID, and replay-order failures;
+  jobs/execution GREEN passed 57 tests. The integrated fatal regression was
+  reconfirmed RED (`processing` vs `failed`) and GREEN.
+- Deferred completed/partial 410 RED: 2 failed, 17 passed; GREEN: 19 passed.
+- Review error alert: focused RED (selector absent), then GREEN.
+- Focused final GREEN: 241 tests across 6 files.
+- Full frontend GREEN: 353 tests across 16 files, with the existing Node
+  experimental `localStorage` warning.
+- Production build GREEN: `vue-tsc -b` and Vite 6.4.3, 56 modules transformed.
+- `git diff --check`: passed.
+
+Task 5 review fix round 1 implementation commit:
+`9c82c32c2b2e9c7eb2bb9ae11765f3b1b0eba0e2`
+(`fix: address task 5 review findings`).
+
+Task 5: review fix round 1 implemented; awaiting independent review.
