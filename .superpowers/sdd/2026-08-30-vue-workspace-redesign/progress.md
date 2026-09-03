@@ -1381,3 +1381,44 @@ Task 6: implementation complete; awaiting controller independent review.
 
 Task 6: review fix round 1 implemented; awaiting independent re-review. Review
 is not claimed clean.
+
+## Task 6 review fix round 2 — 2026-09-03
+
+- Accepted and addressed all eight findings in implementation commit
+  `7ce7da66c9a396694180ec5207f4e812d50d8f12`.
+- Reconstruction now preserves structural gaps exactly and requires unique
+  ordered gap placement. Cross-paragraph, table, block-gap, adjacent-boundary,
+  and ambiguous separator edits fail before reservation with typed 409;
+  repeated/Unicode edits strictly inside uniquely delimited blocks export
+  losslessly and are checked against the downloaded DOCX.
+- Revision text is capped at 5,000,000 code points and 25 MiB UTF-8, further
+  capped by configured upload bytes. Shared diff work is bounded to 1,000,000
+  middle-pair units and 10,000 edit operations, with typed 413/422 responses
+  and legacy-row/export validation.
+- Repair validation, repair transition, and reservation are one transaction
+  under run → job → artifact locks. Deterministic stale interleaving proves
+  pending metadata, verified publication, and quarantine are all removed.
+- Rechecking file-origin edits loads a fresh result identity/issues while
+  retaining separately validated job/source/format export authority. DOCX/RTF
+  continue job-owned original-format export; scanned/unknown PDF continues
+  reconstructed DOCX. Strict version-4 sessions retain this authority and
+  migrate valid version-3 sessions.
+- Same-UUID, stale-parent, and UUID-collision PostgreSQL concurrency tests now
+  assert the second writer entered and remained blocked before first commit;
+  execution remains gated by `TEST_DATABASE_URL`.
+- Session restore bounds raw UTF-8 before parsing and nested result, block,
+  issue, revision, record, and option data before cloning. Exact/exclusive
+  boundaries are covered.
+- Export starts/successes supersede old alerts, including synchronous modified
+  download. Issue/source scrolling uses `auto` when runtime `matchMedia`
+  reports reduced motion.
+- RED/GREEN evidence and all per-finding rulings are recorded in
+  `task-6-report.md`.
+- Final validation: focused backend 106 passed/43 skipped; broad affected
+  backend 221 passed/52 skipped; full backend 942 passed/79 skipped; frontend
+  475 passed; build passed with 70 modules; Playwright 4 passed/1 live skip;
+  full Ruff passed; full mypy passed on 73 source files; Alembic head/offline
+  SQL and `git diff --check` passed.
+
+Task 6: review fix round 2 implemented; awaiting independent re-review. Review
+is not claimed clean.

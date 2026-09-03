@@ -318,3 +318,160 @@ awaits independent re-review; it does not claim the review is clean.
 - Projection is deterministic and explicitly fail-closed for unrepresentable
   structures, but an independent re-review should still scrutinize unusual
   canonical block graphs and extreme edit scripts.
+
+## Review fix round 2 — 2026-09-03
+
+Implementation commit:
+
+- `7ce7da66c9a396694180ec5207f4e812d50d8f12`
+  (`fix: address task 6 review round 2`)
+
+All eight findings were accepted after verification against the Task 6 plan,
+binding design, current exporter behavior, persistence lock order, browser
+state flow, and tests. No item received technical pushback. This round is
+implemented and awaits independent re-review; it does not claim the review is
+clean.
+
+### Finding dispositions and contract decisions
+
+1. **Accepted — fail-closed structural revision contract.** Revised text is no
+   longer globally projected through `SequenceMatcher`. Reconstruction
+   preserves the source prefix, suffix, and every non-renderable gap exactly;
+   the ordered gap placement must be unique. Each changed paragraph, heading,
+   or table-cell owner receives only its uniquely delimited revised segment.
+   Deletion, replacement, or insertion at paragraph/table/block gaps, adjacent
+   owner boundaries, and ambiguous repeated separators fail before artifact
+   reservation with typed `revision_structure_conflict` HTTP 409. Repeated
+   text and astral Unicode edits strictly inside uniquely delimited blocks
+   remain supported. Tests inspect the downloaded DOCX and assert its exact
+   paragraph content, while conflict tests prove no metadata or artifact is
+   created.
+2. **Accepted — bounded revision persistence and diff work.** Canonical
+   revision text is capped at 5,000,000 Unicode code points and 25 MiB UTF-8,
+   further capped by configured upload bytes in revision persistence and
+   reconstruction export. Legacy/existing rows are revalidated before
+   reconstruction. The shared bounded diff removes equal prefix/suffix text,
+   rejects a middle-product work budget above 1,000,000, and rejects more than
+   10,000 edit operations before compatibility or reconstruction mutation.
+   Typed `revision_text_too_large` maps to 413 and
+   `revision_diff_too_complex` maps to 422. Compatibility modified export also
+   enforces the configured upload byte limit and returns 413.
+3. **Accepted — atomic repair reservation with stale compensation.**
+   `begin_export_artifact_repair()` now validates latest revision and source
+   identity under the existing run → job → artifact lock order, transitions
+   repair metadata, and returns the reservation used directly by publication;
+   the separate second reservation transaction is skipped. If a newer
+   revision commits after that transaction, finalization deletes the pending
+   row and verified publication, and reconstruction export removes the repair
+   quarantine before returning typed stale 409. A deterministic commit
+   interleaving proves no pending metadata, quarantine, file, or incorrect
+   ready artifact remains.
+4. **Accepted — retained server-backed file export authority after recheck.**
+   Recheck still obtains a fresh synchronous canonical result so stale issue
+   offsets and result identity are replaced. Separately, the workspace retains
+   the original asynchronous job/document/run/source/format authority from the
+   server result. Export persists a manual revision against that authority and
+   uses the job-owned export endpoint; no compatibility file ID is synthesized.
+   DOCX and RTF retain original-format export, while scanned/unknown-layout PDF
+   retains reconstructed-DOCX export. The authority and latest persisted
+   parent are generation-guarded, backend-validated, and stored in strict
+   version-4 sessions; valid version-3 sessions migrate with no retained
+   authority.
+5. **Accepted — concurrency tests now prove overlap.** Same-UUID retry,
+   stale-parent, and UUID-collision PostgreSQL tests set second-writer started
+   and finished events, assert the second writer entered, and assert it
+   remained blocked before releasing the first commit. Existing
+   `TEST_DATABASE_URL` gating and lock timeout remain unchanged.
+6. **Accepted — bounded session preflight.** Restore bounds raw UTF-8 payloads
+   before `JSON.parse`, then bounds result text, blocks, issues, issue
+   alternatives/text, revision text/chain, state records, and options before
+   workspace cloning or canonical validation. The raw session cap is 32 MiB;
+   nested caps align with the 5,000,000-code-point revision/document limit,
+   20,000 reconstruction elements, 100,000 issues, 10,000 revisions, and
+   500-item/200-code-point options limits. Save applies the same preflight.
+   Exact and exclusive raw, block-array, revision-text, UTF-8, code-point, and
+   diff-work boundaries are covered.
+7. **Accepted — export alert supersession.** Every report or modified export
+   start clears the prior alert. All successful paths, including synchronous
+   text download and compatibility modified export, leave the alert clear;
+   new failures remain persistent and dismissible.
+8. **Accepted — runtime reduced-motion scrolling.** `IssueList` and
+   `DocumentViewer` now query
+   `matchMedia('(prefers-reduced-motion: reduce)')` at scroll time and use
+   `behavior: 'auto'` instead of smooth scrolling when requested. Existing
+   default smooth behavior and global reduced-motion CSS remain covered.
+
+### Round-2 RED/GREEN evidence
+
+- Structural contract RED:
+  `pytest -q tests/integration/test_job_reconstruction_export.py -k
+  'repeated_unicode or cross_structure or structure_conflict'` — 6 failed,
+  2 passed because every gap edit was accepted or failed only inside the DOCX
+  exporter. GREEN with nested-parent coverage: 9 passed.
+- Limits RED: the bounded-diff test module failed collection because
+  `domain.text_edits` did not exist; the configured compatibility export test
+  returned 200 instead of 413. Revision service and legacy reconstruction
+  probes also lacked configurable limits. GREEN focused limits/revision set:
+  20 passed, then the configured compatibility subset passed 7.
+- Repair RED:
+  `test_repair_stale_interleaving_leaves_no_pending_metadata_or_quarantine`
+  returned typed stale but left a pending artifact row and quarantine. GREEN:
+  the deterministic regression and repair collection passed 6.
+- File recheck RED: three DOCX/PDF/RTF component cases attempted synchronous
+  TXT download, made zero revision-persistence calls, and raised missing
+  `URL.createObjectURL`; two session authority/version migration cases also
+  failed. GREEN: all five authority cases passed, followed by 67 passing
+  WorkspaceView/Task6/session tests.
+- PostgreSQL barrier probe against base
+  `663029e49af9bcdd0c0be2daef14701d83bb36ad` exited 1 and named the same-UUID
+  and stale/collision tests as missing entered/blocked barriers. The hardened
+  three cases collected and skipped honestly because `TEST_DATABASE_URL` was
+  unset.
+- Session bounds RED: `WorkspaceSession.spec.ts` reported 4 failures because
+  raw-size and nested preflight APIs/limits were absent. GREEN: the suite
+  passed 9 tests initially and 11 after export-authority/version migration
+  coverage.
+- Export alert RED: synchronous modified export left the old alert rendered.
+  GREEN: the focused supersession case passed in the 53-test session/alert/
+  navigation set.
+- Reduced-motion RED: both source and issue-list scroll tests received
+  `behavior: 'smooth'` instead of `auto`. GREEN: both passed, and the combined
+  session/alert/navigation set passed 53.
+
+### Final validation after round 2
+
+- Focused backend reconstruction/revision/routes/repository/concurrency
+  collection: 106 passed, 43 PostgreSQL-gated skipped.
+- Broad affected backend exporter/artifact/compatibility/golden/repository
+  collection: 221 passed, 52 skipped.
+- Full backend: `.venv/bin/python -m pytest -q` — 942 passed, 79 skipped.
+  Skips were the established `TEST_DATABASE_URL`, `LIVE_API_URL`, and optional
+  OCR-runtime gates.
+- Full backend Ruff: `.venv/bin/python -m ruff check src tests alembic` —
+  passed.
+- Full backend mypy: `.venv/bin/python -m mypy src` — 73 source files, no
+  issues.
+- Alembic: `alembic heads` reported
+  `0010_add_review_revision_chain (head)`; offline `upgrade head --sql`
+  generated the complete chain through 0010.
+- Focused frontend WorkspaceView/session/navigation/accessibility/API set:
+  138 passed across 8 files.
+- Full frontend: `npm test -- --run --reporter=dot` — 475 passed across
+  21 files. Node emitted the existing experimental `localStorage` warning.
+- Production frontend: `npm run build` — `vue-tsc -b` and Vite 6.4.3 passed;
+  70 modules transformed.
+- Playwright: `npm run test:e2e` — 4 deterministic Chromium tests passed;
+  1 live-backend test skipped because `LIVE_API_URL` was unset.
+- `git diff --check` — passed before the implementation commit.
+
+### Round-2 residual concerns
+
+- The strengthened PostgreSQL blocking assertions remain collection-only in
+  this environment because `TEST_DATABASE_URL` is unset; no SQLite substitute
+  was used.
+- The live API/worker/OCR browser boundary remains skipped because
+  `LIVE_API_URL` is unset. Deterministic browser tests still validate the
+  request and interaction contracts rather than backend internals.
+- The retained recheck export authority is revalidated by revision
+  persistence/export endpoints, but independent re-review should scrutinize
+  multi-client parent conflicts and uncommon document gap graphs.
