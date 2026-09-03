@@ -1112,3 +1112,57 @@ Task 5 review fix round 1 implementation commit:
 (`fix: address task 5 review findings`).
 
 Task 5: review fix round 1 implemented; awaiting independent review.
+
+## Task 5 review fix round 2 — 2026-09-03
+
+- Accepted all four scoped round-2 findings after checking Python
+  `str.strip`, Pydantic `VerificationOptions`, backend SSE control ordering,
+  browser EventSource ready-state semantics, job publisher/status-stage
+  relationships, and the complete API → execution → workspace/session result
+  flow.
+- Added one shared Python-equivalent string-strip boundary. It removes Unicode
+  `White_Space` plus U+001C–U+001F, preserves U+FEFF, and is used by both
+  AnalyzeOptions banned-word canonicalization and terminology producers.
+  File-leading BOM removal remains explicit rather than being conflated with
+  Python whitespace.
+- `JobsApi` now treats `done` before terminal progress and permanently CLOSED
+  EventSource connections as fatal. CONNECTING errors remain transient.
+  Integrated execution regressions verify processing exits on fatal errors and
+  stale reset generations cannot be mutated by late controls/errors.
+- SSE progress now requires backend-equivalent integer/range constraints and
+  status/stage relationships, including OCR/finalizing thresholds and
+  completed/partial exporting/finalizing artifact transitions.
+- Canonical results are strictly cloned, validated, and recursively frozen
+  once. A private WeakMap carries validated provenance and canonical issues so
+  JobsApi/direct API results, transformed execution results, workspace loads,
+  and session restores reuse the same snapshot without exposing an unchecked
+  reference.
+- Replaced pairwise block overlap checks with pre-indexed code-point slicing,
+  iterative cycle/depth validation, ancestry traversal intervals, and an
+  ordered active-range sweep. Ancestor containment remains valid; sibling,
+  nested-sibling, crossing, and cross-branch overlap remain invalid.
+- Reaffirmed the accepted partial-warning persistence pushback. No Task 6
+  session schema or export feature was added.
+
+### Task 5 review fix round 2 TDD evidence
+
+- Python whitespace RED: 8 failed, 36 passed; GREEN: 44 passed.
+- SSE termination RED: 4 failed, 61 passed; GREEN: 65 passed.
+- Progress relationships RED: 7 failed, 60 passed; GREEN: 67 passed.
+- Canonical result reuse/publication RED: 3 failed, 148 passed; GREEN included
+  in the 151-test execution/workspace run.
+- Structural block-sweep RED: 8,014,000 range reads for 2,000 disjoint blocks
+  versus a 100,000 cap; focused GREEN passed hierarchy/containment/sweep
+  regressions. The full workspace suite passed 131 tests.
+- Focused Task 5/terminology/workspace GREEN: 312 tests across 7 files.
+- Full frontend GREEN: 397 tests across 16 files, with the existing Node
+  experimental `localStorage` warning.
+- Production build GREEN: `vue-tsc -b` and Vite 6.4.3, 57 modules transformed.
+- `git diff --check`: passed.
+
+Task 5: review fix round 2 implemented; awaiting independent review. Review is
+not claimed clean.
+
+Task 5 review fix round 2 implementation commit:
+`160ff81513337c0b4bc6ebc576c4e9d9dce931b0`
+(`fix: address task 5 review round 2`).

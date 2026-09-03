@@ -9,6 +9,10 @@ Review fix round 1 was implemented on 2026-09-03 in
 `9c82c32c2b2e9c7eb2bb9ae11765f3b1b0eba0e2`. It remains pending
 independent review; this report does not claim the review is clean.
 
+Review fix round 2 was implemented on 2026-09-03 from
+`9cfd54cace36ed9357333de3abb5045141773056`. It remains pending
+independent review; this report does not claim the review is clean.
+
 ## Files
 
 - Added `apps/web/src/composables/useVerificationExecution.ts`.
@@ -199,3 +203,93 @@ No Task 6 revision persistence or asynchronous export backend API was added.
 
 `9c82c32c2b2e9c7eb2bb9ae11765f3b1b0eba0e2`
 (`fix: address task 5 review findings`).
+
+## Review fix round 2 — 2026-09-03
+
+### Reviewer finding decisions
+
+1. **Accepted — Python-equivalent option whitespace normalization.** Direct
+   probes confirmed that Python `str.strip()` removes U+001C–U+001F and U+0085
+   but preserves U+FEFF, while JavaScript `trim()` does the opposite for those
+   reviewed boundaries. A shared frontend `stripPythonWhitespace` helper now
+   uses Unicode `White_Space` plus U+001C–U+001F, deliberately excluding
+   U+FEFF. AnalyzeOptions banned-word canonicalization and terminology
+   producers use the helper; file-leading BOM removal remains an explicit,
+   separate import concern. Canonical serialized-size checks therefore use
+   the same retained strings as backend `VerificationOptions`.
+2. **Accepted — fatal SSE termination semantics.** Backend inspection
+   confirmed that the SSE route publishes all retained progress events before
+   its `done` control event. `JobsApi` now requires a terminal progress event
+   before accepting `done`. Browser `EventSource.readyState === CLOSED` is a
+   fatal connection failure; `CONNECTING` remains a transient reconnect
+   notice. Integrated JobsApi/execution tests confirm fatal termination leaves
+   processing and that reset generations ignore stale controls/errors.
+3. **Accepted — durable progress validation.** SSE progress must now be an
+   integer in `[0, 100]`. Status/stage validation mirrors backend-derived
+   relationships: parsing switches to OCR at 40, English checking switches to
+   finalizing at 95, ordinary stages match their durable statuses, and
+   result-ready completed/partial jobs may publish exporting/finalizing
+   artifact events. Tests cover invalid pairs and every legitimate durable
+   pair without rejecting export transitions.
+4. **Accepted — one canonical result snapshot and order-aware block sweep.**
+   Successful API responses, execution publication, workspace loading, and
+   session restore now share one strict frozen snapshot boundary. A private
+   WeakMap records validated snapshot provenance and canonical safe issues, so
+   downstream execution/workspace consumers reuse the same frozen object
+   without cloning or revalidating it. Unvalidated direct dependency values
+   and transformed recheck values are validated before publication; invalid
+   workspace inputs cannot replace the current snapshot. Block validation now
+   pre-indexes code-point offsets, validates parent cycles iteratively, assigns
+   ancestry intervals, and sweeps blocks ordered by start/end/depth. It
+   preserves ancestor containment while rejecting crossing, sibling, and
+   cross-branch overlaps.
+5. **Reaffirmed pushback — partial warning session persistence.** Round 2 did
+   not add Task 6 session-schema fields. The accepted round-1 reasoning still
+   applies: transport status/message is ephemeral, while canonical
+   degradation and OCR metadata already persist in the result.
+
+### Round 2 RED/GREEN evidence
+
+- Python whitespace RED:
+  `npm test -- --run tests/analyzeOptions.spec.ts tests/useTerminology.spec.ts --reporter=dot`
+  failed 8 assertions with 36 passing. GREEN: 44 tests passed.
+- SSE termination RED:
+  `npm test -- --run tests/jobsApi.spec.ts tests/useVerificationExecution.spec.ts --reporter=dot`
+  failed 4 behavior assertions with 61 passing. GREEN: 65 tests passed.
+- Progress relationship RED:
+  `npm test -- --run tests/jobsApi.spec.ts --reporter=dot` failed 7 assertions
+  with 60 passing. GREEN: 67 tests passed.
+- Canonical publication RED:
+  `npm test -- --run tests/useVerificationExecution.spec.ts tests/useVerificationWorkspace.spec.ts --reporter=dot`
+  failed 3 new snapshot/publication assertions with 148 passing. The strict
+  boundary exposed invalid UUID and zero-bucket summaries in test fixtures;
+  fixtures were corrected to backend-valid data rather than weakening
+  validation.
+- Block sweep structural RED: the 2,000-block regression observed 8,014,000
+  interval-boundary reads under the pairwise implementation, exceeding the
+  100,000 structural cap. GREEN: focused hierarchy/sweep tests passed, and the
+  complete workspace suite passed 131 tests. A separate RED confirmed invalid
+  block structure with zero issues could not use an empty issue list to bypass
+  block validation.
+
+### Round 2 validation
+
+- Focused Task 5, terminology, and workspace GREEN:
+  `npm test -- --run tests/analyzeOptions.spec.ts tests/useTerminology.spec.ts tests/jobsApi.spec.ts tests/verificationApi.spec.ts tests/useVerificationExecution.spec.ts tests/useVerificationWorkspace.spec.ts tests/WorkspaceView.spec.ts --reporter=dot`
+  passed 312 tests across 7 files. Node emitted the existing experimental
+  `localStorage` warning.
+- Full frontend GREEN: `npm test -- --run --reporter=dot` passed 397 tests
+  across 16 files, with the same existing Node warning.
+- Production build GREEN: `npm run build` passed `vue-tsc -b` and Vite 6.4.3
+  with 57 modules transformed.
+- `git diff --check` passed with no output.
+
+### Round 2 scope
+
+No Task 6 revision persistence, session-schema expansion, or asynchronous
+export API feature was added.
+
+### Round 2 implementation commit
+
+`160ff81513337c0b4bc6ebc576c4e9d9dce931b0`
+(`fix: address task 5 review round 2`).
