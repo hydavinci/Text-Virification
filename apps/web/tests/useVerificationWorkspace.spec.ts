@@ -801,6 +801,249 @@ describe('useVerificationWorkspace', () => {
     expect(workspace.visibleIssues.value).toEqual([])
   })
 
+  it.each([
+    {
+      label: 'a root point strictly inside a non-ancestor root',
+      expected: false,
+      blocks: [
+        buildBlock({ block_id: 'interval' }),
+        buildBlock({
+          block_id: 'point',
+          text: '',
+          global_start: 2,
+          global_end: 2,
+          block_end: 0,
+          paragraph_index: 1,
+          source_locator: { paragraph_index: 1 }
+        })
+      ]
+    },
+    {
+      label: 'a sibling point strictly inside a sibling interval',
+      expected: false,
+      blocks: [
+        buildBlock({ block_id: 'root' }),
+        buildBlock({
+          block_id: 'interval',
+          text: '甲乙丙',
+          global_end: 3,
+          block_end: 3,
+          parent_id: 'root',
+          paragraph_index: 1,
+          source_locator: { paragraph_index: 1 }
+        }),
+        buildBlock({
+          block_id: 'point',
+          text: '',
+          global_start: 2,
+          global_end: 2,
+          block_end: 0,
+          parent_id: 'root',
+          paragraph_index: 2,
+          source_locator: { paragraph_index: 2 }
+        })
+      ]
+    },
+    {
+      label: 'an unrelated point at a nested child start but inside its outer ancestor',
+      expected: false,
+      blocks: [
+        buildBlock({ block_id: 'outer' }),
+        buildBlock({
+          block_id: 'child',
+          text: '丙',
+          global_start: 2,
+          global_end: 3,
+          block_end: 1,
+          parent_id: 'outer',
+          paragraph_index: 1,
+          source_locator: { paragraph_index: 1 }
+        }),
+        buildBlock({
+          block_id: 'point',
+          text: '',
+          global_start: 2,
+          global_end: 2,
+          block_end: 0,
+          paragraph_index: 2,
+          source_locator: { paragraph_index: 2 }
+        })
+      ]
+    },
+    {
+      label: 'an unrelated point at a nested child end but inside its outer ancestor',
+      expected: false,
+      blocks: [
+        buildBlock({ block_id: 'outer' }),
+        buildBlock({
+          block_id: 'child',
+          text: '乙',
+          global_start: 1,
+          global_end: 2,
+          block_end: 1,
+          parent_id: 'outer',
+          paragraph_index: 1,
+          source_locator: { paragraph_index: 1 }
+        }),
+        buildBlock({
+          block_id: 'point',
+          text: '',
+          global_start: 2,
+          global_end: 2,
+          block_end: 0,
+          paragraph_index: 2,
+          source_locator: { paragraph_index: 2 }
+        })
+      ]
+    },
+    {
+      label: 'a point strictly inside its ancestor',
+      expected: true,
+      blocks: [
+        buildBlock({ block_id: 'ancestor' }),
+        buildBlock({
+          block_id: 'point',
+          text: '',
+          global_start: 2,
+          global_end: 2,
+          block_end: 0,
+          parent_id: 'ancestor',
+          paragraph_index: 1,
+          source_locator: { paragraph_index: 1 }
+        })
+      ]
+    },
+    {
+      label: 'a non-ancestor point at the interval start',
+      expected: true,
+      blocks: [
+        buildBlock({ block_id: 'interval' }),
+        buildBlock({
+          block_id: 'point',
+          text: '',
+          global_end: 0,
+          block_end: 0,
+          paragraph_index: 1,
+          source_locator: { paragraph_index: 1 }
+        })
+      ]
+    },
+    {
+      label: 'a non-ancestor point at the interval end',
+      expected: true,
+      blocks: [
+        buildBlock({ block_id: 'interval' }),
+        buildBlock({
+          block_id: 'point',
+          text: '',
+          global_start: 4,
+          global_end: 4,
+          block_end: 0,
+          paragraph_index: 1,
+          source_locator: { paragraph_index: 1 }
+        })
+      ]
+    },
+    {
+      label: 'equal sibling points',
+      expected: true,
+      blocks: [
+        buildBlock({
+          block_id: 'first',
+          text: '',
+          global_start: 2,
+          global_end: 2,
+          block_end: 0
+        }),
+        buildBlock({
+          block_id: 'second',
+          text: '',
+          global_start: 2,
+          global_end: 2,
+          block_end: 0,
+          paragraph_index: 1,
+          source_locator: { paragraph_index: 1 }
+        })
+      ]
+    },
+    {
+      label: 'equal cousin points',
+      expected: true,
+      blocks: [
+        buildBlock({
+          block_id: 'first-parent',
+          text: '',
+          global_start: 2,
+          global_end: 2,
+          block_end: 0
+        }),
+        buildBlock({
+          block_id: 'second-parent',
+          text: '',
+          global_start: 2,
+          global_end: 2,
+          block_end: 0,
+          paragraph_index: 1,
+          source_locator: { paragraph_index: 1 }
+        }),
+        buildBlock({
+          block_id: 'first-point',
+          text: '',
+          global_start: 2,
+          global_end: 2,
+          block_end: 0,
+          parent_id: 'first-parent',
+          paragraph_index: 2,
+          source_locator: { paragraph_index: 2 }
+        }),
+        buildBlock({
+          block_id: 'second-point',
+          text: '',
+          global_start: 2,
+          global_end: 2,
+          block_end: 0,
+          parent_id: 'second-parent',
+          paragraph_index: 3,
+          source_locator: { paragraph_index: 3 }
+        })
+      ]
+    },
+    {
+      label: 'equal ancestor and descendant points',
+      expected: true,
+      blocks: [
+        buildBlock({
+          block_id: 'point-parent',
+          text: '',
+          global_start: 2,
+          global_end: 2,
+          block_end: 0
+        }),
+        buildBlock({
+          block_id: 'point-child',
+          text: '',
+          global_start: 2,
+          global_end: 2,
+          block_end: 0,
+          parent_id: 'point-parent',
+          paragraph_index: 1,
+          source_locator: { paragraph_index: 1 }
+        })
+      ]
+    }
+  ])('matches backend zero-length overlap semantics for $label in unsorted input', ({
+    expected,
+    blocks
+  }) => {
+    expect(
+      hasCanonicalBlocks(
+        buildResult([], {
+          blocks: [blocks.at(-1)!, ...blocks.slice(0, -1).reverse()]
+        })
+      )
+    ).toBe(expected)
+  })
+
   it('checks large disjoint block sets without quadratic range comparisons', () => {
     const blockCount = 2_000
     let rangeReads = 0
@@ -831,6 +1074,67 @@ describe('useVerificationWorkspace', () => {
 
     expect(hasCanonicalBlocks(buildResult([], { text, blocks }))).toBe(true)
     expect(rangeReads).toBeLessThan(blockCount * 50)
+  })
+
+  it('checks many equal-start point boundaries without scanning the active ancestry chain', () => {
+    const intervalCount = 1_000
+    const text = 'x'.repeat(intervalCount)
+    let rangeReads = 0
+    const intervals = Array.from({ length: intervalCount }, (_, index) => {
+      const end = intervalCount - index
+      const block = buildBlock({
+        block_id: `interval-${index}`,
+        text: text.slice(0, end),
+        global_start: 0,
+        global_end: end,
+        block_end: end,
+        parent_id: index === 0 ? null : `interval-${index - 1}`,
+        paragraph_index: index,
+        source_locator: { paragraph_index: index }
+      })
+      for (const key of ['global_start', 'global_end'] as const) {
+        const value = block[key]
+        Object.defineProperty(block, key, {
+          configurable: true,
+          enumerable: true,
+          get() {
+            rangeReads += 1
+            return value
+          }
+        })
+      }
+      return block
+    })
+    const points = Array.from({ length: intervalCount }, (_, index) => {
+      const block = buildBlock({
+        block_id: `point-${index}`,
+        text: '',
+        global_start: 0,
+        global_end: 0,
+        block_end: 0,
+        paragraph_index: intervalCount + index,
+        source_locator: { paragraph_index: intervalCount + index }
+      })
+      for (const key of ['global_start', 'global_end'] as const) {
+        const value = block[key]
+        Object.defineProperty(block, key, {
+          configurable: true,
+          enumerable: true,
+          get() {
+            rangeReads += 1
+            return value
+          }
+        })
+      }
+      return block
+    })
+
+    expect(
+      hasCanonicalBlocks(
+        buildResult([], { text, blocks: [...points.reverse(), ...intervals.reverse()] })
+      )
+    ).toBe(true)
+    expect(rangeReads).toBeLessThan((intervalCount + points.length) * 50)
   })
 
   it('allows overlapping ancestor and descendant blocks with astral code-point ranges', () => {
@@ -1532,6 +1836,17 @@ describe('useVerificationWorkspace', () => {
     expect(workspace.result.value).toBe(snapshot)
   })
 
+  it.each([0, 1])(
+    'accepts backend boundary issue confidence %s',
+    (confidence) => {
+      expect(
+        createVerificationResultSnapshot(
+          buildResult([buildIssue({ confidence })])
+        )
+      ).not.toBeNull()
+    }
+  )
+
   it('does not publish an unchecked result over the current canonical snapshot', () => {
     const workspace = useVerificationWorkspace()
     const valid = buildResult([buildIssue()])
@@ -2025,6 +2340,26 @@ describe('useVerificationWorkspace', () => {
     expect(workspace.currentRevision.value).toEqual(sourceRevisionFor(result))
     expect(workspace.requiresReverification.value).toBe(false)
     expect(workspace.canUndoLastBatch.value).toBe(false)
+  })
+
+  it('rejects out-of-range restored issue confidence without replacing workspace state', () => {
+    const priorIssue = buildIssue()
+    const priorResult = buildResult([priorIssue])
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(priorResult)
+    workspace.acceptIssue(priorIssue.issue_id)
+    const priorSnapshot = workspace.result.value
+    const priorRevision = workspace.currentRevision.value
+    const invalidIssue = buildIssue({ confidence: -0.01 })
+    const invalidSession = buildSessionV2(buildResult([invalidIssue]))
+
+    expect(workspace.restoreWorkspaceState(invalidSession)).toBe(false)
+    expect(workspace.result.value).toBe(priorSnapshot)
+    expect(workspace.currentRevision.value).toBe(priorRevision)
+    expect(workspace.issueStates.value).toEqual({
+      [priorIssue.issue_id]: 'accepted'
+    })
+    expect(workspace.modifiedText.value).toBe('甲B丙丁')
   })
 
   it('restores issue-derived canonical and compatibility-localized summaries', () => {

@@ -432,6 +432,64 @@ describe('createJobsApi', () => {
     })
   })
 
+  it.each([-0.01, 1.01])(
+    'rejects retained-result issue confidence %s outside the backend range',
+    async (confidence) => {
+      const issue = {
+        issue_id: '33333333-3333-4333-8333-333333333333',
+        document_id: '11111111-1111-4111-8111-111111111111',
+        verification_run_id: '22222222-2222-4222-8222-222222222222',
+        block_id: 'p-0',
+        page: null,
+        start: 0,
+        end: 1,
+        block_start: 0,
+        block_end: 1,
+        original: '检',
+        suggestion: '校',
+        alternatives: [],
+        type: 'typo',
+        severity: 'warning',
+        layer: 'character',
+        message: '疑似错别字',
+        description: '疑似错别字',
+        rule_id: 'cn_typo',
+        rule_version: '1',
+        source: 'test',
+        source_version: '1',
+        confidence,
+        auto_fixable: true,
+        context: '检查',
+        review: null,
+        review_reason: null
+      }
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () =>
+          buildCanonicalBackendResult({
+            issues: [issue],
+            summary: {
+              total: 1,
+              by_type: { typo: 1 },
+              by_severity: { warning: 1 },
+              by_rule: { cn_typo: 1 },
+              by_layer: { character: 1 },
+              llm_review: null
+            }
+          })
+      })
+      const api = createJobsApi({
+        fetch: fetchMock,
+        eventSourceFactory: (url) =>
+          new FakeEventSource(url) as unknown as EventSource
+      })
+
+      await expect(api.getResult('job-1')).rejects.toThrow(
+        'Invalid verification result response.'
+      )
+    }
+  )
+
   it('rejects a malformed successful retained-result response', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,

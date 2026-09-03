@@ -82,6 +82,41 @@ describe('terminology import parsers', () => {
     ).toEqual(['最好', '第一', '\ufeff唯一\ufeff'])
   })
 
+  it.each([
+    ['glossary original', '\ud800,标准'],
+    ['glossary standard', '原文,\udc00']
+  ])('rejects a lone surrogate in an imported %s', (_label, value) => {
+    expect(() => parseGlossary(value)).toThrowError(
+      expect.objectContaining({ code: 'invalid-unicode' })
+    )
+  })
+
+  it.each(['\ud800', '\udc00'])(
+    'rejects a lone surrogate in imported banned words',
+    (value) => {
+      expect(() => parseBannedWords(value)).toThrowError(
+        expect.objectContaining({ code: 'invalid-unicode' })
+      )
+    }
+  )
+
+  it('rejects malformed Unicode before the import byte-size limit', () => {
+    expect(() =>
+      parseBannedWords(`\ud800${'x'.repeat(MAX_TERMINOLOGY_IMPORT_BYTES)}`)
+    ).toThrowError(
+      expect.objectContaining({ code: 'invalid-unicode' })
+    )
+  })
+
+  it('accepts valid surrogate pairs as one Unicode code point', () => {
+    const astral200 = '😀'.repeat(200)
+
+    expect(parseGlossary(`${astral200},规范`)).toEqual([
+      { original: astral200, standard: '规范' }
+    ])
+    expect(parseBannedWords(astral200)).toEqual([astral200])
+  })
+
   it('handles a UTF-8 BOM, comments, blanks, quoted CSV, TSV, and arrows', () => {
     expect(
       parseGlossary(
@@ -275,6 +310,56 @@ describe('useTerminology', () => {
       { original: 'APP', standard: '应用程序' }
     ])
     expect(terminology.bannedWords.value).toEqual(['最好', '第一'])
+  })
+
+  it.each([
+    [
+      'glossary addition',
+      (terminology: ReturnType<typeof useTerminology>) =>
+        terminology.addGlossaryTerm('\ud800', '规范')
+    ],
+    [
+      'banned-word addition',
+      (terminology: ReturnType<typeof useTerminology>) =>
+        terminology.addBannedWord('\udc00')
+    ],
+    [
+      'glossary replacement',
+      (terminology: ReturnType<typeof useTerminology>) =>
+        terminology.setGlossary([
+          { original: '原文', standard: '\ud800' }
+        ])
+    ],
+    [
+      'banned-word replacement',
+      (terminology: ReturnType<typeof useTerminology>) =>
+        terminology.setBannedWords(['\udc00'])
+    ],
+    [
+      'complete options replacement',
+      (terminology: ReturnType<typeof useTerminology>) =>
+        terminology.setOptions({
+          scenario: 'technical',
+          enableSecurity: false,
+          enableSensitive: false,
+          enableAdExtreme: true,
+          glossary: [{ original: '\ud800', standard: '规范' }],
+          bannedWords: []
+        })
+    ]
+  ])('rejects lone surrogates transactionally during %s', (_label, mutate) => {
+    const terminology = useTerminology({
+      glossary: [{ original: 'AI', standard: '人工智能' }],
+      bannedWords: ['最好']
+    })
+
+    expect(() => mutate(terminology)).toThrowError(
+      expect.objectContaining({ code: 'invalid-unicode' })
+    )
+    expect(terminology.glossary.value).toEqual([
+      { original: 'AI', standard: '人工智能' }
+    ])
+    expect(terminology.bannedWords.value).toEqual(['最好'])
   })
 
   it('enforces the total limit when merging an import into existing state', () => {

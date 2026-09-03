@@ -4,6 +4,7 @@ import {
   isPythonWhitespace,
   stripPythonWhitespace
 } from '../api/pythonWhitespace'
+import { hasLoneSurrogate } from '../api/unicode'
 import type { AnalyzeOptions, GlossaryTerm } from '../types/verification'
 
 export const MAX_TERMINOLOGY_IMPORT_BYTES = 64 * 1024
@@ -24,6 +25,7 @@ export type TerminologyImportErrorCode =
   | 'malformed-delimited-line'
   | 'empty-value'
   | 'term-too-long'
+  | 'invalid-unicode'
   | 'identical-glossary-values'
   | 'unsupported-file-type'
 
@@ -60,6 +62,7 @@ function importError(
 }
 
 function validateImportBytes(value: string): void {
+  assertValidUnicode(value)
   if (new TextEncoder().encode(value).byteLength > MAX_TERMINOLOGY_IMPORT_BYTES) {
     importError(
       'import-too-large',
@@ -69,6 +72,13 @@ function validateImportBytes(value: string): void {
 }
 
 export function verificationOptionsJsonBytes(options: AnalyzeOptions): number {
+  for (const [index, term] of options.glossary.entries()) {
+    assertValidUnicode(term.original, index + 1, '原文写法')
+    assertValidUnicode(term.standard, index + 1, '规范写法')
+  }
+  for (const [index, word] of options.bannedWords.entries()) {
+    assertValidUnicode(word, index + 1, '禁用词')
+  }
   return new TextEncoder().encode(
     JSON.stringify({
       scenario: options.scenario,
@@ -100,6 +110,7 @@ export function validateVerificationOptionsSize(
 
 function validateValue(value: string, line: number, label: string): string {
   const normalized = stripPythonWhitespace(value)
+  assertValidUnicode(normalized, line, label)
   if (!normalized) {
     importError('empty-value', `第 ${line} 行的${label}不能为空。`, line)
   }
@@ -111,6 +122,23 @@ function validateValue(value: string, line: number, label: string): string {
     )
   }
   return normalized
+}
+
+function assertValidUnicode(
+  value: string,
+  line: number | null = null,
+  label = '文本'
+): void {
+  if (!hasLoneSurrogate(value)) {
+    return
+  }
+  importError(
+    'invalid-unicode',
+    line === null
+      ? '文本包含无效的 Unicode 代理项。'
+      : `第 ${line} 行的${label}包含无效的 Unicode 代理项。`,
+    line
+  )
 }
 
 function nonCommentLines(value: string): Array<{ line: number; value: string }> {

@@ -4,6 +4,7 @@ import type {
   Scenario
 } from '../types/verification'
 import { stripPythonWhitespace } from './pythonWhitespace'
+import { hasLoneSurrogate } from './unicode'
 
 const SCENARIOS: readonly Scenario[] = [
   'general',
@@ -53,7 +54,10 @@ export function createAnalyzeOptionsSnapshot(
     if (!normalized || seenBannedWords.has(normalized)) {
       continue
     }
-    if (codePointLength(normalized) > MAX_TERMINOLOGY_CODE_POINTS) {
+    if (
+      hasLoneSurrogate(normalized) ||
+      codePointLength(normalized) > MAX_TERMINOLOGY_CODE_POINTS
+    ) {
       throw invalidOptions()
     }
     bannedWords.push(normalized)
@@ -104,6 +108,8 @@ function cloneGlossaryTerm(term: GlossaryTerm): GlossaryTerm {
     throw invalidOptions()
   }
   if (
+    hasLoneSurrogate(term.original) ||
+    hasLoneSurrogate(term.standard) ||
     codePointLength(term.original) < 1 ||
     codePointLength(term.original) > MAX_TERMINOLOGY_CODE_POINTS ||
     codePointLength(term.standard) > MAX_TERMINOLOGY_CODE_POINTS

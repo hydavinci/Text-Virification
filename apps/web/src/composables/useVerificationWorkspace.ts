@@ -315,17 +315,14 @@ export function hasCanonicalBlocks(result: VerificationResult): boolean {
     }
   }
 
-  const orderedBlocks = result.blocks
-    .filter((block) => block.global_start < block.global_end)
-    .slice()
-    .sort(
-      (left, right) =>
-        left.global_start - right.global_start ||
-        right.global_end - left.global_end ||
-        (depthById.get(left.block_id) ?? 0) -
-          (depthById.get(right.block_id) ?? 0) ||
-        left.block_id.localeCompare(right.block_id)
-    )
+  const orderedBlocks = result.blocks.slice().sort(
+    (left, right) =>
+      left.global_start - right.global_start ||
+      right.global_end - left.global_end ||
+      (depthById.get(left.block_id) ?? 0) -
+        (depthById.get(right.block_id) ?? 0) ||
+      left.block_id.localeCompare(right.block_id)
+  )
   const active: TextBlock[] = []
   for (const block of orderedBlocks) {
     while (
@@ -334,16 +331,38 @@ export function hasCanonicalBlocks(result: VerificationResult): boolean {
     ) {
       active.pop()
     }
-    const overlapping = active[active.length - 1]
+    const overlapping =
+      block.global_start === block.global_end
+        ? lastBlockStartingBefore(active, block.global_start)
+        : active[active.length - 1]
     if (
       overlapping !== undefined &&
       !isAncestor(overlapping.block_id, block.block_id, enteredAt, exitedAt)
     ) {
       return false
     }
-    active.push(block)
+    if (block.global_start < block.global_end) {
+      active.push(block)
+    }
   }
   return true
+}
+
+function lastBlockStartingBefore(
+  blocks: readonly TextBlock[],
+  position: number
+): TextBlock | undefined {
+  let low = 0
+  let high = blocks.length
+  while (low < high) {
+    const middle = low + Math.floor((high - low) / 2)
+    if ((blocks[middle]?.global_start ?? position) < position) {
+      low = middle + 1
+    } else {
+      high = middle
+    }
+  }
+  return low === 0 ? undefined : blocks[low - 1]
 }
 
 function utf16OffsetsByCodePoint(value: string): number[] {
@@ -679,6 +698,8 @@ function copyVerificationIssue(value: unknown): VerificationIssue | null {
     typeof value.source !== 'string' ||
     typeof value.source_version !== 'string' ||
     !isFiniteNumber(value.confidence) ||
+    value.confidence < 0 ||
+    value.confidence > 1 ||
     typeof value.auto_fixable !== 'boolean' ||
     typeof value.context !== 'string' ||
     !isNonnegativeInteger(position) ||

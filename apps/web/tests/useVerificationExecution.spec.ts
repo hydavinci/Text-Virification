@@ -153,6 +153,41 @@ function buildResult(
   }
 }
 
+function buildIssue(
+  confidence: number
+): VerificationResult['issues'][number] {
+  return {
+    issue_id: '44444444-4444-4444-8444-444444444444',
+    document_id: '11111111-1111-4111-8111-111111111111',
+    verification_run_id: '22222222-2222-4222-8222-222222222222',
+    block_id: 'p-0',
+    page: null,
+    start: 0,
+    end: 1,
+    block_start: 0,
+    block_end: 1,
+    type: 'typo',
+    severity: 'warning',
+    original: '检',
+    suggestion: '校',
+    alternatives: [],
+    layer: 'character',
+    message: '疑似错别字',
+    description: '疑似错别字',
+    rule_id: 'cn_typo',
+    rule_version: '1',
+    source: 'test',
+    source_version: '1',
+    confidence,
+    auto_fixable: true,
+    context: '检查',
+    position: 0,
+    end_position: 1,
+    review: null,
+    review_reason: null
+  }
+}
+
 function buildJob(overrides: Partial<JobRead> = {}): JobRead {
   return {
     job_id: '33333333-3333-4333-8333-333333333333',
@@ -743,6 +778,60 @@ describe('useVerificationExecution', () => {
     asyncPayload.text = '调用方篡改'
     expect(asynchronous.execution.result.value?.text).toBe('检查文本')
   })
+
+  it.each([
+    ['direct dependency', 'direct'],
+    ['asynchronous result dependency', 'asynchronous']
+  ] as const)(
+    'rejects out-of-range issue confidence from a %s before publication',
+    async (_label, source) => {
+      const issue = buildIssue(1.01)
+      const invalidResult = buildResult({
+        execution_mode:
+          source === 'asynchronous' ? 'asynchronous' : 'synchronous',
+        issues: [issue],
+        summary: {
+          total: 1,
+          by_type: { typo: 1 },
+          by_severity: { warning: 1 },
+          by_rule: { cn_typo: 1 },
+          by_layer: { character: 1 }
+        }
+      })
+      if (source === 'direct') {
+        const verificationApi: VerificationApi = {
+          analyzeText: vi.fn().mockResolvedValue(invalidResult),
+          analyzeFile: vi.fn(),
+          exportReport: vi.fn(),
+          exportOriginal: vi.fn()
+        }
+        const harness = createHarness({ verificationApi })
+
+        await harness.execution.analyzeText('检查文本', options)
+
+        expect(harness.execution.state.value).toBe('failed')
+        expect(harness.execution.result.value).toBeNull()
+        expect(harness.execution.error.value?.message).toBe(
+          'Invalid verification result response.'
+        )
+        return
+      }
+
+      const harness = createHarness({ result: invalidResult })
+      await harness.execution.analyzeFile(
+        new File(['pdf'], 'sample.pdf'),
+        options
+      )
+      harness.emit(buildEvent('completed'))
+      await flushPromises()
+
+      expect(harness.execution.state.value).toBe('failed')
+      expect(harness.execution.result.value).toBeNull()
+      expect(harness.execution.error.value?.message).toBe(
+        'Invalid verification result response.'
+      )
+    }
+  )
 
   it('passes one immutable cloned options snapshot to direct and asynchronous APIs', async () => {
     const verificationApi: VerificationApi = {

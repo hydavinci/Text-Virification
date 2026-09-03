@@ -109,6 +109,33 @@ describe('createAnalyzeOptionsSnapshot', () => {
 
   it.each([
     [
+      'a lone high surrogate in a glossary original',
+      baseOptions({
+        glossary: [{ original: '\ud800', standard: 'standard' }]
+      })
+    ],
+    [
+      'a lone low surrogate in a glossary standard',
+      baseOptions({
+        glossary: [{ original: 'term', standard: '\udc00' }]
+      })
+    ],
+    [
+      'a lone high surrogate in a banned word',
+      baseOptions({ bannedWords: ['\ud800'] })
+    ],
+    [
+      'a lone low surrogate in a banned word',
+      baseOptions({ bannedWords: ['\udc00'] })
+    ]
+  ])('rejects %s before producing a backend snapshot', (_label, options) => {
+    expect(() => createAnalyzeOptionsSnapshot(options)).toThrow(
+      AnalyzeOptionsError
+    )
+  })
+
+  it.each([
+    [
       '501 glossary terms',
       baseOptions({
         glossary: Array.from({ length: 501 }, (_, index) => ({
