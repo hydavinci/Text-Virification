@@ -4,13 +4,13 @@ import { computed, inject, nextTick, onBeforeUnmount, onMounted, reactive, ref, 
 import { jobsApiKey } from '../api/jobs'
 import { verificationApiKey } from '../api/verification'
 import JobProgress from '../components/JobProgress.vue'
-import UploadWorkspace from '../components/UploadWorkspace.vue'
+import SourceInputPanel from '../components/workspace/SourceInputPanel.vue'
+import TerminologyEditor from '../components/workspace/TerminologyEditor.vue'
+import VerificationSettings from '../components/workspace/VerificationSettings.vue'
 import { isTerminalJobStatus, type JobProgressEvent, type JobRead, type JobStatus } from '../types/jobs'
 import type {
   AnalyzeOptions,
-  GlossaryTerm,
   IssueState,
-  Scenario,
   VerificationIssue,
   VerificationResult
 } from '../types/verification'
@@ -23,22 +23,6 @@ interface JobProgressState {
   failureMessage: string | null
   connectionMessage: string | null
 }
-
-interface ScenarioOption {
-  id: Scenario
-  name: string
-  description: string
-  icon: string
-}
-
-const scenarios: ScenarioOption[] = [
-  { id: 'general', name: '通用文档', description: '全面检查', icon: '通' },
-  { id: 'academic', name: '学术论文', description: '术语与格式', icon: '学' },
-  { id: 'business', name: '商务文档', description: '表达与规范', icon: '商' },
-  { id: 'legal', name: '法律文书', description: '严谨与一致', icon: '法' },
-  { id: 'news', name: '新闻稿', description: '准确与时效', icon: '新' },
-  { id: 'technical', name: '技术文档', description: '术语与数字', icon: '技' }
-]
 
 const layers = [
   { id: 'character', name: '字符层', icon: 'A文', color: '#ef4444' },
@@ -85,9 +69,8 @@ if (!injectedJobsApi) {
 const jobsApi = injectedJobsApi
 const verificationApi = inject(verificationApiKey, null)
 
-const mode = ref<'file' | 'text'>('file')
 const theme = ref<'light' | 'dark'>('light')
-const selectedScenario = ref<Scenario>('general')
+const selectedScenario = ref<AnalyzeOptions['scenario']>('general')
 const enableSecurity = ref(true)
 const enableSensitive = ref(true)
 const enableAdExtreme = ref(false)
@@ -102,11 +85,8 @@ const fileSource = ref<File | null>(null)
 const result = ref<VerificationResult | null>(null)
 const issueStates = reactive<Record<number, IssueState>>({})
 const selectedSuggestions = reactive<Record<number, string>>({})
-const glossary = ref<GlossaryTerm[]>([])
+const glossary = ref<AnalyzeOptions['glossary']>([])
 const bannedWords = ref<string[]>([])
-const termOriginal = ref('')
-const termStandard = ref('')
-const bannedInput = ref('')
 const isAnalyzing = ref(false)
 const analysisStep = ref(0)
 const errorMessage = ref<string | null>(null)
@@ -296,8 +276,8 @@ async function runFileAnalysis(file: File) {
   await runAnalysis(() => verificationApi.analyzeFile(file, currentOptions.value))
 }
 
-async function runTextAnalysis() {
-  const text = textInput.value.trim()
+async function runTextAnalysis(submittedText: string) {
+  const text = submittedText.trim()
   if (!text) {
     notify('请先输入需要检查的文本')
     return
@@ -305,6 +285,7 @@ async function runTextAnalysis() {
   if (!verificationApi || !confirmOptionalSettings()) {
     return
   }
+  textInput.value = text
   fileSource.value = null
   await runAnalysis(() => verificationApi.analyzeText(text, currentOptions.value))
 }
@@ -387,84 +368,13 @@ function undoBatch() {
   saveSession()
 }
 
-function addGlossaryTerm() {
-  const original = termOriginal.value.trim()
-  const standard = termStandard.value.trim()
-  if (!original || !standard || original === standard) {
-    notify('请填写不同的原文写法和规范写法')
-    return
-  }
-  if (glossary.value.some((term) => term.original === original && term.standard === standard)) {
-    notify('该术语对已存在')
-    return
-  }
-  glossary.value.push({ original, standard })
-  termOriginal.value = ''
-  termStandard.value = ''
-}
-
-function addBannedWord() {
-  const word = bannedInput.value.trim()
-  if (!word || bannedWords.value.includes(word)) {
-    return
-  }
-  bannedWords.value.push(word)
-  bannedInput.value = ''
-}
-
-function importGlossary(event: Event, kind: 'terms' | 'banned') {
-  const input = event.target as HTMLInputElement
-  const file = input.files?.[0]
-  if (!file) {
-    return
-  }
-
-  const reader = new FileReader()
-  reader.onload = () => {
-    const lines = String(reader.result ?? '').split(/\r?\n/)
-    let added = 0
-    for (const rawLine of lines) {
-      const line = rawLine.trim()
-      if (!line || line.startsWith('#')) {
-        continue
-      }
-      if (kind === 'terms') {
-        const parts = line.includes('\t')
-          ? line.split('\t')
-          : line.includes('→')
-            ? line.split('→')
-            : line.split(',')
-        const original = parts[0]?.trim().replace(/^["']|["']$/g, '')
-        const standard = parts[1]?.trim().replace(/^["']|["']$/g, '')
-        if (
-          original &&
-          standard &&
-          original !== standard &&
-          !glossary.value.some((term) => term.original === original && term.standard === standard)
-        ) {
-          glossary.value.push({ original, standard })
-          added += 1
-        }
-      } else {
-        for (const word of line.split(/[,\t]/).map((item) => item.trim()).filter(Boolean)) {
-          if (!bannedWords.value.includes(word)) {
-            bannedWords.value.push(word)
-            added += 1
-          }
-        }
-      }
-    }
-    notify(`成功导入 ${added} 项`)
-    input.value = ''
-  }
-  reader.readAsText(file, 'UTF-8')
-}
-
-function downloadSample(kind: 'terms' | 'banned') {
-  const content = kind === 'terms'
-    ? '# 原文写法,规范写法\nAI,人工智能\nAPP,应用程序\n'
-    : '# 每行一个禁用词\n最好\n第一\n'
-  downloadText(content, kind === 'terms' ? '术语表示例.csv' : '禁用词示例.txt')
+function applyOptions(options: AnalyzeOptions) {
+  selectedScenario.value = options.scenario
+  enableSecurity.value = options.enableSecurity
+  enableSensitive.value = options.enableSensitive
+  enableAdExtreme.value = options.enableAdExtreme
+  glossary.value = options.glossary.map((term) => ({ ...term }))
+  bannedWords.value = [...options.bannedWords]
 }
 
 function replaceAll() {
@@ -806,26 +716,13 @@ onBeforeUnmount(() => {
 
       <div class="landing-grid">
         <section class="input-card">
-          <div class="mode-tabs">
-            <button :class="{ active: mode === 'file' }" type="button" @click="mode = 'file'">上传文件</button>
-            <button :class="{ active: mode === 'text' }" type="button" @click="mode = 'text'">粘贴文本</button>
-          </div>
-
-          <UploadWorkspace
-            v-if="mode === 'file'"
+          <SourceInputPanel
+            v-model:text="textInput"
             :busy="isAnalyzing"
             :server-error="errorMessage"
-            @upload="handleUpload"
+            @submit-file="handleUpload"
+            @submit-text="runTextAnalysis"
           />
-          <div v-else class="text-mode">
-            <textarea v-model="textInput" maxlength="500000" placeholder="在此粘贴需要检查的文本内容…" />
-            <div class="text-footer">
-              <span>{{ textInput.length.toLocaleString() }} 字符</span>
-              <button class="btn primary" :disabled="isAnalyzing" type="button" @click="runTextAnalysis">
-                开始检查
-              </button>
-            </div>
-          </div>
 
           <div v-if="isAnalyzing" class="loading-card" role="status" aria-live="polite">
             <div class="spinner"></div>
@@ -849,63 +746,18 @@ onBeforeUnmount(() => {
             </button>
           </div>
 
-          <div v-if="settingsTab === 'settings'" class="settings-body">
-            <h2>文档场景</h2>
-            <div class="scenario-grid">
-              <button
-                v-for="scenario in scenarios"
-                :key="scenario.id"
-                :class="{ active: selectedScenario === scenario.id }"
-                type="button"
-                @click="selectedScenario = scenario.id"
-              >
-                <span>{{ scenario.icon }}</span>
-                <strong>{{ scenario.name }}</strong>
-                <small>{{ scenario.description }}</small>
-              </button>
-            </div>
-            <h2>合规开关</h2>
-            <label class="switch"><span>个人信息与凭证扫描</span><input v-model="enableSecurity" type="checkbox" /></label>
-            <label class="switch"><span>政治与敏感表述检查</span><input v-model="enableSensitive" type="checkbox" /></label>
-            <label class="switch"><span>广告法极限词检查</span><input v-model="enableAdExtreme" type="checkbox" /></label>
-          </div>
-
-          <div v-else-if="settingsTab === 'terms'" class="settings-body">
-            <h2>自定义术语表</h2>
-            <p class="muted">规定原文写法应统一替换为的标准写法。</p>
-            <div class="term-form">
-              <input v-model="termOriginal" placeholder="原文写法" @keyup.enter="addGlossaryTerm" />
-              <span>→</span>
-              <input v-model="termStandard" placeholder="规范写法" @keyup.enter="addGlossaryTerm" />
-              <button class="btn primary small" type="button" @click="addGlossaryTerm">添加</button>
-            </div>
-            <label class="import-btn">导入 CSV / TSV<input type="file" accept=".csv,.tsv,.txt" @change="importGlossary($event, 'terms')" /></label>
-            <button class="link-btn" type="button" @click="downloadSample('terms')">下载示例</button>
-            <button v-if="glossary.length" class="link-btn danger" type="button" @click="glossary = []">清空</button>
-            <div class="chip-list">
-              <div v-for="(term, index) in glossary" :key="`${term.original}-${term.standard}`" class="term-chip">
-                <span class="original">{{ term.original }}</span><span>→</span><span class="standard">{{ term.standard }}</span>
-                <button type="button" @click="glossary.splice(index, 1)">×</button>
-              </div>
-              <p v-if="!glossary.length" class="empty">暂无自定义术语</p>
-            </div>
-          </div>
-
-          <div v-else class="settings-body">
-            <h2>禁用词库</h2>
-            <p class="muted">命中后作为独立问题提示替换或删除。</p>
-            <div class="term-form">
-              <input v-model="bannedInput" placeholder="输入禁用词" @keyup.enter="addBannedWord" />
-              <button class="btn primary small" type="button" @click="addBannedWord">添加</button>
-            </div>
-            <label class="import-btn">批量导入<input type="file" accept=".csv,.tsv,.txt" @change="importGlossary($event, 'banned')" /></label>
-            <button class="link-btn" type="button" @click="downloadSample('banned')">下载示例</button>
-            <button v-if="bannedWords.length" class="link-btn danger" type="button" @click="bannedWords = []">清空</button>
-            <div class="banned-list">
-              <span v-for="(word, index) in bannedWords" :key="word">{{ word }}<button @click="bannedWords.splice(index, 1)">×</button></span>
-              <p v-if="!bannedWords.length" class="empty">暂无禁用词</p>
-            </div>
-          </div>
+          <VerificationSettings
+            v-if="settingsTab === 'settings'"
+            :options="currentOptions"
+            @update:options="applyOptions"
+          />
+          <TerminologyEditor
+            v-else
+            :kind="settingsTab === 'terms' ? 'glossary' : 'banned'"
+            :options="currentOptions"
+            @update:options="applyOptions"
+            @notify="notify"
+          />
         </aside>
       </div>
 
@@ -1157,16 +1009,13 @@ button { color: inherit; }
   border: 1px solid var(--border); border-radius: 20px; background: color-mix(in srgb, var(--surface) 96%, transparent); box-shadow: var(--shadow); overflow: hidden;
 }
 .input-card { padding: 24px; }
-.mode-tabs, .side-tabs { display: flex; gap: 5px; padding: 4px; border-radius: 12px; background: var(--surface-2); }
-.mode-tabs { width: fit-content; margin-bottom: 20px; }
-.mode-tabs button, .side-tabs button { padding: 9px 17px; border: 0; border-radius: 9px; color: var(--muted); background: transparent; cursor: pointer; font-weight: 700; }
-.mode-tabs button.active, .side-tabs button.active { color: var(--primary); background: var(--surface); box-shadow: 0 3px 10px rgba(15,23,42,.08); }
-.text-mode textarea, .document-editor {
+.side-tabs { display: flex; gap: 5px; padding: 4px; border-radius: 12px; background: var(--surface-2); }
+.side-tabs button { padding: 9px 17px; border: 0; border-radius: 9px; color: var(--muted); background: transparent; cursor: pointer; font-weight: 700; }
+.side-tabs button.active { color: var(--primary); background: var(--surface); box-shadow: 0 3px 10px rgba(15,23,42,.08); }
+.document-editor {
   width: 100%; resize: vertical; border: 1px solid var(--border); border-radius: 15px; color: var(--text); background: var(--surface-2); outline: none;
 }
-.text-mode textarea { min-height: 280px; padding: 18px; line-height: 1.8; }
-.text-mode textarea:focus, input:focus, select:focus { border-color: var(--primary); outline: 3px solid rgba(37, 99, 235, .1); }
-.text-footer { display: flex; align-items: center; justify-content: space-between; margin-top: 12px; color: var(--muted); }
+input:focus, select:focus { border-color: var(--primary); outline: 3px solid rgba(37, 99, 235, .1); }
 .privacy-note { margin: 17px 0 0; color: var(--muted); font-size: 12px; }
 .loading-card { margin-top: 16px; padding: 14px; display: flex; align-items: center; gap: 12px; border-radius: 13px; background: #eff6ff; color: #1d4ed8; }
 .loading-card p { margin: 3px 0 0; font-size: 12px; }
@@ -1174,33 +1023,12 @@ button { color: inherit; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .settings-card { min-height: 460px; }
 .settings-card > .side-tabs { margin: 16px; }
-.settings-body { padding: 4px 20px 22px; }
-.settings-body h2 { font-size: 14px; margin: 18px 0 10px; }
-.scenario-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
-.scenario-grid button { padding: 12px 7px; display: flex; flex-direction: column; gap: 3px; align-items: center; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-2); cursor: pointer; }
-.scenario-grid button.active { color: var(--primary); border-color: var(--primary); background: color-mix(in srgb, var(--primary) 8%, var(--surface)); }
-.scenario-grid strong { font-size: 12px; }
-.scenario-grid small { color: var(--muted); font-size: 10px; }
 .switch { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; color: var(--muted); font-size: 13px; }
 .switch input { width: 35px; height: 20px; accent-color: var(--primary); }
 .switch.compact { padding: 0 8px; }
-.term-form { display: flex; align-items: center; gap: 7px; }
-.term-form input, .find-panel input, .filters select {
+.find-panel input, .filters select {
   min-width: 0; padding: 9px 10px; border: 1px solid var(--border); border-radius: 9px; color: var(--text); background: var(--surface-2);
 }
-.term-form input { flex: 1; }
-.muted, .empty { color: var(--muted); font-size: 12px; }
-.import-btn { display: inline-block; margin: 12px 0; padding: 6px 10px; border: 1px dashed var(--border); border-radius: 8px; color: var(--primary); font-size: 12px; cursor: pointer; }
-.import-btn input { display: none; }
-.link-btn { margin-left: 8px; border: 0; color: var(--primary); background: none; cursor: pointer; font-size: 12px; }
-.link-btn.danger { color: #dc2626; }
-.chip-list, .banned-list { max-height: 240px; overflow: auto; }
-.term-chip { display: flex; gap: 6px; align-items: center; padding: 8px; margin-bottom: 6px; border-radius: 9px; background: var(--surface-2); font-size: 12px; }
-.term-chip .original { color: #dc2626; font-weight: 700; }
-.term-chip .standard { color: #059669; font-weight: 700; }
-.term-chip button, .banned-list button { margin-left: auto; border: 0; color: var(--muted); background: none; cursor: pointer; }
-.banned-list { display: flex; gap: 7px; flex-wrap: wrap; }
-.banned-list > span { display: flex; gap: 6px; padding: 6px 9px; border-radius: 999px; background: #fff1f2; color: #be123c; font-size: 12px; }
 .layers { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; margin-top: 18px; }
 .layers article { padding: 13px; display: flex; gap: 9px; align-items: center; border: 1px solid var(--border); border-top: 3px solid var(--layer-color); border-radius: 13px; background: var(--surface); }
 .layers article span { color: var(--layer-color); font-weight: 900; }
@@ -1277,7 +1105,7 @@ button { color: inherit; }
   .hero { padding: 28px 22px; }
   .hero h1 { font-size: 32px; }
   .landing-grid { grid-template-columns: minmax(0, 1fr); }
-  .scenario-grid, .layers { grid-template-columns: repeat(2, 1fr); }
+  .layers { grid-template-columns: repeat(2, 1fr); }
   .stats-strip { grid-template-columns: repeat(2, 1fr); }
   .review-toolbar { align-items: stretch; flex-direction: column; }
   .review-toolbar > div { overflow-x: auto; }

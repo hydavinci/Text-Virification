@@ -3,8 +3,10 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { jobsApiKey, type JobsApi } from '../src/api/jobs'
 import { verificationApiKey } from '../src/api/verification'
-import UploadWorkspace from '../src/components/UploadWorkspace.vue'
-import type { VerificationResult } from '../src/types/verification'
+import SourceInputPanel from '../src/components/workspace/SourceInputPanel.vue'
+import TerminologyEditor from '../src/components/workspace/TerminologyEditor.vue'
+import VerificationSettings from '../src/components/workspace/VerificationSettings.vue'
+import type { AnalyzeOptions, VerificationResult } from '../src/types/verification'
 import WorkspaceView from '../src/views/WorkspaceView.vue'
 
 function buildJobRead(overrides: Partial<Awaited<ReturnType<JobsApi['createJob']>>> = {}) {
@@ -33,7 +35,7 @@ async function selectFile(wrapper: ReturnType<typeof mount>, file: File) {
 }
 
 async function emitUpload(wrapper: ReturnType<typeof mount>, file: File) {
-  wrapper.getComponent(UploadWorkspace).vm.$emit('upload', file)
+  wrapper.getComponent(SourceInputPanel).vm.$emit('submit-file', file)
   await flushPromises()
 }
 
@@ -49,6 +51,61 @@ function createDeferred<T>() {
 }
 
 describe('WorkspaceView', () => {
+  it('submits direct text with the complete settings and terminology snapshot', async () => {
+    const analyzeText = vi.fn().mockRejectedValue(new Error('stop after contract check'))
+    const wrapper = mount(WorkspaceView, {
+      global: {
+        provide: {
+          [jobsApiKey as symbol]: {
+            createJob: vi.fn(),
+            subscribe: vi.fn(() => vi.fn())
+          },
+          [verificationApiKey as symbol]: {
+            analyzeFile: vi.fn(),
+            analyzeText,
+            exportReport: vi.fn(),
+            exportOriginal: vi.fn()
+          }
+        }
+      }
+    })
+
+    await wrapper.getComponent(VerificationSettings).get('[data-scenario="academic"]').trigger('click')
+    const settings = wrapper.getComponent(VerificationSettings)
+    await settings.get('#enable-security').setValue(false)
+    await settings.get('#enable-sensitive').setValue(false)
+    await settings.get('#enable-ad-extreme').setValue(true)
+
+    await wrapper.get('.side-tabs button:nth-child(2)').trigger('click')
+    const glossary = wrapper.getComponent(TerminologyEditor)
+    await glossary.get('#term-original').setValue('AI')
+    await glossary.get('#term-standard').setValue('人工智能')
+    await glossary.get('[data-action="add-glossary"]').trigger('click')
+
+    await wrapper.get('.side-tabs button:nth-child(3)').trigger('click')
+    const banned = wrapper.getComponent(TerminologyEditor)
+    await banned.get('#banned-word').setValue('最好')
+    await banned.get('[data-action="add-banned"]').trigger('click')
+
+    const input = wrapper.getComponent(SourceInputPanel)
+    await input.get('[data-mode="text"]').trigger('click')
+    await input.get('textarea').setValue('检查文本')
+    await input.get('textarea').trigger('keydown', {
+      key: 'Enter',
+      ctrlKey: true
+    })
+    await flushPromises()
+
+    expect(analyzeText).toHaveBeenCalledWith('检查文本', {
+      scenario: 'academic',
+      enableSecurity: false,
+      enableSensitive: false,
+      enableAdExtreme: true,
+      glossary: [{ original: 'AI', standard: '人工智能' }],
+      bannedWords: ['最好']
+    } satisfies AnalyzeOptions)
+  })
+
   it('uploads an allowed file and displays durable progress', async () => {
     const createJob = vi.fn().mockResolvedValue(buildJobRead())
     const subscribe = vi.fn((_jobId, onEvent) => {
