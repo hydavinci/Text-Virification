@@ -1,7 +1,10 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import {
+  MAX_WORKSPACE_RESULT_BLOCKS,
+  MAX_WORKSPACE_REVISION_CODE_POINTS,
   WORKSPACE_SESSION_VERSION,
+  isWorkspaceSessionRawSizeAllowed,
   useWorkspaceSession
 } from '../src/composables/useWorkspaceSession'
 import { useVerificationWorkspace } from '../src/composables/useVerificationWorkspace'
@@ -150,7 +153,8 @@ function uiState() {
       trackChanges: false,
       selectedIssueId: issue.issue_id
     },
-    jobId: result.document_id
+    jobId: result.document_id,
+    exportAuthority: null
   }
 }
 
@@ -179,6 +183,81 @@ describe('useWorkspaceSession', () => {
     expect(restoredWorkspace.revisionChain.value).toEqual(
       original.revisionChain.value
     )
+  })
+
+  it('round-trips validated file export authority for a rechecked synchronous result', () => {
+    const storage = new MemoryStorage()
+    const rechecked = {
+      ...result,
+      document_id: '77777777-7777-4777-8777-777777777777',
+      verification_run_id: '88888888-8888-4888-8888-888888888888',
+      source_version:
+        'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      execution_mode: 'synchronous' as const,
+      issues: [],
+      summary: {
+        total: 0,
+        by_type: {},
+        by_severity: {},
+        by_rule: {},
+        by_layer: {}
+      }
+    }
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(rechecked)
+    const session = useWorkspaceSession(storage, workspace)
+    const state = {
+      ...uiState(),
+      jobId: null,
+      ui: {
+        ...uiState().ui,
+        selectedIssueId: null
+      },
+      exportAuthority: {
+        jobId: result.document_id,
+        documentId: result.document_id,
+        verificationRunId: result.verification_run_id,
+        sourceVersion: result.source_version,
+        fileType: 'docx' as const,
+        requiresOcrReconstruction: false,
+        latestRevisionId: null,
+        latestRevisionNumber: 0,
+        persistedText: null
+      }
+    }
+
+    expect(session.save(state), session.warning.value ?? '').toBe(true)
+    const restoredWorkspace = useVerificationWorkspace()
+    const restored = useWorkspaceSession(
+      storage,
+      restoredWorkspace
+    ).restore()
+
+    expect(restored).toEqual(state)
+    expect(restoredWorkspace.result.value).toEqual(rechecked)
+  })
+
+  it('migrates a valid version-3 session with no retained export authority', () => {
+    const storage = new MemoryStorage()
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(result)
+    const session = useWorkspaceSession(storage, workspace)
+    expect(session.save(uiState())).toBe(true)
+    const saved = JSON.parse(
+      storage.getItem('text-verification-session') ?? '{}'
+    )
+    saved.version = 3
+    delete saved.exportAuthority
+    storage.setItem('text-verification-session', JSON.stringify(saved))
+
+    const restoredWorkspace = useVerificationWorkspace()
+    const restored = useWorkspaceSession(
+      storage,
+      restoredWorkspace
+    ).restore()
+
+    expect(restored).toEqual(uiState())
+    expect(restored?.exportAuthority).toBeNull()
   })
 
   it('leaves current state unchanged for partial, foreign, or corrupt payloads', () => {
@@ -320,5 +399,80 @@ describe('useWorkspaceSession', () => {
       expect(useWorkspaceSession(storage, candidate).restore()).toBeNull()
       expect(candidate.result.value).toBeNull()
     }
+  })
+
+  it('checks the raw UTF-8 payload boundary before JSON parsing', () => {
+    expect(isWorkspaceSessionRawSizeAllowed('😀', 4)).toBe(true)
+    expect(isWorkspaceSessionRawSizeAllowed('😀a', 4)).toBe(false)
+
+    const storage = new MemoryStorage()
+    const workspace = useVerificationWorkspace()
+    const parse = vi.spyOn(JSON, 'parse')
+    storage.setItem('text-verification-session', 'a'.repeat(5))
+
+    expect(
+      useWorkspaceSession(storage, workspace, { maxRawBytes: 4 }).restore()
+    ).toBeNull()
+    expect(parse).not.toHaveBeenCalled()
+    parse.mockRestore()
+  })
+
+  it('rejects oversized nested block arrays before workspace cloning', () => {
+    const storage = new MemoryStorage()
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(result)
+    const session = useWorkspaceSession(storage, workspace)
+    expect(session.save(uiState())).toBe(true)
+    const saved = JSON.parse(
+      storage.getItem('text-verification-session') ?? '{}'
+    )
+    saved.workspace.result.blocks = Array.from(
+      { length: MAX_WORKSPACE_RESULT_BLOCKS + 1 },
+      () => saved.workspace.result.blocks[0]
+    )
+    storage.setItem('text-verification-session', JSON.stringify(saved))
+    const prepare = vi.spyOn(workspace, 'prepareWorkspaceRestore')
+
+    expect(session.restore()).toBeNull()
+    expect(prepare).not.toHaveBeenCalled()
+  })
+
+  it('allows the exact nested block boundary to reach canonical validation', () => {
+    const storage = new MemoryStorage()
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(result)
+    const session = useWorkspaceSession(storage, workspace)
+    expect(session.save(uiState())).toBe(true)
+    const saved = JSON.parse(
+      storage.getItem('text-verification-session') ?? '{}'
+    )
+    saved.workspace.result.blocks = Array.from(
+      { length: MAX_WORKSPACE_RESULT_BLOCKS },
+      () => saved.workspace.result.blocks[0]
+    )
+    storage.setItem('text-verification-session', JSON.stringify(saved))
+    const prepare = vi.spyOn(workspace, 'prepareWorkspaceRestore')
+
+    expect(session.restore()).toBeNull()
+    expect(prepare).toHaveBeenCalled()
+  })
+
+  it('rejects oversized revision text before workspace cloning', () => {
+    const storage = new MemoryStorage()
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(result)
+    const session = useWorkspaceSession(storage, workspace)
+    expect(session.save(uiState())).toBe(true)
+    const saved = JSON.parse(
+      storage.getItem('text-verification-session') ?? '{}'
+    )
+    const oversized = 'a'.repeat(MAX_WORKSPACE_REVISION_CODE_POINTS + 1)
+    saved.workspace.currentRevision.text = oversized
+    saved.workspace.revisionChain[0].text = oversized
+    storage.setItem('text-verification-session', JSON.stringify(saved))
+    const prepare = vi.spyOn(workspace, 'prepareWorkspaceRestore')
+
+    expect(session.restore()).toBeNull()
+    expect(prepare).not.toHaveBeenCalled()
   })
 })

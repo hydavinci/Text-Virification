@@ -165,7 +165,7 @@ function verificationApi(
 
 function seedSession(
   sessionResult: VerificationResult = result,
-  sessionJobId: string = sessionResult.document_id
+  sessionJobId: string | null = sessionResult.document_id
 ): void {
   const workspace = useVerificationWorkspace()
   workspace.loadResult(sessionResult)
@@ -189,7 +189,8 @@ function seedSession(
         trackChanges: true,
         selectedIssueId: null
       },
-      jobId: sessionJobId
+      jobId: sessionJobId,
+      exportAuthority: null
     })
   ).toBe(true)
 }
@@ -384,6 +385,120 @@ describe('WorkspaceView Task 6 integration', () => {
     )
   })
 
+  it.each([
+    ['docx', 'original_format'],
+    ['pdf', 'docx_reconstruction'],
+    ['rtf', 'original_format']
+  ] as const)(
+    'retains %s job export authority after manual text recheck',
+    async (fileType, expectedFormat) => {
+      const origin: VerificationResult = {
+        ...result,
+        filename: `source.${fileType}`,
+        source_name: `source.${fileType}`,
+        file_type: fileType,
+        issues: [],
+        summary: {
+          total: 0,
+          by_type: {},
+          by_severity: {},
+          by_rule: {},
+          by_layer: {}
+        }
+      }
+      const checked: VerificationResult = {
+        ...origin,
+        filename: 'direct.txt',
+        source_name: 'direct.txt',
+        file_type: 'txt',
+        text: '手工修改文本',
+        blocks: [
+          {
+            ...origin.blocks[0],
+            text: '手工修改文本',
+            global_end: 6,
+            block_end: 6
+          }
+        ],
+        document_id: '77777777-7777-4777-8777-777777777777',
+        verification_run_id: '88888888-8888-4888-8888-888888888888',
+        source_version:
+          'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        execution_mode: 'synchronous',
+        stats: {
+          ...origin.stats,
+          char_count: 6,
+          char_count_no_space: 6,
+          primary_count: 6
+        }
+      }
+      seedSession(origin)
+      const persistRevision = vi.fn(async (_jobId, draft) => ({
+        ...draft,
+        revision_number: 1,
+        created_at: '2026-09-03T06:00:00.000Z',
+        persistence_state: 'persisted' as const
+      }))
+      const exportJob = vi.fn()
+      const wrapper = mountWorkspace(
+        verificationApi({
+          analyzeText: vi.fn().mockResolvedValue(checked),
+          persistRevision,
+          exportJob
+        })
+      )
+      await flushPromises()
+      const editor = wrapper.getComponent(EditPreview)
+      await editor.get('[data-action="start-edit"]').trigger('click')
+      await editor.get('[data-edit-input]').setValue('手工修改文本')
+      await editor.get('[data-action="save-edit"]').trigger('click')
+
+      await wrapper.get('[data-action="recheck"]').trigger('click')
+      await flushPromises()
+
+      const current = (
+        wrapper.vm as unknown as {
+          $: {
+            setupState: {
+              verificationWorkspace: ReturnType<
+                typeof useVerificationWorkspace
+              >
+            }
+          }
+        }
+      ).$.setupState.verificationWorkspace.result.value
+      expect(current).toMatchObject({
+        document_id: checked.document_id,
+        verification_run_id: checked.verification_run_id,
+        source_version: checked.source_version,
+        text: '手工修改文本'
+      })
+
+      await wrapper.get('[data-action="export-modified"]').trigger('click')
+      await flushPromises()
+
+      expect(persistRevision).toHaveBeenCalledWith(
+        origin.document_id,
+        expect.objectContaining({
+          document_id: origin.document_id,
+          verification_run_id: origin.verification_run_id,
+          source_version: origin.source_version,
+          parent_revision_id: null,
+          kind: 'manual',
+          text: '手工修改文本'
+        })
+      )
+      const persistedDraft = persistRevision.mock.calls[0]?.[1]
+      expect(exportJob).toHaveBeenCalledWith(
+        origin.document_id,
+        expectedFormat,
+        persistedDraft?.revision_id,
+        true,
+        expect.any(Function)
+      )
+    }
+  )
+
   it('keeps text-based async PDF export in the original PDF format', async () => {
     const rawTextPdf = structuredClone(scannedResult) as any
     rawTextPdf.metadata.pdf.pages[0].kind = 'text'
@@ -507,6 +622,46 @@ describe('WorkspaceView Task 6 integration', () => {
 
     await wrapper.get('[data-dismiss-export-error]').trigger('click')
     expect(wrapper.find('[data-export-error]').exists()).toBe(false)
+  })
+
+  it('supersedes an old export alert when synchronous modified export starts and succeeds', async () => {
+    const synchronousResult: VerificationResult = {
+      ...result,
+      filename: 'direct.txt',
+      source_name: 'direct.txt',
+      file_type: 'txt',
+      execution_mode: 'synchronous',
+      file_id: null,
+      file_ext: null
+    }
+    seedSession(synchronousResult, null)
+    const createObjectURL = vi.fn(() => 'blob:modified')
+    const revokeObjectURL = vi.fn()
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: createObjectURL
+    })
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      value: revokeObjectURL
+    })
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    const wrapper = mountWorkspace(
+      verificationApi({
+        exportReport: vi.fn().mockRejectedValue(new Error('旧导出失败'))
+      })
+    )
+    await flushPromises()
+
+    await wrapper.get('[data-action="export-report"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-export-error]').text()).toContain('旧导出失败')
+
+    await wrapper.get('[data-action="export-modified"]').trigger('click')
+
+    expect(wrapper.find('[data-export-error]').exists()).toBe(false)
+    expect(createObjectURL).toHaveBeenCalledTimes(1)
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:modified')
   })
 
   it('invalidates the export guard when the workspace unmounts', async () => {

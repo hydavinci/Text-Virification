@@ -127,6 +127,7 @@ describe('DocumentViewer', () => {
 
   afterEach(() => {
     vi.restoreAllMocks()
+    vi.unstubAllGlobals()
   })
 
   it('selects an issue by stable id when its source control is activated', async () => {
@@ -342,6 +343,27 @@ describe('DocumentViewer', () => {
       inline: 'nearest'
     })
     wrapper.unmount()
+  })
+
+  it('uses non-smooth source scrolling when reduced motion is preferred', async () => {
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => ({ matches: true }))
+    )
+    const issue = buildIssue()
+    const result = buildResult('甲乙丙丁', [issue])
+    const wrapper = mount(DocumentViewer, {
+      props: { result, issues: result.issues, selectedIssueId: null }
+    })
+
+    await wrapper.setProps({ selectedIssueId: issue.issue_id })
+    await wrapper.vm.$nextTick()
+
+    expect(scrollIntoView).toHaveBeenCalledWith({
+      behavior: 'auto',
+      block: 'center',
+      inline: 'nearest'
+    })
   })
 
   it('scrolls a preselected source control when mounted', async () => {

@@ -7,7 +7,6 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from difflib import SequenceMatcher
 from math import isfinite
 from pathlib import Path
 from uuid import uuid4
@@ -17,10 +16,20 @@ from text_verification.compatibility.parser import (
     decode_rtf_with_spans,
     strip_html,
 )
+from text_verification.domain.text_edits import (
+    MAX_REVISION_TEXT_UTF8_BYTES,
+    TextDiffLimitError,
+    build_bounded_text_edits,
+    validate_revision_text,
+)
 from text_verification.parsers.pdf_parser import PdfParser
 
 
 class ExportError(ValueError):
+    pass
+
+
+class ExportTextLimitError(ExportError):
     pass
 
 
@@ -79,13 +88,19 @@ def export_original(
     *,
     original_text: str | None = None,
     modified_text: str | None = None,
+    max_text_bytes: int | None = None,
 ) -> ExportedDocument:
     cleaned_replacements = [
         (strip_html(original), strip_html(suggestion))
         for original, suggestion, _, _ in replacements
         if strip_html(original)
     ]
-    edits = _build_edits(replacements, original_text, modified_text)
+    edits = _build_edits(
+        replacements,
+        original_text,
+        modified_text,
+        max_text_bytes=max_text_bytes,
+    )
     if extension == "docx":
         content = (
             _export_docx_edits(source_path, edits, track_changes)
@@ -139,6 +154,8 @@ def _build_edits(
     replacements: list[tuple[str, str, int | None, int | None]],
     original_text: str | None,
     modified_text: str | None,
+    *,
+    max_text_bytes: int | None = None,
 ) -> list[TextEdit] | None:
     positioned: list[TextEdit] = []
     for original, suggestion, start, end in replacements:
@@ -151,6 +168,18 @@ def _build_edits(
         return positioned
     if original_text is None:
         raise ExportError("Original text is required for modified-text export.")
+    try:
+        validate_revision_text(original_text)
+        validate_revision_text(
+            modified_text,
+            max_utf8_bytes=(
+                min(max_text_bytes, MAX_REVISION_TEXT_UTF8_BYTES)
+                if max_text_bytes is not None
+                else MAX_REVISION_TEXT_UTF8_BYTES
+            ),
+        )
+    except TextDiffLimitError as error:
+        raise ExportTextLimitError(str(error)) from error
     if positioned:
         accepted_text = _apply_text_edits(original_text, positioned, False)
         if accepted_text != modified_text:
@@ -158,11 +187,13 @@ def _build_edits(
                 "Please recheck manual edits before combining them with accepted suggestions."
             )
         return positioned
-    matcher = SequenceMatcher(a=original_text, b=modified_text, autojunk=False)
+    try:
+        edits = build_bounded_text_edits(original_text, modified_text)
+    except TextDiffLimitError as error:
+        raise ExportTextLimitError(str(error)) from error
     return [
-        TextEdit(start, end, modified_text[new_start:new_end])
-        for operation, start, end, new_start, new_end in matcher.get_opcodes()
-        if operation != "equal"
+        TextEdit(edit.start, edit.end, edit.replacement)
+        for edit in edits
     ]
 
 

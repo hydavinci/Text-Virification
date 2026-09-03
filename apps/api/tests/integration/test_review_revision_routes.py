@@ -128,6 +128,16 @@ def test_revision_route_persists_browser_uuid_without_accepting_a_number(
             503,
             "revision_persistence_failed",
         ),
+        (
+            VerificationError(
+                "revision_text_too_large",
+                "revision_persistence",
+                "too large",
+                False,
+            ),
+            413,
+            "revision_text_too_large",
+        ),
     ],
 )
 def test_revision_route_maps_typed_service_failures(

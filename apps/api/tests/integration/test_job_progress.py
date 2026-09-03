@@ -580,6 +580,39 @@ def test_job_export_maps_stale_revision_to_typed_409(
     }
 
 
+def test_job_export_maps_structure_conflict_to_typed_409(
+    client,
+    app: FastAPI,
+    completed_job: JobRead,
+) -> None:
+    from text_verification.api.dependencies import get_reconstruction_export_service
+    from text_verification.application.errors import VerificationError
+
+    class ConflictingService:
+        def export(self, *args: object, **kwargs: object):
+            raise VerificationError(
+                "revision_structure_conflict",
+                "exporting",
+                "The persisted revision changes a document structure boundary.",
+                False,
+            )
+
+    app.dependency_overrides[get_reconstruction_export_service] = ConflictingService
+
+    response = client.post(
+        f"/api/v1/jobs/{completed_job.job_id}/exports",
+        json={"format": "docx_reconstruction", "revision_id": str(uuid4())},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "revision_structure_conflict",
+        "stage": "exporting",
+        "message": "The persisted revision changes a document structure boundary.",
+        "retryable": False,
+    }
+
+
 def test_job_export_maps_expiry_before_exporting_event_to_410_without_service_call(
     app: FastAPI,
 ) -> None:

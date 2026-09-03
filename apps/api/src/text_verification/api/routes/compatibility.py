@@ -18,7 +18,11 @@ from text_verification.application import (
     VerificationPipeline,
 )
 from text_verification.compatibility.adapters import verification_result_to_legacy_response
-from text_verification.compatibility.exporters import ExportError, export_original
+from text_verification.compatibility.exporters import (
+    ExportError,
+    ExportTextLimitError,
+    export_original,
+)
 from text_verification.compatibility.models import (
     ExportOriginalRequest,
     ReportRequest,
@@ -191,7 +195,10 @@ def export_modified_original(
             payload.track_changes,
             original_text=original_text,
             modified_text=payload.modified_text,
+            max_text_bytes=settings.max_upload_bytes,
         )
+    except ExportTextLimitError as error:
+        raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, detail=str(error)) from error
     except (CompatibilityUploadError, ExportError, ValueError) as error:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
     except Exception as error:

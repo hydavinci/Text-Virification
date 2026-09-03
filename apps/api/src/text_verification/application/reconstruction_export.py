@@ -5,7 +5,6 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Protocol, cast
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
@@ -35,6 +34,13 @@ from text_verification.domain.documents import (
 )
 from text_verification.domain.jobs import JobProgressStage, JobRead
 from text_verification.domain.ports import AnchoredSourcePathResolver
+from text_verification.domain.text_edits import (
+    MAX_REVISION_TEXT_CODEPOINTS,
+    MAX_REVISION_TEXT_UTF8_BYTES,
+    TextDiffLimitError,
+    build_bounded_text_edits,
+    validate_revision_text,
+)
 from text_verification.domain.verification import (
     PersistedDocumentRevision,
     StaleReviewRevisionError,
@@ -118,11 +124,21 @@ class ReconstructionExportService:
         *,
         exporter_registry_factory: ExporterRegistryFactory,
         now_factory: Callable[[], datetime] | None = None,
+        max_revision_bytes: int | None = None,
     ) -> None:
         self._storage = storage
         self._repository_factory = repository_factory
         self._exporter_registry_factory = exporter_registry_factory
         self._now_factory = now_factory or (lambda: datetime.now(UTC))
+        self._max_revision_bytes = (
+            storage.max_document_bytes
+            if max_revision_bytes is None
+            else max_revision_bytes
+        )
+        self._max_revision_bytes = min(
+            self._max_revision_bytes,
+            MAX_REVISION_TEXT_UTF8_BYTES,
+        )
 
     def export(
         self,
@@ -152,6 +168,7 @@ class ReconstructionExportService:
         )
         if export_format is ExportFormat.DOCX_RECONSTRUCTION:
             if revision is not None:
+                self._validate_revision_text(revision.text)
                 document = _document_with_revision_text(document, revision.text)
             _validate_reconstruction_eligibility(document)
             output_file_type = FileType.DOCX
@@ -298,8 +315,11 @@ class ReconstructionExportService:
             created_at=job.created_at,
         )
         self._assert_current_result(job.job_id, result)
-        if repair_candidate:
+        repair_reservation = (
             self._begin_repair(request)
+            if repair_candidate
+            else None
+        )
         if progress_observer is not None:
             progress_observer(JobProgressStage.FINALIZING)
         try:
@@ -307,9 +327,16 @@ class ReconstructionExportService:
                 self._storage,
                 cast(ArtifactRepositoryFactory, self._repository_factory),
                 require_current_result=True,
-            ).persist(request)
+            ).persist(request, reservation=repair_reservation)
         except ArtifactFinalizationRejectedError as error:
             if error.reason is ArtifactFinalizationRejection.STALE_REVISION:
+                if repair_candidate:
+                    self._delete_repair_quarantine(
+                        request.job_id,
+                        request.export_artifact_id,
+                        request.storage_key,
+                        request.file_type,
+                    )
                 raise VerificationError(
                     "revision_export_stale",
                     "finalizing",
@@ -471,6 +498,21 @@ class ReconstructionExportService:
             raise AssertionError("authorized artifact download must retain a descriptor")
         return ArtifactDownload(handle, artifact.file_name, artifact.media_type)
 
+    def _validate_revision_text(self, text: str) -> None:
+        try:
+            validate_revision_text(
+                text,
+                max_codepoints=MAX_REVISION_TEXT_CODEPOINTS,
+                max_utf8_bytes=self._max_revision_bytes,
+            )
+        except TextDiffLimitError as error:
+            raise VerificationError(
+                "revision_text_too_large",
+                "exporting",
+                "The persisted revision exceeds the configured size limit.",
+                False,
+            ) from error
+
     def _load_result(self, job_id: UUID) -> VerificationResult:
         with self._repository_factory() as repository:
             try:
@@ -560,7 +602,10 @@ class ReconstructionExportService:
             finally:
                 repository.rollback()
 
-    def _begin_repair(self, request: ArtifactPersistenceRequest) -> None:
+    def _begin_repair(
+        self,
+        request: ArtifactPersistenceRequest,
+    ) -> ArtifactReservation:
         digest = hashlib.sha256(request.data).hexdigest()
         expected = ArtifactReservation(
             export_artifact_id=request.export_artifact_id,
@@ -580,7 +625,7 @@ class ReconstructionExportService:
         )
         with self._repository_factory() as repository:
             try:
-                repository.begin_export_artifact_repair(
+                reservation = repository.begin_export_artifact_repair(
                     expected,
                     consistency_check=lambda: self._storage.prepare_artifact_repair(
                         request.job_id,
@@ -591,7 +636,18 @@ class ReconstructionExportService:
                         expected_digest=digest,
                     ),
                 )
+                if reservation is None:
+                    raise ValueError("Artifact repair candidate no longer exists.")
                 repository.commit()
+                return reservation
+            except StaleReviewRevisionError as error:
+                repository.rollback()
+                raise VerificationError(
+                    "revision_export_stale",
+                    "finalizing",
+                    "The requested revision is no longer the latest persisted revision.",
+                    False,
+                ) from error
             except InvalidUpload as error:
                 repository.rollback()
                 raise VerificationError(
@@ -706,33 +762,6 @@ def _document_with_revision_text(
             "The persisted revision cannot be mapped to canonical document blocks.",
             False,
         )
-    opcodes = SequenceMatcher(
-        None,
-        document.text,
-        revised_text,
-        autojunk=False,
-    ).get_opcodes()
-
-    def mapped_boundary(position: int) -> int:
-        if position == len(document.text):
-            return len(revised_text)
-        for tag, source_start, source_end, target_start, target_end in opcodes:
-            if source_start <= position <= source_end:
-                if tag == "equal":
-                    return target_start + position - source_start
-                if source_end == source_start:
-                    return target_start
-                source_width = source_end - source_start
-                target_width = target_end - target_start
-                return target_start + (
-                    (position - source_start) * target_width // source_width
-                )
-        raise ValueError("Revision boundary could not be mapped.")
-
-    ranges = [
-        [mapped_boundary(block.global_start), mapped_boundary(block.global_end)]
-        for block in document.blocks
-    ]
     block_index_by_id = {
         block.block_id: index for index, block in enumerate(document.blocks)
     }
@@ -771,40 +800,138 @@ def _document_with_revision_text(
             "The persisted revision cannot be mapped to canonical document blocks.",
             False,
         )
-    edited_ranges = [
-        (target_start, target_end)
-        for tag, _, _, target_start, target_end in opcodes
-        if tag != "equal" and target_end > target_start
+    owner_indexes.sort(
+        key=lambda index: (
+            document.blocks[index].global_start,
+            document.blocks[index].global_end,
+            document.blocks[index].block_id,
+        )
+    )
+    for left_index, right_index in zip(
+        owner_indexes[:-1],
+        owner_indexes[1:],
+        strict=True,
+    ):
+        left = document.blocks[left_index]
+        right = document.blocks[right_index]
+        if left.global_end > right.global_start:
+            raise _revision_structure_conflict()
+
+    first_owner = document.blocks[owner_indexes[0]]
+    last_owner = document.blocks[owner_indexes[-1]]
+    prefix = document.text[: first_owner.global_start]
+    suffix = document.text[last_owner.global_end :]
+    if not revised_text.startswith(prefix) or not revised_text.endswith(suffix):
+        raise _revision_structure_conflict()
+    body_start = len(prefix)
+    body_end = len(revised_text) - len(suffix)
+    gaps = [
+        document.text[
+            document.blocks[left_index].global_end :
+            document.blocks[right_index].global_start
+        ]
+        for left_index, right_index in zip(
+            owner_indexes[:-1],
+            owner_indexes[1:],
+            strict=True,
+        )
     ]
-    for edited_start, edited_end in edited_ranges:
-        for uncovered_start, uncovered_end in _uncovered_ranges(
-            edited_start,
-            edited_end,
-            [ranges[index] for index in owner_indexes],
+    if any(not gap for gap in gaps):
+        raise _revision_structure_conflict()
+
+    earliest_gap_starts: list[int] = []
+    cursor = body_start
+    for gap in gaps:
+        position = revised_text.find(gap, cursor, body_end)
+        if position < 0:
+            raise _revision_structure_conflict()
+        earliest_gap_starts.append(position)
+        cursor = position + len(gap)
+
+    latest_gap_starts = [0] * len(gaps)
+    cursor = body_end
+    for index in range(len(gaps) - 1, -1, -1):
+        gap = gaps[index]
+        position = revised_text.rfind(gap, body_start, cursor)
+        if position < 0:
+            raise _revision_structure_conflict()
+        latest_gap_starts[index] = position
+        cursor = position
+    if earliest_gap_starts != latest_gap_starts:
+        raise _revision_structure_conflict()
+
+    ranges: list[list[int] | None] = [None] * len(document.blocks)
+    owner_starts = [body_start, *(position + len(gap) for position, gap in zip(
+        earliest_gap_starts,
+        gaps,
+        strict=True,
+    ))]
+    owner_ends = [*earliest_gap_starts, body_end]
+    for owner_index, start, end in zip(
+        owner_indexes,
+        owner_starts,
+        owner_ends,
+        strict=True,
+    ):
+        block = document.blocks[owner_index]
+        block_text = revised_text[start:end]
+        try:
+            edits = build_bounded_text_edits(
+                block.text,
+                block_text,
+            )
+        except TextDiffLimitError as error:
+            raise VerificationError(
+                "revision_diff_too_complex",
+                "exporting",
+                "The persisted revision exceeds the configured edit work budget.",
+                False,
+            ) from error
+        if any(
+            edit.start == edit.end
+            and edit.start in {0, len(block.text)}
+            for edit in edits
         ):
-            owner_index = min(
-                owner_indexes,
-                key=lambda index: (
-                    _range_distance(
-                        ranges[index][0],
-                        ranges[index][1],
-                        uncovered_start,
-                        uncovered_end,
-                    ),
-                    0 if ranges[index][1] <= uncovered_start else 1,
-                    document.blocks[index].global_start,
-                    document.blocks[index].global_end,
-                    document.blocks[index].block_id,
-                ),
+            raise _revision_structure_conflict()
+        ranges[owner_index] = [start, end]
+
+    anchored_ranges = [
+        (0, first_owner.global_start, 0, body_start),
+        *(
+            (
+                document.blocks[left_index].global_end,
+                document.blocks[right_index].global_start,
+                gap_start,
+                gap_start + len(gap),
             )
-            ranges[owner_index][0] = min(
-                ranges[owner_index][0],
-                uncovered_start,
+            for left_index, right_index, gap_start, gap in zip(
+                owner_indexes[:-1],
+                owner_indexes[1:],
+                earliest_gap_starts,
+                gaps,
+                strict=True,
             )
-            ranges[owner_index][1] = max(
-                ranges[owner_index][1],
-                uncovered_end,
-            )
+        ),
+        (
+            last_owner.global_end,
+            len(document.text),
+            body_end,
+            len(revised_text),
+        ),
+    ]
+    for index, block in enumerate(document.blocks):
+        if ranges[index] is not None:
+            continue
+        for source_start, source_end, target_start, _ in anchored_ranges:
+            if (
+                source_start <= block.global_start
+                and block.global_end <= source_end
+            ):
+                ranges[index] = [
+                    target_start + block.global_start - source_start,
+                    target_start + block.global_end - source_start,
+                ]
+                break
 
     depths = {
         block.block_id: _block_depth(block, document.blocks, block_index_by_id)
@@ -819,32 +946,23 @@ def _document_with_revision_text(
         if parent_id is None:
             continue
         parent_index = block_index_by_id[parent_id]
-        ranges[parent_index][0] = min(ranges[parent_index][0], ranges[index][0])
-        ranges[parent_index][1] = max(ranges[parent_index][1], ranges[index][1])
-
-    for edited_start, edited_end in edited_ranges:
-        coverage = [
-            (max(edited_start, ranges[index][0]), min(edited_end, ranges[index][1]))
-            for index in owner_indexes
-            if ranges[index][0] < edited_end and edited_start < ranges[index][1]
-        ]
-        if _covered_length(coverage) != edited_end - edited_start:
-            raise VerificationError(
-                "revision_text_unmappable",
-                "exporting",
-                "The persisted revision cannot be mapped to canonical document blocks.",
-                False,
-            )
+        child_range = ranges[index]
+        if child_range is None:
+            raise _revision_structure_conflict()
+        parent_range = ranges[parent_index]
+        if parent_range is None:
+            ranges[parent_index] = list(child_range)
+        else:
+            parent_range[0] = min(parent_range[0], child_range[0])
+            parent_range[1] = max(parent_range[1], child_range[1])
 
     blocks = []
-    for block, (start, end) in zip(document.blocks, ranges, strict=True):
+    for block, mapped_range in zip(document.blocks, ranges, strict=True):
+        if mapped_range is None:
+            raise _revision_structure_conflict()
+        start, end = mapped_range
         if end < start:
-            raise VerificationError(
-                "revision_text_unmappable",
-                "exporting",
-                "The persisted revision cannot be mapped to canonical document blocks.",
-                False,
-            )
+            raise _revision_structure_conflict()
         text = revised_text[start:end]
         style = dict(block.style)
         if text != block.text:
@@ -872,12 +990,16 @@ def _document_with_revision_text(
             }
         )
     except ValueError as error:
-        raise VerificationError(
-            "revision_text_unmappable",
-            "exporting",
-            "The persisted revision cannot be mapped to canonical document blocks.",
-            False,
-        ) from error
+        raise _revision_structure_conflict() from error
+
+
+def _revision_structure_conflict() -> VerificationError:
+    return VerificationError(
+        "revision_structure_conflict",
+        "exporting",
+        "The persisted revision changes or ambiguously crosses a document structure boundary.",
+        False,
+    )
 
 
 def _block_depth(

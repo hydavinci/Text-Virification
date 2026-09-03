@@ -1106,7 +1106,7 @@ describe('WorkspaceView', () => {
       sessionStorage.getItem('text-verification-session') ?? 'null'
     )
     expect(saved).toMatchObject({
-      version: 3,
+      version: 4,
       workspace: {
         requiresReverification: true,
         currentRevision: {
@@ -1339,6 +1339,7 @@ describe('WorkspaceView', () => {
     expect(alert.attributes('role')).toBe('alert')
     expect(alert.attributes('aria-live')).toBe('assertive')
     expect(alert.text()).toBe('重新检查失败，请稍后重试')
+    expect(wrapper.find('[data-session-warning]').exists()).toBe(false)
     wrapper.unmount()
   })
 

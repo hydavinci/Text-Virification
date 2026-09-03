@@ -13,6 +13,10 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, m
 from text_verification.document_processing.pdf_models import OcrRequirement
 from text_verification.domain.documents import DocumentMetadata, DocumentModel, FileType, TextBlock
 from text_verification.domain.issues import Issue
+from text_verification.domain.text_edits import (
+    MAX_REVISION_TEXT_CODEPOINTS,
+    validate_revision_text,
+)
 
 SummaryCount = Annotated[int, Field(ge=0)]
 BoundedOptionText = Annotated[str, Field(strict=True, min_length=1, max_length=200)]
@@ -193,12 +197,13 @@ class ReviewRevisionDraft(BaseModel):
     source_version: str = Field(min_length=1)
     parent_revision_id: UUID | None = None
     kind: DocumentRevisionKind
-    text: str
+    text: str = Field(max_length=MAX_REVISION_TEXT_CODEPOINTS)
 
     @model_validator(mode="after")
     def validate_parent(self) -> ReviewRevisionDraft:
         if self.parent_revision_id == self.revision_id:
             raise ValueError("revision cannot be its own parent")
+        validate_revision_text(self.text)
         return self
 
 

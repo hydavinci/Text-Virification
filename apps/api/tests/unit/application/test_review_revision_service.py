@@ -71,12 +71,20 @@ def draft() -> ReviewRevisionDraft:
     )
 
 
-def service(repository: RecordingRepository) -> ReviewRevisionService:
+def service(
+    repository: RecordingRepository,
+    *,
+    max_revision_bytes: int = 25 * 1024 * 1024,
+) -> ReviewRevisionService:
     @contextmanager
     def factory() -> Iterator[RecordingRepository]:
         yield repository
 
-    return ReviewRevisionService(factory, now_factory=lambda: CREATED_AT)
+    return ReviewRevisionService(
+        factory,
+        now_factory=lambda: CREATED_AT,
+        max_revision_bytes=max_revision_bytes,
+    )
 
 
 def test_persists_browser_revision_identity_and_commits_once() -> None:
@@ -115,3 +123,18 @@ def test_rolls_back_and_maps_repository_failures(
     assert raised.value.retryable is retryable
     assert repository.commit_calls == 0
     assert repository.rollback_calls == 1
+
+
+def test_rejects_revision_text_above_the_configured_byte_limit_before_persistence() -> None:
+    repository = RecordingRepository()
+    oversized = draft().model_copy(update={"text": "😀a"})
+
+    with pytest.raises(VerificationError) as raised:
+        service(repository, max_revision_bytes=4).persist(JOB_ID, oversized)
+
+    assert raised.value.code == "revision_text_too_large"
+    assert raised.value.stage == "revision_persistence"
+    assert raised.value.retryable is False
+    assert repository.calls == []
+    assert repository.commit_calls == 0
+    assert repository.rollback_calls == 0

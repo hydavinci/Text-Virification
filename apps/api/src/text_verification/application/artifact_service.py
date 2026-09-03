@@ -187,14 +187,24 @@ class ArtifactPersistenceService:
     def persist(
         self,
         request: ArtifactPersistenceRequest,
+        *,
+        reservation: ArtifactReservation | None = None,
     ) -> ArtifactPersistenceResult:
         size_bytes = len(request.data)
         content_sha256 = hashlib.sha256(request.data).hexdigest()
-        reservation = self._reserve(
+        if reservation is None:
+            reservation = self._reserve(
+                request,
+                size_bytes=size_bytes,
+                content_sha256=content_sha256,
+            )
+        elif not _reservation_matches_request(
+            reservation,
             request,
             size_bytes=size_bytes,
             content_sha256=content_sha256,
-        )
+        ):
+            raise ValueError("Prepared artifact reservation does not match the request.")
 
         with self._storage.publish_verified_artifact(
             request.job_id,
@@ -442,6 +452,30 @@ def _snapshot_matches_request(
             or (allow_legacy_digest and snapshot.content_sha256 is None)
         )
         and snapshot.created_at == request.created_at
+    )
+
+
+def _reservation_matches_request(
+    reservation: ArtifactReservation,
+    request: ArtifactPersistenceRequest,
+    *,
+    size_bytes: int,
+    content_sha256: str,
+) -> bool:
+    return (
+        reservation.status is ArtifactLifecycleStatus.PENDING
+        and reservation.export_artifact_id == request.export_artifact_id
+        and reservation.job_id == request.job_id
+        and reservation.verification_run_id == request.verification_run_id
+        and reservation.review_revision_id == request.review_revision_id
+        and reservation.source_version == request.source_version
+        and reservation.file_type is request.file_type
+        and reservation.file_name == request.file_name
+        and reservation.media_type == request.media_type
+        and reservation.storage_key == request.storage_key
+        and reservation.size_bytes == size_bytes
+        and reservation.content_sha256 == content_sha256
+        and reservation.created_at == request.created_at
     )
 
 

@@ -83,8 +83,10 @@ class _RepositoryState:
     replacement_result_on_snapshot_read: tuple[int, VerificationResult] | None = None
     reject_finalize_once: bool = False
     stale_revision_on_finalize: PersistedDocumentRevision | None = None
+    newer_revision_after_repair_commit: PersistedDocumentRevision | None = None
     newer_revision_on_artifact_read: PersistedDocumentRevision | None = None
     snapshot_reads: int = 0
+    repair_transition_pending_commit: bool = False
     lock: RLock = field(default_factory=RLock)
 
 
@@ -164,6 +166,7 @@ class _InMemoryExportRepository:
                 ready_at=None,
             )
             self._state.artifacts[expected.export_artifact_id] = pending
+            self._state.repair_transition_pending_commit = True
             return ArtifactReservation(
                 **{
                     key: value
@@ -184,6 +187,22 @@ class _InMemoryExportRepository:
             if result.verification_run_id == verification_run_id
         )
         with self._state.lock:
+            revisions = sorted(
+                (
+                    revision
+                    for revision in self._state.revisions.values()
+                    if revision.verification_run_id == verification_run_id
+                ),
+                key=lambda revision: revision.revision_number,
+            )
+            latest = revisions[-1] if revisions else None
+            requested_revision_id = values["review_revision_id"]
+            if (requested_revision_id is None) != (latest is None) or (
+                requested_revision_id is not None
+                and latest is not None
+                and requested_revision_id != latest.revision_id
+            ):
+                raise StaleReviewRevisionError("requested revision is stale")
             existing = self._state.artifacts.get(artifact_id)
             if existing is not None:
                 assert existing.content_sha256 == values["content_sha256"]
@@ -214,9 +233,32 @@ class _InMemoryExportRepository:
         consistency_check,
         require_current_result: bool = False,
     ) -> ArtifactSnapshot | ArtifactFinalizationRejection | None:
-        del require_current_result
         consistency_check()
         with self._state.lock:
+            if require_current_result:
+                revisions = sorted(
+                    (
+                        revision
+                        for revision in self._state.revisions.values()
+                        if revision.verification_run_id
+                        == reservation.verification_run_id
+                    ),
+                    key=lambda revision: revision.revision_number,
+                )
+                latest = revisions[-1] if revisions else None
+                if (
+                    (reservation.review_revision_id is None) != (latest is None)
+                    or (
+                        reservation.review_revision_id is not None
+                        and latest is not None
+                        and reservation.review_revision_id != latest.revision_id
+                    )
+                ):
+                    self._state.artifacts.pop(
+                        reservation.export_artifact_id,
+                        None,
+                    )
+                    return ArtifactFinalizationRejection.STALE_REVISION
             if self._state.stale_revision_on_finalize is not None:
                 stale = self._state.stale_revision_on_finalize
                 self._state.revisions[stale.revision_id] = stale
@@ -244,6 +286,12 @@ class _InMemoryExportRepository:
             return self._state.artifacts.get(export_artifact_id)
 
     def commit(self) -> None:
+        if self._state.repair_transition_pending_commit:
+            self._state.repair_transition_pending_commit = False
+            newer = self._state.newer_revision_after_repair_commit
+            if newer is not None:
+                self._state.revisions[newer.revision_id] = newer
+                self._state.newer_revision_after_repair_commit = None
         return None
 
     def rollback(self) -> None:
@@ -318,6 +366,7 @@ def _service(
     state: _RepositoryState,
     *,
     registry_calls: list[object] | None = None,
+    max_revision_bytes: int | None = None,
 ) -> ReconstructionExportService:
     def registry_factory(resolver):
         if registry_calls is not None:
@@ -331,6 +380,7 @@ def _service(
         storage,
         _repository_factory(state),
         exporter_registry_factory=registry_factory,
+        max_revision_bytes=max_revision_bytes,
     )
 
 
@@ -383,37 +433,18 @@ def _projection_block(
     )
 
 
-@pytest.mark.parametrize(
-    ("source", "revised", "expected"),
-    [
-        ("A\nB", "AX\nB", [("a", "AX", 0, 2), ("b", "B", 3, 4)]),
-        ("A\nB", "A\nXB", [("a", "A", 0, 1), ("b", "XB", 2, 4)]),
-        ("A\nB", "XYZ", [("a", "XY", 0, 2), ("b", "Z", 2, 3)]),
-        ("AB\nCD", "AD", [("a", "A", 0, 1), ("b", "D", 1, 2)]),
-        (
-            "😀A\n表B",
-            "😀ΩA\n表",
-            [("a", "😀ΩA", 0, 3), ("b", "表", 4, 5)],
-        ),
-        ("A\n\nB", "A\nX\nB", [("a", "A\nX", 0, 3), ("b", "B", 4, 5)]),
-    ],
-)
-def test_revision_projection_preserves_every_edit_across_block_boundaries(
-    source: str,
-    revised: str,
-    expected: list[tuple[str, str, int, int]],
-) -> None:
-    first_end = source.index("\n") if "\n" in source else 2
-    second_start = source.rfind("\n") + 1 if "\n" in source else 3
+def test_revision_projection_preserves_repeated_unicode_edits_within_blocks() -> None:
+    source = "AAAA\n😀表😀"
+    revised = "AAΩAA\n😀字表😀"
     document = _projection_document(
         source,
         [
-            _projection_block("a", "paragraph", source[:first_end], 0, first_end),
+            _projection_block("a", "paragraph", "AAAA", 0, 4),
             _projection_block(
                 "b",
                 "paragraph",
-                source[second_start:],
-                second_start,
+                "😀表😀",
+                5,
                 len(source),
             ),
         ],
@@ -425,7 +456,10 @@ def test_revision_projection_preserves_every_edit_across_block_boundaries(
     assert [
         (block.block_id, block.text, block.global_start, block.global_end)
         for block in projected.blocks
-    ] == expected
+    ] == [
+        ("a", "AAΩAA", 0, 5),
+        ("b", "😀字表😀", 6, 10),
+    ]
     original_by_id = {block.block_id: block for block in document.blocks}
     assert all(
         "spans" not in block.style
@@ -434,18 +468,224 @@ def test_revision_projection_preserves_every_edit_across_block_boundaries(
     )
 
 
+@pytest.mark.parametrize(
+    ("source", "revised", "blocks"),
+    [
+        (
+            "A\nB",
+            "AB",
+            [
+                _projection_block("a", "paragraph", "A", 0, 1),
+                _projection_block("b", "paragraph", "B", 2, 3),
+            ],
+        ),
+        (
+            "A\nB",
+            "A|B",
+            [
+                _projection_block("a", "paragraph", "A", 0, 1),
+                _projection_block("b", "paragraph", "B", 2, 3),
+            ],
+        ),
+        (
+            "A\nB",
+            "A X\nB",
+            [
+                _projection_block("a", "paragraph", "A", 0, 1),
+                _projection_block("b", "paragraph", "B", 2, 3),
+            ],
+        ),
+        (
+            "A\n\nB",
+            "A\nX\nB",
+            [
+                _projection_block("a", "paragraph", "A", 0, 1),
+                _projection_block("b", "paragraph", "B", 3, 4),
+            ],
+        ),
+        (
+            "甲|乙",
+            "甲乙",
+            [
+                _projection_block(
+                    "a",
+                    "table_cell",
+                    "甲",
+                    0,
+                    1,
+                    table_index=0,
+                    row_index=0,
+                    cell_index=0,
+                ),
+                _projection_block(
+                    "b",
+                    "table_cell",
+                    "乙",
+                    2,
+                    3,
+                    table_index=0,
+                    row_index=0,
+                    cell_index=1,
+                ),
+            ],
+        ),
+    ],
+)
+def test_revision_projection_rejects_cross_structure_gap_edits(
+    source: str,
+    revised: str,
+    blocks: list[TextBlock],
+) -> None:
+    document = _projection_document(source, blocks)
+
+    with pytest.raises(VerificationError) as raised:
+        _document_with_revision_text(document, revised)
+
+    assert raised.value.code == "revision_structure_conflict"
+
+
+def test_reconstruction_exports_exact_repeated_unicode_revision_without_loss(
+    tmp_path: Path,
+) -> None:
+    storage = JobStorage(tmp_path / "jobs", max_upload_bytes=5 * 1024 * 1024)
+    job, base_result = _job_and_result(storage)
+    source = "AAAA\n😀表😀"
+    revised = "AAΩAA\n😀字表😀"
+    result = base_result.model_copy(
+        update={
+            "source_version": "sha256:repeated-unicode",
+            "text": source,
+            "blocks": (
+                _projection_block("a", "paragraph", "AAAA", 0, 4),
+                _projection_block("b", "paragraph", "😀表😀", 5, 8),
+            ),
+        }
+    )
+    revision_id = uuid4()
+    revision = PersistedDocumentRevision(
+        revision_id=revision_id,
+        document_id=result.document_id,
+        verification_run_id=result.verification_run_id,
+        source_version=result.source_version,
+        revision_number=1,
+        created_at=job.created_at + timedelta(minutes=1),
+        parent_revision_id=None,
+        persistence_state="persisted",
+        kind=DocumentRevisionKind.MANUAL,
+        text=revised,
+    )
+    state = _RepositoryState(
+        {job.job_id: result},
+        revisions={revision_id: revision},
+    )
+
+    artifact = _service(storage, state).export(
+        job,
+        ExportFormat.DOCX_RECONSTRUCTION,
+        review_revision_id=revision_id,
+    )
+    download = _service(storage, state).download(
+        job.job_id,
+        artifact.export_artifact_id,
+    )
+
+    with download.handle:
+        rebuilt = Document(download.path)
+        assert "\n".join(paragraph.text for paragraph in rebuilt.paragraphs) == revised
+        assert download.handle.read_bytes()
+
+
+def test_reconstruction_rejects_structure_conflict_before_artifact_reservation(
+    tmp_path: Path,
+) -> None:
+    storage = JobStorage(tmp_path / "jobs", max_upload_bytes=5 * 1024 * 1024)
+    job, base_result = _job_and_result(storage)
+    result = base_result.model_copy(
+        update={
+            "source_version": "sha256:paragraph-boundary",
+            "text": "A\nB",
+            "blocks": (
+                _projection_block("a", "paragraph", "A", 0, 1),
+                _projection_block("b", "paragraph", "B", 2, 3),
+            ),
+        }
+    )
+    revision_id = uuid4()
+    revision = PersistedDocumentRevision(
+        revision_id=revision_id,
+        document_id=result.document_id,
+        verification_run_id=result.verification_run_id,
+        source_version=result.source_version,
+        revision_number=1,
+        created_at=job.created_at + timedelta(minutes=1),
+        parent_revision_id=None,
+        persistence_state="persisted",
+        kind=DocumentRevisionKind.MANUAL,
+        text="AB",
+    )
+    state = _RepositoryState(
+        {job.job_id: result},
+        revisions={revision_id: revision},
+    )
+
+    with pytest.raises(VerificationError) as raised:
+        _service(storage, state).export(
+            job,
+            ExportFormat.DOCX_RECONSTRUCTION,
+            review_revision_id=revision_id,
+        )
+
+    assert raised.value.code == "revision_structure_conflict"
+    assert state.artifacts == {}
+    assert not list((storage._root / "artifacts").rglob("*.docx"))
+
+
+def test_reconstruction_rejects_legacy_oversized_revision_before_diff_or_reservation(
+    tmp_path: Path,
+) -> None:
+    storage = JobStorage(tmp_path / "jobs", max_upload_bytes=5 * 1024 * 1024)
+    job, result = _job_and_result(storage)
+    revision_id = uuid4()
+    revision = PersistedDocumentRevision(
+        revision_id=revision_id,
+        document_id=result.document_id,
+        verification_run_id=result.verification_run_id,
+        source_version=result.source_version,
+        revision_number=1,
+        created_at=job.created_at + timedelta(minutes=1),
+        parent_revision_id=None,
+        persistence_state="persisted",
+        kind=DocumentRevisionKind.MANUAL,
+        text="😀a",
+    )
+    state = _RepositoryState(
+        {job.job_id: result},
+        revisions={revision_id: revision},
+    )
+
+    with pytest.raises(VerificationError) as raised:
+        _service(storage, state, max_revision_bytes=4).export(
+            job,
+            ExportFormat.DOCX_RECONSTRUCTION,
+            review_revision_id=revision_id,
+        )
+
+    assert raised.value.code == "revision_text_too_large"
+    assert state.artifacts == {}
+
+
 def test_revision_projection_expands_nested_parent_and_table_cell_boundaries() -> None:
     document = _projection_document(
-        "A|B",
+        "AA|BB",
         [
-            _projection_block("root", "header", "A|B", 0, 3),
-            _projection_block("paragraph", "paragraph", "A", 0, 1, parent_id="root"),
+            _projection_block("root", "header", "AA|BB", 0, 5),
+            _projection_block("paragraph", "paragraph", "AA", 0, 2, parent_id="root"),
             _projection_block(
                 "cell",
                 "table_cell",
-                "B",
-                2,
+                "BB",
                 3,
+                5,
                 parent_id="root",
                 table_index=0,
                 row_index=0,
@@ -454,20 +694,20 @@ def test_revision_projection_expands_nested_parent_and_table_cell_boundaries() -
         ],
     )
 
-    projected = _document_with_revision_text(document, "AX|βB")
+    projected = _document_with_revision_text(document, "AΩA|BβB")
 
     by_id = {block.block_id: block for block in projected.blocks}
-    assert (by_id["paragraph"].text, by_id["paragraph"].global_end) == ("AX", 2)
+    assert (by_id["paragraph"].text, by_id["paragraph"].global_end) == ("AΩA", 3)
     assert (
         by_id["cell"].text,
         by_id["cell"].global_start,
         by_id["cell"].global_end,
-    ) == ("βB", 3, 5)
+    ) == ("BβB", 4, 7)
     assert (
         by_id["root"].text,
         by_id["root"].global_start,
         by_id["root"].global_end,
-    ) == ("AX|βB", 0, 5)
+    ) == ("AΩA|BβB", 0, 7)
 
 
 def test_revision_projection_fails_when_edited_text_has_no_block_owner() -> None:
@@ -1205,6 +1445,67 @@ def test_crash_after_corrupt_quarantine_is_recoverable_on_retry(
         first.export_artifact_id,
         FileType.DOCX,
     ).exists()
+
+
+def test_repair_stale_interleaving_leaves_no_pending_metadata_or_quarantine(
+    tmp_path: Path,
+) -> None:
+    storage = JobStorage(tmp_path / "jobs", max_upload_bytes=5 * 1024 * 1024)
+    job, result = _job_and_result(storage)
+    first_revision_id = uuid4()
+    first_revision = PersistedDocumentRevision(
+        revision_id=first_revision_id,
+        document_id=result.document_id,
+        verification_run_id=result.verification_run_id,
+        source_version=result.source_version,
+        revision_number=1,
+        created_at=job.created_at + timedelta(minutes=1),
+        parent_revision_id=None,
+        persistence_state="persisted",
+        kind=DocumentRevisionKind.REVIEW,
+        text=result.text.replace("test@example.com", "first@example.com"),
+    )
+    state = _RepositoryState(
+        {job.job_id: result},
+        revisions={first_revision_id: first_revision},
+    )
+    service = _service(storage, state)
+    first = service.export(
+        job,
+        ExportFormat.DOCX_RECONSTRUCTION,
+        review_revision_id=first_revision_id,
+    )
+    snapshot = state.artifacts[first.export_artifact_id]
+    (storage._root / snapshot.storage_key).write_bytes(b"corrupt")
+    second_revision_id = uuid4()
+    state.newer_revision_after_repair_commit = PersistedDocumentRevision(
+        revision_id=second_revision_id,
+        document_id=result.document_id,
+        verification_run_id=result.verification_run_id,
+        source_version=result.source_version,
+        revision_number=2,
+        created_at=job.created_at + timedelta(minutes=2),
+        parent_revision_id=first_revision_id,
+        persistence_state="persisted",
+        kind=DocumentRevisionKind.MANUAL,
+        text="newer revision",
+    )
+
+    with pytest.raises(VerificationError) as raised:
+        service.export(
+            job,
+            ExportFormat.DOCX_RECONSTRUCTION,
+            review_revision_id=first_revision_id,
+        )
+
+    assert raised.value.code == "revision_export_stale"
+    assert first.export_artifact_id not in state.artifacts
+    assert not storage.artifact_repair_quarantine_path(
+        job.job_id,
+        first.export_artifact_id,
+        FileType.DOCX,
+    ).exists()
+    assert not (storage._root / snapshot.storage_key).exists()
 
 
 def test_corrupt_ready_repair_rejects_changed_canonical_metadata(

@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import { createAnalyzeOptionsSnapshot } from '../api/analyzeOptions'
 import type {
   AnalyzeOptions,
+  FileType,
   IssueSeverity
 } from '../types/verification'
 import type { IssueLayerFilter } from './useIssueNavigation'
@@ -11,13 +12,34 @@ import {
   type useVerificationWorkspace
 } from './useVerificationWorkspace'
 
-export const WORKSPACE_SESSION_VERSION = 3
+export const WORKSPACE_SESSION_VERSION = 4
 export const WORKSPACE_SESSION_KEY = 'text-verification-session'
+export const MAX_WORKSPACE_SESSION_RAW_BYTES = 32 * 1024 * 1024
+export const MAX_WORKSPACE_RESULT_BLOCKS = 20_000
+export const MAX_WORKSPACE_RESULT_ISSUES = 100_000
+export const MAX_WORKSPACE_REVISION_CHAIN = 10_000
+export const MAX_WORKSPACE_REVISION_CODE_POINTS = 5_000_000
+const MAX_WORKSPACE_ISSUE_ALTERNATIVES = 100
+const MAX_WORKSPACE_ISSUE_TEXT_CODE_POINTS = 10_000
+const MAX_WORKSPACE_TERMINOLOGY_ITEMS = 500
+const MAX_WORKSPACE_TERMINOLOGY_CODE_POINTS = 200
 
 export type WorkspaceViewMode = 'sentence' | 'continuous'
 export type WorkspaceSettingsTab = 'settings' | 'terms' | 'banned'
 export type WorkspaceResultTab = 'issues' | 'summary'
 export type WorkspaceSeverityFilter = 'all' | IssueSeverity
+
+export interface WorkspaceExportAuthority {
+  jobId: string
+  documentId: string
+  verificationRunId: string
+  sourceVersion: string
+  fileType: FileType
+  requiresOcrReconstruction: boolean
+  latestRevisionId: string | null
+  latestRevisionNumber: number
+  persistedText: string | null
+}
 
 export interface WorkspaceSessionUiState {
   options: AnalyzeOptions
@@ -34,6 +56,7 @@ export interface WorkspaceSessionUiState {
     selectedIssueId: string | null
   }
   jobId: string | null
+  exportAuthority: WorkspaceExportAuthority | null
 }
 
 type VerificationWorkspace = ReturnType<typeof useVerificationWorkspace>
@@ -44,6 +67,16 @@ interface PreparedSession {
 }
 
 const SESSION_KEYS = [
+  'version',
+  'workspace',
+  'options',
+  'filters',
+  'viewMode',
+  'ui',
+  'jobId',
+  'exportAuthority'
+] as const
+const VERSION_3_SESSION_KEYS = [
   'version',
   'workspace',
   'options',
@@ -86,14 +119,29 @@ const LAYERS = new Set([
   'security'
 ])
 const SEVERITIES = new Set(['all', 'error', 'warning', 'info'])
+const FILE_TYPES = new Set(['docx', 'doc', 'pdf', 'txt', 'rtf', 'md', 'csv'])
+const EXPORT_AUTHORITY_KEYS = [
+  'jobId',
+  'documentId',
+  'verificationRunId',
+  'sourceVersion',
+  'fileType',
+  'requiresOcrReconstruction',
+  'latestRevisionId',
+  'latestRevisionNumber',
+  'persistedText'
+] as const
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
 export function useWorkspaceSession(
   storage: Storage,
-  workspace: VerificationWorkspace
+  workspace: VerificationWorkspace,
+  limits: { maxRawBytes?: number } = {}
 ) {
   const warningState = ref<string | null>(null)
+  const maxRawBytes =
+    limits.maxRawBytes ?? MAX_WORKSPACE_SESSION_RAW_BYTES
 
   function save(state: WorkspaceSessionUiState): boolean {
     const result = workspace.result.value
@@ -113,19 +161,28 @@ export function useWorkspaceSession(
       },
       ...state
     }
+    if (!hasBoundedSessionPayload(payload)) {
+      warningState.value = '当前工作区状态超过会话大小限制，无法保存会话。'
+      return false
+    }
     const prepared = prepareSession(payload, workspace)
     if (prepared === null) {
       warningState.value = '当前工作区状态无效，无法保存会话。'
       return false
     }
     try {
+      const serialized = JSON.stringify({
+        version: WORKSPACE_SESSION_VERSION,
+        workspace: payload.workspace,
+        ...prepared.state
+      })
+      if (!isWorkspaceSessionRawSizeAllowed(serialized, maxRawBytes)) {
+        warningState.value = '当前工作区状态超过会话大小限制，无法保存会话。'
+        return false
+      }
       storage.setItem(
         WORKSPACE_SESSION_KEY,
-        JSON.stringify({
-          version: WORKSPACE_SESSION_VERSION,
-          workspace: payload.workspace,
-          ...prepared.state
-        })
+        serialized
       )
       warningState.value = null
       return true
@@ -147,10 +204,21 @@ export function useWorkspaceSession(
     if (raw === null) {
       return null
     }
+    if (!isWorkspaceSessionRawSizeAllowed(raw, maxRawBytes)) {
+      warningState.value = '已保存的工作区会话超过大小限制，未恢复任何状态。'
+      removeInvalidSession(storage)
+      return null
+    }
     try {
       const parsed: unknown = JSON.parse(raw)
+      if (!hasBoundedSessionPayload(parsed)) {
+        warningState.value = '已保存的工作区会话超过大小限制，未恢复任何状态。'
+        removeInvalidSession(storage)
+        return null
+      }
       const prepared =
         prepareSession(parsed, workspace) ??
+        prepareVersion3Session(parsed, workspace) ??
         prepareLegacySession(parsed, workspace)
       if (prepared === null) {
         warningState.value = '已保存的工作区会话无效，未恢复任何状态。'
@@ -182,6 +250,169 @@ export function useWorkspaceSession(
     restore,
     clear
   }
+}
+
+export function isWorkspaceSessionRawSizeAllowed(
+  raw: string,
+  maxBytes: number = MAX_WORKSPACE_SESSION_RAW_BYTES
+): boolean {
+  if (
+    !Number.isInteger(maxBytes) ||
+    maxBytes < 0 ||
+    raw.length > maxBytes
+  ) {
+    return false
+  }
+  return new TextEncoder().encode(raw).byteLength <= maxBytes
+}
+
+function hasBoundedSessionPayload(value: unknown): boolean {
+  if (!isRecord(value)) {
+    return false
+  }
+  if (
+    Object.hasOwn(value, 'result') &&
+    Object.hasOwn(value, 'workingText') &&
+    !Object.hasOwn(value, 'currentRevision')
+  ) {
+    return (
+      hasBoundedResult(value.result) &&
+      isBoundedText(
+        value.workingText,
+        MAX_WORKSPACE_REVISION_CODE_POINTS
+      ) &&
+      hasBoundedRecord(value.issueStates, MAX_WORKSPACE_RESULT_ISSUES) &&
+      hasBoundedRecord(
+        value.selectedSuggestions,
+        MAX_WORKSPACE_RESULT_ISSUES
+      )
+    )
+  }
+  const workspace = isRecord(value.workspace) ? value.workspace : value
+  return (
+    hasBoundedResult(workspace.result) &&
+    hasBoundedRevision(workspace.currentRevision) &&
+    Array.isArray(workspace.revisionChain) &&
+    workspace.revisionChain.length <= MAX_WORKSPACE_REVISION_CHAIN &&
+    workspace.revisionChain.every(hasBoundedRevision) &&
+    hasBoundedRecord(workspace.issueStates, MAX_WORKSPACE_RESULT_ISSUES) &&
+    hasBoundedRecord(
+      workspace.selectedSuggestions,
+      MAX_WORKSPACE_RESULT_ISSUES
+    ) &&
+    (
+      !Object.hasOwn(value, 'options') ||
+      hasBoundedOptions(value.options)
+    )
+  )
+}
+
+function hasBoundedResult(value: unknown): boolean {
+  if (
+    !isRecord(value) ||
+    !isBoundedText(value.text, MAX_WORKSPACE_REVISION_CODE_POINTS) ||
+    !Array.isArray(value.blocks) ||
+    value.blocks.length > MAX_WORKSPACE_RESULT_BLOCKS ||
+    !Array.isArray(value.issues) ||
+    value.issues.length > MAX_WORKSPACE_RESULT_ISSUES
+  ) {
+    return false
+  }
+  return (
+    value.blocks.every(
+      (block) =>
+        isRecord(block) &&
+        isBoundedText(
+          block.text,
+          MAX_WORKSPACE_REVISION_CODE_POINTS
+        )
+    ) &&
+    value.issues.every(hasBoundedIssue)
+  )
+}
+
+function hasBoundedRevision(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    isBoundedText(value.text, MAX_WORKSPACE_REVISION_CODE_POINTS)
+  )
+}
+
+function hasBoundedIssue(value: unknown): boolean {
+  if (
+    !isRecord(value) ||
+    !Array.isArray(value.alternatives) ||
+    value.alternatives.length > MAX_WORKSPACE_ISSUE_ALTERNATIVES
+  ) {
+    return false
+  }
+  for (const key of [
+    'original',
+    'suggestion',
+    'message',
+    'description',
+    'context',
+    'review',
+    'review_reason'
+  ]) {
+    const text = value[key]
+    if (
+      text !== null &&
+      !isBoundedText(text, MAX_WORKSPACE_ISSUE_TEXT_CODE_POINTS)
+    ) {
+      return false
+    }
+  }
+  return value.alternatives.every((alternative) =>
+    isBoundedText(alternative, MAX_WORKSPACE_ISSUE_TEXT_CODE_POINTS)
+  )
+}
+
+function hasBoundedOptions(value: unknown): boolean {
+  if (
+    !isRecord(value) ||
+    !Array.isArray(value.glossary) ||
+    value.glossary.length > MAX_WORKSPACE_TERMINOLOGY_ITEMS ||
+    !Array.isArray(value.bannedWords) ||
+    value.bannedWords.length > MAX_WORKSPACE_TERMINOLOGY_ITEMS
+  ) {
+    return false
+  }
+  return (
+    value.glossary.every(
+      (term) =>
+        isRecord(term) &&
+        isBoundedText(
+          term.original,
+          MAX_WORKSPACE_TERMINOLOGY_CODE_POINTS
+        ) &&
+        isBoundedText(
+          term.standard,
+          MAX_WORKSPACE_TERMINOLOGY_CODE_POINTS
+        )
+    ) &&
+    value.bannedWords.every((word) =>
+      isBoundedText(word, MAX_WORKSPACE_TERMINOLOGY_CODE_POINTS)
+    )
+  )
+}
+
+function hasBoundedRecord(value: unknown, maxEntries: number): boolean {
+  return isRecord(value) && Object.keys(value).length <= maxEntries
+}
+
+function isBoundedText(value: unknown, maxCodePoints: number): value is string {
+  if (typeof value !== 'string') {
+    return false
+  }
+  let codePoints = 0
+  for (const _character of value) {
+    codePoints += 1
+    if (codePoints > maxCodePoints) {
+      return false
+    }
+  }
+  return true
 }
 
 function prepareLegacySession(
@@ -218,7 +449,8 @@ function prepareLegacySession(
         trackChanges: true,
         selectedIssueId: null
       },
-      jobId: null
+      jobId: null,
+      exportAuthority: null
     }
   }
 }
@@ -244,23 +476,51 @@ function prepareSession(
   ) {
     return null
   }
+  return prepareSessionState(value, workspace, value.exportAuthority)
+}
+
+function prepareVersion3Session(
+  value: unknown,
+  workspace: VerificationWorkspace
+): PreparedSession | null {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, VERSION_3_SESSION_KEYS) ||
+    value.version !== 3 ||
+    !isRecord(value.workspace) ||
+    !hasExactKeys(value.workspace, WORKSPACE_KEYS)
+  ) {
+    return null
+  }
+  return prepareSessionState(value, workspace, null)
+}
+
+function prepareSessionState(
+  value: Record<string, unknown>,
+  workspace: VerificationWorkspace,
+  rawExportAuthority: unknown
+): PreparedSession | null {
+  const workspaceValue = value.workspace
+  if (!isRecord(workspaceValue)) {
+    return null
+  }
   const preparedWorkspace = workspace.prepareWorkspaceRestore({
     version: 2,
-    result: value.workspace.result,
-    currentRevision: value.workspace.currentRevision,
-    revisionChain: value.workspace.revisionChain,
-    requiresReverification: value.workspace.requiresReverification,
-    issueStates: value.workspace.issueStates,
-    selectedSuggestions: value.workspace.selectedSuggestions
+    result: workspaceValue.result,
+    currentRevision: workspaceValue.currentRevision,
+    revisionChain: workspaceValue.revisionChain,
+    requiresReverification: workspaceValue.requiresReverification,
+    issueStates: workspaceValue.issueStates,
+    selectedSuggestions: workspaceValue.selectedSuggestions
   })
   if (
     preparedWorkspace === null ||
     !sameRecordKeys(
-      value.workspace.issueStates,
+      workspaceValue.issueStates,
       preparedWorkspace.issueStates
     ) ||
     !sameRecordKeys(
-      value.workspace.selectedSuggestions,
+      workspaceValue.selectedSuggestions,
       preparedWorkspace.selectedSuggestions
     )
   ) {
@@ -284,13 +544,17 @@ function prepareSession(
     return null
   }
   const jobId = value.jobId
+  const exportAuthority = preparedExportAuthority(rawExportAuthority)
   if (
     (jobId !== null &&
       (typeof jobId !== 'string' || !UUID_PATTERN.test(jobId))) ||
     (preparedWorkspace.result.execution_mode === 'asynchronous' &&
       jobId !== preparedWorkspace.result.document_id) ||
     (preparedWorkspace.result.execution_mode === 'synchronous' &&
-      jobId !== null)
+      jobId !== null) ||
+    exportAuthority === undefined ||
+    (preparedWorkspace.result.execution_mode === 'asynchronous' &&
+      exportAuthority !== null)
   ) {
     return null
   }
@@ -321,9 +585,68 @@ function prepareSession(
         trackChanges: value.ui.trackChanges,
         selectedIssueId
       },
-      jobId
+      jobId,
+      exportAuthority
     }
   }
+}
+
+function preparedExportAuthority(
+  value: unknown
+): WorkspaceExportAuthority | null | undefined {
+  if (value === null) {
+    return null
+  }
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, EXPORT_AUTHORITY_KEYS) ||
+    typeof value.jobId !== 'string' ||
+    !UUID_PATTERN.test(value.jobId) ||
+    value.documentId !== value.jobId ||
+    typeof value.verificationRunId !== 'string' ||
+    !UUID_PATTERN.test(value.verificationRunId) ||
+    !isBoundedText(value.sourceVersion, 500) ||
+    typeof value.fileType !== 'string' ||
+    !FILE_TYPES.has(value.fileType) ||
+    typeof value.requiresOcrReconstruction !== 'boolean' ||
+    !Number.isInteger(value.latestRevisionNumber) ||
+    Number(value.latestRevisionNumber) < 0 ||
+    (
+      value.latestRevisionId !== null &&
+      (
+        typeof value.latestRevisionId !== 'string' ||
+        !UUID_PATTERN.test(value.latestRevisionId)
+      )
+    ) ||
+    (
+      (value.latestRevisionId === null) !==
+      (Number(value.latestRevisionNumber) === 0)
+    ) ||
+    (
+      value.persistedText !== null &&
+      !isBoundedText(
+        value.persistedText,
+        MAX_WORKSPACE_REVISION_CODE_POINTS
+      )
+    ) ||
+    (
+      (value.latestRevisionId === null) !==
+      (value.persistedText === null)
+    )
+  ) {
+    return undefined
+  }
+  return Object.freeze({
+    jobId: value.jobId,
+    documentId: value.documentId,
+    verificationRunId: value.verificationRunId,
+    sourceVersion: value.sourceVersion,
+    fileType: value.fileType as FileType,
+    requiresOcrReconstruction: value.requiresOcrReconstruction,
+    latestRevisionId: value.latestRevisionId,
+    latestRevisionNumber: Number(value.latestRevisionNumber),
+    persistedText: value.persistedText
+  })
 }
 
 function preparedOptions(value: unknown): AnalyzeOptions | null {

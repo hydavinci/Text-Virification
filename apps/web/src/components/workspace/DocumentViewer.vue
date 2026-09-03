@@ -153,7 +153,11 @@ async function scrollSelectedSource(issueId: string | null): Promise<void> {
   )
   if (control && typeof control.scrollIntoView === 'function') {
     control.scrollIntoView({
-      behavior: 'smooth',
+      behavior:
+        typeof window.matchMedia === 'function' &&
+        window.matchMedia('(prefers-reduced-motion: reduce)').matches
+          ? 'auto'
+          : 'smooth',
       block: 'center',
       inline: 'nearest'
     })

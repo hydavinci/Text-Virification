@@ -1739,6 +1739,8 @@ def test_concurrent_persist_review_revision_uuid_retry_is_idempotent(
         seed_session.close()
 
     first_saved = Event()
+    second_started = Event()
+    second_finished = Event()
     allow_first_commit = Event()
     draft = ReviewRevisionDraft(
         revision_id=REVISION_ID,
@@ -1750,11 +1752,18 @@ def test_concurrent_persist_review_revision_uuid_retry_is_idempotent(
         text="same",
     )
 
-    def worker(created_at: datetime, hold: bool) -> PersistedDocumentRevision:
+    def worker(
+        created_at: datetime,
+        hold: bool,
+        *,
+        second: bool = False,
+    ) -> PersistedDocumentRevision:
         session = db_session_factory()
         repository = VerificationRepository(session)
         try:
             session.execute(text("SET lock_timeout = '4s'"))
+            if second:
+                second_started.set()
             persisted = repository.persist_review_revision(
                 JOB_ID,
                 draft,
@@ -1767,6 +1776,8 @@ def test_concurrent_persist_review_revision_uuid_retry_is_idempotent(
             repository.commit()
             return persisted
         finally:
+            if second:
+                second_finished.set()
             session.close()
 
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -1776,7 +1787,10 @@ def test_concurrent_persist_review_revision_uuid_retry_is_idempotent(
             worker,
             CREATED_AT + timedelta(minutes=1),
             False,
+            second=True,
         )
+        assert second_started.wait(timeout=1)
+        assert not second_finished.wait(timeout=0.2)
         allow_first_commit.set()
         first = first_future.result(timeout=5)
         retried = retry_future.result(timeout=5)
@@ -1809,6 +1823,8 @@ def test_concurrent_persist_review_revision_rejects_stale_parent_or_uuid_collisi
         seed_session.close()
 
     first_saved = Event()
+    second_started = Event()
+    second_finished = Event()
     allow_first_commit = Event()
 
     def first_worker() -> None:
@@ -1840,6 +1856,7 @@ def test_concurrent_persist_review_revision_rejects_stale_parent_or_uuid_collisi
         repository = VerificationRepository(session)
         try:
             session.execute(text("SET lock_timeout = '4s'"))
+            second_started.set()
             repository.persist_review_revision(
                 JOB_ID,
                 ReviewRevisionDraft(
@@ -1859,12 +1876,15 @@ def test_concurrent_persist_review_revision_rejects_stale_parent_or_uuid_collisi
             repository.rollback()
             return error
         finally:
+            second_finished.set()
             session.close()
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         first_future = executor.submit(first_worker)
         assert first_saved.wait(timeout=2)
         second_future = executor.submit(second_worker)
+        assert second_started.wait(timeout=1)
+        assert not second_finished.wait(timeout=0.2)
         allow_first_commit.set()
         first_future.result(timeout=5)
         error = second_future.result(timeout=5)

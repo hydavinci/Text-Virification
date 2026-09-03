@@ -620,6 +620,32 @@ class VerificationRepository:
             raise ValueError("Artifact repair does not belong to the requested job.")
         if JobStatus(job.status) not in RESULT_READY_STATUSES:
             raise ValueError("Artifact repair requires a result-ready job.")
+        review_revision = self._review_revision_for_run(
+            expected.verification_run_id,
+            expected.review_revision_id,
+        )
+        latest_revision = self._latest_review_revision(
+            expected.verification_run_id
+        )
+        if (review_revision is None) != (latest_revision is None) or (
+            review_revision is not None
+            and latest_revision is not None
+            and review_revision.review_revision_id
+            != latest_revision.review_revision_id
+        ):
+            raise StaleReviewRevisionError(
+                "Requested revision is not the latest persisted revision."
+            )
+        expected_source_version = (
+            review_revision.source_version
+            if review_revision is not None
+            else run.document.source_version
+        )
+        if expected.source_version != expected_source_version:
+            raise ValueError(
+                f"Export source version {expected.source_version!r} does not match "
+                f"{expected_source_version!r}."
+            )
         row = self._lock_artifact_or_none(expected.export_artifact_id)
         if row is None:
             return None

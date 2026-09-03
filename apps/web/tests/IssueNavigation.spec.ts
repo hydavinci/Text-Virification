@@ -227,6 +227,7 @@ describe('IssueList', () => {
 
   afterEach(() => {
     vi.restoreAllMocks()
+    vi.unstubAllGlobals()
   })
 
   it('activates the same stable id by click and keyboard', async () => {
@@ -283,6 +284,31 @@ describe('IssueList', () => {
     await nextTick()
 
     expect(scrollIntoView).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('uses non-smooth list scrolling when reduced motion is preferred', async () => {
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => ({ matches: true }))
+    )
+    const issue = buildIssue('reduced-motion-list-issue', 0, 1)
+    const wrapper = mount(IssueList, {
+      props: {
+        issues: [issue],
+        selectedIssueId: issue.issue_id,
+        issueStates,
+        selectedSuggestions: Object.freeze({})
+      }
+    })
+
+    await nextTick()
+
+    expect(scrollIntoView).toHaveBeenCalledWith({
+      behavior: 'auto',
+      block: 'center',
+      inline: 'nearest'
+    })
     wrapper.unmount()
   })
 

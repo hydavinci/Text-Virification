@@ -659,6 +659,9 @@ def _export_http_error(error: VerificationError) -> HTTPException:
         "revision_identity_mismatch": status.HTTP_409_CONFLICT,
         "revision_export_stale": status.HTTP_409_CONFLICT,
         "revision_text_unmappable": status.HTTP_422_UNPROCESSABLE_CONTENT,
+        "revision_structure_conflict": status.HTTP_409_CONFLICT,
+        "revision_text_too_large": status.HTTP_413_CONTENT_TOO_LARGE,
+        "revision_diff_too_complex": status.HTTP_422_UNPROCESSABLE_CONTENT,
         "export_artifact_repair_cleanup_failed": status.HTTP_409_CONFLICT,
         "export_artifact_repair_pending": status.HTTP_409_CONFLICT,
         "export_artifact_repair_unsafe": status.HTTP_409_CONFLICT,
@@ -680,6 +683,7 @@ def _revision_http_error(error: VerificationError) -> HTTPException:
     status_code = {
         "revision_identity_not_found": status.HTTP_404_NOT_FOUND,
         "revision_conflict": status.HTTP_409_CONFLICT,
+        "revision_text_too_large": status.HTTP_413_CONTENT_TOO_LARGE,
         "revision_persistence_failed": status.HTTP_503_SERVICE_UNAVAILABLE,
     }.get(error.code, status.HTTP_500_INTERNAL_SERVER_ERROR)
     return _typed_http_error(

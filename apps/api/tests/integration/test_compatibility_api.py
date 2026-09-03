@@ -295,6 +295,34 @@ def test_upload_and_export_txt_from_uuid_scoped_storage(
     assert exported.headers["content-disposition"].endswith(".txt")
 
 
+def test_export_original_rejects_modified_text_above_configured_upload_limit(
+    app: FastAPI,
+    client: TestClient,
+    tmp_path: Path,
+) -> None:
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        storage_root=tmp_path / "compatibility",
+        max_upload_bytes=8,
+    )
+    analysis = client.post(
+        "/api/v1/analyze",
+        files={"file": ("source.txt", b"text", "text/plain")},
+    )
+    assert analysis.status_code == 200
+
+    exported = client.post(
+        "/api/v1/export-original",
+        json={
+            "file_id": analysis.json()["file_id"],
+            "filename": "source.txt",
+            "modified_text": "123456789",
+            "track_changes": False,
+        },
+    )
+
+    assert exported.status_code == 413
+
+
 def test_uploaded_source_version_hashes_source_bytes_not_extracted_text(
     app: FastAPI,
     client: TestClient,

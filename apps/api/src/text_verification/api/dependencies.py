@@ -71,13 +71,15 @@ def get_reconstruction_export_service(
 
 def get_review_revision_service(
     session: Annotated[Session, Depends(get_db_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> ReviewRevisionService:
     @contextmanager
     def repository_factory() -> Iterator[VerificationRepository]:
         yield VerificationRepository(session)
 
     return ReviewRevisionService(
-        cast(ReviewRevisionRepositoryFactory, repository_factory)
+        cast(ReviewRevisionRepositoryFactory, repository_factory),
+        max_revision_bytes=settings.max_upload_bytes,
     )
 
 

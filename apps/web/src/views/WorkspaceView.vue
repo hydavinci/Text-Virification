@@ -17,7 +17,10 @@ import VerificationSettings from '../components/workspace/VerificationSettings.v
 import WorkspaceHeader from '../components/workspace/WorkspaceHeader.vue'
 import { useIssueNavigation } from '../composables/useIssueNavigation'
 import { useVerificationExecution } from '../composables/useVerificationExecution'
-import { useWorkspaceSession } from '../composables/useWorkspaceSession'
+import {
+  type WorkspaceExportAuthority,
+  useWorkspaceSession
+} from '../composables/useWorkspaceSession'
 import {
   applyStoredWorkspaceTheme,
   persistWorkspaceTheme
@@ -126,6 +129,7 @@ const segmentedView = ref(true)
 const showFindReplace = ref(false)
 const isExporting = ref(false)
 const exportError = ref<string | null>(null)
+const fileExportAuthority = ref<WorkspaceExportAuthority | null>(null)
 const jobState = computed(() => {
   const job = execution.job.value
   const status = execution.jobStatus.value
@@ -220,6 +224,7 @@ async function handleUpload(file: File) {
   if (execution.isActive.value) {
     return
   }
+  fileExportAuthority.value = null
   fileSource.value = file
   if (verificationApi && !confirmOptionalSettings()) {
     return
@@ -239,6 +244,7 @@ async function runTextAnalysis(submittedText: string) {
   if (!verificationApi || !confirmOptionalSettings()) {
     return
   }
+  fileExportAuthority.value = null
   textInput.value = text
   fileSource.value = null
   await execution.analyzeText(text, currentOptions.value)
@@ -342,6 +348,15 @@ async function recheck() {
     return
   }
   const source = result.value
+  const exportAuthority = captureFileExportAuthority()
+  if (
+    source.execution_mode === 'asynchronous' &&
+    exportAuthority === null
+  ) {
+    notify('当前文件缺少可验证的任务导出身份，无法重新检查')
+    return
+  }
+  fileExportAuthority.value = exportAuthority
   textInput.value = modifiedText.value
   fileSource.value = null
   await execution.analyzeText(
@@ -354,12 +369,14 @@ async function recheck() {
       file_ext: null
     })
   )
+  saveSession()
 }
 
 async function exportReport() {
   if (!verificationApi || !result.value) {
     return
   }
+  exportError.value = null
   if (verificationWorkspace.requiresReverification.value) {
     notify('当前文本已修改，请重新检查后再导出报告')
     return
@@ -369,8 +386,8 @@ async function exportReport() {
     return
   }
   try {
-    exportError.value = null
     await verificationApi.exportReport(result.value)
+    exportError.value = null
   } catch (error) {
     exportError.value =
       error instanceof Error ? error.message : '报告导出失败'
@@ -381,6 +398,7 @@ async function exportModified() {
   if (!result.value) {
     return
   }
+  exportError.value = null
   if (verificationWorkspace.hasReplacementConflicts.value) {
     notify('存在重叠的已接受修改，请先解决冲突后再导出')
     return
@@ -426,9 +444,14 @@ async function exportModified() {
     }
     return
   }
+  if (fileExportAuthority.value !== null) {
+    await exportRecheckedFile()
+    return
+  }
   if (!result.value.file_id || !verificationApi) {
     const text = trackChanges.value ? buildTrackedText() : modifiedText.value
     downloadText(text, `修改版_${result.value.filename.replace(/\.[^.]+$/, '')}.txt`)
+    exportError.value = null
     return
   }
 
@@ -482,10 +505,214 @@ async function exportModified() {
       modifiedText.value,
       trackChanges.value
     )
+    exportError.value = null
   } catch (error) {
     exportError.value =
       error instanceof Error ? error.message : '修改文件导出失败'
   }
+}
+
+function captureFileExportAuthority(): WorkspaceExportAuthority | null {
+  if (fileExportAuthority.value !== null) {
+    return fileExportAuthority.value
+  }
+  const currentResult = result.value
+  const jobId = execution.jobId.value
+  if (
+    currentResult === null ||
+    currentResult.execution_mode !== 'asynchronous' ||
+    jobId === null ||
+    currentResult.document_id !== jobId
+  ) {
+    return null
+  }
+  const latestPersisted = [...verificationWorkspace.revisionChain.value]
+    .reverse()
+    .find((revision) => revision.persistence_state === 'persisted')
+  return Object.freeze({
+    jobId,
+    documentId: currentResult.document_id,
+    verificationRunId: currentResult.verification_run_id,
+    sourceVersion: currentResult.source_version,
+    fileType: currentResult.file_type,
+    requiresOcrReconstruction:
+      currentResult.file_type === 'pdf' &&
+      (currentResult.pdf_metadata === undefined ||
+        currentResult.pdf_metadata.pages.some(
+          (page) => page.kind !== 'text'
+        )),
+    latestRevisionId: latestPersisted?.revision_id ?? null,
+    latestRevisionNumber: latestPersisted?.revision_number ?? 0,
+    persistedText: latestPersisted?.text ?? null
+  })
+}
+
+interface RecheckedExportOperation {
+  generation: number
+  resultIdentity: string
+  revisionIdentity: string
+  authorityFingerprint: string
+  authority: WorkspaceExportAuthority
+  trackChanges: boolean
+}
+
+async function exportRecheckedFile(): Promise<void> {
+  const operation = beginRecheckedExportOperation()
+  if (operation === null || verificationApi === null) {
+    if (verificationApi === null) {
+      exportError.value = '异步文档导出服务不可用'
+    }
+    return
+  }
+  try {
+    let revisionId = operation.authority.latestRevisionId
+    if (
+      revisionId === null ||
+      operation.authority.persistedText !== currentRevisionText.value
+    ) {
+      const draft: DraftDocumentRevision = Object.freeze({
+        revision_id: crypto.randomUUID(),
+        document_id: operation.authority.documentId,
+        verification_run_id: operation.authority.verificationRunId,
+        source_version: operation.authority.sourceVersion,
+        revision_number: null,
+        created_at: new Date().toISOString(),
+        parent_revision_id: operation.authority.latestRevisionId,
+        persistence_state: 'draft',
+        kind: 'manual',
+        text: currentRevisionText.value
+      })
+      const persisted = await verificationApi.persistRevision(
+        operation.authority.jobId,
+        draft
+      )
+      assertCurrentRecheckedExportOperation(operation)
+      const nextAuthority = Object.freeze({
+        ...operation.authority,
+        latestRevisionId: persisted.revision_id,
+        latestRevisionNumber: persisted.revision_number,
+        persistedText: persisted.text
+      })
+      fileExportAuthority.value = nextAuthority
+      operation.authority = nextAuthority
+      operation.authorityFingerprint = exportAuthorityFingerprint(nextAuthority)
+      revisionId = persisted.revision_id
+      saveSession()
+    }
+    assertCurrentRecheckedExportOperation(operation)
+    await verificationApi.exportJob(
+      operation.authority.jobId,
+      operation.authority.requiresOcrReconstruction
+        ? 'docx_reconstruction'
+        : 'original_format',
+      revisionId,
+      operation.trackChanges,
+      () => isCurrentRecheckedExportOperation(operation)
+    )
+    assertCurrentRecheckedExportOperation(operation)
+    exportError.value = null
+    notify('导出文件已生成')
+  } catch (error) {
+    if (
+      !(error instanceof StaleExportOperationError) &&
+      isCurrentRecheckedExportOperation(operation)
+    ) {
+      exportError.value =
+        error instanceof Error ? error.message : '修改文件导出失败'
+    }
+  } finally {
+    if (isCurrentRecheckedExportOperation(operation)) {
+      isExporting.value = false
+    }
+  }
+}
+
+function beginRecheckedExportOperation(): RecheckedExportOperation | null {
+  const currentResult = result.value
+  const currentRevision = verificationWorkspace.currentRevision.value
+  const authority = fileExportAuthority.value
+  if (
+    isExporting.value ||
+    currentResult === null ||
+    currentRevision === null ||
+    authority === null
+  ) {
+    exportError.value = '异步文档缺少可验证的任务身份，无法导出'
+    return null
+  }
+  exportGeneration += 1
+  isExporting.value = true
+  exportError.value = null
+  return {
+    generation: exportGeneration,
+    resultIdentity: resultIdentityFingerprint(currentResult),
+    revisionIdentity: revisionIdentityFingerprint(currentRevision),
+    authorityFingerprint: exportAuthorityFingerprint(authority),
+    authority,
+    trackChanges: trackChanges.value
+  }
+}
+
+function isCurrentRecheckedExportOperation(
+  operation: RecheckedExportOperation
+): boolean {
+  const currentResult = result.value
+  const currentRevision = verificationWorkspace.currentRevision.value
+  const authority = fileExportAuthority.value
+  return (
+    !disposed &&
+    operation.generation === exportGeneration &&
+    currentResult !== null &&
+    currentRevision !== null &&
+    authority !== null &&
+    resultIdentityFingerprint(currentResult) === operation.resultIdentity &&
+    revisionIdentityFingerprint(currentRevision) === operation.revisionIdentity &&
+    exportAuthorityFingerprint(authority) === operation.authorityFingerprint
+  )
+}
+
+function assertCurrentRecheckedExportOperation(
+  operation: RecheckedExportOperation
+): void {
+  if (!isCurrentRecheckedExportOperation(operation)) {
+    throw new StaleExportOperationError('Export operation was superseded.')
+  }
+}
+
+function resultIdentityFingerprint(value: VerificationResult): string {
+  return JSON.stringify([
+    value.document_id,
+    value.verification_run_id,
+    value.source_version,
+    value.text
+  ])
+}
+
+function revisionIdentityFingerprint(
+  value: Readonly<DocumentRevision>
+): string {
+  return JSON.stringify([
+    value.revision_id,
+    value.parent_revision_id,
+    value.kind,
+    value.text
+  ])
+}
+
+function exportAuthorityFingerprint(
+  value: WorkspaceExportAuthority
+): string {
+  return JSON.stringify([
+    value.jobId,
+    value.documentId,
+    value.verificationRunId,
+    value.sourceVersion,
+    value.fileType,
+    value.requiresOcrReconstruction,
+    value.latestRevisionId,
+    value.latestRevisionNumber,
+    value.persistedText
+  ])
 }
 
 function jobExportFormat(
@@ -646,6 +873,7 @@ function downloadText(text: string, filename: string) {
 function resetWorkspace() {
   invalidateExportOperation()
   exportError.value = null
+  fileExportAuthority.value = null
   execution.reset()
   verificationWorkspace.clearResult()
   loadedExecutionResult = null
@@ -699,7 +927,8 @@ function saveSession() {
       trackChanges: trackChanges.value,
       selectedIssueId: selectedIssueId.value
     },
-    jobId: execution.jobId.value
+    jobId: execution.jobId.value,
+    exportAuthority: fileExportAuthority.value
   })
 }
 
@@ -717,6 +946,7 @@ function restoreSession() {
   showFindReplace.value = restored.ui.showFindReplace
   trackChanges.value = restored.ui.trackChanges
   selectedIssueId.value = restored.ui.selectedIssueId
+  fileExportAuthority.value = restored.exportAuthority
   if (
     restored.jobId !== null &&
     result.value !== null &&
@@ -772,7 +1002,8 @@ watch(
     () => resultTab.value,
     () => showFindReplace.value,
     () => trackChanges.value,
-    () => selectedIssueId.value
+    () => selectedIssueId.value,
+    () => fileExportAuthority.value
   ],
   saveSession,
   { deep: true }
