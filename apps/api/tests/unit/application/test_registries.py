@@ -511,7 +511,9 @@ def test_compatibility_exporter_uses_injected_source_path_resolver(
         *,
         original_text: str | None = None,
         modified_text: str | None = None,
+        max_text_bytes: int | None = None,
     ) -> ExportedDocument:
+        del max_text_bytes
         calls.append(
             {
                 "source_path": source_path,
@@ -546,6 +548,57 @@ def test_compatibility_exporter_uses_injected_source_path_resolver(
     assert output_path == target
     assert target.read_bytes() == b"%PDF-1.7"
     assert calls[0]["source_path"] == resolved_source
+
+
+def test_compatibility_exporter_propagates_the_configured_text_byte_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[int | None] = []
+
+    def fake_export_original(
+        source_path: Path,
+        extension: str,
+        replacements: list[tuple[str, str, int | None, int | None]],
+        track_changes: bool,
+        *,
+        original_text: str | None = None,
+        modified_text: str | None = None,
+        max_text_bytes: int | None = None,
+    ) -> ExportedDocument:
+        del (
+            source_path,
+            extension,
+            replacements,
+            track_changes,
+            original_text,
+            modified_text,
+        )
+        calls.append(max_text_bytes)
+        return ExportedDocument(
+            content=b"edited",
+            extension="txt",
+            media_type="text/plain",
+        )
+
+    monkeypatch.setattr(
+        "text_verification.exporters.compatibility_exporter.export_original",
+        fake_export_original,
+    )
+    exporter = CompatibilityExporter(
+        FileType.TXT,
+        source_path_resolver=StaticSourcePathResolver(tmp_path / "source.txt"),
+        max_text_bytes=5,
+    )
+
+    exporter.export(
+        _document(text="source"),
+        [],
+        tmp_path / "exported.txt",
+        modified_text="😀a",
+    )
+
+    assert calls == [5]
 
 
 def test_compatibility_exporter_rejects_nullable_suggestion(
@@ -592,8 +645,16 @@ def test_compatibility_exporter_allows_explicit_deletion_suggestion(
         *,
         original_text: str | None = None,
         modified_text: str | None = None,
+        max_text_bytes: int | None = None,
     ) -> ExportedDocument:
-        del source_path, extension, track_changes, original_text, modified_text
+        del (
+            source_path,
+            extension,
+            track_changes,
+            original_text,
+            modified_text,
+            max_text_bytes,
+        )
         assert replacements == [("帐号", "", 0, 2)]
         return ExportedDocument(
             content=b"",

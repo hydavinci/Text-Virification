@@ -13,6 +13,9 @@ import pytest
 
 from text_verification.domain.documents import FileType
 from text_verification.infrastructure import storage as storage_module
+from text_verification.infrastructure.artifact_storage import (
+    ArtifactRepairPreparation,
+)
 from text_verification.infrastructure.storage import (
     InvalidUpload,
     JobStorage,
@@ -194,6 +197,71 @@ def test_artifact_repair_refuses_linked_corrupt_replacement(
 
     assert outside.read_bytes() == b"corrupt"
     assert artifact_path.exists() or artifact_path.is_symlink()
+
+
+def test_artifact_repair_does_not_claim_quarantine_renamed_by_another_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = JobStorage(tmp_path / "storage", max_upload_bytes=1024)
+    job_id = uuid4()
+    artifact_id = uuid4()
+    storage_key = storage_module.build_artifact_storage_key(
+        job_id,
+        artifact_id,
+        FileType.DOCX,
+    )
+    original = make_docx_bytes()
+    with storage.publish_verified_artifact(
+        job_id,
+        artifact_id,
+        storage_key,
+        FileType.DOCX,
+        original,
+    ) as handle:
+        handle.path.write_bytes(b"corrupt")
+        leaf_name = handle.path.name
+    quarantine_name = f".{leaf_name}.repair-corrupt"
+    real_stat = os.stat
+    renamed = False
+
+    def rename_before_named_stat(path, *args, **kwargs):
+        nonlocal renamed
+        if (
+            not renamed
+            and path == leaf_name
+            and kwargs.get("dir_fd") is not None
+        ):
+            renamed = True
+            os.rename(
+                leaf_name,
+                quarantine_name,
+                src_dir_fd=kwargs["dir_fd"],
+                dst_dir_fd=kwargs["dir_fd"],
+            )
+            raise FileNotFoundError
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        "text_verification.infrastructure.artifact_storage.os.stat",
+        rename_before_named_stat,
+    )
+    monkeypatch.setattr(
+        storage._artifact_storage,
+        "_supports_descriptor_operations",
+        lambda: True,
+    )
+
+    preparation = storage.prepare_artifact_repair(
+        job_id,
+        artifact_id,
+        storage_key,
+        FileType.DOCX,
+        expected_size=len(original),
+        expected_digest=hashlib.sha256(original).hexdigest(),
+    )
+
+    assert preparation is ArtifactRepairPreparation.REUSED_QUARANTINE
 
 
 def test_repair_quarantine_is_discovered_as_exact_canonical_artifact_candidate(

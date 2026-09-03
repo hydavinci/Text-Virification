@@ -6,6 +6,7 @@ import os
 import stat
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import Enum
 from pathlib import Path, PurePosixPath
 from uuid import UUID, uuid4
 
@@ -21,6 +22,12 @@ from text_verification.infrastructure.document_storage import (
 
 class ArtifactNotFoundError(InvalidUpload):
     pass
+
+
+class ArtifactRepairPreparation(Enum):
+    ALREADY_CURRENT = "already_current"
+    QUARANTINED = "quarantined"
+    REUSED_QUARANTINE = "reused_quarantine"
 
 
 @dataclass(frozen=True)
@@ -394,7 +401,7 @@ class ArtifactStorage:
         *,
         expected_size: int,
         expected_digest: str,
-    ) -> bool | None:
+    ) -> ArtifactRepairPreparation | None:
         if not self._supports_descriptor_operations():
             raise InvalidUpload(
                 "Safe artifact repair requires descriptor-relative "
@@ -425,7 +432,7 @@ class ArtifactStorage:
                 )
             except FileNotFoundError:
                 return (
-                    True
+                    ArtifactRepairPreparation.REUSED_QUARANTINE
                     if _validate_existing_quarantine(parent_fd, quarantine_name)
                     else None
                 )
@@ -443,7 +450,7 @@ class ArtifactStorage:
                 )
             size_bytes, content_sha256, file_signature = _hash_stable_file(file_fd)
             if size_bytes == expected_size and content_sha256 == expected_digest:
-                return False
+                return ArtifactRepairPreparation.ALREADY_CURRENT
 
             try:
                 named = os.stat(
@@ -457,7 +464,7 @@ class ArtifactStorage:
                     file_signature.device,
                     file_signature.inode,
                 ):
-                    return True
+                    return ArtifactRepairPreparation.REUSED_QUARANTINE
                 raise InvalidUpload(
                     "Artifact repair target changed before quarantine."
                 ) from None
@@ -491,7 +498,7 @@ class ArtifactStorage:
                 file_signature.inode,
             ):
                 raise InvalidUpload("Artifact repair quarantine changed unexpectedly.")
-            return True
+            return ArtifactRepairPreparation.QUARANTINED
         finally:
             if file_fd >= 0:
                 os.close(file_fd)

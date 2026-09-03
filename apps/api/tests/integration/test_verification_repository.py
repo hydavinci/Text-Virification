@@ -1655,9 +1655,10 @@ def test_concurrent_persist_review_revisions_allocate_unique_sequential_numbers(
         seed_session.close()
 
     first_saved = Event()
-    second_started = Event()
-    second_finished = Event()
+    second_pid_ready = Event()
     allow_first_commit = Event()
+    first_pid: list[int] = []
+    second_pid: list[int] = []
     first_draft = ReviewRevisionDraft(
         revision_id=REVISION_ID,
         document_id=DOCUMENT_ID,
@@ -1682,13 +1683,16 @@ def test_concurrent_persist_review_revisions_allocate_unique_sequential_numbers(
         repository = VerificationRepository(session)
         try:
             session.execute(text("SET lock_timeout = '4s'"))
+            first_pid.append(
+                int(session.execute(text("SELECT pg_backend_pid()")).scalar_one())
+            )
             persisted = repository.persist_review_revision(
                 JOB_ID,
                 first_draft,
                 created_at=CREATED_AT,
             )
             first_saved.set()
-            if not allow_first_commit.wait(timeout=2):
+            if not allow_first_commit.wait(timeout=5):
                 raise TimeoutError("timed out waiting to commit first revision")
             repository.commit()
             return persisted
@@ -1700,7 +1704,10 @@ def test_concurrent_persist_review_revisions_allocate_unique_sequential_numbers(
         repository = VerificationRepository(session)
         try:
             session.execute(text("SET lock_timeout = '4s'"))
-            second_started.set()
+            second_pid.append(
+                int(session.execute(text("SELECT pg_backend_pid()")).scalar_one())
+            )
+            second_pid_ready.set()
             persisted = repository.persist_review_revision(
                 JOB_ID,
                 second_draft,
@@ -1709,18 +1716,24 @@ def test_concurrent_persist_review_revisions_allocate_unique_sequential_numbers(
             repository.commit()
             return persisted
         finally:
-            second_finished.set()
             session.close()
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        first_future = executor.submit(first_worker)
-        assert first_saved.wait(timeout=2)
-        second_future = executor.submit(second_worker)
-        assert second_started.wait(timeout=1)
-        assert not second_finished.wait(timeout=0.2)
-        allow_first_commit.set()
-        first = first_future.result(timeout=5)
-        second = second_future.result(timeout=5)
+        try:
+            first_future = executor.submit(first_worker)
+            assert first_saved.wait(timeout=2)
+            second_future = executor.submit(second_worker)
+            assert second_pid_ready.wait(timeout=2)
+            _wait_until_backend_waits_for_lock(
+                db_session_factory,
+                second_pid[0],
+                blocker_pid=first_pid[0],
+            )
+            allow_first_commit.set()
+            first = first_future.result(timeout=5)
+            second = second_future.result(timeout=5)
+        finally:
+            allow_first_commit.set()
 
     assert (first.revision_number, second.revision_number) == (1, 2)
     assert second.parent_revision_id == first.revision_id
@@ -1739,9 +1752,10 @@ def test_concurrent_persist_review_revision_uuid_retry_is_idempotent(
         seed_session.close()
 
     first_saved = Event()
-    second_started = Event()
-    second_finished = Event()
+    second_pid_ready = Event()
     allow_first_commit = Event()
+    first_pid: list[int] = []
+    second_pid: list[int] = []
     draft = ReviewRevisionDraft(
         revision_id=REVISION_ID,
         document_id=DOCUMENT_ID,
@@ -1762,8 +1776,14 @@ def test_concurrent_persist_review_revision_uuid_retry_is_idempotent(
         repository = VerificationRepository(session)
         try:
             session.execute(text("SET lock_timeout = '4s'"))
+            backend_pid = int(
+                session.execute(text("SELECT pg_backend_pid()")).scalar_one()
+            )
             if second:
-                second_started.set()
+                second_pid.append(backend_pid)
+                second_pid_ready.set()
+            else:
+                first_pid.append(backend_pid)
             persisted = repository.persist_review_revision(
                 JOB_ID,
                 draft,
@@ -1771,29 +1791,34 @@ def test_concurrent_persist_review_revision_uuid_retry_is_idempotent(
             )
             if hold:
                 first_saved.set()
-                if not allow_first_commit.wait(timeout=2):
+                if not allow_first_commit.wait(timeout=5):
                     raise TimeoutError("timed out waiting to commit retry")
             repository.commit()
             return persisted
         finally:
-            if second:
-                second_finished.set()
             session.close()
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        first_future = executor.submit(worker, CREATED_AT, True)
-        assert first_saved.wait(timeout=2)
-        retry_future = executor.submit(
-            worker,
-            CREATED_AT + timedelta(minutes=1),
-            False,
-            second=True,
-        )
-        assert second_started.wait(timeout=1)
-        assert not second_finished.wait(timeout=0.2)
-        allow_first_commit.set()
-        first = first_future.result(timeout=5)
-        retried = retry_future.result(timeout=5)
+        try:
+            first_future = executor.submit(worker, CREATED_AT, True)
+            assert first_saved.wait(timeout=2)
+            retry_future = executor.submit(
+                worker,
+                CREATED_AT + timedelta(minutes=1),
+                False,
+                second=True,
+            )
+            assert second_pid_ready.wait(timeout=2)
+            _wait_until_backend_waits_for_lock(
+                db_session_factory,
+                second_pid[0],
+                blocker_pid=first_pid[0],
+            )
+            allow_first_commit.set()
+            first = first_future.result(timeout=5)
+            retried = retry_future.result(timeout=5)
+        finally:
+            allow_first_commit.set()
 
     assert retried == first
     assert retried.revision_number == 1
@@ -1823,14 +1848,18 @@ def test_concurrent_persist_review_revision_rejects_stale_parent_or_uuid_collisi
         seed_session.close()
 
     first_saved = Event()
-    second_started = Event()
-    second_finished = Event()
+    second_pid_ready = Event()
     allow_first_commit = Event()
+    first_pid: list[int] = []
+    second_pid: list[int] = []
 
     def first_worker() -> None:
         session = db_session_factory()
         repository = VerificationRepository(session)
         try:
+            first_pid.append(
+                int(session.execute(text("SELECT pg_backend_pid()")).scalar_one())
+            )
             repository.persist_review_revision(
                 JOB_ID,
                 ReviewRevisionDraft(
@@ -1845,7 +1874,7 @@ def test_concurrent_persist_review_revision_rejects_stale_parent_or_uuid_collisi
                 created_at=CREATED_AT,
             )
             first_saved.set()
-            if not allow_first_commit.wait(timeout=2):
+            if not allow_first_commit.wait(timeout=5):
                 raise TimeoutError("timed out waiting to commit conflict")
             repository.commit()
         finally:
@@ -1856,7 +1885,10 @@ def test_concurrent_persist_review_revision_rejects_stale_parent_or_uuid_collisi
         repository = VerificationRepository(session)
         try:
             session.execute(text("SET lock_timeout = '4s'"))
-            second_started.set()
+            second_pid.append(
+                int(session.execute(text("SELECT pg_backend_pid()")).scalar_one())
+            )
+            second_pid_ready.set()
             repository.persist_review_revision(
                 JOB_ID,
                 ReviewRevisionDraft(
@@ -1876,18 +1908,24 @@ def test_concurrent_persist_review_revision_rejects_stale_parent_or_uuid_collisi
             repository.rollback()
             return error
         finally:
-            second_finished.set()
             session.close()
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        first_future = executor.submit(first_worker)
-        assert first_saved.wait(timeout=2)
-        second_future = executor.submit(second_worker)
-        assert second_started.wait(timeout=1)
-        assert not second_finished.wait(timeout=0.2)
-        allow_first_commit.set()
-        first_future.result(timeout=5)
-        error = second_future.result(timeout=5)
+        try:
+            first_future = executor.submit(first_worker)
+            assert first_saved.wait(timeout=2)
+            second_future = executor.submit(second_worker)
+            assert second_pid_ready.wait(timeout=2)
+            _wait_until_backend_waits_for_lock(
+                db_session_factory,
+                second_pid[0],
+                blocker_pid=first_pid[0],
+            )
+            allow_first_commit.set()
+            first_future.result(timeout=5)
+            error = second_future.result(timeout=5)
+        finally:
+            allow_first_commit.set()
 
     assert isinstance(error, ValueError)
     assert expected_message in str(error)
@@ -2545,26 +2583,64 @@ def _wait_until_backend_waits_for_lock(
     db_session_factory: sessionmaker[Session],
     backend_pid: int,
     *,
+    blocker_pid: int | None = None,
     timeout_seconds: float = 3.0,
 ) -> None:
     deadline = monotonic() + timeout_seconds
     poll_wait = Event()
+    last_wait_event_type: str | None = None
+    last_wait_event: str | None = None
+    last_waiting_locks: list[tuple[str, str, str | None]] = []
+    last_blocking_pids: list[int] = []
     session = db_session_factory()
     try:
         while monotonic() < deadline:
-            wait_event_type = session.execute(
+            activity = session.execute(
                 text(
-                    "SELECT wait_event_type FROM pg_stat_activity "
+                    "SELECT wait_event_type, wait_event, pg_blocking_pids(pid) "
+                    "FROM pg_stat_activity "
                     "WHERE pid = :backend_pid"
                 ),
                 {"backend_pid": backend_pid},
-            ).scalar_one_or_none()
-            if wait_event_type == "Lock":
+            ).one_or_none()
+            waiting_locks = session.execute(
+                text(
+                    "SELECT locktype, mode, "
+                    "CASE WHEN relation IS NULL THEN NULL "
+                    "ELSE relation::regclass::text END "
+                    "FROM pg_locks "
+                    "WHERE pid = :backend_pid AND NOT granted"
+                ),
+                {"backend_pid": backend_pid},
+            ).all()
+            if activity is not None:
+                last_wait_event_type = activity[0]
+                last_wait_event = activity[1]
+                last_blocking_pids = list(activity[2] or [])
+            last_waiting_locks = [
+                (str(row[0]), str(row[1]), row[2])
+                for row in waiting_locks
+            ]
+            if (
+                last_wait_event_type == "Lock"
+                and last_waiting_locks
+                and (
+                    blocker_pid is None
+                    or blocker_pid in last_blocking_pids
+                )
+            ):
                 return
             poll_wait.wait(timeout=0.02)
     finally:
         session.close()
-    raise TimeoutError(f"backend {backend_pid} did not wait for a lock")
+    raise TimeoutError(
+        f"backend {backend_pid} did not wait for the expected lock; "
+        f"wait_event_type={last_wait_event_type!r}, "
+        f"wait_event={last_wait_event!r}, "
+        f"waiting_locks={last_waiting_locks!r}, "
+        f"blocking_pids={last_blocking_pids!r}, "
+        f"expected_blocker={blocker_pid!r}"
+    )
 
 
 def _result(

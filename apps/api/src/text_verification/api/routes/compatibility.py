@@ -8,8 +8,10 @@ from typing import Annotated
 from urllib.parse import quote
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import Response
+from pydantic import ValidationError
 
 from text_verification.api.dependencies import get_verification_pipeline
 from text_verification.application import (
@@ -57,6 +59,7 @@ router = APIRouter(tags=["compatibility"])
 
 logger = logging.getLogger(__name__)
 _DICTIONARY_UNAVAILABLE_DETAIL = "Verification dictionaries are unavailable."
+MAX_COMPATIBILITY_EXPORT_REQUEST_BYTES = 32 * 1024 * 1024
 
 
 @router.get("/scenarios")
@@ -172,10 +175,11 @@ def export_report(payload: ReportRequest) -> Response:
 
 
 @router.post("/export-original")
-def export_modified_original(
-    payload: ExportOriginalRequest,
+async def export_modified_original(
+    request: Request,
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> Response:
+    payload = await _read_export_original_request(request)
     storage = CompatibilityStorage(settings.storage_root, settings.max_upload_bytes)
     try:
         source_path, extension = storage.resolve_source(payload.file_id)
@@ -217,6 +221,46 @@ def export_modified_original(
         media_type=exported.media_type,
         headers={"Content-Disposition": _content_disposition(download_name)},
     )
+
+
+async def _read_export_original_request(
+    request: Request,
+) -> ExportOriginalRequest:
+    raw_content_length = request.headers.get("content-length")
+    if raw_content_length is not None:
+        try:
+            content_length = int(raw_content_length)
+        except ValueError:
+            content_length = -1
+        if content_length > MAX_COMPATIBILITY_EXPORT_REQUEST_BYTES:
+            raise HTTPException(
+                status.HTTP_413_CONTENT_TOO_LARGE,
+                detail="Export request body exceeds the configured maximum size.",
+            )
+
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > MAX_COMPATIBILITY_EXPORT_REQUEST_BYTES:
+            raise HTTPException(
+                status.HTTP_413_CONTENT_TOO_LARGE,
+                detail="Export request body exceeds the configured maximum size.",
+            )
+        body.extend(chunk)
+    try:
+        return ExportOriginalRequest.model_validate_json(body)
+    except ValidationError as error:
+        errors = [
+            {
+                **item,
+                "loc": ("body", *item["loc"]),
+            }
+            for item in error.errors(
+                include_url=False,
+                include_context=True,
+                include_input=False,
+            )
+        ]
+        raise RequestValidationError(errors) from error
 
 
 def _safe_download_name(filename: str) -> str:

@@ -1,15 +1,18 @@
 import os
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
+from threading import Event, Lock
 from uuid import uuid4
 
 import pytest
 
 from text_verification import application
+from text_verification.domain.artifacts import ArtifactFinalizationRejection
 from text_verification.domain.documents import FileType
 from text_verification.infrastructure.storage import JobStorage, build_artifact_storage_key
 
@@ -257,6 +260,90 @@ def test_finalize_failure_does_not_delete_preexisting_idempotent_file(
         ).persist(request)
 
     assert (tmp_path / request.storage_key).read_bytes() == request.data
+
+
+def test_stale_repair_request_does_not_unlink_another_requests_ready_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = JobStorage(tmp_path, max_upload_bytes=1024)
+    request = _request()
+    digest = sha256(request.data).hexdigest()
+    reservation, ready = _reservation_and_snapshot(
+        request,
+        status=application.ArtifactLifecycleStatus.READY,
+        digest=digest,
+    )
+    stale_before_publish = Event()
+    allow_stale_publish = Event()
+    new_revision_committed = Event()
+    publish_lock = Lock()
+    publish_calls = 0
+    real_publish = storage.publish_verified_artifact
+
+    def interleaved_publish(*args, **kwargs):
+        nonlocal publish_calls
+        with publish_lock:
+            publish_calls += 1
+            call_number = publish_calls
+        if call_number == 1:
+            stale_before_publish.set()
+            if not allow_stale_publish.wait(timeout=2):
+                raise TimeoutError("timed out waiting for the ready repair")
+        return real_publish(*args, **kwargs)
+
+    monkeypatch.setattr(
+        storage,
+        "publish_verified_artifact",
+        interleaved_publish,
+    )
+
+    class RepairRepository:
+        finalize_calls = 0
+
+        def finalize_export_artifact(self, prepared, **values):
+            assert prepared == reservation
+            values["consistency_check"]()
+            self.finalize_calls += 1
+            if self.finalize_calls == 1:
+                return ready
+            assert new_revision_committed.is_set()
+            return ArtifactFinalizationRejection.STALE_REVISION
+
+        def commit(self) -> None:
+            return None
+
+        def rollback(self) -> None:
+            return None
+
+    repository = RepairRepository()
+
+    @contextmanager
+    def repository_factory():
+        yield repository
+
+    service = application.ArtifactPersistenceService(
+        storage,
+        repository_factory,
+        require_current_result=True,
+    )
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        stale_future = executor.submit(
+            service.persist,
+            request,
+            reservation=reservation,
+        )
+        assert stale_before_publish.wait(timeout=2)
+        ready_result = service.persist(request, reservation=reservation)
+        assert ready_result.created is True
+        new_revision_committed.set()
+        allow_stale_publish.set()
+        with pytest.raises(application.ArtifactFinalizationRejectedError):
+            stale_future.result(timeout=5)
+
+    assert (tmp_path / request.storage_key).read_bytes() == request.data
+    assert ready.status is application.ArtifactLifecycleStatus.READY
 
 
 def test_finalize_commit_succeeded_then_raised_is_proven_ready(

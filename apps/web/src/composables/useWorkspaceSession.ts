@@ -4,7 +4,8 @@ import { createAnalyzeOptionsSnapshot } from '../api/analyzeOptions'
 import type {
   AnalyzeOptions,
   FileType,
-  IssueSeverity
+  IssueSeverity,
+  VerificationResult
 } from '../types/verification'
 import type { IssueLayerFilter } from './useIssueNavigation'
 import {
@@ -12,7 +13,7 @@ import {
   type useVerificationWorkspace
 } from './useVerificationWorkspace'
 
-export const WORKSPACE_SESSION_VERSION = 4
+export const WORKSPACE_SESSION_VERSION = 5
 export const WORKSPACE_SESSION_KEY = 'text-verification-session'
 export const MAX_WORKSPACE_SESSION_RAW_BYTES = 32 * 1024 * 1024
 export const MAX_WORKSPACE_RESULT_BLOCKS = 20_000
@@ -29,7 +30,7 @@ export type WorkspaceSettingsTab = 'settings' | 'terms' | 'banned'
 export type WorkspaceResultTab = 'issues' | 'summary'
 export type WorkspaceSeverityFilter = 'all' | IssueSeverity
 
-export interface WorkspaceExportAuthority {
+export interface WorkspaceExportAuthoritySource {
   jobId: string
   documentId: string
   verificationRunId: string
@@ -39,6 +40,19 @@ export interface WorkspaceExportAuthority {
   latestRevisionId: string | null
   latestRevisionNumber: number
   persistedText: string | null
+}
+
+export interface WorkspaceExportProvenance {
+  resultDocumentId: string
+  resultVerificationRunId: string
+  resultSourceVersion: string
+  resultTextFingerprint: string
+  binding: string
+}
+
+export interface WorkspaceExportAuthority
+  extends WorkspaceExportAuthoritySource {
+  provenance: WorkspaceExportProvenance
 }
 
 export interface WorkspaceSessionUiState {
@@ -85,6 +99,7 @@ const VERSION_3_SESSION_KEYS = [
   'ui',
   'jobId'
 ] as const
+const VERSION_4_SESSION_KEYS = SESSION_KEYS
 const WORKSPACE_KEYS = [
   'result',
   'currentRevision',
@@ -129,10 +144,68 @@ const EXPORT_AUTHORITY_KEYS = [
   'requiresOcrReconstruction',
   'latestRevisionId',
   'latestRevisionNumber',
+  'persistedText',
+  'provenance'
+] as const
+const LEGACY_EXPORT_AUTHORITY_KEYS = [
+  'jobId',
+  'documentId',
+  'verificationRunId',
+  'sourceVersion',
+  'fileType',
+  'requiresOcrReconstruction',
+  'latestRevisionId',
+  'latestRevisionNumber',
   'persistedText'
+] as const
+const EXPORT_PROVENANCE_KEYS = [
+  'resultDocumentId',
+  'resultVerificationRunId',
+  'resultSourceVersion',
+  'resultTextFingerprint',
+  'binding'
 ] as const
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+const SHA256_SOURCE_VERSION_PATTERN = /^sha256:[0-9a-f]{64}$/
+
+export function bindWorkspaceExportAuthority(
+  source: WorkspaceExportAuthoritySource,
+  result: VerificationResult,
+  submittedText: string
+): WorkspaceExportAuthority | null {
+  const preparedSource = preparedExportAuthoritySource(source)
+  if (
+    preparedSource === undefined ||
+    result.execution_mode !== 'synchronous' ||
+    result.text !== submittedText ||
+    !SHA256_SOURCE_VERSION_PATTERN.test(result.source_version)
+  ) {
+    return null
+  }
+  const provenanceBase = {
+    resultDocumentId: result.document_id,
+    resultVerificationRunId: result.verification_run_id,
+    resultSourceVersion: result.source_version,
+    resultTextFingerprint: textFingerprint(submittedText)
+  }
+  const provenance = Object.freeze({
+    ...provenanceBase,
+    binding: exportAuthorityBinding(preparedSource, provenanceBase)
+  })
+  return Object.freeze({
+    ...preparedSource,
+    provenance
+  })
+}
+
+export function isWorkspaceExportAuthorityBoundToResult(
+  authority: WorkspaceExportAuthority,
+  result: VerificationResult
+): boolean {
+  const prepared = preparedExportAuthority(authority, result)
+  return prepared !== undefined && prepared !== null
+}
 
 export function useWorkspaceSession(
   storage: Storage,
@@ -218,6 +291,7 @@ export function useWorkspaceSession(
       }
       const prepared =
         prepareSession(parsed, workspace) ??
+        prepareVersion4Session(parsed, workspace) ??
         prepareVersion3Session(parsed, workspace) ??
         prepareLegacySession(parsed, workspace)
       if (prepared === null) {
@@ -495,6 +569,36 @@ function prepareVersion3Session(
   return prepareSessionState(value, workspace, null)
 }
 
+function prepareVersion4Session(
+  value: unknown,
+  workspace: VerificationWorkspace
+): PreparedSession | null {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, VERSION_4_SESSION_KEYS) ||
+    value.version !== 4 ||
+    !isRecord(value.workspace) ||
+    !hasExactKeys(value.workspace, WORKSPACE_KEYS) ||
+    (
+      value.exportAuthority !== null &&
+      preparedLegacyExportAuthority(value.exportAuthority) === undefined
+    )
+  ) {
+    return null
+  }
+  const prepared = prepareSessionState(value, workspace, null)
+  if (
+    prepared === null ||
+    (
+      prepared.workspace.result.execution_mode === 'asynchronous' &&
+      value.exportAuthority !== null
+    )
+  ) {
+    return null
+  }
+  return prepared
+}
+
 function prepareSessionState(
   value: Record<string, unknown>,
   workspace: VerificationWorkspace,
@@ -544,7 +648,10 @@ function prepareSessionState(
     return null
   }
   const jobId = value.jobId
-  const exportAuthority = preparedExportAuthority(rawExportAuthority)
+  const exportAuthority = preparedExportAuthority(
+    rawExportAuthority,
+    preparedWorkspace.result
+  )
   if (
     (jobId !== null &&
       (typeof jobId !== 'string' || !UUID_PATTERN.test(jobId))) ||
@@ -592,7 +699,8 @@ function prepareSessionState(
 }
 
 function preparedExportAuthority(
-  value: unknown
+  value: unknown,
+  result: VerificationResult
 ): WorkspaceExportAuthority | null | undefined {
   if (value === null) {
     return null
@@ -600,6 +708,53 @@ function preparedExportAuthority(
   if (
     !isRecord(value) ||
     !hasExactKeys(value, EXPORT_AUTHORITY_KEYS) ||
+    !isRecord(value.provenance) ||
+    !hasExactKeys(value.provenance, EXPORT_PROVENANCE_KEYS)
+  ) {
+    return undefined
+  }
+  const source = preparedExportAuthoritySource(value)
+  if (source === undefined) {
+    return undefined
+  }
+  const expected = bindWorkspaceExportAuthority(source, result, result.text)
+  if (
+    expected === null ||
+    value.provenance.resultDocumentId !==
+      expected.provenance.resultDocumentId ||
+    value.provenance.resultVerificationRunId !==
+      expected.provenance.resultVerificationRunId ||
+    value.provenance.resultSourceVersion !==
+      expected.provenance.resultSourceVersion ||
+    value.provenance.resultTextFingerprint !==
+      expected.provenance.resultTextFingerprint ||
+    value.provenance.binding !== expected.provenance.binding
+  ) {
+    return undefined
+  }
+  return expected
+}
+
+function preparedLegacyExportAuthority(
+  value: unknown
+): WorkspaceExportAuthoritySource | null | undefined {
+  if (value === null) {
+    return null
+  }
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, LEGACY_EXPORT_AUTHORITY_KEYS)
+  ) {
+    return undefined
+  }
+  return preparedExportAuthoritySource(value)
+}
+
+function preparedExportAuthoritySource(
+  value: unknown
+): WorkspaceExportAuthoritySource | undefined {
+  if (
+    !isRecord(value) ||
     typeof value.jobId !== 'string' ||
     !UUID_PATTERN.test(value.jobId) ||
     value.documentId !== value.jobId ||
@@ -647,6 +802,44 @@ function preparedExportAuthority(
     latestRevisionNumber: Number(value.latestRevisionNumber),
     persistedText: value.persistedText
   })
+}
+
+function exportAuthorityBinding(
+  source: WorkspaceExportAuthoritySource,
+  result: Omit<WorkspaceExportProvenance, 'binding'>
+): string {
+  return textFingerprint(
+    JSON.stringify([
+      source.jobId,
+      source.documentId,
+      source.verificationRunId,
+      source.sourceVersion,
+      source.fileType,
+      source.requiresOcrReconstruction,
+      source.latestRevisionId,
+      source.latestRevisionNumber,
+      source.persistedText === null
+        ? null
+        : textFingerprint(source.persistedText),
+      result.resultDocumentId,
+      result.resultVerificationRunId,
+      result.resultSourceVersion,
+      result.resultTextFingerprint
+    ])
+  )
+}
+
+function textFingerprint(value: string): string {
+  const bytes = new TextEncoder().encode(value)
+  let first = 0x811c9dc5
+  let second = 0x9e3779b9
+  for (const byte of bytes) {
+    first = Math.imul(first ^ byte, 0x01000193)
+    second = Math.imul(second ^ byte, 0x85ebca6b)
+  }
+  const hex = (part: number) =>
+    (part >>> 0).toString(16).padStart(8, '0')
+  return `textfp-v1:${bytes.byteLength}:${hex(first)}${hex(second)}`
 }
 
 function preparedOptions(value: unknown): AnalyzeOptions | null {

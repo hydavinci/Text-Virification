@@ -11,6 +11,7 @@ import ReviewActions from '../src/components/workspace/ReviewActions.vue'
 import SearchReplacePanel from '../src/components/workspace/SearchReplacePanel.vue'
 import TerminologyEditor from '../src/components/workspace/TerminologyEditor.vue'
 import VerificationSettings from '../src/components/workspace/VerificationSettings.vue'
+import { WORKSPACE_SESSION_VERSION } from '../src/composables/useWorkspaceSession'
 import type {
   AnalyzeOptions,
   VerificationIssue,
@@ -1106,7 +1107,7 @@ describe('WorkspaceView', () => {
       sessionStorage.getItem('text-verification-session') ?? 'null'
     )
     expect(saved).toMatchObject({
-      version: 4,
+      version: WORKSPACE_SESSION_VERSION,
       workspace: {
         requiresReverification: true,
         currentRevision: {

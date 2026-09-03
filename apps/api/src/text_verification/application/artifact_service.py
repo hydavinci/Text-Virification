@@ -19,6 +19,7 @@ from text_verification.domain.documents import FileType
 from text_verification.infrastructure.artifact_storage import (
     ArtifactNotFoundError,
     ArtifactOrphanCandidate,
+    ArtifactRepairPreparation,
     ArtifactVerificationHandle,
 )
 from text_verification.infrastructure.storage import JobStorage
@@ -72,7 +73,7 @@ class ArtifactRepository(Protocol):
         self,
         expected: ArtifactReservation,
         *,
-        consistency_check: Callable[[], bool | None],
+        consistency_check: Callable[[], ArtifactRepairPreparation | None],
     ) -> ArtifactReservation | None: ...
 
     def finalize_stale_pending_export_artifact(
@@ -321,13 +322,7 @@ class ArtifactPersistenceService:
             snapshot,
             ArtifactFinalizationRejection,
         ):
-            try:
-                handle.unlink_if_current()
-            except Exception as error:
-                raise ArtifactReconciliationRequiredError(
-                    reservation.export_artifact_id,
-                    "Rejected artifact could not be safely removed.",
-                ) from error
+            self._compensate_known_pending(handle, reservation)
             raise ArtifactFinalizationRejectedError(
                 reservation.export_artifact_id,
                 snapshot

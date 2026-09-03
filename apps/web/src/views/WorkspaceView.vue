@@ -18,7 +18,10 @@ import WorkspaceHeader from '../components/workspace/WorkspaceHeader.vue'
 import { useIssueNavigation } from '../composables/useIssueNavigation'
 import { useVerificationExecution } from '../composables/useVerificationExecution'
 import {
+  bindWorkspaceExportAuthority,
+  isWorkspaceExportAuthorityBoundToResult,
   type WorkspaceExportAuthority,
+  type WorkspaceExportAuthoritySource,
   useWorkspaceSession
 } from '../composables/useWorkspaceSession'
 import {
@@ -348,27 +351,47 @@ async function recheck() {
     return
   }
   const source = result.value
-  const exportAuthority = captureFileExportAuthority()
+  const exportAuthoritySource = captureFileExportAuthority()
   if (
     source.execution_mode === 'asynchronous' &&
-    exportAuthority === null
+    exportAuthoritySource === null
   ) {
     notify('当前文件缺少可验证的任务导出身份，无法重新检查')
     return
   }
-  fileExportAuthority.value = exportAuthority
-  textInput.value = modifiedText.value
+  const priorAuthority = fileExportAuthority.value
+  const submittedText = modifiedText.value
+  let boundAuthority: WorkspaceExportAuthority | null = null
+  textInput.value = submittedText
   fileSource.value = null
   await execution.analyzeText(
     textInput.value,
     currentOptions.value,
-    (checked) => ({
-      ...checked,
-      filename: source.filename,
-      file_id: null,
-      file_ext: null
-    })
+    (checked) => {
+      const transformed = {
+        ...checked,
+        filename: source.filename,
+        file_id: null,
+        file_ext: null
+      }
+      if (exportAuthoritySource !== null) {
+        boundAuthority = bindWorkspaceExportAuthority(
+          exportAuthoritySource,
+          transformed,
+          submittedText
+        )
+        if (boundAuthority === null) {
+          throw new Error('重新检查结果与提交文本或保留任务身份不匹配')
+        }
+      }
+      return transformed
+    }
   )
+  fileExportAuthority.value = exportAuthoritySource === null
+    ? null
+    : execution.state.value === 'completed'
+      ? boundAuthority
+      : priorAuthority
   saveSession()
 }
 
@@ -512,11 +535,18 @@ async function exportModified() {
   }
 }
 
-function captureFileExportAuthority(): WorkspaceExportAuthority | null {
-  if (fileExportAuthority.value !== null) {
-    return fileExportAuthority.value
-  }
+function captureFileExportAuthority(): WorkspaceExportAuthoritySource | null {
   const currentResult = result.value
+  if (
+    fileExportAuthority.value !== null &&
+    currentResult !== null &&
+    isWorkspaceExportAuthorityBoundToResult(
+      fileExportAuthority.value,
+      currentResult
+    )
+  ) {
+    return exportAuthoritySource(fileExportAuthority.value)
+  }
   const jobId = execution.jobId.value
   if (
     currentResult === null ||
@@ -544,6 +574,22 @@ function captureFileExportAuthority(): WorkspaceExportAuthority | null {
     latestRevisionId: latestPersisted?.revision_id ?? null,
     latestRevisionNumber: latestPersisted?.revision_number ?? 0,
     persistedText: latestPersisted?.text ?? null
+  })
+}
+
+function exportAuthoritySource(
+  authority: WorkspaceExportAuthority
+): WorkspaceExportAuthoritySource {
+  return Object.freeze({
+    jobId: authority.jobId,
+    documentId: authority.documentId,
+    verificationRunId: authority.verificationRunId,
+    sourceVersion: authority.sourceVersion,
+    fileType: authority.fileType,
+    requiresOcrReconstruction: authority.requiresOcrReconstruction,
+    latestRevisionId: authority.latestRevisionId,
+    latestRevisionNumber: authority.latestRevisionNumber,
+    persistedText: authority.persistedText
   })
 }
 
@@ -587,12 +633,21 @@ async function exportRecheckedFile(): Promise<void> {
         draft
       )
       assertCurrentRecheckedExportOperation(operation)
-      const nextAuthority = Object.freeze({
+      const currentResult = result.value
+      if (currentResult === null) {
+        throw new StaleExportOperationError(
+          'Export operation was superseded.'
+        )
+      }
+      const nextAuthority = bindWorkspaceExportAuthority({
         ...operation.authority,
         latestRevisionId: persisted.revision_id,
         latestRevisionNumber: persisted.revision_number,
         persistedText: persisted.text
-      })
+      }, currentResult, currentResult.text)
+      if (nextAuthority === null) {
+        throw new Error('保留的任务导出身份与重新检查结果不匹配')
+      }
       fileExportAuthority.value = nextAuthority
       operation.authority = nextAuthority
       operation.authorityFingerprint = exportAuthorityFingerprint(nextAuthority)
@@ -635,7 +690,8 @@ function beginRecheckedExportOperation(): RecheckedExportOperation | null {
     isExporting.value ||
     currentResult === null ||
     currentRevision === null ||
-    authority === null
+    authority === null ||
+    !isWorkspaceExportAuthorityBoundToResult(authority, currentResult)
   ) {
     exportError.value = '异步文档缺少可验证的任务身份，无法导出'
     return null
@@ -665,6 +721,7 @@ function isCurrentRecheckedExportOperation(
     currentResult !== null &&
     currentRevision !== null &&
     authority !== null &&
+    isWorkspaceExportAuthorityBoundToResult(authority, currentResult) &&
     resultIdentityFingerprint(currentResult) === operation.resultIdentity &&
     revisionIdentityFingerprint(currentRevision) === operation.revisionIdentity &&
     exportAuthorityFingerprint(authority) === operation.authorityFingerprint
@@ -711,7 +768,12 @@ function exportAuthorityFingerprint(
     value.requiresOcrReconstruction,
     value.latestRevisionId,
     value.latestRevisionNumber,
-    value.persistedText
+    value.persistedText,
+    value.provenance.resultDocumentId,
+    value.provenance.resultVerificationRunId,
+    value.provenance.resultSourceVersion,
+    value.provenance.resultTextFingerprint,
+    value.provenance.binding
   ])
 }
 

@@ -387,8 +387,12 @@ describe('WorkspaceView Task 6 integration', () => {
 
   it.each([
     ['docx', 'original_format'],
+    ['doc', 'original_format'],
     ['pdf', 'docx_reconstruction'],
-    ['rtf', 'original_format']
+    ['txt', 'original_format'],
+    ['rtf', 'original_format'],
+    ['md', 'original_format'],
+    ['csv', 'original_format']
   ] as const)(
     'retains %s job export authority after manual text recheck',
     async (fileType, expectedFormat) => {
@@ -498,6 +502,89 @@ describe('WorkspaceView Task 6 integration', () => {
       )
     }
   )
+
+  it('rejects an unrelated synchronous result instead of binding retained job authority', async () => {
+    const origin: VerificationResult = {
+      ...result,
+      filename: 'source.docx',
+      source_name: 'source.docx',
+      file_type: 'docx',
+      issues: [],
+      summary: {
+        total: 0,
+        by_type: {},
+        by_severity: {},
+        by_rule: {},
+        by_layer: {}
+      }
+    }
+    const unrelated: VerificationResult = {
+      ...origin,
+      filename: 'direct.txt',
+      source_name: 'direct.txt',
+      file_type: 'txt',
+      text: '无关检查结果',
+      blocks: [
+        {
+          ...origin.blocks[0],
+          text: '无关检查结果',
+          global_end: 6,
+          block_end: 6
+        }
+      ],
+      document_id: '77777777-7777-4777-8777-777777777777',
+      verification_run_id: '88888888-8888-4888-8888-888888888888',
+      source_version:
+        'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      execution_mode: 'synchronous',
+      stats: {
+        ...origin.stats,
+        char_count: 6,
+        char_count_no_space: 6,
+        primary_count: 6
+      }
+    }
+    seedSession(origin)
+    const persistRevision = vi.fn()
+    const exportJob = vi.fn()
+    const wrapper = mountWorkspace(
+      verificationApi({
+        analyzeText: vi.fn().mockResolvedValue(unrelated),
+        persistRevision,
+        exportJob
+      })
+    )
+    await flushPromises()
+    const editor = wrapper.getComponent(EditPreview)
+    await editor.get('[data-action="start-edit"]').trigger('click')
+    await editor.get('[data-edit-input]').setValue('手工修改文本')
+    await editor.get('[data-action="save-edit"]').trigger('click')
+
+    await wrapper.get('[data-action="recheck"]').trigger('click')
+    await flushPromises()
+
+    const workspace = (
+      wrapper.vm as unknown as {
+        $: {
+          setupState: {
+            verificationWorkspace: ReturnType<
+              typeof useVerificationWorkspace
+            >
+          }
+        }
+      }
+    ).$.setupState.verificationWorkspace
+    expect(workspace.result.value).toMatchObject({
+      document_id: origin.document_id,
+      verification_run_id: origin.verification_run_id,
+      source_version: origin.source_version
+    })
+    expect(wrapper.get('[data-review-execution-error]').text()).toContain(
+      '重新检查结果'
+    )
+    expect(persistRevision).not.toHaveBeenCalled()
+    expect(exportJob).not.toHaveBeenCalled()
+  })
 
   it('keeps text-based async PDF export in the original PDF format', async () => {
     const rawTextPdf = structuredClone(scannedResult) as any

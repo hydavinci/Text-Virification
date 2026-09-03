@@ -37,6 +37,9 @@ from text_verification.domain.ports import AnchoredSourcePathResolver
 from text_verification.domain.text_edits import (
     MAX_REVISION_TEXT_CODEPOINTS,
     MAX_REVISION_TEXT_UTF8_BYTES,
+    MAX_TEXT_DIFF_WORK,
+    MAX_TEXT_EDIT_OPERATIONS,
+    BoundedTextEdit,
     TextDiffLimitError,
     build_bounded_text_edits,
     validate_revision_text,
@@ -51,6 +54,7 @@ from text_verification.exporters.docx_reconstruction import DocxReconstructionEx
 from text_verification.exporters.registry import ExporterRegistry
 from text_verification.infrastructure.artifact_storage import (
     ArtifactNotFoundError,
+    ArtifactRepairPreparation,
     ArtifactVerificationHandle,
 )
 from text_verification.infrastructure.storage import (
@@ -116,6 +120,12 @@ class ArtifactDownload:
         return self.handle.path
 
 
+@dataclass(frozen=True)
+class _PreparedRepair:
+    reservation: ArtifactReservation
+    quarantine_owned: bool
+
+
 class ReconstructionExportService:
     def __init__(
         self,
@@ -125,6 +135,7 @@ class ReconstructionExportService:
         exporter_registry_factory: ExporterRegistryFactory,
         now_factory: Callable[[], datetime] | None = None,
         max_revision_bytes: int | None = None,
+        max_revision_codepoints: int = MAX_REVISION_TEXT_CODEPOINTS,
     ) -> None:
         self._storage = storage
         self._repository_factory = repository_factory
@@ -138,6 +149,10 @@ class ReconstructionExportService:
         self._max_revision_bytes = min(
             self._max_revision_bytes,
             MAX_REVISION_TEXT_UTF8_BYTES,
+        )
+        self._max_revision_codepoints = min(
+            max_revision_codepoints,
+            MAX_REVISION_TEXT_CODEPOINTS,
         )
 
     def export(
@@ -166,9 +181,11 @@ class ReconstructionExportService:
             result,
             review_revision_id,
         )
+        if revision is not None:
+            _validate_revision_identity(revision, result)
+            self._validate_revision_text(revision.text)
         if export_format is ExportFormat.DOCX_RECONSTRUCTION:
             if revision is not None:
-                self._validate_revision_text(revision.text)
                 document = _document_with_revision_text(document, revision.text)
             _validate_reconstruction_eligibility(document)
             output_file_type = FileType.DOCX
@@ -179,8 +196,6 @@ class ReconstructionExportService:
                 job.source_name,
                 output_file_type,
             )
-        if revision is not None:
-            _validate_revision_identity(revision, result)
 
         artifact_id = _artifact_id(
             job,
@@ -315,7 +330,7 @@ class ReconstructionExportService:
             created_at=job.created_at,
         )
         self._assert_current_result(job.job_id, result)
-        repair_reservation = (
+        prepared_repair = (
             self._begin_repair(request)
             if repair_candidate
             else None
@@ -327,10 +342,20 @@ class ReconstructionExportService:
                 self._storage,
                 cast(ArtifactRepositoryFactory, self._repository_factory),
                 require_current_result=True,
-            ).persist(request, reservation=repair_reservation)
+            ).persist(
+                request,
+                reservation=(
+                    prepared_repair.reservation
+                    if prepared_repair is not None
+                    else None
+                ),
+            )
         except ArtifactFinalizationRejectedError as error:
             if error.reason is ArtifactFinalizationRejection.STALE_REVISION:
-                if repair_candidate:
+                if (
+                    prepared_repair is not None
+                    and prepared_repair.quarantine_owned
+                ):
                     self._delete_repair_quarantine(
                         request.job_id,
                         request.export_artifact_id,
@@ -502,7 +527,7 @@ class ReconstructionExportService:
         try:
             validate_revision_text(
                 text,
-                max_codepoints=MAX_REVISION_TEXT_CODEPOINTS,
+                max_codepoints=self._max_revision_codepoints,
                 max_utf8_bytes=self._max_revision_bytes,
             )
         except TextDiffLimitError as error:
@@ -605,7 +630,7 @@ class ReconstructionExportService:
     def _begin_repair(
         self,
         request: ArtifactPersistenceRequest,
-    ) -> ArtifactReservation:
+    ) -> _PreparedRepair:
         digest = hashlib.sha256(request.data).hexdigest()
         expected = ArtifactReservation(
             export_artifact_id=request.export_artifact_id,
@@ -623,23 +648,35 @@ class ReconstructionExportService:
             reserved_at=self._now_factory(),
             created_at=request.created_at,
         )
+        preparation: ArtifactRepairPreparation | None = None
+
+        def prepare_repair() -> ArtifactRepairPreparation | None:
+            nonlocal preparation
+            preparation = self._storage.prepare_artifact_repair(
+                request.job_id,
+                request.export_artifact_id,
+                request.storage_key,
+                request.file_type,
+                expected_size=len(request.data),
+                expected_digest=digest,
+            )
+            return preparation
+
         with self._repository_factory() as repository:
             try:
                 reservation = repository.begin_export_artifact_repair(
                     expected,
-                    consistency_check=lambda: self._storage.prepare_artifact_repair(
-                        request.job_id,
-                        request.export_artifact_id,
-                        request.storage_key,
-                        request.file_type,
-                        expected_size=len(request.data),
-                        expected_digest=digest,
-                    ),
+                    consistency_check=prepare_repair,
                 )
                 if reservation is None:
                     raise ValueError("Artifact repair candidate no longer exists.")
                 repository.commit()
-                return reservation
+                return _PreparedRepair(
+                    reservation=reservation,
+                    quarantine_owned=(
+                        preparation is ArtifactRepairPreparation.QUARANTINED
+                    ),
+                )
             except StaleReviewRevisionError as error:
                 repository.rollback()
                 raise VerificationError(
@@ -817,108 +854,81 @@ def _document_with_revision_text(
         if left.global_end > right.global_start:
             raise _revision_structure_conflict()
 
-    first_owner = document.blocks[owner_indexes[0]]
-    last_owner = document.blocks[owner_indexes[-1]]
-    prefix = document.text[: first_owner.global_start]
-    suffix = document.text[last_owner.global_end :]
-    if not revised_text.startswith(prefix) or not revised_text.endswith(suffix):
-        raise _revision_structure_conflict()
-    body_start = len(prefix)
-    body_end = len(revised_text) - len(suffix)
-    gaps = [
-        document.text[
-            document.blocks[left_index].global_end :
-            document.blocks[right_index].global_start
-        ]
-        for left_index, right_index in zip(
-            owner_indexes[:-1],
-            owner_indexes[1:],
-            strict=True,
-        )
-    ]
-    if any(not gap for gap in gaps):
-        raise _revision_structure_conflict()
-
-    earliest_gap_starts: list[int] = []
-    cursor = body_start
-    for gap in gaps:
-        position = revised_text.find(gap, cursor, body_end)
-        if position < 0:
-            raise _revision_structure_conflict()
-        earliest_gap_starts.append(position)
-        cursor = position + len(gap)
-
-    latest_gap_starts = [0] * len(gaps)
-    cursor = body_end
-    for index in range(len(gaps) - 1, -1, -1):
-        gap = gaps[index]
-        position = revised_text.rfind(gap, body_start, cursor)
-        if position < 0:
-            raise _revision_structure_conflict()
-        latest_gap_starts[index] = position
-        cursor = position
-    if earliest_gap_starts != latest_gap_starts:
-        raise _revision_structure_conflict()
-
     ranges: list[list[int] | None] = [None] * len(document.blocks)
-    owner_starts = [body_start, *(position + len(gap) for position, gap in zip(
-        earliest_gap_starts,
-        gaps,
-        strict=True,
-    ))]
-    owner_ends = [*earliest_gap_starts, body_end]
-    for owner_index, start, end in zip(
-        owner_indexes,
-        owner_starts,
-        owner_ends,
-        strict=True,
-    ):
-        block = document.blocks[owner_index]
-        block_text = revised_text[start:end]
-        try:
-            edits = build_bounded_text_edits(
-                block.text,
-                block_text,
-            )
-        except TextDiffLimitError as error:
-            raise VerificationError(
-                "revision_diff_too_complex",
-                "exporting",
-                "The persisted revision exceeds the configured edit work budget.",
-                False,
-            ) from error
-        if any(
-            edit.start == edit.end
-            and edit.start in {0, len(block.text)}
-            for edit in edits
-        ):
-            raise _revision_structure_conflict()
-        ranges[owner_index] = [start, end]
+    try:
+        edits = build_bounded_text_edits(
+            document.text,
+            revised_text,
+            max_work=MAX_TEXT_DIFF_WORK,
+            max_operations=MAX_TEXT_EDIT_OPERATIONS,
+        )
+    except TextDiffLimitError as error:
+        raise VerificationError(
+            "revision_diff_too_complex",
+            "exporting",
+            "The persisted revision exceeds the configured edit work budget.",
+            False,
+        ) from error
 
-    anchored_ranges = [
-        (0, first_owner.global_start, 0, body_start),
-        *(
+    owner_edits: dict[int, list[BoundedTextEdit]] = {
+        owner_index: [] for owner_index in owner_indexes
+    }
+    for edit in edits:
+        owner_index = _edit_owner(edit, owner_indexes, document.blocks)
+        if owner_index is None:
+            raise _revision_structure_conflict()
+        block = document.blocks[owner_index]
+        owner_edits[owner_index].append(
+            BoundedTextEdit(
+                edit.start - block.global_start,
+                edit.end - block.global_start,
+                edit.replacement,
+            )
+        )
+
+    anchored_ranges: list[tuple[int, int, int, int]] = []
+    rebuilt_parts: list[str] = []
+    source_cursor = 0
+    target_cursor = 0
+    for owner_index in owner_indexes:
+        block = document.blocks[owner_index]
+        structural_text = document.text[source_cursor:block.global_start]
+        rebuilt_parts.append(structural_text)
+        structural_end = target_cursor + len(structural_text)
+        anchored_ranges.append(
             (
-                document.blocks[left_index].global_end,
-                document.blocks[right_index].global_start,
-                gap_start,
-                gap_start + len(gap),
+                source_cursor,
+                block.global_start,
+                target_cursor,
+                structural_end,
             )
-            for left_index, right_index, gap_start, gap in zip(
-                owner_indexes[:-1],
-                owner_indexes[1:],
-                earliest_gap_starts,
-                gaps,
-                strict=True,
-            )
-        ),
+        )
+        target_cursor = structural_end
+
+        block_text = _apply_bounded_text_edits(
+            block.text,
+            owner_edits[owner_index],
+        )
+        start = target_cursor
+        end = start + len(block_text)
+        ranges[owner_index] = [start, end]
+        rebuilt_parts.append(block_text)
+        target_cursor = end
+        source_cursor = block.global_end
+
+    structural_text = document.text[source_cursor:]
+    rebuilt_parts.append(structural_text)
+    anchored_ranges.append(
         (
-            last_owner.global_end,
+            source_cursor,
             len(document.text),
-            body_end,
-            len(revised_text),
-        ),
-    ]
+            target_cursor,
+            target_cursor + len(structural_text),
+        )
+    )
+    if "".join(rebuilt_parts) != revised_text:
+        raise _revision_structure_conflict()
+
     for index, block in enumerate(document.blocks):
         if ranges[index] is not None:
             continue
@@ -991,6 +1001,68 @@ def _document_with_revision_text(
         )
     except ValueError as error:
         raise _revision_structure_conflict() from error
+
+
+def _edit_owner(
+    edit: BoundedTextEdit,
+    owner_indexes: list[int],
+    blocks: list[TextBlock],
+) -> int | None:
+    if edit.start < edit.end:
+        owners = [
+            owner_index
+            for owner_index in owner_indexes
+            if (
+                blocks[owner_index].global_start <= edit.start
+                and edit.end <= blocks[owner_index].global_end
+            )
+        ]
+        return owners[0] if len(owners) == 1 else None
+
+    containing_owners = [
+        owner_index
+        for owner_index in owner_indexes
+        if (
+            blocks[owner_index].global_start < edit.start
+            < blocks[owner_index].global_end
+        )
+    ]
+    if len(containing_owners) == 1:
+        return containing_owners[0]
+    if containing_owners:
+        return None
+    ending_owner = next(
+        (
+            owner_index
+            for owner_index in reversed(owner_indexes)
+            if blocks[owner_index].global_end == edit.start
+        ),
+        None,
+    )
+    if ending_owner is not None:
+        return ending_owner
+    return next(
+        (
+            owner_index
+            for owner_index in owner_indexes
+            if blocks[owner_index].global_start == edit.start
+        ),
+        None,
+    )
+
+
+def _apply_bounded_text_edits(
+    text: str,
+    edits: list[BoundedTextEdit],
+) -> str:
+    revised = text
+    for edit in reversed(edits):
+        revised = (
+            f"{revised[:edit.start]}"
+            f"{edit.replacement}"
+            f"{revised[edit.end:]}"
+        )
+    return revised
 
 
 def _revision_structure_conflict() -> VerificationError:

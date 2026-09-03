@@ -41,6 +41,9 @@ from text_verification.domain.verification import (
     VerificationStatistics,
     VerificationSummary,
 )
+from text_verification.infrastructure.artifact_storage import (
+    ArtifactRepairPreparation,
+)
 from text_verification.infrastructure.orm import (
     DocumentBlockRow,
     DocumentRow,
@@ -612,7 +615,7 @@ class VerificationRepository:
         self,
         expected: ArtifactReservation,
         *,
-        consistency_check: Callable[[], bool | None],
+        consistency_check: Callable[[], ArtifactRepairPreparation | None],
     ) -> ArtifactReservation | None:
         run = self._lock_run(expected.verification_run_id)
         job = self._lock_job(run.job_id)
@@ -656,7 +659,7 @@ class VerificationRepository:
             )
         repair_state = consistency_check()
         if (
-            repair_state is not False
+            repair_state is not ArtifactRepairPreparation.ALREADY_CURRENT
             or ArtifactLifecycleStatus(row.status) is ArtifactLifecycleStatus.PENDING
         ):
             row.status = ArtifactLifecycleStatus.PENDING.value

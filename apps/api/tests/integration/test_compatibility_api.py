@@ -16,8 +16,10 @@ from pydantic import BaseModel
 from text_verification.api.dependencies import get_verification_pipeline
 from text_verification.application.errors import VerificationError
 from text_verification.application.verification_pipeline import VerificationCommand
+from text_verification.compatibility.storage import CompatibilityStorage
 from text_verification.config import Settings, get_settings
 from text_verification.domain.documents import FileType, TextBlock
+from text_verification.domain.text_edits import MAX_REVISION_TEXT_CODEPOINTS
 from text_verification.domain.verification import (
     Scenario,
     VerificationAnalysisMode,
@@ -32,6 +34,7 @@ from text_verification.infrastructure.dictionary_loader import DictionaryLoadErr
 from text_verification.parsers import compatibility_parser as compatibility_parser_module
 
 PDF_FIXTURE_DIRECTORY = Path(__file__).resolve().parents[1] / "fixtures" / "pdf"
+MAX_COMPATIBILITY_EXPORT_REQUEST_BYTES = 32 * 1024 * 1024
 
 
 def override_storage(app: FastAPI, storage_root: Path) -> None:
@@ -310,7 +313,16 @@ def test_export_original_rejects_modified_text_above_configured_upload_limit(
     )
     assert analysis.status_code == 200
 
-    exported = client.post(
+    accepted = client.post(
+        "/api/v1/export-original",
+        json={
+            "file_id": analysis.json()["file_id"],
+            "filename": "source.txt",
+            "modified_text": "12345678",
+            "track_changes": False,
+        },
+    )
+    rejected = client.post(
         "/api/v1/export-original",
         json={
             "file_id": analysis.json()["file_id"],
@@ -320,7 +332,70 @@ def test_export_original_rejects_modified_text_above_configured_upload_limit(
         },
     )
 
-    assert exported.status_code == 413
+    assert accepted.status_code == 200
+    assert accepted.content == b"12345678"
+    assert rejected.status_code == 413
+
+
+def test_export_original_rejects_modified_text_above_the_model_codepoint_limit(
+    app: FastAPI,
+    client: TestClient,
+    tmp_path: Path,
+) -> None:
+    settings = Settings(
+        storage_root=tmp_path / "compatibility",
+        max_upload_bytes=6 * 1024 * 1024,
+    )
+    app.dependency_overrides[get_settings] = lambda: settings
+    file_id = uuid4()
+    boundary_text = "x" * MAX_REVISION_TEXT_CODEPOINTS
+    CompatibilityStorage(
+        settings.storage_root,
+        settings.max_upload_bytes,
+    ).save_stream(
+        file_id,
+        "source.txt",
+        BytesIO(boundary_text.encode()),
+    )
+
+    accepted = client.post(
+        "/api/v1/export-original",
+        json={
+            "file_id": str(file_id),
+            "filename": "source.txt",
+            "modified_text": boundary_text,
+            "track_changes": False,
+        },
+    )
+    rejected = client.post(
+        "/api/v1/export-original",
+        json={
+            "file_id": str(file_id),
+            "filename": "source.txt",
+            "modified_text": "x" * (MAX_REVISION_TEXT_CODEPOINTS + 1),
+            "track_changes": False,
+        },
+    )
+
+    assert accepted.status_code == 200
+    assert len(accepted.content) == MAX_REVISION_TEXT_CODEPOINTS
+    assert rejected.status_code == 422
+    assert rejected.json()["detail"][0]["type"] == "string_too_long"
+
+
+def test_export_original_rejects_an_oversized_declared_body_before_model_validation(
+    client: TestClient,
+) -> None:
+    response = client.post(
+        "/api/v1/export-original",
+        content=b"{}",
+        headers={
+            "Content-Type": "application/json",
+            "Content-Length": str(MAX_COMPATIBILITY_EXPORT_REQUEST_BYTES + 1),
+        },
+    )
+
+    assert response.status_code == 413
 
 
 def test_uploaded_source_version_hashes_source_bytes_not_extracted_text(

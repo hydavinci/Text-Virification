@@ -13,6 +13,7 @@ from text_verification.domain.ports import ResolvedSourcePath
 from text_verification.infrastructure import document_storage
 from text_verification.infrastructure.artifact_storage import (
     ArtifactOrphanCandidate,
+    ArtifactRepairPreparation,
     ArtifactStorage,
     ArtifactVerificationHandle,
 )
@@ -107,7 +108,7 @@ class JobStorage(DocumentStorage):
         *,
         expected_size: int,
         expected_digest: str,
-    ) -> bool | None:
+    ) -> ArtifactRepairPreparation | None:
         return self._artifact_storage.prepare_repair(
             job_id,
             artifact_id,

@@ -6,6 +6,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from text_verification.domain import verification as domain_verification
+from text_verification.domain.text_edits import MAX_REVISION_TEXT_CODEPOINTS
 
 Scenario = domain_verification.Scenario
 
@@ -41,7 +42,10 @@ class ExportOriginalRequest(BaseModel):
     file_id: UUID
     filename: str = Field(default="修改后文本", max_length=500)
     replacements: list[ExportReplacement] = Field(default_factory=list, max_length=10_000)
-    modified_text: str | None = None
+    modified_text: str | None = Field(
+        default=None,
+        max_length=MAX_REVISION_TEXT_CODEPOINTS,
+    )
     track_changes: bool = False
 
 

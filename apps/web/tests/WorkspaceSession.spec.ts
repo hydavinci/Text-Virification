@@ -4,7 +4,9 @@ import {
   MAX_WORKSPACE_RESULT_BLOCKS,
   MAX_WORKSPACE_REVISION_CODE_POINTS,
   WORKSPACE_SESSION_VERSION,
+  bindWorkspaceExportAuthority,
   isWorkspaceSessionRawSizeAllowed,
+  type WorkspaceExportAuthoritySource,
   useWorkspaceSession
 } from '../src/composables/useWorkspaceSession'
 import { useVerificationWorkspace } from '../src/composables/useVerificationWorkspace'
@@ -206,6 +208,23 @@ describe('useWorkspaceSession', () => {
     const workspace = useVerificationWorkspace()
     workspace.loadResult(rechecked)
     const session = useWorkspaceSession(storage, workspace)
+    const authoritySource: WorkspaceExportAuthoritySource = {
+      jobId: result.document_id,
+      documentId: result.document_id,
+      verificationRunId: result.verification_run_id,
+      sourceVersion: result.source_version,
+      fileType: 'docx',
+      requiresOcrReconstruction: false,
+      latestRevisionId: null,
+      latestRevisionNumber: 0,
+      persistedText: null
+    }
+    const exportAuthority = bindWorkspaceExportAuthority(
+      authoritySource,
+      rechecked,
+      rechecked.text
+    )
+    expect(exportAuthority).not.toBeNull()
     const state = {
       ...uiState(),
       jobId: null,
@@ -213,17 +232,7 @@ describe('useWorkspaceSession', () => {
         ...uiState().ui,
         selectedIssueId: null
       },
-      exportAuthority: {
-        jobId: result.document_id,
-        documentId: result.document_id,
-        verificationRunId: result.verification_run_id,
-        sourceVersion: result.source_version,
-        fileType: 'docx' as const,
-        requiresOcrReconstruction: false,
-        latestRevisionId: null,
-        latestRevisionNumber: 0,
-        persistedText: null
-      }
+      exportAuthority
     }
 
     expect(session.save(state), session.warning.value ?? '').toBe(true)
@@ -234,6 +243,198 @@ describe('useWorkspaceSession', () => {
     ).restore()
 
     expect(restored).toEqual(state)
+    expect(restoredWorkspace.result.value).toEqual(rechecked)
+  })
+
+  it('rejects cross-job restored authority atomically', () => {
+    const storage = new MemoryStorage()
+    const rechecked = {
+      ...result,
+      document_id: '77777777-7777-4777-8777-777777777777',
+      verification_run_id: '88888888-8888-4888-8888-888888888888',
+      source_version:
+        'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      execution_mode: 'synchronous' as const,
+      issues: [],
+      summary: {
+        total: 0,
+        by_type: {},
+        by_severity: {},
+        by_rule: {},
+        by_layer: {}
+      }
+    }
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(rechecked)
+    const session = useWorkspaceSession(storage, workspace)
+    const exportAuthority = bindWorkspaceExportAuthority(
+      {
+        jobId: result.document_id,
+        documentId: result.document_id,
+        verificationRunId: result.verification_run_id,
+        sourceVersion: result.source_version,
+        fileType: 'docx',
+        requiresOcrReconstruction: false,
+        latestRevisionId: null,
+        latestRevisionNumber: 0,
+        persistedText: null
+      },
+      rechecked,
+      rechecked.text
+    )
+    expect(exportAuthority).not.toBeNull()
+    expect(
+      session.save({
+        ...uiState(),
+        jobId: null,
+        ui: { ...uiState().ui, selectedIssueId: null },
+        exportAuthority
+      })
+    ).toBe(true)
+    const saved = JSON.parse(
+      storage.getItem('text-verification-session') ?? '{}'
+    )
+    saved.exportAuthority.jobId =
+      '99999999-9999-4999-8999-999999999999'
+    saved.exportAuthority.documentId =
+      '99999999-9999-4999-8999-999999999999'
+    storage.setItem('text-verification-session', JSON.stringify(saved))
+
+    const current = useVerificationWorkspace()
+    current.loadResult(result)
+    current.acceptIssue(issue.issue_id)
+    const currentResult = current.result.value
+    const currentRevision = current.currentRevision.value
+    const restored = useWorkspaceSession(storage, current).restore()
+
+    expect(restored).toBeNull()
+    expect(current.result.value).toBe(currentResult)
+    expect(current.currentRevision.value).toBe(currentRevision)
+    expect(current.issueStates.value).toEqual({
+      [issue.issue_id]: 'accepted'
+    })
+  })
+
+  it('rejects a tampered recheck result bound to retained authority atomically', () => {
+    const storage = new MemoryStorage()
+    const rechecked = {
+      ...result,
+      document_id: '77777777-7777-4777-8777-777777777777',
+      verification_run_id: '88888888-8888-4888-8888-888888888888',
+      source_version:
+        'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      execution_mode: 'synchronous' as const,
+      issues: [],
+      summary: {
+        total: 0,
+        by_type: {},
+        by_severity: {},
+        by_rule: {},
+        by_layer: {}
+      }
+    }
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(rechecked)
+    const session = useWorkspaceSession(storage, workspace)
+    const exportAuthority = bindWorkspaceExportAuthority(
+      {
+        jobId: result.document_id,
+        documentId: result.document_id,
+        verificationRunId: result.verification_run_id,
+        sourceVersion: result.source_version,
+        fileType: 'docx',
+        requiresOcrReconstruction: false,
+        latestRevisionId: null,
+        latestRevisionNumber: 0,
+        persistedText: null
+      },
+      rechecked,
+      rechecked.text
+    )
+    expect(exportAuthority).not.toBeNull()
+    expect(
+      session.save({
+        ...uiState(),
+        jobId: null,
+        ui: { ...uiState().ui, selectedIssueId: null },
+        exportAuthority
+      })
+    ).toBe(true)
+    const saved = JSON.parse(
+      storage.getItem('text-verification-session') ?? '{}'
+    )
+    saved.workspace.result.text = '篡号测试'
+    saved.workspace.result.blocks[0].text = '篡号测试'
+    storage.setItem('text-verification-session', JSON.stringify(saved))
+
+    const current = useVerificationWorkspace()
+    current.loadResult(result)
+    const currentResult = current.result.value
+    const restored = useWorkspaceSession(storage, current).restore()
+
+    expect(restored).toBeNull()
+    expect(current.result.value).toBe(currentResult)
+  })
+
+  it('migrates valid version-4 state but drops unprovable retained authority', () => {
+    const storage = new MemoryStorage()
+    const rechecked = {
+      ...result,
+      document_id: '77777777-7777-4777-8777-777777777777',
+      verification_run_id: '88888888-8888-4888-8888-888888888888',
+      source_version:
+        'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      execution_mode: 'synchronous' as const,
+      issues: [],
+      summary: {
+        total: 0,
+        by_type: {},
+        by_severity: {},
+        by_rule: {},
+        by_layer: {}
+      }
+    }
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(rechecked)
+    const session = useWorkspaceSession(storage, workspace)
+    const exportAuthority = bindWorkspaceExportAuthority(
+      {
+        jobId: result.document_id,
+        documentId: result.document_id,
+        verificationRunId: result.verification_run_id,
+        sourceVersion: result.source_version,
+        fileType: 'docx',
+        requiresOcrReconstruction: false,
+        latestRevisionId: null,
+        latestRevisionNumber: 0,
+        persistedText: null
+      },
+      rechecked,
+      rechecked.text
+    )
+    expect(exportAuthority).not.toBeNull()
+    expect(
+      session.save({
+        ...uiState(),
+        jobId: null,
+        ui: { ...uiState().ui, selectedIssueId: null },
+        exportAuthority
+      })
+    ).toBe(true)
+    const saved = JSON.parse(
+      storage.getItem('text-verification-session') ?? '{}'
+    )
+    saved.version = 4
+    delete saved.exportAuthority.provenance
+    storage.setItem('text-verification-session', JSON.stringify(saved))
+
+    const restoredWorkspace = useVerificationWorkspace()
+    const restored = useWorkspaceSession(
+      storage,
+      restoredWorkspace
+    ).restore()
+
+    expect(restored?.exportAuthority).toBeNull()
     expect(restoredWorkspace.result.value).toEqual(rechecked)
   })
 

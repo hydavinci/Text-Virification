@@ -114,6 +114,7 @@ def build_default_exporter_registry(
                         SourcePathResolver,
                         anchored_source_resolver,
                     ),
+                    max_text_bytes=max_output_bytes,
                 )
                 for file_type in FileType
             ),

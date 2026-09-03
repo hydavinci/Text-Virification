@@ -13,6 +13,7 @@ from text_verification.domain.ports import SourcePathResolver
 class CompatibilityExporter:
     file_type: FileType
     source_path_resolver: SourcePathResolver
+    max_text_bytes: int | None = None
 
     def export(
         self,
@@ -35,6 +36,7 @@ class CompatibilityExporter:
             track_changes,
             original_text=document.text,
             modified_text=modified_text,
+            max_text_bytes=self.max_text_bytes,
         )
         target.write_bytes(exported.content)
         return target
