@@ -179,3 +179,142 @@ claim an independent review is clean.
   unset. Deterministic route fixtures validate frontend lifecycle and request
   contracts only.
 - Controller independent review is still required.
+
+## Review fix round 1 — 2026-09-03
+
+Implementation commit:
+
+- `29b37a1c0d4dccf5029555c1db8ba42ce2853056`
+  (`fix: address task 6 review round 1`)
+
+All nine findings were accepted after verification against the design,
+repository contracts, browser state flow, exporter registry, and current
+tests. No item received technical pushback. This round is implemented and
+awaits independent re-review; it does not claim the review is clean.
+
+### Finding dispositions and design decisions
+
+1. **Accepted — complete revision projection.** Reconstruction still uses
+   `SequenceMatcher` only to obtain a deterministic edit script, then projects
+   edited target ranges through canonical block ownership. Insertions and
+   replacements in unowned gaps expand the nearest renderable block boundary;
+   ancestors expand with children; changed blocks drop stale span styling.
+   Projection fails with `revision_text_unmappable` when no renderable owner
+   exists or nested renderable blocks would duplicate edited output. Multi-
+   block insertion, deletion, whole-range replacement, boundary expansion,
+   astral Unicode, blank-line gaps, table cells, and safe nested parents are
+   covered.
+2. **Accepted — latest-revision export authorization.** The requested revision
+   is checked under the verification-run lock at initial context load,
+   reservation, finalization, ready-artifact retry, and download. A source
+   export is latest only while no persisted revision exists. Finalization
+   returns a typed stale-revision rejection after deleting matching pending
+   metadata; artifact publication then removes the verified file. The route
+   maps `revision_export_stale` to HTTP 409.
+3. **Accepted — job-owned ordinary-format export.** Added
+   `original_format` job artifacts through `JobStorage`,
+   `JobOwnedSourcePathResolver`, `CompatibilityExporter`, and the existing
+   exporter implementations for DOCX, DOC, PDF, TXT, RTF, Markdown, and CSV.
+   The frontend no longer synthesizes compatibility `file_id`/`file_ext`
+   values. Async non-PDF files use job-owned original-format export; text PDFs
+   preserve PDF, while scanned/mixed PDFs explicitly use reconstructed DOCX.
+4. **Accepted — immutable export operation snapshots.** Modified export
+   captures job/result/source/revision-chain/text/format/track-change identity,
+   checks a generation guard after every persistence and network await, and
+   invalidates on reset, new execution/result, and unmount. Stale completions
+   cannot download, notify success, hydrate another workspace, or mutate the
+   current session. Review, suggestion, search, edit, and track-change controls
+   are disabled during persistence/export and are released on failure.
+5. **Accepted — strict asynchronous session identity and revision order.**
+   Async version-3 sessions require `jobId === document_id`, while the
+   canonical result supplies the run/source relationship. Persisted revision
+   numbers must be unique sequential positives beginning at 1; persisted
+   entries must precede drafts; parents must remain a single exact chain.
+   Restored job identity is held by `useVerificationExecution` without
+   fabricating a completed `JobRead`; reset clears it. Restore remains
+   prepare-then-commit and invalid payloads publish no partial state.
+6. **Accepted — real PostgreSQL revision concurrency coverage.** Added
+   `persist_review_revision()` tests for chained concurrent drafts allocating
+   1/2, same-UUID retry idempotency, stale-parent rejection, and UUID identity
+   collision rejection. They use the existing `TEST_DATABASE_URL` fixture and
+   no SQLite substitute.
+7. **Accepted — deterministic browser format/OCR coverage.** Playwright now
+   covers direct text, a valid ordinary DOCX upload/result/revision/original-
+   format export, a real scanned-PDF fixture with an OCR progress event,
+   canonical OCR result, reconstructed-DOCX export, and reduced viewport
+   privacy behavior. Acceptance asserts the changed accepted count and the
+   exact export request, not an always-present label. The live backend remains
+   separately and honestly gated.
+8. **Accepted — persistent export alerts.** Export failures now render a
+   persistent `role="alert"`/assertive region until explicitly dismissed or
+   superseded by another export/reset/result.
+9. **Accepted — global reduced motion.** The root application stylesheet now
+   near-disables animation duration, animation iteration, transition duration,
+   transition delay, and smooth scrolling for every workspace/component
+   descendant.
+
+### Round-1 RED/GREEN evidence
+
+- Projection RED:
+  `pytest -q tests/integration/test_job_reconstruction_export.py -k
+  'revision_projection'` — 6 failed, 2 passed. The nested-renderable duplicate
+  regression separately failed 1 test. GREEN: 9 passed.
+- Export authorization RED: stale route mapping returned 500 instead of 409;
+  finalization race returned `export_persistence_failed`; ready-artifact retry
+  and stale download did not raise. Each focused regression was rerun GREEN.
+- Job-owned export RED: the route returned 422 for `original_format`; the
+  service exposed the missing job-owned source resolver before passing the TXT
+  artifact/download regression. Route and service focused tests passed.
+- Frontend review RED:
+  `npm test -- --run tests/WorkspaceTask6.spec.ts
+  tests/WorkspaceSession.spec.ts tests/WorkspaceAccessibility.spec.ts
+  tests/verificationApi.spec.ts tests/useVerificationExecution.spec.ts
+  --reporter=dot` initially reported 38 failed and 17 passed while the guarded
+  job export, execution-owned restore identity, strict numbering, persistent
+  alert, and global transition rules were absent/incomplete.
+- Compatibility identity RED: canonical async results produced a synthetic
+  document UUID `file_id` instead of `null`. GREEN: Task 6 workspace suite
+  passed 12 tests.
+- Text-PDF boundary RED: the frontend requested `docx_reconstruction` instead
+  of `original_format`. GREEN: the same focused suite passed.
+- E2E RED iterations exposed an invalid OCR progress threshold, ambiguous
+  locators, and scanned-result format detection. Final GREEN:
+  4 deterministic Chromium tests passed and 1 live-backend test skipped.
+- PostgreSQL revision collection:
+  `pytest -q tests/integration/test_verification_repository.py -k
+  'persist_review_revision or superseded_review_revision or
+  revision_became_stale'` — 12 skipped because `TEST_DATABASE_URL` was unset;
+  collection succeeded and SQLite was not used.
+
+### Final validation after round 1
+
+- Affected backend revision/export/registry/golden suites:
+  169 passed, 43 PostgreSQL-gated skipped.
+- Full backend: `.venv/bin/python -m pytest -q` — 928 passed, 79 skipped.
+  Skips were the existing `TEST_DATABASE_URL`, `LIVE_API_URL`, and optional OCR
+  runtime gates.
+- Full backend Ruff: `.venv/bin/python -m ruff check src tests alembic` —
+  passed.
+- Full backend mypy: `.venv/bin/python -m mypy src` — 72 source files, no
+  issues.
+- Alembic: `alembic heads` reported
+  `0010_add_review_revision_chain (head)`; offline `upgrade head --sql`
+  generated the full chain through 0010.
+- Full frontend: `npm test -- --run --reporter=dot` — 463 passed across
+  21 files. Node emitted the existing experimental `localStorage` warning.
+- Production frontend: `npm run build` — `vue-tsc -b` and Vite 6.4.3 passed;
+  70 modules transformed.
+- Playwright: `npm run test:e2e` — 4 deterministic Chromium tests passed;
+  1 live-backend test skipped because `LIVE_API_URL` was unset.
+- `git diff --check` — passed before the implementation commit.
+
+### Round-1 residual concerns
+
+- The new PostgreSQL concurrency and stale reservation/finalization tests were
+  collected but not executed locally because `TEST_DATABASE_URL` was unset.
+- The live API/worker/OCR browser boundary remains unexecuted because
+  `LIVE_API_URL` was unset; deterministic fixtures validate browser behavior
+  and wire contracts rather than backend internals.
+- Projection is deterministic and explicitly fail-closed for unrepresentable
+  structures, but an independent re-review should still scrutinize unusual
+  canonical block graphs and extreme edit scripts.

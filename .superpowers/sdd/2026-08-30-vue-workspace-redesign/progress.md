@@ -1337,3 +1337,47 @@ Task 6 implementation commits:
   (`feat: complete workspace export session and accessibility`)
 
 Task 6: implementation complete; awaiting controller independent review.
+
+## Task 6 review fix round 1 — 2026-09-03
+
+- Accepted and addressed all nine independent findings in implementation
+  commit `29b37a1c0d4dccf5029555c1db8ba42ce2853056`.
+- Revision reconstruction now covers every edited target range through
+  canonical renderable block ownership, expands boundary/gap edits
+  deterministically, updates nested ancestors and table cells, removes stale
+  spans only from changed blocks, and fails explicitly for no-owner or
+  duplicate-render structures.
+- Export authorization now requires the latest appropriate persisted revision
+  under the run lock during context load, reservation, finalization,
+  ready-artifact retry, and download. Stale finalization deletes pending
+  metadata and verified publication, returning typed HTTP 409.
+- Added job-owned original-format export for the existing seven format
+  exporters. Async DOCX/DOC/TXT/RTF/MD/CSV use it; text PDFs retain PDF while
+  scanned/mixed PDFs use reconstructed DOCX. Canonical job results no longer
+  receive synthetic compatibility file IDs.
+- Frontend export operations snapshot identity/text/revision state, recheck a
+  generation guard after every await, invalidate on reset/new result/unmount,
+  and lock conflicting mutation controls without stranding them after failure.
+- Version-3 restore requires async `jobId === document_id`; execution owns the
+  restored job context without a fake completed job. Persisted revision
+  numbering is sequential/unique and persisted entries must precede drafts.
+- Added real PostgreSQL concurrency cases through
+  `persist_review_revision()` for sequential allocation, idempotent retry,
+  stale parents, and UUID collisions. They remain gated only by
+  `TEST_DATABASE_URL`.
+- Deterministic Playwright now covers direct text, ordinary DOCX job revision
+  and original-format export, scanned-PDF OCR progress/result/reconstruction,
+  and responsive privacy behavior. Acceptance asserts the accepted count and
+  exact request.
+- Export failures use a persistent assertive dismissible alert. A global
+  reduced-motion rule covers animations, transitions, delays, and smooth
+  scrolling across child components.
+- RED/GREEN evidence and per-finding rulings are recorded in
+  `task-6-report.md`.
+- Final validation: affected backend 169 passed/43 skipped; full backend
+  928 passed/79 skipped; frontend 463 passed; build passed with 70 modules;
+  Playwright 4 passed/1 live skip; full Ruff passed; full mypy passed on 72
+  source files; Alembic head/offline SQL and `git diff --check` passed.
+
+Task 6: review fix round 1 implemented; awaiting independent re-review. Review
+is not claimed clean.
