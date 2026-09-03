@@ -8,6 +8,8 @@ Independent review findings were fixed on 2026-09-03 from Task 4 HEAD
 `b4964e9293bb1654d8ab30b41043784eab35de9b`.
 Fix round 2 was completed on 2026-09-03 from Task 4 fix-round-1 HEAD
 `e40192e3aff3541180cc7143deed6a2606fd49b5`.
+Fix round 3 was completed on 2026-09-03 from Task 4 fix-round-2 HEAD
+`85b5e4592a6d4cabaa8f2104084e4fa1ac7a6a2f`.
 
 ## Files
 
@@ -163,3 +165,50 @@ No Task 5 or Task 6 implementation was included in the fix wave.
 
 No Task 5 result-loading work or Task 6 revision persistence work was included
 in fix round 2.
+
+## Fix round 3
+
+- Case-insensitive search now segments source text into extended grapheme
+  clusters with `Intl.Segmenter('und', { granularity: 'grapheme' })`. Each
+  complete cluster is folded exactly once with the established whole-value
+  NFKD, stable `und` uppercase/lowercase, and final NFKD transform. Folded
+  grapheme start/end boundaries map back to original Unicode code-point
+  offsets.
+- The complete query is folded once and matched against the concatenated
+  folded text with KMP. Only candidates whose folded start and end are recorded
+  grapheme boundaries are accepted; accepted matches advance
+  non-overlappingly, while rejected inside-grapheme or inside-expansion
+  candidates continue through the bounded matcher.
+- Accent-sensitive semantics now reject a base-only query inside an accented
+  grapheme and reject a combining-mark-only query when the mark is attached to
+  a base. Canonically equivalent reordered marks, composed/decomposed text,
+  ligatures, sharp-s, astral offsets, literal case-sensitive behavior, and the
+  4096-code-point folded-query guard remain covered.
+- Replacement regressions assert exact original code-point ranges and prove
+  that replacing or rejecting an accented grapheme cannot leave a dangling
+  combining mark. A deterministic 10,001-cluster/512-code-point regression
+  counts exactly two normalization calls per text cluster plus one complete
+  query fold, ruling out candidate-substring refolding.
+
+### Fix round 3 TDD and validation evidence
+
+- Search RED:
+  `npm test -- --run tests/useSearchReplace.spec.ts --reporter=dot` failed 4
+  new grapheme-safety/complexity tests with 13 existing tests passing. The
+  observed failures included a base match at `{ start: 0, end: 1 }`, an
+  attached-mark match at `{ start: 1, end: 2 }`, an unsafe replacement, and
+  94,260 normalization calls instead of the bounded 20,004.
+- Focused search GREEN: the same command passed 17 tests in 1 file.
+- Task 4/workspace GREEN:
+  `npm test -- --run tests/ReviewActions.spec.ts tests/SearchReplacePanel.spec.ts tests/EditPreview.spec.ts tests/useSearchReplace.spec.ts tests/useVerificationWorkspace.spec.ts tests/WorkspaceView.spec.ts --reporter=dot`
+  passed 192 tests across 6 files. Node emitted the existing experimental
+  `localStorage` warning.
+- Full frontend GREEN: `npm test -- --run --reporter=dot` passed 286 tests
+  across 14 files with the same existing warning.
+- Production build GREEN: `npm run build` passed `vue-tsc -b` and Vite 6.4.3
+  with 50 modules transformed. An earlier build caught and prompted correction
+  of a test-only `String.normalize` spy overload mismatch.
+- `git diff --check` passed with no output.
+
+No Task 5 result-loading/API work or Task 6 backend revision persistence work
+was included in fix round 3.

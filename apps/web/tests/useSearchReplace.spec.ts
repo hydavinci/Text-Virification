@@ -112,6 +112,77 @@ describe('useSearchReplace', () => {
     ])
   })
 
+  it('does not match a base inside an accented grapheme', () => {
+    const search = useSearchReplace({ text: () => 'a\u0301 á a' })
+
+    search.query.value = 'a'
+    expect(search.matches.value).toEqual([{ start: 5, end: 6 }])
+  })
+
+  it('does not match a combining mark attached to a base', () => {
+    const search = useSearchReplace({ text: () => 'a\u0301 á' })
+
+    search.query.value = '\u0301'
+    expect(search.matches.value).toEqual([])
+  })
+
+  it('replaces the exact original grapheme range without leaving combining marks', () => {
+    const text = ref('x a\u0301 y')
+    const onReplace = vi.fn((nextText: string) => {
+      text.value = nextText
+    })
+    const search = useSearchReplace({ text, onReplace })
+
+    search.query.value = 'á'
+    expect(search.matches.value).toEqual([{ start: 2, end: 4 }])
+
+    search.replacement.value = 'Z'
+    expect(search.replaceCurrent()).toBe(true)
+    expect(text.value).toBe('x Z y')
+    expect(onReplace).toHaveBeenCalledWith('x Z y', {
+      kind: 'current',
+      count: 1
+    })
+  })
+
+  it('does not replace a base or combining mark inside an accented grapheme', () => {
+    const text = ref('a\u0301')
+    const onReplace = vi.fn()
+    const search = useSearchReplace({ text, onReplace })
+    search.replacement.value = 'X'
+
+    search.query.value = 'a'
+    expect(search.replaceAll()).toBe(false)
+
+    search.query.value = '\u0301'
+    expect(search.replaceAll()).toBe(false)
+    expect(text.value).toBe('a\u0301')
+    expect(onReplace).not.toHaveBeenCalled()
+  })
+
+  it('folds each text grapheme and the complete query only once', () => {
+    const originalNormalize = String.prototype.normalize
+    const normalizeSpy = vi
+      .spyOn(String.prototype, 'normalize')
+      .mockImplementation(function (
+        this: string,
+        form?: string
+      ) {
+        return originalNormalize.call(this, form)
+      })
+    const search = useSearchReplace({
+      text: () => `${'a'.repeat(10_000)}b`
+    })
+
+    try {
+      search.query.value = 'a'.repeat(512)
+      expect(search.matches.value).toHaveLength(19)
+      expect(normalizeSpy).toHaveBeenCalledTimes(2 * (10_001 + 1))
+    } finally {
+      normalizeSpy.mockRestore()
+    }
+  })
+
   it('replaces whole original ranges after cross-boundary canonical reordering', () => {
     const text = ref('😀a\u0315\u0300 q\u0307\u0323')
     const onReplace = vi.fn((nextText: string) => {

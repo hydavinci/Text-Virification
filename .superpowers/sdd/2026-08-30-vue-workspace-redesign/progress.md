@@ -815,3 +815,56 @@ instead of partially trusting it.
 Task 4: fix round 2/5 (2 addressed, 0 open — boundary-safe canonical search
 and backend-parity canonical session result validation; commit
 `fix: validate canonical session results`)
+
+## Task 4 fix round 3 — 2026-09-03
+
+- Replaced arbitrary code-point candidate boundaries with original-text
+  extended grapheme segmentation via
+  `Intl.Segmenter('und', { granularity: 'grapheme' })`. Every complete source
+  cluster is folded once using whole-cluster NFKD, stable `und`
+  uppercase/lowercase, and final NFKD. Only folded grapheme start/end
+  boundaries map to original Unicode code-point offsets.
+- Folded queries are computed once, guarded at 4096 code points, and searched
+  with KMP. Accepted matches must start and end at mapped grapheme boundaries
+  and advance non-overlappingly; rejected inside-expansion and
+  inside-grapheme candidates advance through KMP without candidate slicing,
+  joining, or repeated normalization.
+- Base-only search no longer matches decomposed or composed accented
+  graphemes, and a combining-mark-only query no longer matches a mark attached
+  to a base. Canonically reordered `a\u0315\u0300`/`à\u0315`, ligature,
+  sharp-s, composed/decomposed, astral, literal case-sensitive, and
+  non-overlap behavior remains green.
+- Replacement coverage records exact original ranges and verifies no dangling
+  marks. A deterministic complexity regression uses 10,001 text graphemes and
+  a 512-code-point query and observes exactly 20,004 normalization calls:
+  twice per text cluster and twice for one complete query fold.
+
+### Task 4 fix round 3 TDD and validation evidence
+
+- Search RED:
+  `npm test -- --run tests/useSearchReplace.spec.ts --reporter=dot` failed 4
+  new tests with 13 passing. Unsafe base and attached-mark ranges were
+  reported, replacement returned `true`, and the complexity probe observed
+  94,260 rather than 20,004 normalization calls.
+- Focused search GREEN: the same command passed 17 tests in 1 file.
+- Task 4/workspace GREEN:
+  `npm test -- --run tests/ReviewActions.spec.ts tests/SearchReplacePanel.spec.ts tests/EditPreview.spec.ts tests/useSearchReplace.spec.ts tests/useVerificationWorkspace.spec.ts tests/WorkspaceView.spec.ts --reporter=dot`
+  passed 192 tests across 6 files. Node emitted the existing experimental
+  `localStorage` warning.
+- Full frontend GREEN: `npm test -- --run --reporter=dot` passed 286 tests
+  across 14 files with the same existing warning.
+- Production build GREEN: `npm run build` passed `vue-tsc -b` and Vite 6.4.3
+  with 50 modules transformed. The first build found a test-only
+  `String.normalize` spy overload mismatch; correcting the declared argument
+  type made the build green without production changes.
+- `git diff --check` passed with no output.
+
+Ruling: Insensitive matching treats extended grapheme clusters as the smallest
+replaceable unit while retaining original Unicode code-point offsets. KMP over
+once-folded clusters bounds matching to O(folded text + folded query); cost if
+wrong is requiring runtime `Intl.Segmenter` support, consistent with the
+project's ES2022 TypeScript target rather than silently falling back to unsafe
+code-point boundaries.
+
+Task 4: fix round 3/5 (2 addressed, 0 open — grapheme-safe Unicode matching
+and bounded once-folded KMP search; commit `fix: bound Unicode search matching`)

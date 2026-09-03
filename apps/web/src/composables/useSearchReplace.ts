@@ -22,6 +22,9 @@ interface UseSearchReplaceOptions {
 }
 
 const MAX_FOLDED_QUERY_LENGTH = 4096
+const graphemeSegmenter = new Intl.Segmenter('und', {
+  granularity: 'grapheme'
+})
 
 function foldSearchValue(value: string): string[] {
   return Array.from(
@@ -33,19 +36,100 @@ function foldSearchValue(value: string): string[] {
   )
 }
 
-function foldedValuesEqual(
-  candidate: readonly string[],
-  query: readonly string[]
-): boolean {
-  if (candidate.length !== query.length) {
-    return false
+interface FoldedGraphemeText {
+  characters: readonly string[]
+  originalStarts: readonly (number | undefined)[]
+  originalEnds: readonly (number | undefined)[]
+}
+
+function foldTextByGrapheme(value: string): FoldedGraphemeText {
+  const characters: string[] = []
+  const originalStarts: (number | undefined)[] = []
+  const originalEnds: (number | undefined)[] = []
+  let originalOffset = 0
+
+  for (const { segment } of graphemeSegmenter.segment(value)) {
+    const foldedStart = characters.length
+    originalStarts[foldedStart] = originalOffset
+    originalOffset += Array.from(segment).length
+    characters.push(...foldSearchValue(segment))
+    originalEnds[characters.length] = originalOffset
   }
-  for (let offset = 0; offset < query.length; offset += 1) {
-    if (candidate[offset] !== query[offset]) {
-      return false
+
+  return {
+    characters,
+    originalStarts,
+    originalEnds
+  }
+}
+
+function buildKmpPrefixTable(pattern: readonly string[]): number[] {
+  const prefixTable = new Array<number>(pattern.length).fill(0)
+  let prefixLength = 0
+
+  for (let offset = 1; offset < pattern.length; offset += 1) {
+    while (
+      prefixLength > 0 &&
+      pattern[offset] !== pattern[prefixLength]
+    ) {
+      prefixLength = prefixTable[prefixLength - 1] ?? 0
     }
+    if (pattern[offset] === pattern[prefixLength]) {
+      prefixLength += 1
+    }
+    prefixTable[offset] = prefixLength
   }
-  return true
+
+  return prefixTable
+}
+
+function findInsensitiveMatches(
+  originalText: string,
+  foldedQuery: readonly string[]
+): SearchMatch[] {
+  const {
+    characters: foldedText,
+    originalStarts,
+    originalEnds
+  } = foldTextByGrapheme(originalText)
+  const prefixTable = buildKmpPrefixTable(foldedQuery)
+  const found: SearchMatch[] = []
+  let matchedLength = 0
+  let acceptedThrough = 0
+
+  for (let offset = 0; offset < foldedText.length; offset += 1) {
+    while (
+      matchedLength > 0 &&
+      foldedText[offset] !== foldedQuery[matchedLength]
+    ) {
+      matchedLength = prefixTable[matchedLength - 1] ?? 0
+    }
+    if (foldedText[offset] === foldedQuery[matchedLength]) {
+      matchedLength += 1
+    }
+    if (matchedLength !== foldedQuery.length) {
+      continue
+    }
+
+    const foldedEnd = offset + 1
+    const foldedStart = foldedEnd - foldedQuery.length
+    const originalStart = originalStarts[foldedStart]
+    const originalEnd = originalEnds[foldedEnd]
+    if (
+      foldedStart >= acceptedThrough &&
+      originalStart !== undefined &&
+      originalEnd !== undefined
+    ) {
+      found.push({
+        start: originalStart,
+        end: originalEnd
+      })
+      acceptedThrough = foldedEnd
+    }
+    matchedLength = prefixTable[matchedLength - 1] ?? 0
+  }
+
+  return found
 }
 
 export function useSearchReplace({
@@ -63,9 +147,10 @@ export function useSearchReplace({
       return Object.freeze([])
     }
 
-    const textCharacters = Array.from(toValue(text))
-    const found: SearchMatch[] = []
+    const originalText = toValue(text)
     if (caseSensitive.value) {
+      const textCharacters = Array.from(originalText)
+      const found: SearchMatch[] = []
       let start = 0
       while (start + queryCharacters.length <= textCharacters.length) {
         const candidate = textCharacters
@@ -91,32 +176,11 @@ export function useSearchReplace({
     ) {
       return Object.freeze([])
     }
-
-    let originalStart = 0
-    while (originalStart < textCharacters.length) {
-      let originalEnd = originalStart + 1
-      let matchedEnd: number | null = null
-      while (originalEnd <= textCharacters.length) {
-        const foldedCandidate = foldSearchValue(
-          textCharacters.slice(originalStart, originalEnd).join('')
-        )
-        if (foldedCandidate.length > foldedQuery.length) {
-          break
-        }
-        if (foldedValuesEqual(foldedCandidate, foldedQuery)) {
-          matchedEnd = originalEnd
-          break
-        }
-        originalEnd += 1
-      }
-      if (matchedEnd === null) {
-        originalStart += 1
-      } else {
-        found.push({ start: originalStart, end: matchedEnd })
-        originalStart = matchedEnd
-      }
-    }
-    return Object.freeze(found.map((match) => Object.freeze(match)))
+    return Object.freeze(
+      findInsensitiveMatches(originalText, foldedQuery).map((match) =>
+        Object.freeze(match)
+      )
+    )
   })
 
   const currentMatch = computed<SearchMatch | null>(() => {
