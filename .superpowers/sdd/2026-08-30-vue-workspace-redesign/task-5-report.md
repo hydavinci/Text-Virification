@@ -13,6 +13,10 @@ Review fix round 2 was implemented on 2026-09-03 from
 `9cfd54cace36ed9357333de3abb5045141773056`. It remains pending
 independent review; this report does not claim the review is clean.
 
+Review fix round 3 was implemented on 2026-09-03 from
+`c9cdc7036f61a675cadec0f71ea50e1b72869bbe`. It remains pending
+independent review; this report does not claim the review is clean.
+
 ## Files
 
 - Added `apps/web/src/composables/useVerificationExecution.ts`.
@@ -293,3 +297,79 @@ export API feature was added.
 
 `160ff81513337c0b4bc6ebc576c4e9d9dce931b0`
 (`fix: address task 5 review round 2`).
+
+## Review fix round 3 — 2026-09-03
+
+### Reviewer finding decisions
+
+1. **Accepted — zero-length block overlap parity.** Direct
+   `DocumentModel` probes confirmed the backend half-open predicate: a point
+   overlaps a non-ancestor interval only when it is strictly inside; interval
+   endpoints and equal points do not overlap. Ancestor exemptions still apply,
+   including a point strictly inside its ancestor. The ordered sweep now
+   includes point blocks. Nonzero intervals retain the stack check; points
+   binary-search the deepest active interval whose start is strictly earlier,
+   which also catches points placed at a nested child boundary while strictly
+   inside an unrelated outer interval. Point blocks are not activated, so
+   equal root, sibling, cousin, and ancestor points remain valid. Sorting keeps
+   input order irrelevant and total complexity at `O(n log n)`.
+2. **Accepted — issue confidence range.** Backend `Issue.confidence` accepts
+   only finite values in inclusive `[0, 1]`. The shared result snapshot
+   boundary now rejects values below zero or above one before recursive
+   freezing and validated-snapshot branding. Jobs API results, raw direct and
+   asynchronous execution dependencies, workspace loads, and session restore
+   therefore share the same enforcement. Invalid restored sessions leave the
+   current result, revision, review decisions, and modified text untouched.
+3. **Accepted — malformed UTF-16 terminology.** Backend
+   `VerificationOptions` rejects lone high and low surrogates during its
+   canonical UTF-8 JSON validation, while valid surrogate pairs represent one
+   Unicode code point. A shared frontend UTF-16 scan now rejects lone
+   surrogates in glossary originals/standards and banned words before byte-size
+   encoding. Terminology imports reject malformed Unicode before the import
+   byte limit; manual additions, replacements, complete option replacement,
+   and imports fail transactionally with `invalid-unicode`. Valid astral text
+   still uses the existing 200-code-point rule and exact 64 KiB payload
+   boundary.
+
+### Round 3 RED/GREEN evidence
+
+- Backend parity probes covered root, sibling, equal, boundary, nested,
+  ancestor, and unsorted point-block cases; confidence `0`/`1` passed while
+  `-0.1`/`1.1` failed; lone high/low surrogates failed while an astral code
+  point passed.
+- Zero-length overlap RED:
+  `npm test -- --run tests/useVerificationWorkspace.spec.ts --reporter=dot`
+  failed 3 point-inside cases with 138 passing because all point blocks were
+  filtered from the sweep. GREEN: the same suite passed 141 tests before the
+  final boundary additions.
+- Confidence RED:
+  `npm test -- --run tests/jobsApi.spec.ts tests/useVerificationExecution.spec.ts tests/useVerificationWorkspace.spec.ts --reporter=dot`
+  failed 5 assertions with 232 passing across JobsApi, direct execution,
+  asynchronous execution, and atomic session restore. GREEN: 237 tests passed.
+- Lone-surrogate RED:
+  `npm test -- --run tests/analyzeOptions.spec.ts tests/useTerminology.spec.ts --reporter=dot`
+  failed 14 assertions with 45 passing. The first scan implementation still
+  failed 6 terminal-high-surrogate cases, exposing the `NaN` lookahead edge;
+  after correcting that condition, GREEN passed 59 tests.
+
+### Round 3 validation
+
+- Focused Task 5, terminology, API, execution, workspace, and view GREEN:
+  `npm test -- --run tests/analyzeOptions.spec.ts tests/useTerminology.spec.ts tests/jobsApi.spec.ts tests/verificationApi.spec.ts tests/useVerificationExecution.spec.ts tests/useVerificationWorkspace.spec.ts tests/WorkspaceView.spec.ts --reporter=dot`
+  passed 345 tests across 7 files. Node emitted the existing experimental
+  `localStorage` warning.
+- Full frontend GREEN: `npm test -- --run --reporter=dot` passed 430 tests
+  across 16 files, with the same existing Node warning.
+- Production build GREEN: `npm run build` passed `vue-tsc -b` and Vite 6.4.3
+  with 58 modules transformed.
+- `git diff --check` passed with no output before the implementation commit.
+
+### Round 3 scope
+
+No Task 6 revision persistence, session-schema expansion, or asynchronous
+export API feature was added.
+
+### Round 3 implementation commit
+
+`bc9f62333e886c218cf33ccadf83185be12cd90a`
+(`fix: address task 5 review round 3`).

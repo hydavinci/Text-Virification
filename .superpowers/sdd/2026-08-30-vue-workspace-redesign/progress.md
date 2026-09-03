@@ -1166,3 +1166,44 @@ not claimed clean.
 Task 5 review fix round 2 implementation commit:
 `160ff81513337c0b4bc6ebc576c4e9d9dce931b0`
 (`fix: address task 5 review round 2`).
+
+## Task 5 review fix round 3 — 2026-09-03
+
+- Accepted all three scoped round-3 findings after probing authoritative
+  backend `DocumentModel`, `Issue`, and `VerificationOptions` behavior.
+- Zero-length blocks now participate in the ordered overlap sweep. Backend
+  parity is exact: a non-ancestor interval conflicts with a point only when the
+  point is strictly inside, while endpoints/equal points are allowed and
+  ancestry still exempts overlap. Point lookup binary-searches the active
+  start-ordered chain, preserving `O(n log n)` behavior for large equal-start
+  hierarchies and unsorted input.
+- The one canonical result snapshot boundary now requires issue confidence in
+  inclusive `[0, 1]` before deep freeze/provenance branding. JobsApi, direct
+  and asynchronous dependency publication, and atomic session restore reject
+  out-of-range values consistently.
+- AnalyzeOptions and terminology producers/imports now reject lone UTF-16
+  high/low surrogates before byte-size encoding. Valid surrogate pairs remain
+  one Unicode code point, the 200-code-point limit is unchanged, and the exact
+  64 KiB options boundary remains intact.
+
+### Task 5 review fix round 3 TDD evidence
+
+- Zero-length overlap RED: 3 failed, 138 passed; focused GREEN: 141 passed
+  before final boundary additions.
+- Confidence RED: 5 failed, 232 passed; GREEN: 237 passed across JobsApi,
+  execution, and workspace/session tests.
+- Lone-surrogate RED: 14 failed, 45 passed. An intermediate run retained 6
+  terminal-high-surrogate failures and identified the missing-lookahead edge;
+  final GREEN: 59 passed.
+- Focused Task 5/terminology/workspace GREEN: 345 tests across 7 files.
+- Full frontend GREEN: 430 tests across 16 files, with the existing Node
+  experimental `localStorage` warning.
+- Production build GREEN: `vue-tsc -b` and Vite 6.4.3, 58 modules transformed.
+- `git diff --check`: passed before the implementation commit.
+
+Task 5: review fix round 3 implemented; awaiting independent review. Review is
+not claimed clean.
+
+Task 5 review fix round 3 implementation commit:
+`bc9f62333e886c218cf33ccadf83185be12cd90a`
+(`fix: address task 5 review round 3`).
