@@ -13,7 +13,11 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import Response
 from pydantic import ValidationError
 
+from text_verification.api.body_readers import (
+    MAX_JSON_STRING_ESCAPE_FACTOR,
+)
 from text_verification.api.dependencies import get_verification_pipeline
+from text_verification.api.report_reader import read_bounded_report_request
 from text_verification.application import (
     VerificationCommand,
     VerificationError,
@@ -27,7 +31,6 @@ from text_verification.compatibility.exporters import (
 )
 from text_verification.compatibility.models import (
     ExportOriginalRequest,
-    ReportRequest,
     Scenario,
 )
 from text_verification.compatibility.reports import generate_report_html
@@ -47,7 +50,13 @@ from text_verification.compatibility.storage import (
     CompatibilityUploadTooLarge,
 )
 from text_verification.config import Settings, get_settings
-from text_verification.domain.documents import FileType
+from text_verification.domain.documents import (
+    MAX_CANONICAL_RESULT_BLOCKS,
+    MAX_CANONICAL_RESULT_TOTAL_CODEPOINTS,
+    MAX_CANONICAL_RESULT_TOTAL_UTF8_BYTES,
+    FileType,
+)
+from text_verification.domain.text_edits import MAX_REVISION_TEXT_UTF8_BYTES
 from text_verification.domain.verification import VerificationExecutionMode, VerificationResult
 from text_verification.infrastructure.document_storage import (
     UnsupportedFileType,
@@ -60,6 +69,11 @@ router = APIRouter(tags=["compatibility"])
 logger = logging.getLogger(__name__)
 _DICTIONARY_UNAVAILABLE_DETAIL = "Verification dictionaries are unavailable."
 MAX_COMPATIBILITY_EXPORT_REQUEST_BYTES = 32 * 1024 * 1024
+MAX_COMPATIBILITY_REPORT_REQUEST_BYTES = (
+    MAX_JSON_STRING_ESCAPE_FACTOR
+    * MAX_CANONICAL_RESULT_TOTAL_UTF8_BYTES
+    + MAX_COMPATIBILITY_EXPORT_REQUEST_BYTES
+)
 
 
 @router.get("/scenarios")
@@ -165,15 +179,40 @@ def analyze_content(
 
 
 @router.post("/export")
-def export_report(payload: ReportRequest) -> Response:
+async def export_report(
+    request: Request,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> Response:
+    max_document_bytes = min(
+        settings.max_upload_bytes,
+        MAX_REVISION_TEXT_UTF8_BYTES,
+    )
+    max_aggregate_bytes = min(
+        MAX_CANONICAL_RESULT_TOTAL_UTF8_BYTES,
+        3 * max_document_bytes,
+    )
+    payload = await read_bounded_report_request(
+        request,
+        max_body_bytes=min(
+            MAX_COMPATIBILITY_REPORT_REQUEST_BYTES,
+            (
+                MAX_JSON_STRING_ESCAPE_FACTOR
+                * max_aggregate_bytes
+                + MAX_COMPATIBILITY_EXPORT_REQUEST_BYTES
+            ),
+        ),
+        max_retained_bytes=MAX_COMPATIBILITY_EXPORT_REQUEST_BYTES,
+        max_document_utf8_bytes=max_document_bytes,
+        max_blocks=MAX_CANONICAL_RESULT_BLOCKS,
+        max_total_codepoints=MAX_CANONICAL_RESULT_TOTAL_CODEPOINTS,
+        max_total_utf8_bytes=max_aggregate_bytes,
+    )
     content = generate_report_html(payload.model_dump()).encode("utf-8")
     return Response(
         content=content,
         media_type="text/html; charset=utf-8",
         headers={"Content-Disposition": _content_disposition("原文检查报告.html")},
     )
-
-
 @router.post("/export-original")
 async def export_modified_original(
     request: Request,

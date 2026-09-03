@@ -24,6 +24,7 @@ from text_verification.application.review_revision import (
 )
 from text_verification.application.verification_pipeline import VerificationPipeline
 from text_verification.config import Settings, get_settings
+from text_verification.domain.text_edits import MAX_REVISION_TEXT_UTF8_BYTES
 from text_verification.infrastructure.database import get_session_factory
 from text_verification.infrastructure.repositories import JobRepository
 from text_verification.infrastructure.storage import JobStorage
@@ -72,10 +73,6 @@ def get_recheck_provenance_grant_service(
 
 def get_reconstruction_export_service(
     storage: Annotated[JobStorage, Depends(get_job_storage)],
-    grant_service: Annotated[
-        RecheckProvenanceGrantService | None,
-        Depends(get_recheck_provenance_grant_service),
-    ],
 ) -> ReconstructionExportService:
     session_factory = get_session_factory()
 
@@ -94,7 +91,6 @@ def get_reconstruction_export_service(
             anchored_source_resolver=resolver,
             max_output_bytes=storage.max_document_bytes,
         ),
-        recheck_grant_service=grant_service,
     )
 
 
@@ -123,7 +119,10 @@ def get_job_recheck_service(
         cast(JobRecheckRepositoryFactory, repository_factory),
         pipeline,
         grant_service,
-        max_text_bytes=settings.max_upload_bytes,
+        max_text_bytes=min(
+            settings.max_upload_bytes,
+            MAX_REVISION_TEXT_UTF8_BYTES,
+        ),
     )
 
 

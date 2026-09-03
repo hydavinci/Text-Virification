@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -545,22 +546,20 @@ def test_job_original_format_export_route_preserves_job_owned_options(
     ]
 
 
-def test_job_export_route_forwards_opaque_recheck_provenance(
+def test_job_export_route_rejects_caller_provided_recheck_grant(
     client,
     app: FastAPI,
     completed_job: JobRead,
 ) -> None:
     from text_verification.api.dependencies import get_reconstruction_export_service
-    from text_verification.domain.verification import RecheckProvenance
 
     provenance_payload = {
         "grant": "server-issued-opaque-grant",
         "result_document_id": str(uuid4()),
         "result_verification_run_id": str(uuid4()),
         "result_source_version": "sha256:" + "b" * 64,
-        "recheck_text": "重新检查文本",
     }
-    calls: list[RecheckProvenance] = []
+    calls: list[object] = []
 
     class FakeService:
         def export(
@@ -570,13 +569,19 @@ def test_job_export_route_forwards_opaque_recheck_provenance(
             *,
             review_revision_id=None,
             track_changes=False,
-            recheck_provenance=None,
             progress_observer=None,
+            **extra,
         ):
-            del job, review_revision_id, track_changes, progress_observer
-            assert export_format is ExportFormat.ORIGINAL_FORMAT
-            assert recheck_provenance is not None
-            calls.append(recheck_provenance)
+            calls.append(
+                (
+                    job,
+                    export_format,
+                    review_revision_id,
+                    track_changes,
+                    progress_observer,
+                    extra,
+                )
+            )
             return ExportArtifactReference(
                 export_artifact_id=uuid4(),
                 job_id=completed_job.job_id,
@@ -604,8 +609,85 @@ def test_job_export_route_forwards_opaque_recheck_provenance(
         },
     )
 
-    assert response.status_code == 200
-    assert calls == [RecheckProvenance.model_validate(provenance_payload)]
+    assert response.status_code == 422
+    assert calls == []
+    assert provenance_payload["grant"] not in response.text
+
+
+def test_job_export_json_body_limit_is_inclusive_and_streaming(
+    client,
+    app: FastAPI,
+    completed_job: JobRead,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from text_verification.api.dependencies import get_reconstruction_export_service
+    from text_verification.api.routes import jobs as jobs_routes
+
+    body = json.dumps(
+        {"format": "original_format"},
+        separators=(",", ":"),
+    ).encode()
+
+    class FakeService:
+        def export(self, job, export_format, **kwargs):
+            del export_format, kwargs
+            return ExportArtifactReference(
+                export_artifact_id=uuid4(),
+                job_id=job.job_id,
+                verification_run_id=uuid4(),
+                format=ExportFormat.ORIGINAL_FORMAT,
+                file_type=FileType.TXT,
+                file_name="sample-modified.txt",
+                media_type="text/plain",
+                size_bytes=1,
+                content_sha256="a" * 64,
+                status=ArtifactLifecycleStatus.READY,
+                created_at=job.created_at,
+            )
+
+    app.dependency_overrides[get_reconstruction_export_service] = FakeService
+    monkeypatch.setattr(
+        jobs_routes,
+        "MAX_JOB_EXPORT_REQUEST_BYTES",
+        len(body),
+        raising=False,
+    )
+    accepted = client.post(
+        f"/api/v1/jobs/{completed_job.job_id}/exports",
+        content=body,
+        headers={"Content-Type": "application/json"},
+    )
+    monkeypatch.setattr(
+        jobs_routes,
+        "MAX_JOB_EXPORT_REQUEST_BYTES",
+        len(body) - 1,
+        raising=False,
+    )
+    rejected = client.post(
+        f"/api/v1/jobs/{completed_job.job_id}/exports",
+        content=iter((body[:5], body[5:])),
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert accepted.status_code == 200
+    assert rejected.status_code == 413
+
+
+def test_job_export_malformed_json_never_reflects_request_secrets(
+    client,
+    completed_job: JobRead,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret = "job-export-secret-never-reflect"
+    response = client.post(
+        f"/api/v1/jobs/{completed_job.job_id}/exports",
+        content=b'{"format":"original_format","grant":"' + secret.encode(),
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 422
+    assert secret not in response.text
+    assert secret not in caplog.text
 
 
 def test_job_export_maps_stale_revision_to_typed_409(

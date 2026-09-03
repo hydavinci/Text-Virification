@@ -42,7 +42,7 @@ def test_authorize_artifact_publication_locks_run_job_artifact_in_canonical_orde
     )
 
     assert handle is marker
-    assert order == ["run", "job", "artifact"]
+    assert order == ["run", "job", "artifact", "run-query"]
 
 
 def test_finalize_stale_artifact_locks_run_job_artifact_in_canonical_order() -> None:
@@ -55,7 +55,7 @@ def test_finalize_stale_artifact_locks_run_job_artifact_in_canonical_order() -> 
     )
 
     assert snapshot is not None
-    assert order == ["run", "job", "artifact"]
+    assert order == ["run", "job", "artifact", "run-query"]
 
 
 def test_delete_stale_artifact_locks_run_job_artifact_in_canonical_order() -> None:
@@ -87,10 +87,10 @@ class _RecordingSession:
         self._run = run
         self._order = order
 
-    def scalar(self, statement: object) -> SimpleNamespace:
+    def scalar(self, statement: object) -> None:
         del statement
         self._order.append("run-query")
-        return self._run
+        return None
 
     def flush(self) -> None:
         return None

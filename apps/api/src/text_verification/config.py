@@ -4,6 +4,16 @@ from pathlib import Path
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+DEPLOYED_APP_ENVIRONMENTS = frozenset(
+    {
+        "deployed",
+        "prod",
+        "production",
+        "stage",
+        "staging",
+    }
+)
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -29,6 +39,21 @@ class Settings(BaseSettings):
     llm_json_mode: bool = False
     recheck_grant_secret: SecretStr = SecretStr("")
     recheck_grant_ttl_seconds: int = Field(default=900, ge=60, le=86_400)
+
+
+def validate_runtime_settings(settings: Settings) -> None:
+    environment = settings.app_env.strip().lower()
+    secret_size = len(
+        settings.recheck_grant_secret.get_secret_value().encode("utf-8")
+    )
+    if (
+        environment in DEPLOYED_APP_ENVIRONMENTS
+        and secret_size < 32
+    ):
+        raise RuntimeError(
+            "RECHECK_GRANT_SECRET must contain at least 32 UTF-8 bytes "
+            "in deployed environments."
+        )
 
 
 @lru_cache

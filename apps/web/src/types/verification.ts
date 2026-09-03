@@ -271,7 +271,6 @@ export interface RecheckProvenance {
   result_document_id: string
   result_verification_run_id: string
   result_source_version: string
-  recheck_text: string
 }
 
 export interface ExportArtifactReference {

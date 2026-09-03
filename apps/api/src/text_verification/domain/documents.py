@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from enum import StrEnum
 from typing import Any, Literal
 from uuid import UUID
@@ -5,6 +6,24 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from text_verification.document_processing.pdf_models import OcrRequirement, PdfDocumentMetadata
+from text_verification.domain.text_edits import (
+    MAX_REVISION_TEXT_CODEPOINTS,
+    MAX_REVISION_TEXT_UTF8_BYTES,
+    TextDiffLimitError,
+    validate_revision_text,
+)
+
+MAX_CANONICAL_RESULT_BLOCKS = 20_000
+MAX_CANONICAL_RESULT_TOTAL_CODEPOINTS = 3 * MAX_REVISION_TEXT_CODEPOINTS
+MAX_CANONICAL_RESULT_TOTAL_UTF8_BYTES = 3 * MAX_REVISION_TEXT_UTF8_BYTES
+
+
+class DocumentPayloadLimitError(ValueError):
+    pass
+
+
+class DocumentPayloadShapeError(ValueError):
+    pass
 
 
 class FileType(StrEnum):
@@ -80,6 +99,12 @@ class DocumentModel(BaseModel):
     parser_version: str
     metadata: DocumentMetadata = Field(default_factory=DocumentMetadata)
 
+    @model_validator(mode="before")
+    @classmethod
+    def preflight_payload(cls, value: object) -> object:
+        preflight_document_payload(value)
+        return value
+
     @model_validator(mode="after")
     def validate_blocks(self) -> "DocumentModel":
         blocks_by_id = {block.block_id: block for block in self.blocks}
@@ -103,32 +128,165 @@ class DocumentModel(BaseModel):
                 ):
                     raise ValueError("parent block must contain its child block")
 
-        ancestors_by_id: dict[str, set[str]] = {}
+        depth_by_id: dict[str, int] = {}
         for block in self.blocks:
-            visited = {block.block_id}
-            ancestors: set[str] = set()
-            parent_id = block.parent_id
-            while parent_id is not None:
-                if parent_id in visited:
+            if block.block_id in depth_by_id:
+                continue
+            path: list[TextBlock] = []
+            path_indexes: dict[str, int] = {}
+            current = block
+            parent_depth = -1
+            while True:
+                known_depth = depth_by_id.get(current.block_id)
+                if known_depth is not None:
+                    parent_depth = known_depth
+                    break
+                if current.block_id in path_indexes:
                     raise ValueError("block parent relationships must not contain cycles")
-                visited.add(parent_id)
-                ancestors.add(parent_id)
-                parent_id = blocks_by_id[parent_id].parent_id
-            ancestors_by_id[block.block_id] = ancestors
+                path_indexes[current.block_id] = len(path)
+                path.append(current)
+                if current.parent_id is None:
+                    break
+                current = blocks_by_id[current.parent_id]
+            for path_block in reversed(path):
+                parent_depth += 1
+                depth_by_id[path_block.block_id] = parent_depth
 
-        for index, first in enumerate(self.blocks):
-            for second in self.blocks[index + 1 :]:
-                if not (
-                    first.global_start < second.global_end
-                    and second.global_start < first.global_end
-                ):
+        children_by_id: dict[str, list[str]] = {
+            block.block_id: [] for block in self.blocks
+        }
+        roots: list[str] = []
+        for block in self.blocks:
+            if block.parent_id is None:
+                roots.append(block.block_id)
+            else:
+                children_by_id[block.parent_id].append(block.block_id)
+
+        entered_at: dict[str, int] = {}
+        exited_at: dict[str, int] = {}
+        traversal_index = 0
+        for root in roots:
+            traversal = [(root, False)]
+            while traversal:
+                block_id, exiting = traversal.pop()
+                if exiting:
+                    exited_at[block_id] = traversal_index
+                    traversal_index += 1
                     continue
-                if (
-                    second.block_id in ancestors_by_id[first.block_id]
-                    or first.block_id in ancestors_by_id[second.block_id]
-                ):
-                    continue
+                entered_at[block_id] = traversal_index
+                traversal_index += 1
+                traversal.append((block_id, True))
+                for child_id in reversed(children_by_id[block_id]):
+                    traversal.append((child_id, False))
+
+        ordered_blocks = sorted(
+            self.blocks,
+            key=lambda block: (
+                block.global_start,
+                -block.global_end,
+                depth_by_id[block.block_id],
+                block.block_id,
+            ),
+        )
+        active: list[TextBlock] = []
+        for block in ordered_blocks:
+            while active and active[-1].global_end <= block.global_start:
+                active.pop()
+            overlapping = (
+                _last_block_starting_before(active, block.global_start)
+                if block.global_start == block.global_end
+                else (active[-1] if active else None)
+            )
+            if overlapping is not None and not _is_ancestor(
+                overlapping.block_id,
+                block.block_id,
+                entered_at,
+                exited_at,
+            ):
                 raise ValueError(
                     "block ranges may overlap only through ancestor-descendant containment"
                 )
+            if block.global_start < block.global_end:
+                active.append(block)
         return self
+
+
+def preflight_document_payload(
+    value: object,
+    *,
+    max_blocks: int = MAX_CANONICAL_RESULT_BLOCKS,
+    max_total_codepoints: int = MAX_CANONICAL_RESULT_TOTAL_CODEPOINTS,
+    max_total_utf8_bytes: int = MAX_CANONICAL_RESULT_TOTAL_UTF8_BYTES,
+) -> None:
+    if not isinstance(value, Mapping):
+        raise DocumentPayloadShapeError(
+            "Canonical document payload must be an object."
+        )
+    text = value.get("text")
+    blocks = value.get("blocks")
+    if not isinstance(text, str) or not isinstance(blocks, list | tuple):
+        raise DocumentPayloadShapeError(
+            "Canonical document text and blocks are required."
+        )
+    if len(blocks) > max_blocks:
+        raise DocumentPayloadLimitError(
+            "Canonical document block count exceeds the configured limit."
+        )
+    try:
+        validate_revision_text(text)
+        total_codepoints = len(text)
+        total_utf8_bytes = len(text.encode("utf-8"))
+        for entry in blocks:
+            block_text: object
+            if isinstance(entry, TextBlock):
+                block_text = entry.text
+            elif isinstance(entry, Mapping):
+                block_text = entry.get("text")
+            else:
+                raise DocumentPayloadShapeError(
+                    "Canonical document blocks must be objects."
+                )
+            if not isinstance(block_text, str):
+                raise DocumentPayloadShapeError(
+                    "Canonical document block text must be a string."
+                )
+            total_codepoints += len(block_text)
+            total_utf8_bytes += len(block_text.encode("utf-8"))
+            if (
+                total_codepoints > max_total_codepoints
+                or total_utf8_bytes > max_total_utf8_bytes
+            ):
+                raise DocumentPayloadLimitError(
+                    "Canonical document aggregate text exceeds the configured limit."
+                )
+    except (TextDiffLimitError, UnicodeEncodeError) as error:
+        raise DocumentPayloadLimitError(
+            "Canonical document text exceeds the configured limit."
+        ) from error
+
+
+def _last_block_starting_before(
+    blocks: list[TextBlock],
+    position: int,
+) -> TextBlock | None:
+    low = 0
+    high = len(blocks)
+    while low < high:
+        middle = low + (high - low) // 2
+        if blocks[middle].global_start < position:
+            low = middle + 1
+        else:
+            high = middle
+    return None if low == 0 else blocks[low - 1]
+
+
+def _is_ancestor(
+    ancestor_id: str,
+    descendant_id: str,
+    entered_at: dict[str, int],
+    exited_at: dict[str, int],
+) -> bool:
+    return (
+        entered_at[ancestor_id] <= entered_at[descendant_id]
+        and exited_at[descendant_id] <= exited_at[ancestor_id]
+    )

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from uuid import UUID
 
+import pytest
 from fastapi import FastAPI
 
 from text_verification.application.job_recheck import JobRecheckResult
+from text_verification.config import Settings, get_settings
 from text_verification.domain.documents import FileType
 from text_verification.domain.verification import (
     Scenario,
@@ -89,3 +91,90 @@ def test_job_bound_recheck_returns_fresh_result_and_opaque_grant(
     assert payload["result"]["text"] == "重新检查文本"
     assert payload["result"]["success"] is True
     assert calls[0][0:2] == (JOB_ID, "重新检查文本")
+
+
+def test_recheck_accepts_multipart_text_above_framework_default_when_configured(
+    client,
+    app: FastAPI,
+    tmp_path,
+) -> None:
+    from text_verification.api.dependencies import get_job_recheck_service
+
+    text = "a" * (1024 * 1024 + 1)
+    calls: list[int] = []
+
+    class FakeService:
+        def recheck(self, job_id, submitted_text, options):
+            del job_id, options
+            calls.append(len(submitted_text))
+            return JobRecheckResult(result=result(), grant="opaque-grant")
+
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        app_env="test",
+        storage_root=tmp_path,
+        max_upload_bytes=len(text),
+    )
+    app.dependency_overrides[get_job_recheck_service] = FakeService
+
+    response = client.post(
+        f"/api/v1/jobs/{JOB_ID}/recheck",
+        files={"text": (None, text)},
+    )
+
+    assert response.status_code == 200
+    assert calls == [len(text)]
+
+
+def test_recheck_multipart_text_limit_is_inclusive(
+    client,
+    app: FastAPI,
+    tmp_path,
+) -> None:
+    from text_verification.api.dependencies import get_job_recheck_service
+
+    calls: list[str] = []
+
+    class FakeService:
+        def recheck(self, job_id, submitted_text, options):
+            del job_id, options
+            calls.append(submitted_text)
+            return JobRecheckResult(result=result(), grant="opaque-grant")
+
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        app_env="test",
+        storage_root=tmp_path,
+        max_upload_bytes=8,
+    )
+    app.dependency_overrides[get_job_recheck_service] = FakeService
+
+    accepted = client.post(
+        f"/api/v1/jobs/{JOB_ID}/recheck",
+        files={"text": (None, "12345678")},
+    )
+    rejected = client.post(
+        f"/api/v1/jobs/{JOB_ID}/recheck",
+        files={"text": (None, "123456789")},
+    )
+
+    assert accepted.status_code == 200
+    assert rejected.status_code == 413
+    assert calls == ["12345678"]
+
+
+def test_recheck_validation_errors_do_not_reflect_form_secrets(
+    client,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret = "recheck-form-secret-never-reflect"
+
+    response = client.post(
+        f"/api/v1/jobs/{JOB_ID}/recheck",
+        files={
+            "text": (None, "text"),
+            "scenario": (None, secret),
+        },
+    )
+
+    assert response.status_code == 422
+    assert secret not in response.text
+    assert secret not in caplog.text

@@ -11,7 +11,13 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
 from text_verification.document_processing.pdf_models import OcrRequirement
-from text_verification.domain.documents import DocumentMetadata, DocumentModel, FileType, TextBlock
+from text_verification.domain.documents import (
+    DocumentMetadata,
+    DocumentModel,
+    FileType,
+    TextBlock,
+    preflight_document_payload,
+)
 from text_verification.domain.issues import Issue
 from text_verification.domain.text_edits import (
     MAX_REVISION_TEXT_CODEPOINTS,
@@ -185,7 +191,16 @@ class DocumentRevisionKind(StrEnum):
     MANUAL = "manual"
 
 
+class RevisionProvenanceKind(StrEnum):
+    ORIGINAL_RESULT = "original_result"
+    RECHECK_RESULT = "recheck_result"
+
+
 class StaleReviewRevisionError(ValueError):
+    pass
+
+
+class InvalidRevisionProvenanceError(ValueError):
     pass
 
 
@@ -208,6 +223,27 @@ class ReviewRevisionDraft(BaseModel):
         return self
 
 
+class RevisionBaseResult(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    document_id: UUID
+    verification_run_id: UUID
+    source_version: str = Field(min_length=1, max_length=500)
+
+
+class VerifiedRevisionBaseResult(RevisionBaseResult):
+    text_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class VerifiedRevisionProvenance(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: RevisionProvenanceKind
+    job_id: UUID
+    base_result: VerifiedRevisionBaseResult
+    revision_text_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class RecheckProvenance(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -215,20 +251,20 @@ class RecheckProvenance(BaseModel):
     result_document_id: UUID
     result_verification_run_id: UUID
     result_source_version: str = Field(min_length=1, max_length=500)
-    recheck_text: str = Field(max_length=MAX_REVISION_TEXT_CODEPOINTS)
-
-    @model_validator(mode="after")
-    def validate_recheck_text(self) -> RecheckProvenance:
-        validate_revision_text(self.recheck_text)
-        return self
 
 
 class ReviewRevisionSubmission(ReviewRevisionDraft):
+    base_result: RevisionBaseResult
     recheck_provenance: RecheckProvenance | None = None
 
     def draft(self) -> ReviewRevisionDraft:
         return ReviewRevisionDraft.model_validate(
-            self.model_dump(exclude={"recheck_provenance"})
+            self.model_dump(
+                exclude={
+                    "base_result",
+                    "recheck_provenance",
+                }
+            )
         )
 
 
@@ -236,6 +272,11 @@ class PersistedDocumentRevision(ReviewRevisionDraft):
     revision_number: int = Field(gt=0)
     created_at: datetime
     persistence_state: Literal["persisted"] = "persisted"
+    verified_provenance: VerifiedRevisionProvenance | None = Field(
+        default=None,
+        exclude=True,
+        repr=False,
+    )
 
 
 class VerificationDegradation(BaseModel):
@@ -267,6 +308,12 @@ class VerificationResult(BaseModel):
     analysis_mode: VerificationAnalysisMode
     dictionary_versions: dict[str, str] = Field(default_factory=dict)
     degradation: VerificationDegradation = Field(default_factory=VerificationDegradation)
+
+    @model_validator(mode="before")
+    @classmethod
+    def preflight_result_payload(cls, value: object) -> object:
+        preflight_document_payload(value)
+        return value
 
     @model_validator(mode="after")
     def validate_issues_and_summary(self) -> VerificationResult:

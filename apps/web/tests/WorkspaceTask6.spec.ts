@@ -241,7 +241,7 @@ describe('WorkspaceView Task 6 integration', () => {
     expect(
       useWorkspaceSession(window.sessionStorage, probeWorkspace).restore()
     ).not.toBeNull()
-    const persistRevision = vi.fn(async (_jobId, draft) => ({
+    const persistRevision = vi.fn(async (_jobId, draft, _baseResult) => ({
       ...draft,
       revision_number: 1,
       created_at: '2026-09-03T04:00:00.000Z',
@@ -266,6 +266,12 @@ describe('WorkspaceView Task 6 integration', () => {
       persistence_state: 'draft',
       kind: 'review',
       text: '账号测试'
+    })
+    expect(persistRevision.mock.calls[0]?.[2]).toMatchObject({
+      document_id: result.document_id,
+      verification_run_id: result.verification_run_id,
+      source_version: result.source_version,
+      text: result.text
     })
     expect(exportJob).toHaveBeenCalledWith(
       result.document_id,
@@ -496,12 +502,17 @@ describe('WorkspaceView Task 6 integration', () => {
           kind: 'manual',
           text: '手工修改文本'
         }),
+        expect.objectContaining({
+          document_id: checked.document_id,
+          verification_run_id: checked.verification_run_id,
+          source_version: checked.source_version,
+          text: checked.text
+        }),
         {
           grant: recheckGrant,
           result_document_id: checked.document_id,
           result_verification_run_id: checked.verification_run_id,
-          result_source_version: checked.source_version,
-          recheck_text: checked.text
+          result_source_version: checked.source_version
         }
       )
       const persistedDraft = persistRevision.mock.calls[0]?.[1]
@@ -510,14 +521,7 @@ describe('WorkspaceView Task 6 integration', () => {
         expectedFormat,
         persistedDraft?.revision_id,
         true,
-        expect.any(Function),
-        {
-          grant: recheckGrant,
-          result_document_id: checked.document_id,
-          result_verification_run_id: checked.verification_run_id,
-          result_source_version: checked.source_version,
-          recheck_text: checked.text
-        }
+        expect.any(Function)
       )
     }
   )

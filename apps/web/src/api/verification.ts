@@ -38,6 +38,7 @@ export interface VerificationApi {
   persistRevision(
     jobId: string,
     revision: DraftDocumentRevision,
+    baseResult: VerificationResult,
     recheckProvenance?: RecheckProvenance
   ): Promise<PersistedDocumentRevision>
   exportJob(
@@ -45,8 +46,7 @@ export interface VerificationApi {
     format: ExportArtifactReference['format'],
     revisionId: string | null,
     trackChanges: boolean,
-    isCurrent: () => boolean,
-    recheckProvenance?: RecheckProvenance
+    isCurrent: () => boolean
   ): Promise<void>
 }
 
@@ -114,7 +114,12 @@ export function createVerificationApi(fetchImpl: typeof fetch = fetch): Verifica
       const response = await fetchImpl(`${API_BASE}/export`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(result)
+        body: JSON.stringify({
+          filename: result.filename,
+          stats: result.stats,
+          summary: result.summary,
+          issues: result.issues
+        })
       })
       await downloadResponse(response, '原文检查报告.html')
     },
@@ -132,7 +137,12 @@ export function createVerificationApi(fetchImpl: typeof fetch = fetch): Verifica
       })
       await downloadResponse(response, `修改版_${result.filename}`)
     },
-    persistRevision: async (jobId, revision, recheckProvenance) => {
+    persistRevision: async (
+      jobId,
+      revision,
+      baseResult,
+      recheckProvenance
+    ) => {
       const response = await fetchImpl(`${API_BASE}/jobs/${jobId}/revisions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -144,6 +154,11 @@ export function createVerificationApi(fetchImpl: typeof fetch = fetch): Verifica
           parent_revision_id: revision.parent_revision_id,
           kind: revision.kind,
           text: revision.text,
+          base_result: {
+            document_id: baseResult.document_id,
+            verification_run_id: baseResult.verification_run_id,
+            source_version: baseResult.source_version
+          },
           ...(recheckProvenance === undefined
             ? {}
             : { recheck_provenance: recheckProvenance })
@@ -168,8 +183,7 @@ export function createVerificationApi(fetchImpl: typeof fetch = fetch): Verifica
       format,
       revisionId,
       trackChanges,
-      isCurrent,
-      recheckProvenance
+      isCurrent
     ) => {
       const response = await fetchImpl(`${API_BASE}/jobs/${jobId}/exports`, {
         method: 'POST',
@@ -177,10 +191,7 @@ export function createVerificationApi(fetchImpl: typeof fetch = fetch): Verifica
         body: JSON.stringify({
           format,
           revision_id: revisionId,
-          track_changes: trackChanges,
-          ...(recheckProvenance === undefined
-            ? {}
-            : { recheck_provenance: recheckProvenance })
+          track_changes: trackChanges
         })
       })
       if (!isCurrent()) {

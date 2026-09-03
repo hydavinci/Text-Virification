@@ -42,8 +42,10 @@ from text_verification.domain.issues import Issue, IssueSeverity
 from text_verification.domain.jobs import JobStatus
 from text_verification.domain.verification import (
     DocumentRevisionKind,
+    InvalidRevisionProvenanceError,
     PersistedDocumentRevision,
     ReviewRevisionDraft,
+    RevisionProvenanceKind,
     Scenario,
     VerificationAnalysisMode,
     VerificationDegradation,
@@ -51,6 +53,8 @@ from text_verification.domain.verification import (
     VerificationResult,
     VerificationStatistics,
     VerificationSummary,
+    VerifiedRevisionBaseResult,
+    VerifiedRevisionProvenance,
 )
 from text_verification.infrastructure.orm import (
     Base,
@@ -91,6 +95,31 @@ ARTIFACT_STORAGE_KEY = build_artifact_storage_key(
     ARTIFACT_ID,
     FileType.DOCX,
 )
+
+
+def _verified_provenance(
+    revision_text: str,
+    *,
+    job_id: UUID = JOB_ID,
+) -> VerifiedRevisionProvenance:
+    digest = sha256(revision_text.encode()).hexdigest()
+    return VerifiedRevisionProvenance(
+        kind=RevisionProvenanceKind.RECHECK_RESULT,
+        job_id=job_id,
+        base_result=VerifiedRevisionBaseResult(
+            document_id=(
+                DOCUMENT_ID
+                if job_id == JOB_ID
+                else SECOND_DOCUMENT_ID
+            ),
+            verification_run_id=(
+                RUN_ID if job_id == JOB_ID else SECOND_RUN_ID
+            ),
+            source_version="sha256:verified-recheck",
+            text_sha256=digest,
+        ),
+        revision_text_sha256=digest,
+    )
 
 
 @pytest.fixture
@@ -716,6 +745,7 @@ def test_save_review_revision_and_export_artifact_preserves_identity_and_source(
         revision_number=1,
         text="账号测试\n第二行",
         created_at=CREATED_AT + timedelta(minutes=1),
+        verified_provenance=_verified_provenance("账号测试\n第二行"),
     )
     repository.commit()
     service = _artifact_service_for_session(artifact_storage, db_session)
@@ -727,6 +757,7 @@ def test_save_review_revision_and_export_artifact_preserves_identity_and_source(
         revision_number=1,
         text="账号测试\n第二行",
         created_at=CREATED_AT + timedelta(minutes=1),
+        verified_provenance=_verified_provenance("账号测试\n第二行"),
     )
     repository.commit()
     second = service.persist(request)
@@ -788,16 +819,19 @@ def test_persist_review_revision_allocates_server_numbers_and_preserves_parent_c
         JOB_ID,
         first_draft,
         created_at=CREATED_AT + timedelta(minutes=1),
+        verified_provenance=_verified_provenance(first_draft.text),
     )
     second = repository.persist_review_revision(
         JOB_ID,
         second_draft,
         created_at=CREATED_AT + timedelta(minutes=2),
+        verified_provenance=_verified_provenance(second_draft.text),
     )
     retried = repository.persist_review_revision(
         JOB_ID,
         first_draft,
         created_at=CREATED_AT + timedelta(minutes=3),
+        verified_provenance=_verified_provenance(first_draft.text),
     )
     repository.commit()
 
@@ -805,11 +839,13 @@ def test_persist_review_revision_allocates_server_numbers_and_preserves_parent_c
         **first_draft.model_dump(),
         revision_number=1,
         created_at=CREATED_AT + timedelta(minutes=1),
+        verified_provenance=_verified_provenance(first_draft.text),
     )
     assert second == PersistedDocumentRevision(
         **second_draft.model_dump(),
         revision_number=2,
         created_at=CREATED_AT + timedelta(minutes=2),
+        verified_provenance=_verified_provenance(second_draft.text),
     )
     assert retried == first
     rows = db_session.scalars(
@@ -817,6 +853,71 @@ def test_persist_review_revision_allocates_server_numbers_and_preserves_parent_c
     ).all()
     assert [row.parent_revision_id for row in rows] == [None, REVISION_ID]
     assert [row.kind for row in rows] == ["review", "manual"]
+    assert [row.verified_provenance for row in rows] == [
+        _verified_provenance(first_draft.text).model_dump(mode="json"),
+        _verified_provenance(second_draft.text).model_dump(mode="json"),
+    ]
+
+
+def test_persist_review_revision_rejects_cross_job_verified_provenance(
+    db_session: Session,
+) -> None:
+    _create_job(db_session)
+    repository = VerificationRepository(db_session)
+    repository.save_result(JOB_ID, _result())
+    draft = ReviewRevisionDraft(
+        revision_id=REVISION_ID,
+        document_id=DOCUMENT_ID,
+        verification_run_id=RUN_ID,
+        source_version="sha256:source-v7",
+        parent_revision_id=None,
+        kind=DocumentRevisionKind.MANUAL,
+        text="authorized text",
+    )
+
+    with pytest.raises(InvalidRevisionProvenanceError, match="job or text"):
+        repository.persist_review_revision(
+            JOB_ID,
+            draft,
+            created_at=CREATED_AT,
+            verified_provenance=_verified_provenance(
+                draft.text,
+                job_id=SECOND_JOB_ID,
+            ),
+        )
+
+
+def test_read_export_revision_rejects_tampered_stored_provenance(
+    db_session: Session,
+) -> None:
+    _create_job(db_session)
+    repository = VerificationRepository(db_session)
+    repository.save_result(JOB_ID, _result())
+    draft = ReviewRevisionDraft(
+        revision_id=REVISION_ID,
+        document_id=DOCUMENT_ID,
+        verification_run_id=RUN_ID,
+        source_version="sha256:source-v7",
+        parent_revision_id=None,
+        kind=DocumentRevisionKind.MANUAL,
+        text="authorized text",
+    )
+    repository.persist_review_revision(
+        JOB_ID,
+        draft,
+        created_at=CREATED_AT,
+        verified_provenance=_verified_provenance(draft.text),
+    )
+    row = db_session.get(ReviewRevisionRow, REVISION_ID)
+    assert row is not None and row.verified_provenance is not None
+    row.verified_provenance = {
+        **row.verified_provenance,
+        "revision_text_sha256": "0" * 64,
+    }
+    db_session.flush()
+
+    with pytest.raises(InvalidRevisionProvenanceError):
+        repository.read_export_revision(JOB_ID, RUN_ID, REVISION_ID)
 
 
 @pytest.mark.parametrize(
@@ -868,6 +969,10 @@ def test_persist_review_revision_rejects_foreign_or_stale_identity(
             job_id,
             draft,
             created_at=CREATED_AT,
+            verified_provenance=_verified_provenance(
+                draft.text,
+                job_id=job_id,
+            ),
         )
 
 
@@ -886,7 +991,12 @@ def test_persist_review_revision_rejects_stale_parent_after_newer_revision(
         kind=DocumentRevisionKind.REVIEW,
         text="账号测试",
     )
-    repository.persist_review_revision(JOB_ID, first, created_at=CREATED_AT)
+    repository.persist_review_revision(
+        JOB_ID,
+        first,
+        created_at=CREATED_AT,
+        verified_provenance=_verified_provenance(first.text),
+    )
 
     with pytest.raises(ValueError, match="latest persisted revision"):
         repository.persist_review_revision(
@@ -901,6 +1011,7 @@ def test_persist_review_revision_rejects_stale_parent_after_newer_revision(
                 text="分叉文本",
             ),
             created_at=CREATED_AT + timedelta(minutes=1),
+            verified_provenance=_verified_provenance("分叉文本"),
         )
 
 
@@ -922,6 +1033,7 @@ def test_reserve_export_artifact_rejects_a_superseded_review_revision(
             text="first",
         ),
         created_at=CREATED_AT,
+        verified_provenance=_verified_provenance("first"),
     )
     repository.persist_review_revision(
         JOB_ID,
@@ -935,6 +1047,7 @@ def test_reserve_export_artifact_rejects_a_superseded_review_revision(
             text="second",
         ),
         created_at=CREATED_AT + timedelta(minutes=1),
+        verified_provenance=_verified_provenance("second"),
     )
 
     with pytest.raises(ValueError, match="latest persisted revision"):
@@ -972,6 +1085,7 @@ def test_finalize_export_artifact_retains_owned_pending_reservation_for_compensa
             text="first",
         ),
         created_at=CREATED_AT,
+        verified_provenance=_verified_provenance("first"),
     )
     reservation = repository.reserve_export_artifact(
         export_artifact_id=ARTIFACT_ID,
@@ -999,6 +1113,7 @@ def test_finalize_export_artifact_retains_owned_pending_reservation_for_compensa
             text="second",
         ),
         created_at=CREATED_AT + timedelta(minutes=1),
+        verified_provenance=_verified_provenance("second"),
     )
 
     result = repository.finalize_export_artifact(
@@ -1392,6 +1507,7 @@ def test_save_review_revision_rejects_source_version_mismatch(
             revision_number=1,
             text="账号测试\n第二行",
             created_at=CREATED_AT + timedelta(minutes=1),
+            verified_provenance=_verified_provenance("账号测试\n第二行"),
         )
 
 
@@ -1443,6 +1559,7 @@ def test_database_rejects_review_document_and_source_from_another_run(
         revision_number=1,
         text="账号测试",
         created_at=CREATED_AT,
+        verified_provenance=_verified_provenance("账号测试"),
     )
     repository.commit()
 
@@ -1488,6 +1605,10 @@ def test_database_rejects_artifact_revision_from_another_run(
         revision_number=1,
         text="账号测试",
         created_at=CREATED_AT,
+        verified_provenance=_verified_provenance(
+            "账号测试",
+            job_id=SECOND_JOB_ID,
+        ),
     )
     repository.commit()
     _artifact_service_for_session(artifact_storage, db_session).persist(
@@ -1603,6 +1724,7 @@ def test_concurrent_review_revision_conflict_raises_value_error(
                 revision_number=1,
                 text="first",
                 created_at=CREATED_AT,
+                verified_provenance=_verified_provenance("first"),
             )
             first_saved.set()
             if not allow_first_commit.wait(timeout=2):
@@ -1627,6 +1749,7 @@ def test_concurrent_review_revision_conflict_raises_value_error(
                 revision_number=1,
                 text="second",
                 created_at=CREATED_AT,
+                verified_provenance=_verified_provenance("second"),
             )
             repository.commit()
             return None
@@ -1699,6 +1822,9 @@ def test_concurrent_persist_review_revisions_allocate_unique_sequential_numbers(
                 JOB_ID,
                 first_draft,
                 created_at=CREATED_AT,
+                verified_provenance=_verified_provenance(
+                    first_draft.text
+                ),
             )
             first_saved.set()
             if not allow_first_commit.wait(timeout=5):
@@ -1721,6 +1847,9 @@ def test_concurrent_persist_review_revisions_allocate_unique_sequential_numbers(
                 JOB_ID,
                 second_draft,
                 created_at=CREATED_AT + timedelta(minutes=1),
+                verified_provenance=_verified_provenance(
+                    second_draft.text
+                ),
             )
             repository.commit()
             return persisted
@@ -1797,6 +1926,7 @@ def test_concurrent_persist_review_revision_uuid_retry_is_idempotent(
                 JOB_ID,
                 draft,
                 created_at=created_at,
+                verified_provenance=_verified_provenance(draft.text),
             )
             if hold:
                 first_saved.set()
@@ -1881,6 +2011,7 @@ def test_concurrent_persist_review_revision_rejects_stale_parent_or_uuid_collisi
                     text="first",
                 ),
                 created_at=CREATED_AT,
+                verified_provenance=_verified_provenance("first"),
             )
             first_saved.set()
             if not allow_first_commit.wait(timeout=5):
@@ -1910,6 +2041,7 @@ def test_concurrent_persist_review_revision_rejects_stale_parent_or_uuid_collisi
                     text=second_text,
                 ),
                 created_at=CREATED_AT + timedelta(minutes=1),
+                verified_provenance=_verified_provenance(second_text),
             )
             repository.commit()
             return None

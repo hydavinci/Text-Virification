@@ -3,11 +3,12 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from text_verification.api.router import api_router
 from text_verification.application import build_default_verification_pipeline
-from text_verification.config import get_settings
+from text_verification.config import get_settings, validate_runtime_settings
 
 
 def create_app() -> FastAPI:
     settings = get_settings()
+    validate_runtime_settings(settings)
     app = FastAPI(title="text-verification", version="0.1.0")
     app.state.verification_pipeline = build_default_verification_pipeline(settings)
     app.add_middleware(

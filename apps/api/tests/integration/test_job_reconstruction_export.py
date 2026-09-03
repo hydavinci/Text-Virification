@@ -22,10 +22,6 @@ from text_verification.application import (
 from text_verification.application import reconstruction_export as reconstruction_export_module
 from text_verification.application.artifact_service import ArtifactPersistenceService
 from text_verification.application.factory import build_default_exporter_registry
-from text_verification.application.recheck_provenance import (
-    RecheckGrantBinding,
-    RecheckProvenanceGrantService,
-)
 from text_verification.application.reconstruction_export import (
     ReconstructionExportService,
     _document_with_revision_text,
@@ -43,7 +39,6 @@ from text_verification.domain.jobs import JobProgressStage, JobRead, JobStatus
 from text_verification.domain.verification import (
     DocumentRevisionKind,
     PersistedDocumentRevision,
-    RecheckProvenance,
     Scenario,
     StaleReviewRevisionError,
     VerificationAnalysisMode,
@@ -97,7 +92,36 @@ class _RepositoryState:
     newer_revision_on_artifact_read: PersistedDocumentRevision | None = None
     snapshot_reads: int = 0
     repair_transition_pending_commit: bool = False
+    authorize_missing_revisions: bool = True
     lock: RLock = field(default_factory=RLock)
+
+    def __post_init__(self) -> None:
+        if not self.authorize_missing_revisions:
+            return
+        for revision_id, revision in tuple(self.revisions.items()):
+            if revision.verified_provenance is not None:
+                continue
+            matched = next(
+                (
+                    (job_id, result)
+                    for job_id, result in self.result_by_job.items()
+                    if result.verification_run_id
+                    == revision.verification_run_id
+                ),
+                None,
+            )
+            if matched is None:
+                continue
+            job_id, result = matched
+            self.revisions[revision_id] = revision.model_copy(
+                update={
+                    "verified_provenance": _verified_revision_provenance(
+                        job_id,
+                        result,
+                        revision.text,
+                    )
+                }
+            )
 
 
 class _InMemoryExportRepository:
@@ -422,7 +446,6 @@ def _service(
     registry_calls: list[object] | None = None,
     max_revision_bytes: int | None = None,
     max_revision_codepoints: int | None = None,
-    recheck_grant_service: RecheckProvenanceGrantService | None = None,
 ) -> ReconstructionExportService:
     def registry_factory(resolver):
         if registry_calls is not None:
@@ -440,7 +463,6 @@ def _service(
         _repository_factory(state),
         exporter_registry_factory=registry_factory,
         max_revision_bytes=max_revision_bytes,
-        recheck_grant_service=recheck_grant_service,
         **kwargs,
     )
 
@@ -493,6 +515,40 @@ def _projection_block(
         style={"spans": []},
         source_locator={},
     )
+
+
+def _verified_revision_provenance(
+    job_id: UUID,
+    result: VerificationResult,
+    revision_text: str,
+    *,
+    kind: str = "recheck_result",
+) -> dict[str, object]:
+    return {
+        "kind": kind,
+        "job_id": str(job_id),
+        "base_result": {
+            "document_id": str(
+                result.document_id if kind == "original_result" else uuid4()
+            ),
+            "verification_run_id": str(
+                result.verification_run_id if kind == "original_result" else uuid4()
+            ),
+            "source_version": (
+                result.source_version
+                if kind == "original_result"
+                else "sha256:" + "b" * 64
+            ),
+            "text_sha256": sha256(
+                (
+                    result.text
+                    if kind == "original_result"
+                    else revision_text
+                ).encode()
+            ).hexdigest(),
+        },
+        "revision_text_sha256": sha256(revision_text.encode()).hexdigest(),
+    }
 
 
 def _export_projected_revision(
@@ -691,6 +747,52 @@ def test_reconstruction_exports_repeated_adjacent_blocks_without_crossing_separa
     )
 
     assert paragraphs == expected_paragraphs
+    assert "\n".join(paragraphs) == revised
+    assert tables == []
+
+
+@pytest.mark.parametrize(
+    ("source_owners", "target_owners"),
+    [
+        (["a\na", "a"], ["a", ""]),
+        (["a", ""], ["a\na", "a"]),
+        (["same\nsame", "same"], ["same", ""]),
+        (["same", ""], ["same\nsame", "same"]),
+        (["😀\n😀", "😀"], ["😀", ""]),
+        (["😀", ""], ["😀\n😀", "😀"]),
+    ],
+)
+def test_reconstruction_aligns_complete_multiline_repeated_owner_sequences(
+    tmp_path: Path,
+    source_owners: list[str],
+    target_owners: list[str],
+) -> None:
+    source = "\n".join(source_owners)
+    revised = "\n".join(target_owners)
+    first_end = len(source_owners[0])
+    paragraphs, tables = _export_projected_revision(
+        tmp_path,
+        source=source,
+        revised=revised,
+        blocks=[
+            _projection_block(
+                "first",
+                "paragraph",
+                source_owners[0],
+                0,
+                first_end,
+            ),
+            _projection_block(
+                "second",
+                "paragraph",
+                source_owners[1],
+                first_end + 1,
+                len(source),
+            ),
+        ],
+    )
+
+    assert paragraphs == target_owners
     assert "\n".join(paragraphs) == revised
     assert tables == []
 
@@ -1035,6 +1137,88 @@ def test_reconstruction_exports_exact_repeated_unicode_revision_without_loss(
         assert download.handle.read_bytes()
 
 
+def test_export_rejects_revision_without_stored_verified_provenance(
+    tmp_path: Path,
+) -> None:
+    storage = JobStorage(tmp_path / "jobs", max_upload_bytes=5 * 1024 * 1024)
+    job, result = _job_and_result(storage)
+    revision_id = uuid4()
+    state = _RepositoryState(
+        {job.job_id: result},
+        revisions={
+            revision_id: PersistedDocumentRevision(
+                revision_id=revision_id,
+                document_id=result.document_id,
+                verification_run_id=result.verification_run_id,
+                source_version=result.source_version,
+                revision_number=1,
+                created_at=job.created_at + timedelta(minutes=1),
+                parent_revision_id=None,
+                persistence_state="persisted",
+                kind=DocumentRevisionKind.MANUAL,
+                text=result.text,
+            )
+        },
+        authorize_missing_revisions=False,
+    )
+
+    with pytest.raises(VerificationError) as raised:
+        _service(storage, state).export(
+            job,
+            ExportFormat.DOCX_RECONSTRUCTION,
+            review_revision_id=revision_id,
+        )
+
+    assert raised.value.code == "revision_provenance_invalid"
+    assert state.artifacts == {}
+
+
+@pytest.mark.parametrize(
+    "provenance_update",
+    [
+        {"job_id": str(uuid4())},
+        {"revision_text_sha256": "0" * 64},
+    ],
+)
+def test_export_rejects_tampered_or_cross_job_stored_provenance(
+    tmp_path: Path,
+    provenance_update: dict[str, object],
+) -> None:
+    storage = JobStorage(tmp_path / "jobs", max_upload_bytes=5 * 1024 * 1024)
+    job, result = _job_and_result(storage)
+    revision_id = uuid4()
+    provenance = {
+        **_verified_revision_provenance(job.job_id, result, result.text),
+        **provenance_update,
+    }
+    revision = PersistedDocumentRevision(
+        revision_id=revision_id,
+        document_id=result.document_id,
+        verification_run_id=result.verification_run_id,
+        source_version=result.source_version,
+        revision_number=1,
+        created_at=job.created_at + timedelta(minutes=1),
+        parent_revision_id=None,
+        persistence_state="persisted",
+        kind=DocumentRevisionKind.MANUAL,
+        text=result.text,
+    ).model_copy(update={"verified_provenance": provenance})
+    state = _RepositoryState(
+        {job.job_id: result},
+        revisions={revision_id: revision},
+    )
+
+    with pytest.raises(VerificationError) as raised:
+        _service(storage, state).export(
+            job,
+            ExportFormat.DOCX_RECONSTRUCTION,
+            review_revision_id=revision_id,
+        )
+
+    assert raised.value.code == "revision_provenance_invalid"
+    assert state.artifacts == {}
+
+
 def test_reconstruction_rejects_structure_conflict_before_artifact_reservation(
     tmp_path: Path,
 ) -> None:
@@ -1313,12 +1497,16 @@ def test_reconstructs_the_persisted_revision_text_and_keys_artifact_by_revision(
     download.handle.close()
 
 
-def test_valid_recheck_grant_authorizes_revision_export(
+def test_valid_stored_recheck_provenance_authorizes_export_without_request_grant(
     tmp_path: Path,
 ) -> None:
     storage = JobStorage(tmp_path / "jobs", max_upload_bytes=5 * 1024 * 1024)
     job, result = _job_and_result(storage)
     revision_id = uuid4()
+    revision_text = result.text.replace(
+        "test@example.com",
+        "rechecked@example.com",
+    )
     revision = PersistedDocumentRevision(
         revision_id=revision_id,
         document_id=result.document_id,
@@ -1329,88 +1517,70 @@ def test_valid_recheck_grant_authorizes_revision_export(
         parent_revision_id=None,
         persistence_state="persisted",
         kind=DocumentRevisionKind.MANUAL,
-        text=result.text.replace("test@example.com", "rechecked@example.com"),
+        text=revision_text,
+    ).model_copy(
+        update={
+            "verified_provenance": _verified_revision_provenance(
+                job.job_id,
+                result,
+                revision_text,
+            )
+        }
     )
     state = _RepositoryState(
         {job.job_id: result},
         revisions={revision_id: revision},
     )
-    grants = RecheckProvenanceGrantService(
-        "server-owned-recheck-grant-secret-32-bytes",
-        now_factory=lambda: job.created_at + timedelta(minutes=2),
-    )
-    binding = RecheckGrantBinding(
-        job_id=job.job_id,
-        original_document_id=result.document_id,
-        original_verification_run_id=result.verification_run_id,
-        original_source_version=result.source_version,
-        submitted_text="重新检查基线",
-        result_document_id=uuid4(),
-        result_verification_run_id=uuid4(),
-        result_source_version="sha256:" + "b" * 64,
-    )
-    provenance = RecheckProvenance(
-        grant=grants.issue(binding),
-        result_document_id=binding.result_document_id,
-        result_verification_run_id=binding.result_verification_run_id,
-        result_source_version=binding.result_source_version,
-        recheck_text=binding.submitted_text,
-    )
 
-    artifact = _service(
-        storage,
-        state,
-        recheck_grant_service=grants,
-    ).export(
+    artifact = _service(storage, state).export(
         job,
         ExportFormat.DOCX_RECONSTRUCTION,
         review_revision_id=revision_id,
-        recheck_provenance=provenance,
     )
 
     assert state.artifacts[artifact.export_artifact_id].review_revision_id == revision_id
 
 
-def test_tampered_recheck_grant_result_is_rejected_before_export_artifact(
+def test_tampered_stored_recheck_base_digest_is_rejected_before_export_artifact(
     tmp_path: Path,
 ) -> None:
     storage = JobStorage(tmp_path / "jobs", max_upload_bytes=5 * 1024 * 1024)
     job, result = _job_and_result(storage)
-    grants = RecheckProvenanceGrantService(
-        "server-owned-recheck-grant-secret-32-bytes",
-        now_factory=lambda: job.created_at + timedelta(minutes=2),
+    revision_id = uuid4()
+    provenance = _verified_revision_provenance(
+        job.job_id,
+        result,
+        result.text,
     )
-    binding = RecheckGrantBinding(
-        job_id=job.job_id,
-        original_document_id=result.document_id,
-        original_verification_run_id=result.verification_run_id,
-        original_source_version=result.source_version,
-        submitted_text=result.text,
-        result_document_id=uuid4(),
-        result_verification_run_id=uuid4(),
-        result_source_version="sha256:" + "b" * 64,
+    provenance["base_result"] = {
+        **provenance["base_result"],
+        "text_sha256": "0" * 64,
+    }
+    revision = PersistedDocumentRevision(
+        revision_id=revision_id,
+        document_id=result.document_id,
+        verification_run_id=result.verification_run_id,
+        source_version=result.source_version,
+        revision_number=1,
+        created_at=job.created_at + timedelta(minutes=1),
+        parent_revision_id=None,
+        persistence_state="persisted",
+        kind=DocumentRevisionKind.MANUAL,
+        text=result.text,
+    ).model_copy(update={"verified_provenance": provenance})
+    state = _RepositoryState(
+        {job.job_id: result},
+        revisions={revision_id: revision},
     )
-    provenance = RecheckProvenance(
-        grant=grants.issue(binding),
-        result_document_id=uuid4(),
-        result_verification_run_id=binding.result_verification_run_id,
-        result_source_version=binding.result_source_version,
-        recheck_text=binding.submitted_text,
-    )
-    state = _RepositoryState({job.job_id: result})
 
     with pytest.raises(VerificationError) as raised:
-        _service(
-            storage,
-            state,
-            recheck_grant_service=grants,
-        ).export(
+        _service(storage, state).export(
             job,
             ExportFormat.DOCX_RECONSTRUCTION,
-            recheck_provenance=provenance,
+            review_revision_id=revision_id,
         )
 
-    assert raised.value.code == "recheck_provenance_invalid"
+    assert raised.value.code == "revision_provenance_invalid"
     assert state.artifacts == {}
 
 

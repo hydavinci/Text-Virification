@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass
@@ -30,8 +32,10 @@ from text_verification.domain.jobs import (
 )
 from text_verification.domain.verification import (
     DocumentRevisionKind,
+    InvalidRevisionProvenanceError,
     PersistedDocumentRevision,
     ReviewRevisionDraft,
+    RevisionProvenanceKind,
     Scenario,
     StaleReviewRevisionError,
     VerificationAnalysisMode,
@@ -40,6 +44,7 @@ from text_verification.domain.verification import (
     VerificationResult,
     VerificationStatistics,
     VerificationSummary,
+    VerifiedRevisionProvenance,
 )
 from text_verification.infrastructure.artifact_storage import (
     ArtifactRepairPreparation,
@@ -208,6 +213,22 @@ class VerificationRepository:
             ).all()
         )
 
+    def read_revision_result(
+        self,
+        job_id: UUID,
+        verification_run_id: UUID,
+    ) -> VerificationResult:
+        run = self._lock_run_result(verification_run_id)
+        if run.job_id != job_id:
+            raise ValueError(
+                f"Verification run {verification_run_id} does not belong "
+                f"to requested job {job_id}."
+            )
+        job = self._lock_job(run.job_id)
+        if JobStatus(job.status) not in RESULT_READY_STATUSES:
+            raise ValueError("Revision persistence requires a result-ready job.")
+        return _map_rows_to_result(run.document, run)
+
     def save_review_revision(
         self,
         *,
@@ -217,6 +238,7 @@ class VerificationRepository:
         revision_number: int,
         text: str,
         created_at: datetime,
+        verified_provenance: VerifiedRevisionProvenance | None = None,
     ) -> None:
         if revision_number < 1:
             raise ValueError("revision_number must be greater than zero.")
@@ -226,6 +248,13 @@ class VerificationRepository:
                 f"Review source version {source_version!r} does not match "
                 f"{run.document.source_version!r}."
             )
+        if verified_provenance is not None:
+            _assert_verified_revision_provenance(
+                run.job_id,
+                run,
+                text,
+                verified_provenance,
+            )
         existing = self._session.get(ReviewRevisionRow, review_revision_id)
         values = (
             verification_run_id,
@@ -233,6 +262,11 @@ class VerificationRepository:
             source_version,
             revision_number,
             text,
+            (
+                None
+                if verified_provenance is None
+                else verified_provenance.model_dump(mode="json")
+            ),
             created_at,
         )
         if existing is not None:
@@ -242,6 +276,7 @@ class VerificationRepository:
                 existing.source_version,
                 existing.revision_number,
                 existing.text,
+                existing.verified_provenance,
                 existing.created_at,
             )
             if persisted != values:
@@ -275,6 +310,11 @@ class VerificationRepository:
                         parent_revision_id=None,
                         kind=DocumentRevisionKind.REVIEW.value,
                         text=text,
+                        verified_provenance=(
+                            None
+                            if verified_provenance is None
+                            else verified_provenance.model_dump(mode="json")
+                        ),
                         created_at=created_at,
                     )
                 )
@@ -290,6 +330,7 @@ class VerificationRepository:
         draft: ReviewRevisionDraft,
         *,
         created_at: datetime,
+        verified_provenance: VerifiedRevisionProvenance,
     ) -> PersistedDocumentRevision:
         run = self._lock_run(draft.verification_run_id)
         if run.job_id != job_id:
@@ -307,6 +348,12 @@ class VerificationRepository:
                 f"Review source version {draft.source_version!r} does not match "
                 f"{run.document.source_version!r}."
             )
+        _assert_verified_revision_provenance(
+            job_id,
+            run,
+            draft.text,
+            verified_provenance,
+        )
 
         existing = self._session.scalar(
             select(ReviewRevisionRow)
@@ -316,7 +363,10 @@ class VerificationRepository:
         )
         if existing is not None:
             persisted = _persisted_revision_from_row(existing)
-            if _revision_draft_identity(persisted) != draft:
+            if (
+                _revision_draft_identity(persisted) != draft
+                or persisted.verified_provenance != verified_provenance
+            ):
                 raise ValueError(
                     f"Review revision {draft.revision_id} is already persisted "
                     "with different data."
@@ -370,6 +420,7 @@ class VerificationRepository:
             parent_revision_id=draft.parent_revision_id,
             kind=draft.kind.value,
             text=draft.text,
+            verified_provenance=verified_provenance.model_dump(mode="json"),
             created_at=created_at,
         )
         try:
@@ -405,6 +456,8 @@ class VerificationRepository:
             verification_run_id,
             review_revision_id,
         )
+        if revision is not None:
+            _assert_stored_revision_provenance(job_id, run, revision)
         latest = self._latest_review_revision(verification_run_id)
         if (revision is None) != (latest is None) or (
             revision is not None
@@ -450,6 +503,12 @@ class VerificationRepository:
             verification_run_id,
             review_revision_id,
         )
+        if review_revision is not None:
+            _assert_stored_revision_provenance(
+                job.job_id,
+                run,
+                review_revision,
+            )
         latest_revision = self._latest_review_revision(verification_run_id)
         if (review_revision is None) != (latest_revision is None) or (
             review_revision is not None
@@ -631,6 +690,10 @@ class VerificationRepository:
             return None
         if ArtifactLifecycleStatus(row.status) is not reservation.status:
             return None
+        if not self._artifact_revision_is_latest(run, row):
+            raise StaleReviewRevisionError(
+                "Requested revision is not the latest persisted revision."
+            )
         return publish()
 
     def begin_export_artifact_repair(
@@ -649,6 +712,12 @@ class VerificationRepository:
             expected.verification_run_id,
             expected.review_revision_id,
         )
+        if review_revision is not None:
+            _assert_stored_revision_provenance(
+                job.job_id,
+                run,
+                review_revision,
+            )
         latest_revision = self._latest_review_revision(
             expected.verification_run_id
         )
@@ -711,6 +780,8 @@ class VerificationRepository:
             row,
             reservation,
         ):
+            return None
+        if not self._artifact_revision_is_latest(run, row):
             return None
         consistency_check()
         snapshot = _finalize_artifact_row(row, reservation, ready_at)
@@ -892,6 +963,26 @@ class VerificationRepository:
             raise LookupError(f"Verification run {verification_run_id} does not exist.")
         return row
 
+    def _lock_run_result(
+        self,
+        verification_run_id: UUID,
+    ) -> VerificationRunRow:
+        row = self._session.scalar(
+            select(VerificationRunRow)
+            .options(
+                selectinload(VerificationRunRow.document).selectinload(
+                    DocumentRow.blocks
+                ),
+                selectinload(VerificationRunRow.issues),
+            )
+            .where(VerificationRunRow.verification_run_id == verification_run_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if row is None:
+            raise LookupError(f"Verification run {verification_run_id} does not exist.")
+        return row
+
     def _lock_artifact(self, export_artifact_id: UUID) -> ExportArtifactRow:
         row = self._lock_artifact_or_none(export_artifact_id)
         if row is None:
@@ -1008,6 +1099,18 @@ class VerificationRepository:
         run: VerificationRunRow,
         artifact: ExportArtifactRow,
     ) -> bool:
+        if artifact.review_revision_id is not None:
+            revision = self._review_revision_for_run(
+                run.verification_run_id,
+                artifact.review_revision_id,
+            )
+            if revision is None:
+                return False
+            _assert_stored_revision_provenance(
+                run.job_id,
+                run,
+                revision,
+            )
         latest = self._latest_review_revision(run.verification_run_id)
         return (artifact.review_revision_id is None) == (latest is None) and (
             latest is None
@@ -1074,6 +1177,11 @@ def _map_result_to_rows(
 def _persisted_revision_from_row(
     row: ReviewRevisionRow,
 ) -> PersistedDocumentRevision:
+    verified_provenance = (
+        None
+        if row.verified_provenance is None
+        else VerifiedRevisionProvenance.model_validate(row.verified_provenance)
+    )
     return PersistedDocumentRevision(
         revision_id=row.review_revision_id,
         document_id=row.document_id,
@@ -1085,6 +1193,7 @@ def _persisted_revision_from_row(
         persistence_state="persisted",
         kind=DocumentRevisionKind(row.kind),
         text=row.text,
+        verified_provenance=verified_provenance,
     )
 
 
@@ -1099,6 +1208,76 @@ def _revision_draft_identity(
         parent_revision_id=revision.parent_revision_id,
         kind=revision.kind,
         text=revision.text,
+    )
+
+
+def _assert_verified_revision_provenance(
+    job_id: UUID,
+    run: VerificationRunRow,
+    revision_text: str,
+    provenance: VerifiedRevisionProvenance,
+) -> None:
+    revision_digest = hashlib.sha256(revision_text.encode("utf-8")).hexdigest()
+    if (
+        provenance.job_id != job_id
+        or not hmac.compare_digest(
+            provenance.revision_text_sha256,
+            revision_digest,
+        )
+    ):
+        raise InvalidRevisionProvenanceError(
+            "Review revision provenance does not match its job or text."
+        )
+    if provenance.kind is RevisionProvenanceKind.ORIGINAL_RESULT:
+        expected_base_digest = hashlib.sha256(
+            run.document.text.encode("utf-8")
+        ).hexdigest()
+        if (
+            provenance.base_result.document_id != run.document_id
+            or provenance.base_result.verification_run_id
+            != run.verification_run_id
+            or provenance.base_result.source_version
+            != run.document.source_version
+            or not hmac.compare_digest(
+                provenance.base_result.text_sha256,
+                expected_base_digest,
+            )
+        ):
+            raise InvalidRevisionProvenanceError(
+                "Original-result revision provenance is invalid."
+            )
+        return
+    if not hmac.compare_digest(
+        provenance.base_result.text_sha256,
+        revision_digest,
+    ):
+        raise InvalidRevisionProvenanceError(
+            "Rechecked revision provenance does not match its authorized text."
+        )
+
+
+def _assert_stored_revision_provenance(
+    job_id: UUID,
+    run: VerificationRunRow,
+    revision: ReviewRevisionRow,
+) -> None:
+    if revision.verified_provenance is None:
+        raise InvalidRevisionProvenanceError(
+            "Review revision has no verified provenance."
+        )
+    try:
+        provenance = VerifiedRevisionProvenance.model_validate(
+            revision.verified_provenance
+        )
+    except ValueError as error:
+        raise InvalidRevisionProvenanceError(
+            "Review revision provenance is malformed."
+        ) from error
+    _assert_verified_revision_provenance(
+        job_id,
+        run,
+        revision.text,
+        provenance,
     )
 
 

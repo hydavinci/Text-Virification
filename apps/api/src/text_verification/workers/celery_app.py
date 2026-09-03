@@ -5,7 +5,7 @@ from celery import Celery  # type: ignore[import-untyped]
 from celery.signals import celeryd_init  # type: ignore[import-untyped]
 from kombu import Queue  # type: ignore[import-untyped]
 
-from text_verification.config import get_settings
+from text_verification.config import get_settings, validate_runtime_settings
 
 LEGACY_PROCESSING_QUEUE = "celery"
 ADVANCED_PROCESSING_QUEUE = "verification-v2"
@@ -25,6 +25,7 @@ def broker_transport_options_for(broker_url: str) -> dict[str, bool]:
 
 
 settings = get_settings()
+validate_runtime_settings(settings)
 broker_url = settings.celery_broker_url or settings.redis_url
 
 celery_app = Celery(

@@ -651,6 +651,7 @@ async function exportRecheckedFile(): Promise<void> {
       const persisted = await verificationApi.persistRevision(
         operation.authority.jobId,
         draft,
+        currentResult,
         recheckProvenance(operation.authority, currentResult)
       )
       assertCurrentRecheckedExportOperation(operation)
@@ -677,8 +678,7 @@ async function exportRecheckedFile(): Promise<void> {
         : 'original_format',
       revisionId,
       operation.trackChanges,
-      () => isCurrentRecheckedExportOperation(operation),
-      recheckProvenance(operation.authority, result.value)
+      () => isCurrentRecheckedExportOperation(operation)
     )
     assertCurrentRecheckedExportOperation(operation)
     exportError.value = null
@@ -800,8 +800,7 @@ function recheckProvenance(
     grant: authority.recheckGrant,
     result_document_id: currentResult.document_id,
     result_verification_run_id: currentResult.verification_run_id,
-    result_source_version: currentResult.source_version,
-    recheck_text: currentResult.text
+    result_source_version: currentResult.source_version
   })
 }
 
@@ -827,6 +826,7 @@ interface ExportOperation {
   revisionFingerprint: string
   trackChanges: boolean
   chain: readonly Readonly<DocumentRevision>[]
+  baseResult: VerificationResult
 }
 
 class StaleExportOperationError extends Error {}
@@ -866,7 +866,8 @@ function beginExportOperation(): ExportOperation | null {
     currentRevisionText: currentRevision.text,
     revisionFingerprint: revisionChainFingerprint(chain),
     trackChanges: trackChanges.value,
-    chain
+    chain,
+    baseResult: currentResult
   }
 }
 
@@ -936,7 +937,8 @@ async function persistDraftRevisionChain(
     }
     const persisted = await verificationApi.persistRevision(
       operation.jobId,
-      revision as DraftDocumentRevision
+      revision as DraftDocumentRevision,
+      operation.baseResult
     )
     assertCurrentExportOperation(operation)
     if (!verificationWorkspace.hydratePersistedRevision(persisted)) {

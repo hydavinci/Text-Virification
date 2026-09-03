@@ -333,7 +333,8 @@ describe('createVerificationApi', () => {
         persistence_state: 'draft',
         kind: 'review',
         text: '账号测试。'
-      }
+      },
+      resultPayload
     )
 
     expect(persisted).toMatchObject({
@@ -352,21 +353,32 @@ describe('createVerificationApi', () => {
           source_version: resultPayload.source_version,
           parent_revision_id: null,
           kind: 'review',
-          text: '账号测试。'
+          text: '账号测试。',
+          base_result: {
+            document_id: resultPayload.document_id,
+            verification_run_id: resultPayload.verification_run_id,
+            source_version: resultPayload.source_version
+          }
         })
       })
     )
   })
 
-  it('forwards opaque recheck provenance for revision persistence and export', async () => {
+  it('forwards opaque recheck provenance only when persisting the revision', async () => {
     const provenance = {
       grant: 'server-issued-opaque-grant',
       result_document_id: '77777777-7777-4777-8777-777777777777',
       result_verification_run_id: '88888888-8888-4888-8888-888888888888',
       result_source_version:
-        'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-      recheck_text: resultPayload.text
+        'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
     }
+    const recheckedResult: VerificationResult = {
+      ...resultPayload,
+      document_id: provenance.result_document_id,
+      verification_run_id: provenance.result_verification_run_id,
+      source_version: provenance.result_source_version
+    }
+    const artifactId = '66666666-6666-4666-8666-666666666666'
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce({
@@ -385,15 +397,19 @@ describe('createVerificationApi', () => {
         })
       })
       .mockResolvedValueOnce({
-        ok: false,
-        status: 409,
+        ok: true,
         json: async () => ({
-          detail: {
-            code: 'recheck_provenance_invalid',
-            stage: 'exporting',
-            message: 'The recheck provenance grant is invalid.',
-            retryable: false
-          }
+          export_artifact_id: artifactId,
+          job_id: '55555555-5555-4555-8555-555555555555',
+          verification_run_id: resultPayload.verification_run_id,
+          format: 'original_format',
+          file_type: 'txt',
+          file_name: 'sample-modified.txt',
+          media_type: 'text/plain',
+          size_bytes: 12,
+          content_sha256: 'a'.repeat(64),
+          status: 'ready',
+          created_at: '2026-09-03T04:00:00Z'
         })
       })
     const api = createVerificationApi(fetchMock as typeof fetch)
@@ -413,24 +429,29 @@ describe('createVerificationApi', () => {
     await api.persistRevision(
       '55555555-5555-4555-8555-555555555555',
       draft,
+      recheckedResult,
       provenance
     )
-    await expect(
-      api.exportJob(
-        '55555555-5555-4555-8555-555555555555',
-        'original_format',
-        draft.revision_id,
-        false,
-        () => true,
-        provenance
-      )
-    ).rejects.toMatchObject({ code: 'recheck_provenance_invalid' })
+    await api.exportJob(
+      '55555555-5555-4555-8555-555555555555',
+      'original_format',
+      draft.revision_id,
+      false,
+      () => false
+    )
 
     expect(JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string)).toMatchObject({
+      base_result: {
+        document_id: recheckedResult.document_id,
+        verification_run_id: recheckedResult.verification_run_id,
+        source_version: recheckedResult.source_version
+      },
       recheck_provenance: provenance
     })
-    expect(JSON.parse(fetchMock.mock.calls[1]?.[1]?.body as string)).toMatchObject({
-      recheck_provenance: provenance
+    expect(JSON.parse(fetchMock.mock.calls[1]?.[1]?.body as string)).toEqual({
+      format: 'original_format',
+      revision_id: draft.revision_id,
+      track_changes: false
     })
   })
 

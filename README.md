@@ -69,6 +69,11 @@ docker compose -f infra/compose.yaml down
 
 - 应用地址：`http://localhost:8080`
 - 健康检查：`http://localhost:8080/api/v1/health`
+- `APP_ENV` 设置为 `production`、`staging` 或 `deployed` 时，
+  `RECHECK_GRANT_SECRET` 必须是至少 32 个 UTF-8 字节的部署密钥；API 与
+  Worker 会在启动时拒绝空值或短值。开发/测试环境可显式使用
+  `APP_ENV=development` 或 `APP_ENV=test`。
+- `RECHECK_GRANT_TTL_SECONDS` 控制重新检查授权的有效期，默认 900 秒。
 - `migrate` 服务只负责执行 Alembic，成功后退出；`maintenance-worker` 独占清理和租约救援队列。
 
 ### Worker 滚动升级队列

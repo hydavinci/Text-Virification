@@ -409,6 +409,11 @@ class ReviewRevisionRow(Base):
             "kind IN ('review', 'manual')",
             name="ck_review_revisions_kind",
         ),
+        CheckConstraint(
+            "verified_provenance IS NULL "
+            "OR jsonb_typeof(verified_provenance) = 'object'",
+            name="ck_review_revisions_verified_provenance_object",
+        ),
     )
 
     review_revision_id: Mapped[UUID] = mapped_column(
@@ -425,6 +430,10 @@ class ReviewRevisionRow(Base):
     )
     kind: Mapped[str] = mapped_column(String(16))
     text: Mapped[str] = mapped_column(Text)
+    verified_provenance: Mapped[dict[str, object] | None] = mapped_column(
+        JSONB,
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     run: Mapped[VerificationRunRow] = relationship(back_populates="review_revisions")
 

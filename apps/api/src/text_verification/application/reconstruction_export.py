@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 from bisect import bisect_right
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from heapq import heappop, heappush
 from pathlib import Path
 from typing import Protocol, cast
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
@@ -19,11 +21,6 @@ from text_verification.application.artifact_service import (
     ArtifactRepositoryFactory,
 )
 from text_verification.application.errors import VerificationError
-from text_verification.application.recheck_provenance import (
-    RecheckGrantBinding,
-    RecheckGrantError,
-    RecheckProvenanceGrantService,
-)
 from text_verification.compatibility.exporters import ExportError
 from text_verification.domain.artifacts import (
     ArtifactFinalizationRejection,
@@ -33,10 +30,15 @@ from text_verification.domain.artifacts import (
     ExportArtifactReference,
 )
 from text_verification.domain.documents import (
+    MAX_CANONICAL_RESULT_BLOCKS,
+    MAX_CANONICAL_RESULT_TOTAL_CODEPOINTS,
+    MAX_CANONICAL_RESULT_TOTAL_UTF8_BYTES,
     DocumentModel,
+    DocumentPayloadLimitError,
     ExportFormat,
     FileType,
     TextBlock,
+    preflight_document_payload,
 )
 from text_verification.domain.jobs import JobProgressStage, JobRead
 from text_verification.domain.ports import AnchoredSourcePathResolver
@@ -50,10 +52,12 @@ from text_verification.domain.text_edits import (
     validate_revision_text,
 )
 from text_verification.domain.verification import (
+    InvalidRevisionProvenanceError,
     PersistedDocumentRevision,
-    RecheckProvenance,
+    RevisionProvenanceKind,
     StaleReviewRevisionError,
     VerificationResult,
+    VerifiedRevisionProvenance,
 )
 from text_verification.exporters.compatibility_exporter import CompatibilityExporter
 from text_verification.exporters.docx_reconstruction import DocxReconstructionExporter
@@ -86,9 +90,13 @@ MEDIA_TYPES = {
     FileType.RTF: "application/rtf",
     FileType.TXT: "text/plain",
 }
-MAX_REVISION_PROJECTION_BLOCKS = 20_000
-MAX_REVISION_PROJECTION_TOTAL_CODEPOINTS = 3 * MAX_REVISION_TEXT_CODEPOINTS
-MAX_REVISION_PROJECTION_TOTAL_UTF8_BYTES = 3 * MAX_REVISION_TEXT_UTF8_BYTES
+MAX_REVISION_PROJECTION_BLOCKS = MAX_CANONICAL_RESULT_BLOCKS
+MAX_REVISION_PROJECTION_TOTAL_CODEPOINTS = (
+    MAX_CANONICAL_RESULT_TOTAL_CODEPOINTS
+)
+MAX_REVISION_PROJECTION_TOTAL_UTF8_BYTES = (
+    MAX_CANONICAL_RESULT_TOTAL_UTF8_BYTES
+)
 ExportProgressObserver = Callable[[JobProgressStage], None]
 ExporterRegistryFactory = Callable[[AnchoredSourcePathResolver], ExporterRegistry]
 
@@ -147,7 +155,6 @@ class ReconstructionExportService:
         now_factory: Callable[[], datetime] | None = None,
         max_revision_bytes: int | None = None,
         max_revision_codepoints: int = MAX_REVISION_TEXT_CODEPOINTS,
-        recheck_grant_service: RecheckProvenanceGrantService | None = None,
     ) -> None:
         self._storage = storage
         self._repository_factory = repository_factory
@@ -166,7 +173,6 @@ class ReconstructionExportService:
             max_revision_codepoints,
             MAX_REVISION_TEXT_CODEPOINTS,
         )
-        self._recheck_grant_service = recheck_grant_service
 
     def export(
         self,
@@ -175,7 +181,6 @@ class ReconstructionExportService:
         *,
         review_revision_id: UUID | None = None,
         track_changes: bool = False,
-        recheck_provenance: RecheckProvenance | None = None,
         progress_observer: ExportProgressObserver | None = None,
     ) -> ExportArtifactReference:
         if export_format not in {
@@ -197,13 +202,8 @@ class ReconstructionExportService:
         )
         if revision is not None:
             _validate_revision_identity(revision, result)
+            _validate_revision_provenance(job.job_id, revision, result)
             self._validate_revision_text(revision.text)
-        if recheck_provenance is not None:
-            self._verify_recheck_provenance(
-                job.job_id,
-                result,
-                recheck_provenance,
-            )
         if export_format is ExportFormat.DOCX_RECONSTRUCTION:
             if revision is not None:
                 document = _document_with_revision_text(document, revision.text)
@@ -392,6 +392,8 @@ class ReconstructionExportService:
                 "The requested revision is no longer the latest persisted revision.",
                 False,
             ) from error
+        except InvalidRevisionProvenanceError as error:
+            raise _invalid_revision_provenance() from error
         except ArtifactReconciliationRequiredError as error:
             if repair_candidate:
                 raise VerificationError(
@@ -468,6 +470,8 @@ class ReconstructionExportService:
                         "The requested revision is no longer the latest persisted revision.",
                         False,
                     ) from error
+                except InvalidRevisionProvenanceError as error:
+                    raise _invalid_revision_provenance() from error
                 except (LookupError, ValueError) as error:
                     raise VerificationError(
                         "export_artifact_not_found",
@@ -477,6 +481,8 @@ class ReconstructionExportService:
                     ) from error
                 result_snapshot = repository.read_result_snapshot(job_id)
                 result = self._download_result(result_snapshot)
+                if revision is not None:
+                    _validate_revision_provenance(job_id, revision, result)
                 if artifact is None or not _artifact_belongs_to_result(
                     artifact,
                     job_id,
@@ -574,43 +580,6 @@ class ReconstructionExportService:
             )
         return snapshot.result
 
-    def _verify_recheck_provenance(
-        self,
-        job_id: UUID,
-        result: VerificationResult,
-        provenance: RecheckProvenance,
-    ) -> None:
-        if self._recheck_grant_service is None:
-            raise VerificationError(
-                "recheck_provenance_unavailable",
-                "exporting",
-                "Secure recheck provenance is not configured.",
-                True,
-            )
-        try:
-            self._recheck_grant_service.verify(
-                provenance.grant,
-                RecheckGrantBinding(
-                    job_id=job_id,
-                    original_document_id=result.document_id,
-                    original_verification_run_id=result.verification_run_id,
-                    original_source_version=result.source_version,
-                    submitted_text=provenance.recheck_text,
-                    result_document_id=provenance.result_document_id,
-                    result_verification_run_id=(
-                        provenance.result_verification_run_id
-                    ),
-                    result_source_version=provenance.result_source_version,
-                ),
-            )
-        except RecheckGrantError as error:
-            raise VerificationError(
-                "recheck_provenance_invalid",
-                "exporting",
-                "The recheck provenance grant is invalid or expired.",
-                False,
-            ) from error
-
     def _assert_current_result(
         self,
         job_id: UUID,
@@ -656,6 +625,8 @@ class ReconstructionExportService:
                     "The requested persisted revision was not found.",
                     False,
                 ) from error
+            except InvalidRevisionProvenanceError as error:
+                raise _invalid_revision_provenance() from error
             except ValueError as error:
                 raise VerificationError(
                     "revision_identity_mismatch",
@@ -739,6 +710,9 @@ class ReconstructionExportService:
                     "The requested revision is no longer the latest persisted revision.",
                     False,
                 ) from error
+            except InvalidRevisionProvenanceError as error:
+                repository.rollback()
+                raise _invalid_revision_provenance() from error
             except InvalidUpload as error:
                 repository.rollback()
                 raise VerificationError(
@@ -802,16 +776,32 @@ class ReconstructionExportService:
 
 
 def _document_from_result(result: VerificationResult) -> DocumentModel:
-    return DocumentModel(
-        document_id=result.document_id,
-        source_version=result.source_version,
-        file_type=result.file_type,
-        source_name=result.source_name,
-        text=result.text,
-        blocks=list(result.blocks),
-        parser_name=result.parser_name,
-        parser_version=result.parser_version,
-        metadata=result.metadata,
+    payload = {
+        "document_id": result.document_id,
+        "source_version": result.source_version,
+        "file_type": result.file_type,
+        "source_name": result.source_name,
+        "text": result.text,
+        "blocks": list(result.blocks),
+        "parser_name": result.parser_name,
+        "parser_version": result.parser_version,
+        "metadata": result.metadata,
+    }
+    try:
+        preflight_document_payload(
+            payload,
+            max_blocks=MAX_REVISION_PROJECTION_BLOCKS,
+            max_total_codepoints=(
+                MAX_REVISION_PROJECTION_TOTAL_CODEPOINTS
+            ),
+            max_total_utf8_bytes=(
+                MAX_REVISION_PROJECTION_TOTAL_UTF8_BYTES
+            ),
+        )
+    except DocumentPayloadLimitError as error:
+        raise _revision_diff_too_complex() from error
+    return DocumentModel.model_validate(
+        payload
     )
 
 
@@ -830,6 +820,58 @@ def _validate_revision_identity(
             "The requested revision does not belong to this verification result.",
             False,
         )
+
+
+def _validate_revision_provenance(
+    job_id: UUID,
+    revision: PersistedDocumentRevision,
+    result: VerificationResult,
+) -> None:
+    try:
+        provenance = VerifiedRevisionProvenance.model_validate(
+            revision.verified_provenance
+        )
+    except (TypeError, ValueError) as error:
+        raise _invalid_revision_provenance() from error
+    revision_digest = hashlib.sha256(
+        revision.text.encode("utf-8")
+    ).hexdigest()
+    if (
+        provenance.job_id != job_id
+        or not hmac.compare_digest(
+            provenance.revision_text_sha256,
+            revision_digest,
+        )
+    ):
+        raise _invalid_revision_provenance()
+    if provenance.kind is RevisionProvenanceKind.ORIGINAL_RESULT:
+        result_digest = hashlib.sha256(result.text.encode("utf-8")).hexdigest()
+        if (
+            provenance.base_result.document_id != result.document_id
+            or provenance.base_result.verification_run_id
+            != result.verification_run_id
+            or provenance.base_result.source_version != result.source_version
+            or not hmac.compare_digest(
+                provenance.base_result.text_sha256,
+                result_digest,
+            )
+        ):
+            raise _invalid_revision_provenance()
+        return
+    if not hmac.compare_digest(
+        provenance.base_result.text_sha256,
+        revision_digest,
+    ):
+        raise _invalid_revision_provenance()
+
+
+def _invalid_revision_provenance() -> VerificationError:
+    return VerificationError(
+        "revision_provenance_invalid",
+        "exporting",
+        "The persisted revision does not contain valid server-verified provenance.",
+        False,
+    )
 
 
 def _preflight_revision_projection(
@@ -1126,136 +1168,219 @@ def _project_revision_owner_text(
 ) -> dict[int, str]:
     owner_starts = [blocks[index].global_start for index in owner_indexes]
     owner_ends = [blocks[index].global_end for index in owner_indexes]
+    owner_rank = {
+        owner_index: rank
+        for rank, owner_index in enumerate(owner_indexes)
+    }
+    owners_ending_at: dict[int, list[int]] = {}
+    owners_starting_at: dict[int, list[int]] = {}
+    for owner_index in owner_indexes:
+        block = blocks[owner_index]
+        owners_ending_at.setdefault(block.global_end, []).append(owner_index)
+        owners_starting_at.setdefault(block.global_start, []).append(owner_index)
+    owner_cache: dict[int, int | None] = {}
+    insertion_owner_cache: dict[int, int | None] = {}
 
     def owner_at(position: int) -> int | None:
+        if position in owner_cache:
+            return owner_cache[position]
         budget.charge_work(1)
         candidate = bisect_right(owner_starts, position) - 1
         if candidate < 0 or position >= owner_ends[candidate]:
-            return None
-        return owner_indexes[candidate]
+            owner_cache[position] = None
+        else:
+            owner_cache[position] = owner_indexes[candidate]
+        return owner_cache[position]
 
     def insertion_owner(boundary: int) -> int | None:
+        if boundary in insertion_owner_cache:
+            return insertion_owner_cache[boundary]
         if boundary > 0:
             left = owner_at(boundary - 1)
             if left is not None:
+                insertion_owner_cache[boundary] = left
                 return left
-        if boundary < len(source_text):
-            return owner_at(boundary)
-        return None
+        ending = owners_ending_at.get(boundary)
+        if ending:
+            insertion_owner_cache[boundary] = ending[0]
+            return ending[0]
+        owner = (
+            owner_at(boundary)
+            if boundary < len(source_text)
+            else None
+        )
+        if owner is None:
+            starting = owners_starting_at.get(boundary)
+            if starting:
+                owner = starting[0]
+        insertion_owner_cache[boundary] = owner
+        return owner
 
-    prefix_length = _common_prefix_length(
-        source_text,
-        revised_text,
-        budget,
-    )
-    suffix_length = _common_suffix_length(
-        source_text,
-        revised_text,
-        prefix_length,
-        budget,
-    )
-    source_end = len(source_text) - suffix_length
-    revised_end = len(revised_text) - suffix_length
-    source_middle = source_text[prefix_length:source_end]
-    revised_middle = revised_text[prefix_length:revised_end]
-    work = (
-        len(source_middle) * len(revised_middle)
-        if source_middle and revised_middle
-        else max(len(source_middle), len(revised_middle))
-    )
-    budget.charge_work(work)
+    source_length = len(source_text)
+    revised_length = len(revised_text)
+    start = (0, 0)
+    goal = (source_length, revised_length)
+    best_score: dict[tuple[int, int], tuple[int, int]] = {
+        start: (0, 0)
+    }
+    parents: dict[
+        tuple[int, int],
+        tuple[tuple[int, int], str, str | None, int | None],
+    ] = {}
+    sequence = 0
+    queue: list[tuple[int, int, int, int, int, int, int]] = [
+        (
+            abs(source_length - revised_length),
+            0,
+            0,
+            0,
+            sequence,
+            0,
+            0,
+        )
+    ]
 
-    width = len(revised_middle) + 1
-    directions = bytearray((len(source_middle) + 1) * width)
-    unreachable = work + len(source_middle) + len(revised_middle) + 1
-    previous = [unreachable] * width
-    previous[0] = 0
-    first_insertion_owner = insertion_owner(prefix_length)
-    if first_insertion_owner is not None:
-        for revised_index in range(1, width):
-            previous[revised_index] = revised_index
-            directions[revised_index] = 3
+    while queue:
+        (
+            _,
+            cost,
+            edit_owner_penalty,
+            _,
+            _,
+            source_index,
+            revised_index,
+        ) = heappop(queue)
+        state = (source_index, revised_index)
+        if best_score.get(state) != (cost, edit_owner_penalty):
+            continue
+        budget.charge_work(1)
+        if state == goal:
+            break
 
-    for source_index, source_character in enumerate(source_middle, start=1):
-        source_position = prefix_length + source_index - 1
-        source_owner = owner_at(source_position)
-        current = [unreachable] * width
-        row_offset = source_index * width
-        if source_owner is not None and previous[0] < unreachable:
-            current[0] = previous[0] + 1
-            directions[row_offset] = 2
-        boundary_owner = insertion_owner(source_position + 1)
-        for revised_index, revised_character in enumerate(
-            revised_middle,
-            start=1,
-        ):
-            best_cost = unreachable
-            best_priority = 4
-            best_direction = 0
+        source_owner = (
+            owner_at(source_index)
+            if source_index < source_length
+            else None
+        )
+        transitions: list[
+            tuple[int, int, int, int, int, str, str | None, int | None]
+        ] = []
+        if source_index < source_length and revised_index < revised_length:
+            source_character = source_text[source_index]
+            revised_character = revised_text[revised_index]
+            if source_owner is not None or source_character == revised_character:
+                changed = source_character != revised_character
+                changed_owner_penalty = (
+                    owner_rank[source_owner]
+                    if changed and source_owner is not None
+                    else 0
+                )
+                transitions.append(
+                    (
+                        int(changed),
+                        changed_owner_penalty,
+                        int(changed),
+                        source_index + 1,
+                        revised_index + 1,
+                        "diagonal",
+                        "replace" if changed else None,
+                        source_owner,
+                    )
+                )
+        if source_index < source_length and source_owner is not None:
+            transitions.append(
+                (
+                    1,
+                    owner_rank[source_owner],
+                    2,
+                    source_index + 1,
+                    revised_index,
+                    "delete",
+                    "delete",
+                    source_owner,
+                )
+            )
+        if revised_index < revised_length:
+            inserted_owner = insertion_owner(source_index)
+            if inserted_owner is not None:
+                transitions.append(
+                    (
+                        1,
+                        owner_rank[inserted_owner],
+                        3,
+                        source_index,
+                        revised_index + 1,
+                        "insert",
+                        "insert",
+                        inserted_owner,
+                    )
+                )
 
-            if previous[revised_index - 1] < unreachable and (
-                source_owner is not None
-                or source_character == revised_character
+        for (
+            added_cost,
+            added_owner_penalty,
+            priority,
+            next_source,
+            next_revised,
+            direction,
+            operation,
+            owner,
+        ) in transitions:
+            next_state = (next_source, next_revised)
+            next_cost = cost + added_cost
+            next_owner_penalty = (
+                edit_owner_penalty + added_owner_penalty
+            )
+            next_score = (next_cost, next_owner_penalty)
+            if next_score >= best_score.get(
+                next_state,
+                (next_cost + 1, 0),
             ):
-                substitution = int(source_character != revised_character)
-                best_cost = previous[revised_index - 1] + substitution
-                best_priority = substitution
-                best_direction = 1
+                continue
+            best_score[next_state] = next_score
+            parents[next_state] = (
+                state,
+                direction,
+                operation,
+                owner,
+            )
+            sequence += 1
+            estimate = next_cost + abs(
+                (source_length - next_source)
+                - (revised_length - next_revised)
+            )
+            heappush(
+                queue,
+                (
+                    estimate,
+                    next_cost,
+                    next_owner_penalty,
+                    priority,
+                    sequence,
+                    next_source,
+                    next_revised,
+                ),
+            )
 
-            if source_owner is not None and previous[revised_index] < unreachable:
-                deletion_cost = previous[revised_index] + 1
-                if (deletion_cost, 2) < (best_cost, best_priority):
-                    best_cost = deletion_cost
-                    best_priority = 2
-                    best_direction = 2
-
-            if boundary_owner is not None and current[revised_index - 1] < unreachable:
-                insertion_cost = current[revised_index - 1] + 1
-                if (insertion_cost, 3) < (best_cost, best_priority):
-                    best_cost = insertion_cost
-                    best_priority = 3
-                    best_direction = 3
-
-            current[revised_index] = best_cost
-            directions[row_offset + revised_index] = best_direction
-        previous = current
-
-    if previous[-1] >= unreachable:
+    if goal not in best_score:
         raise _revision_structure_conflict()
 
-    source_index = len(source_middle)
-    revised_index = len(revised_middle)
-    middle_owners: list[int | None] = []
-    edit_steps: list[tuple[str | None, int | None]] = []
-    while source_index > 0 or revised_index > 0:
-        direction = directions[source_index * width + revised_index]
-        if direction == 1:
-            source_position = prefix_length + source_index - 1
-            owner = owner_at(source_position)
-            changed = (
-                source_middle[source_index - 1]
-                != revised_middle[revised_index - 1]
-            )
-            middle_owners.append(owner)
-            edit_steps.append(("replace" if changed else None, owner))
-            source_index -= 1
-            revised_index -= 1
-        elif direction == 2:
-            source_position = prefix_length + source_index - 1
-            owner = owner_at(source_position)
-            edit_steps.append(("delete", owner))
-            source_index -= 1
-        elif direction == 3:
-            owner = insertion_owner(prefix_length + source_index)
-            middle_owners.append(owner)
-            edit_steps.append(("insert", owner))
-            revised_index -= 1
-        else:
+    state = goal
+    target_owners_reversed: list[int | None] = []
+    edit_steps_reversed: list[tuple[str | None, int | None]] = []
+    while state != start:
+        parent = parents.get(state)
+        if parent is None:
             raise _revision_structure_conflict()
+        previous_state, direction, operation, owner = parent
+        edit_steps_reversed.append((operation, owner))
+        if direction in {"diagonal", "insert"}:
+            target_owners_reversed.append(owner)
+        state = previous_state
 
     previous_edit_owner: int | None = None
     previous_was_edit = False
-    for operation, owner in reversed(edit_steps):
+    for operation, owner in reversed(edit_steps_reversed):
         is_edit = operation is not None
         if is_edit and (
             not previous_was_edit
@@ -1266,21 +1391,7 @@ def _project_revision_owner_text(
         previous_was_edit = is_edit
         previous_edit_owner = owner if is_edit else None
 
-    budget.charge_work(
-        prefix_length
-        + suffix_length
-        + len(middle_owners)
-        + len(revised_text)
-    )
-    target_owners = [
-        owner_at(position)
-        for position in range(prefix_length)
-    ]
-    target_owners.extend(reversed(middle_owners))
-    target_owners.extend(
-        owner_at(position)
-        for position in range(source_end, len(source_text))
-    )
+    target_owners = list(reversed(target_owners_reversed))
     if len(target_owners) != len(revised_text):
         raise _revision_structure_conflict()
 
@@ -1294,37 +1405,6 @@ def _project_revision_owner_text(
         owner_index: "".join(owner_parts[owner_index])
         for owner_index in owner_indexes
     }
-
-
-def _common_prefix_length(
-    left: str,
-    right: str,
-    budget: CheckedTextWorkBudget,
-) -> int:
-    limit = min(len(left), len(right))
-    index = 0
-    while index < limit:
-        budget.charge_work(1)
-        if left[index] != right[index]:
-            break
-        index += 1
-    return index
-
-
-def _common_suffix_length(
-    left: str,
-    right: str,
-    prefix_length: int,
-    budget: CheckedTextWorkBudget,
-) -> int:
-    limit = min(len(left), len(right)) - prefix_length
-    count = 0
-    while count < limit:
-        budget.charge_work(1)
-        if left[-count - 1] != right[-count - 1]:
-            break
-        count += 1
-    return count
 
 
 def _revision_structure_conflict() -> VerificationError:

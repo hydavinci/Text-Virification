@@ -4,7 +4,12 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
-from text_verification.domain.documents import DocumentModel, FileType, TextBlock
+from text_verification.domain.documents import (
+    MAX_CANONICAL_RESULT_BLOCKS,
+    DocumentModel,
+    FileType,
+    TextBlock,
+)
 from text_verification.domain.issues import Issue, IssueSeverity
 from text_verification.domain.jobs import JobProgressStage, JobRead, JobStatus
 
@@ -184,6 +189,103 @@ def test_document_model_allows_grandparent_parent_child_containment() -> None:
         "grandparent",
         "parent",
     ]
+
+
+def test_document_model_allows_zero_length_child_inside_its_ancestor() -> None:
+    document = _document_with_blocks(
+        "abcdef",
+        [
+            _block("parent", "abcdef", 0, 6),
+            _block("cursor", "", 3, 3, parent_id="parent"),
+        ],
+    )
+
+    assert document.blocks[1].parent_id == "parent"
+
+
+def test_document_model_rejects_zero_length_cross_branch_overlap() -> None:
+    with pytest.raises(ValidationError, match="overlap"):
+        _document_with_blocks(
+            "abcdef",
+            [
+                _block("first", "abcdef", 0, 6),
+                _block("cursor", "", 3, 3),
+            ],
+        )
+
+
+def test_document_model_allows_zero_length_sibling_at_range_boundary() -> None:
+    document = _document_with_blocks(
+        "abcdef",
+        [
+            _block("first", "abc", 0, 3),
+            _block("cursor", "", 3, 3),
+            _block("second", "def", 3, 6),
+        ],
+    )
+
+    assert [block.block_id for block in document.blocks] == [
+        "first",
+        "cursor",
+        "second",
+    ]
+
+
+def test_document_model_rejects_overlap_between_separate_child_branches() -> None:
+    with pytest.raises(ValidationError, match="overlap"):
+        _document_with_blocks(
+            "abcdef",
+            [
+                _block("root", "abcdef", 0, 6),
+                _block("left", "abcde", 0, 5, parent_id="root"),
+                _block("right", "bcdef", 1, 6, parent_id="root"),
+            ],
+        )
+
+
+def test_document_overlap_validation_is_ordered_not_pairwise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    access_count = 0
+    original_getattribute = TextBlock.__getattribute__
+
+    def counting_getattribute(block: TextBlock, name: str):
+        nonlocal access_count
+        if name in {"global_start", "global_end"}:
+            access_count += 1
+        return original_getattribute(block, name)
+
+    monkeypatch.setattr(TextBlock, "__getattribute__", counting_getattribute)
+    block_count = 100
+    document = _document_with_blocks(
+        "a" * block_count,
+        [
+            _block(str(index), "a", index, index + 1)
+            for index in range(block_count)
+        ],
+    )
+
+    assert len(document.blocks) == block_count
+    assert access_count < block_count * 30
+
+
+def test_document_model_preflights_raw_block_count_before_element_validation() -> None:
+    with pytest.raises(ValidationError, match="block count"):
+        DocumentModel.model_validate(
+            {
+                "document_id": str(uuid4()),
+                "source_version": "sha256:sample",
+                "file_type": "txt",
+                "source_name": "sample.txt",
+                "text": "",
+                "blocks": [
+                    object()
+                    for _ in range(MAX_CANONICAL_RESULT_BLOCKS + 1)
+                ],
+                "parser_name": "plain-text",
+                "parser_version": "1",
+            }
+        )
 
 
 def test_document_model_rejects_parent_child_overlap_without_containment() -> None:

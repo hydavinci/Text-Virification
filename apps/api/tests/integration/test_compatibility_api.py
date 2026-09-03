@@ -619,6 +619,217 @@ def test_export_html_report_keeps_nullable_suggestion_display_safe(
     assert ">None<" not in response.text
 
 
+def test_export_report_preflights_raw_result_block_count_before_validation(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from text_verification.api.routes import compatibility as compatibility_routes
+
+    monkeypatch.setattr(
+        compatibility_routes,
+        "MAX_CANONICAL_RESULT_BLOCKS",
+        2,
+        raising=False,
+    )
+    response = client.post(
+        "/api/v1/export",
+        json={
+            "filename": "report.txt",
+            "stats": {},
+            "summary": {"total": 0},
+            "issues": [],
+            "text": "abc",
+            "blocks": [
+                {"block_id": "a", "text": "a"},
+                {"block_id": "b", "text": "b"},
+                {"block_id": "c", "text": "c"},
+            ],
+        },
+    )
+
+    assert response.status_code == 413
+
+
+def test_export_report_preflights_raw_result_aggregate_text_size(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from text_verification.api.routes import compatibility as compatibility_routes
+
+    monkeypatch.setattr(
+        compatibility_routes,
+        "MAX_CANONICAL_RESULT_TOTAL_CODEPOINTS",
+        5,
+        raising=False,
+    )
+    response = client.post(
+        "/api/v1/export",
+        json={
+            "filename": "report.txt",
+            "stats": {},
+            "summary": {"total": 0},
+            "issues": [],
+            "text": "ab",
+            "blocks": [
+                {"block_id": "a", "text": "ab"},
+                {"block_id": "b", "text": "ab"},
+            ],
+        },
+    )
+
+    assert response.status_code == 413
+
+
+def test_export_report_preflights_raw_result_aggregate_utf8_size(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from text_verification.api.routes import compatibility as compatibility_routes
+
+    monkeypatch.setattr(
+        compatibility_routes,
+        "MAX_CANONICAL_RESULT_TOTAL_UTF8_BYTES",
+        7,
+    )
+    response = client.post(
+        "/api/v1/export",
+        json={
+            "filename": "report.txt",
+            "stats": {},
+            "summary": {"total": 0},
+            "issues": [],
+            "text": "😀",
+            "blocks": [{"block_id": "a", "text": "😀"}],
+        },
+    )
+
+    assert response.status_code == 413
+
+
+def test_export_report_rejects_malformed_raw_block_without_reflecting_it(
+    client: TestClient,
+) -> None:
+    secret = "raw-block-secret-that-must-not-be-reflected"
+    response = client.post(
+        "/api/v1/export",
+        json={
+            "filename": "report.txt",
+            "stats": {},
+            "summary": {"total": 0},
+            "issues": [],
+            "text": "a",
+            "blocks": [secret],
+        },
+    )
+
+    assert response.status_code == 422
+    assert secret not in response.text
+
+
+def test_export_report_json_body_limit_is_inclusive_and_streaming(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from text_verification.api.routes import compatibility as compatibility_routes
+
+    body = b'{"filename":"report.txt","stats":{},"summary":{},"issues":[]}'
+    monkeypatch.setattr(
+        compatibility_routes,
+        "MAX_COMPATIBILITY_REPORT_REQUEST_BYTES",
+        len(body),
+    )
+    accepted = client.post(
+        "/api/v1/export",
+        content=body,
+        headers={"Content-Type": "application/json"},
+    )
+    monkeypatch.setattr(
+        compatibility_routes,
+        "MAX_COMPATIBILITY_REPORT_REQUEST_BYTES",
+        len(body) - 1,
+    )
+    rejected = client.post(
+        "/api/v1/export",
+        content=iter((body[:7], body[7:])),
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert accepted.status_code == 200
+    assert rejected.status_code == 413
+
+
+def test_export_report_accepts_large_valid_legacy_full_result_payload(
+    client: TestClient,
+) -> None:
+    text = "汉" * 3_000_000
+    body = json.dumps(
+        {
+            "filename": "report.txt",
+            "stats": {},
+            "summary": {"total": 0},
+            "issues": [],
+            "text": text,
+            "blocks": [{"block_id": "only", "text": text}],
+        },
+        separators=(",", ":"),
+    ).encode()
+    assert len(body) > 32 * 1024 * 1024
+
+    response = client.post(
+        "/api/v1/export",
+        content=body,
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 200
+
+
+def test_export_report_reader_does_not_buffer_the_complete_raw_body(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from text_verification.api import body_readers
+
+    calls = 0
+    original = body_readers.read_bounded_body
+
+    async def recording_reader(*args: object, **kwargs: object) -> bytes:
+        nonlocal calls
+        calls += 1
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(body_readers, "read_bounded_body", recording_reader)
+
+    response = client.post(
+        "/api/v1/export",
+        json={
+            "filename": "report.txt",
+            "stats": {},
+            "summary": {"total": 0},
+            "issues": [],
+        },
+    )
+
+    assert response.status_code == 200
+    assert calls == 0
+
+
+def test_export_report_malformed_json_never_reflects_request_secrets(
+    client: TestClient,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret = "report-body-secret-never-reflect"
+    response = client.post(
+        "/api/v1/export",
+        content=b'{"filename":"' + secret.encode(),
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 422
+    assert secret not in response.text
+    assert secret not in caplog.text
+
+
 def test_docx_export_can_emit_word_track_changes(
     app: FastAPI,
     client: TestClient,

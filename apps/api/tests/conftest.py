@@ -13,18 +13,22 @@ from sqlalchemy.engine.url import make_url
 from sqlalchemy.orm import Session, sessionmaker
 
 from alembic import command
+from text_verification.config import get_settings
 from text_verification.main import create_app
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture
-def app() -> Iterator[FastAPI]:
+def app(monkeypatch: pytest.MonkeyPatch) -> Iterator[FastAPI]:
+    monkeypatch.setenv("APP_ENV", "test")
+    get_settings.cache_clear()
     application = create_app()
     try:
         yield application
     finally:
         application.dependency_overrides.clear()
+        get_settings.cache_clear()
 
 
 @pytest.fixture

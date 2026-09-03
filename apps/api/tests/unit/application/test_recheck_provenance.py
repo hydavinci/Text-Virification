@@ -119,6 +119,24 @@ def test_expired_grant_is_rejected() -> None:
         service(now=NOW + timedelta(minutes=11)).verify(grant, expected)
 
 
+@pytest.mark.parametrize(
+    "grant",
+    [
+        "not-base64.%%%%",
+        "missing-separator",
+        ".empty-payload",
+        "a." + "b" * 200,
+    ],
+)
+def test_malformed_grants_fail_closed_without_reflecting_token(
+    grant: str,
+) -> None:
+    with pytest.raises(RecheckGrantError) as raised:
+        service().verify(grant, binding())
+
+    assert grant not in str(raised.value)
+
+
 def _encode(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
 

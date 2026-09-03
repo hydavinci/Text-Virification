@@ -6,6 +6,8 @@ x-backend-service: &backend-service
   image: text-verification-backend:development
   env_file:
     - ../.env
+  # APP_ENV 为 production/staging/deployed 时，.env 必须提供至少 32 字节的
+  # RECHECK_GRANT_SECRET；API 与 Worker 会在启动时 fail closed。
 
 services:
   postgres:
