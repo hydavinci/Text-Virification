@@ -705,7 +705,10 @@ describe('WorkspaceView', () => {
         message: '处理完成',
         created_at: '2026-08-14T00:02:00Z'
       })
-      onError('无法接收任务进度，请稍后重试。')
+      onError({
+        kind: 'fatal',
+        message: '无法接收任务进度，请稍后重试。'
+      })
       return vi.fn()
     })
     const wrapper = mount(WorkspaceView, {
@@ -731,7 +734,10 @@ describe('WorkspaceView', () => {
   it('shows a temporary connection notice and clears it on the next progress event', async () => {
     const createJob = vi.fn().mockResolvedValue(buildJobRead())
     const subscribe = vi.fn((_jobId, onEvent, onError) => {
-      onError('Connection interrupted. Waiting to reconnect…')
+      onError({
+        kind: 'transient',
+        message: 'Connection interrupted. Waiting to reconnect…'
+      })
       onEvent({
         sequence: 2,
         status: 'parsing',
@@ -1282,6 +1288,48 @@ describe('WorkspaceView', () => {
     await wrapper.get('.top-actions .btn.primary').trigger('click')
     expect(exportOriginal).not.toHaveBeenCalled()
     expect(exportedBlob).not.toBeNull()
+    wrapper.unmount()
+  })
+
+  it('preserves the review result and announces a failed recheck accessibly', async () => {
+    const original = buildWorkspaceResult([], '原始检查结果')
+    const analyzeText = vi
+      .fn()
+      .mockResolvedValueOnce(original)
+      .mockRejectedValueOnce(new Error('重新检查失败，请稍后重试'))
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const wrapper = mount(WorkspaceView, {
+      global: {
+        provide: {
+          [jobsApiKey as symbol]: {
+            createJob: vi.fn(),
+            subscribe: vi.fn(() => vi.fn())
+          },
+          [verificationApiKey as symbol]: {
+            analyzeFile: vi.fn(),
+            analyzeText,
+            exportReport: vi.fn(),
+            exportOriginal: vi.fn()
+          }
+        }
+      }
+    })
+
+    wrapper
+      .getComponent(SourceInputPanel)
+      .vm.$emit('submit-text', '原始检查结果')
+    await flushPromises()
+    const retainedResult = canonicalWorkspace(wrapper).result.value
+
+    await wrapper.get('[data-action="recheck"]').trigger('click')
+    await flushPromises()
+
+    expect(canonicalWorkspace(wrapper).result.value).toBe(retainedResult)
+    expect(wrapper.findComponent(DocumentViewer).exists()).toBe(true)
+    const alert = wrapper.get('[data-review-execution-error]')
+    expect(alert.attributes('role')).toBe('alert')
+    expect(alert.attributes('aria-live')).toBe('assertive')
+    expect(alert.text()).toBe('重新检查失败，请稍后重试')
     wrapper.unmount()
   })
 

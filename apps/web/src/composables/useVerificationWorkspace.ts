@@ -543,6 +543,9 @@ function copyVerificationIssue(value: unknown): VerificationIssue | null {
       : typeof value.review_reason === 'string'
         ? value.review_reason
         : false
+  const position = value.position === undefined ? value.start : value.position
+  const endPosition =
+    value.end_position === undefined ? value.end : value.end_position
   if (
     typeof value.issue_id !== 'string' ||
     !isUuid(value.issue_id) ||
@@ -575,8 +578,8 @@ function copyVerificationIssue(value: unknown): VerificationIssue | null {
     !isFiniteNumber(value.confidence) ||
     typeof value.auto_fixable !== 'boolean' ||
     typeof value.context !== 'string' ||
-    !isNonnegativeInteger(value.position) ||
-    !isNonnegativeInteger(value.end_position) ||
+    !isNonnegativeInteger(position) ||
+    !isNonnegativeInteger(endPosition) ||
     review === false ||
     reviewReason === false
   ) {
@@ -608,8 +611,8 @@ function copyVerificationIssue(value: unknown): VerificationIssue | null {
     confidence: value.confidence,
     auto_fixable: value.auto_fixable,
     context: value.context,
-    position: value.position,
-    end_position: value.end_position,
+    position,
+    end_position: endPosition,
     review,
     review_reason: reviewReason
   }
@@ -650,7 +653,7 @@ function copyVerificationSummary(
   const byRule = copyCountRecord(value.by_rule)
   const byLayer = copyCountRecord(value.by_layer)
   const llmReview =
-    value.llm_review === undefined
+    value.llm_review === undefined || value.llm_review === null
       ? undefined
       : copyJsonRecord(value.llm_review)
   if (
@@ -1310,10 +1313,14 @@ function isScenario(value: unknown): value is VerificationResult['scenario'] {
   )
 }
 
-function canonicalResultSnapshot(value: unknown): VerificationResult | null {
+export function createVerificationResultSnapshot(
+  value: unknown
+): VerificationResult | null {
   if (!isRecord(value)) {
     return null
   }
+  const filename =
+    typeof value.filename === 'string' ? value.filename : value.source_name
   const stats = copyVerificationStats(value.stats)
   const summary = copyVerificationSummary(value.summary)
   const dictionaryVersions = copyStringRecord(value.dictionary_versions)
@@ -1322,8 +1329,8 @@ function canonicalResultSnapshot(value: unknown): VerificationResult | null {
       ? copyStringArray(value.degradation.reasons)
       : null
   if (
-    value.success !== true ||
-    typeof value.filename !== 'string' ||
+    (value.success !== undefined && value.success !== true) ||
+    typeof filename !== 'string' ||
     typeof value.source_name !== 'string' ||
     !isFileType(value.file_type) ||
     typeof value.text !== 'string' ||
@@ -1333,9 +1340,6 @@ function canonicalResultSnapshot(value: unknown): VerificationResult | null {
     stats === null ||
     !Array.isArray(value.issues) ||
     summary === null ||
-    (value.file_id !== null &&
-      (typeof value.file_id !== 'string' || !isUuid(value.file_id))) ||
-    (value.file_ext !== null && typeof value.file_ext !== 'string') ||
     typeof value.document_id !== 'string' ||
     !isUuid(value.document_id) ||
     typeof value.verification_run_id !== 'string' ||
@@ -1350,6 +1354,17 @@ function canonicalResultSnapshot(value: unknown): VerificationResult | null {
     typeof value.degradation.is_degraded !== 'boolean' ||
     reasons === null ||
     !isScenario(value.scenario)
+  ) {
+    return null
+  }
+
+  const fileId =
+    value.file_id === undefined ? value.document_id : value.file_id
+  const fileExt =
+    value.file_ext === undefined ? `.${value.file_type}` : value.file_ext
+  if (
+    (fileId !== null && (typeof fileId !== 'string' || !isUuid(fileId))) ||
+    (fileExt !== null && typeof fileExt !== 'string')
   ) {
     return null
   }
@@ -1370,10 +1385,23 @@ function canonicalResultSnapshot(value: unknown): VerificationResult | null {
     }
     issues.push(issue)
   }
-  const hasPdfMetadata = hasOwn(value, 'pdf_metadata')
-  const hasOcrRequirement = hasOwn(value, 'ocr_requirement')
+  const metadata = value.metadata
+  if (
+    metadata !== undefined &&
+    (!isRecord(metadata) || !hasOwn(metadata, 'pdf'))
+  ) {
+    return null
+  }
+  const metadataPdf = isRecord(metadata) ? metadata.pdf : undefined
+  const rawPdfMetadata = hasOwn(value, 'pdf_metadata')
+    ? value.pdf_metadata
+    : metadataPdf
+  const hasPdfMetadata =
+    rawPdfMetadata !== undefined && rawPdfMetadata !== null
+  const hasOcrRequirement =
+    hasOwn(value, 'ocr_requirement') && value.ocr_requirement !== null
   const pdfMetadata = hasPdfMetadata
-    ? copyPdfMetadata(value.pdf_metadata)
+    ? copyPdfMetadata(rawPdfMetadata)
     : undefined
   const ocrRequirement = hasOcrRequirement
     ? copyOcrRequirement(value.ocr_requirement)
@@ -1404,7 +1432,7 @@ function canonicalResultSnapshot(value: unknown): VerificationResult | null {
 
   const result: VerificationResult = {
     success: true,
-    filename: value.filename,
+    filename,
     source_name: value.source_name,
     file_type: value.file_type,
     text: value.text,
@@ -1414,8 +1442,8 @@ function canonicalResultSnapshot(value: unknown): VerificationResult | null {
     stats,
     issues,
     summary,
-    file_id: value.file_id,
-    file_ext: value.file_ext,
+    file_id: fileId,
+    file_ext: fileExt,
     document_id: value.document_id,
     verification_run_id: value.verification_run_id,
     source_version: value.source_version,
@@ -1664,7 +1692,7 @@ function prepareWorkspaceRestore(
   if (!isRecord(saved) || !hasOwn(saved, 'result')) {
     return null
   }
-  const result = canonicalResultSnapshot(saved.result)
+  const result = createVerificationResultSnapshot(saved.result)
   if (result === null) {
     return null
   }

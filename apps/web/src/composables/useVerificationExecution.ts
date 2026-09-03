@@ -6,6 +6,7 @@ import {
 } from 'vue'
 
 import {
+  type JobSubscriptionError,
   JobResultExpiredError,
   type JobsApi
 } from '../api/jobs'
@@ -222,7 +223,8 @@ export function useVerificationExecution({
     const close = jobsApi.subscribe(
       createdJob.job_id,
       (event) => handleProgress(event, generation),
-      (connectionError) => handleConnectionError(connectionError, generation)
+      (subscriptionError) =>
+        handleSubscriptionError(subscriptionError, generation)
     )
     if (!isCurrent(generation) || terminalObserved) {
       close()
@@ -297,6 +299,9 @@ export function useVerificationExecution({
       requestActive = false
     } catch (caught) {
       const nextError = toError(caught)
+      if (caught instanceof JobResultExpiredError) {
+        applyExpiredResultError(caught)
+      }
       finishWithError(
         generation,
         caught instanceof JobResultExpiredError ? 'expired' : 'failed',
@@ -305,8 +310,26 @@ export function useVerificationExecution({
     }
   }
 
-  function handleConnectionError(
-    connectionError: string,
+  function applyExpiredResultError(expiredError: JobResultExpiredError): void {
+    jobStatus.value = 'expired'
+    stage.value = 'expired'
+    message.value = expiredError.message
+    if (job.value) {
+      job.value = Object.freeze({
+        ...job.value,
+        status: 'expired',
+        stage: 'expired',
+        progress: progress.value,
+        error_code: expiredError.code,
+        error_message: expiredError.message,
+        error_stage: expiredError.stage ?? 'expired',
+        error_retryable: expiredError.retryable
+      })
+    }
+  }
+
+  function handleSubscriptionError(
+    subscriptionError: JobSubscriptionError,
     generation: number
   ): void {
     if (
@@ -318,7 +341,15 @@ export function useVerificationExecution({
     ) {
       return
     }
-    connectionMessage.value = connectionError
+    if (subscriptionError.kind === 'fatal') {
+      finishWithError(
+        generation,
+        'failed',
+        new Error(subscriptionError.message)
+      )
+      return
+    }
+    connectionMessage.value = subscriptionError.message
   }
 
   function reset(): void {

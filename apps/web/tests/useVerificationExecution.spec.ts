@@ -2,7 +2,11 @@ import { flushPromises } from '@vue/test-utils'
 import { effectScope } from 'vue'
 import { describe, expect, it, vi } from 'vitest'
 
-import { JobResultExpiredError, type JobsApi } from '../src/api/jobs'
+import {
+  JobResultExpiredError,
+  type JobsApi,
+  type JobSubscriptionError
+} from '../src/api/jobs'
 import type { VerificationApi } from '../src/api/verification'
 import { useVerificationExecution } from '../src/composables/useVerificationExecution'
 import type { JobProgressEvent, JobRead } from '../src/types/jobs'
@@ -134,7 +138,7 @@ function createHarness(overrides: {
   verificationApi?: VerificationApi | null
 } = {}) {
   let onEvent: ((event: JobProgressEvent) => void) | null = null
-  let onError: ((message: string) => void) | null = null
+  let onError: ((error: JobSubscriptionError) => void) | null = null
   const close = vi.fn()
   const jobsApi: JobsApi = {
     createJob: vi.fn().mockResolvedValue(overrides.job ?? buildJob()),
@@ -164,7 +168,7 @@ function createHarness(overrides: {
     jobsApi,
     close,
     emit: (event: JobProgressEvent) => onEvent?.(event),
-    emitError: (message: string) => onError?.(message)
+    emitError: (error: JobSubscriptionError) => onError?.(error)
   }
 }
 
@@ -253,6 +257,62 @@ describe('useVerificationExecution', () => {
     )
   })
 
+  it.each([
+    ['completed', 100],
+    ['partial', 95]
+  ] as const)(
+    'replaces %s SSE presentation with coherent expired metadata when the deferred result fetch returns 410',
+    async (terminalStatus, terminalProgress) => {
+      const pending = createDeferred<VerificationResult>()
+      const harness = createHarness({
+        getResult: vi.fn().mockReturnValue(pending.promise)
+      })
+
+      await harness.execution.analyzeFile(
+        new File(['pdf'], 'sample.pdf'),
+        options
+      )
+      harness.emit(
+        buildEvent(terminalStatus, {
+          stage: terminalStatus,
+          progress: terminalProgress,
+          message:
+            terminalStatus === 'partial'
+              ? '语义复核不可用，已保留本地检查结果'
+              : '处理完成'
+        })
+      )
+      expect(harness.execution.jobStatus.value).toBe(terminalStatus)
+
+      pending.reject(
+        new JobResultExpiredError(
+          410,
+          'job_result_expired',
+          'Job result has expired.',
+          'expired',
+          false
+        )
+      )
+      await flushPromises()
+
+      expect(harness.execution.state.value).toBe('expired')
+      expect(harness.execution.jobStatus.value).toBe('expired')
+      expect(harness.execution.stage.value).toBe('expired')
+      expect(harness.execution.progress.value).toBe(terminalProgress)
+      expect(harness.execution.message.value).toBe('Job result has expired.')
+      expect(harness.execution.job.value).toMatchObject({
+        status: 'expired',
+        stage: 'expired',
+        progress: terminalProgress,
+        error_code: 'job_result_expired',
+        error_message: 'Job result has expired.',
+        error_stage: 'expired',
+        error_retryable: false
+      })
+      expect(harness.execution.result.value).toBeNull()
+    }
+  )
+
   it('maps an expired event to expired without fetching a result', async () => {
     const harness = createHarness()
 
@@ -316,7 +376,10 @@ describe('useVerificationExecution', () => {
         message: '处理完成'
       })
     )
-    harness.emitError('Connection interrupted. Waiting to reconnect…')
+    harness.emitError({
+      kind: 'transient',
+      message: 'Connection interrupted. Waiting to reconnect…'
+    })
     await flushPromises()
 
     expect(harness.execution.message.value).toBe('处理完成')
@@ -324,9 +387,27 @@ describe('useVerificationExecution', () => {
 
     pending.resolve(buildResult({ execution_mode: 'asynchronous' }))
     await flushPromises()
-    harness.emitError('late')
+    harness.emitError({ kind: 'transient', message: 'late' })
     expect(harness.execution.state.value).toBe('completed')
     expect(harness.execution.error.value).toBeNull()
+  })
+
+  it('fails and releases active execution on a fatal SSE protocol error', async () => {
+    const harness = createHarness()
+
+    await harness.execution.analyzeFile(new File(['pdf'], 'sample.pdf'), options)
+    harness.emitError({
+      kind: 'fatal',
+      message: 'Unable to receive job progress updates.'
+    })
+
+    expect(harness.execution.state.value).toBe('failed')
+    expect(harness.execution.isActive.value).toBe(false)
+    expect(harness.execution.error.value?.message).toBe(
+      'Unable to receive job progress updates.'
+    )
+    expect(harness.execution.connectionMessage.value).toBeNull()
+    expect(harness.close).toHaveBeenCalledTimes(1)
   })
 
   it('invalidates an unresolved create request on reset', async () => {

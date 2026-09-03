@@ -1,6 +1,7 @@
 import type { InjectionKey } from 'vue'
 
 import {
+  JOB_FILE_TYPE_VALUES,
   JOB_PROGRESS_STAGE_VALUES,
   JOB_STATUS_VALUES,
   type JobProgressEvent,
@@ -13,7 +14,12 @@ import {
   appendAnalyzeOptions,
   createAnalyzeOptionsSnapshot
 } from './analyzeOptions'
-import { ApiRequestError, readApiRequestError } from './errors'
+import {
+  ApiRequestError,
+  ApiResponseValidationError,
+  readApiRequestError
+} from './errors'
+import { createVerificationResultSnapshot } from '../composables/useVerificationWorkspace'
 
 export interface JobsApi {
   createJob(file: File, options: AnalyzeOptions): Promise<JobRead>
@@ -21,8 +27,13 @@ export interface JobsApi {
   subscribe(
     jobId: string,
     onEvent: (event: JobProgressEvent) => void,
-    onError: (message: string) => void
+    onError: (error: JobSubscriptionError) => void
   ): () => void
+}
+
+export interface JobSubscriptionError {
+  kind: 'transient' | 'fatal'
+  message: string
 }
 
 interface JobsApiDependencies {
@@ -77,7 +88,11 @@ export function createJobsApi(
         )
       }
 
-      return (await response.json()) as JobRead
+      const job = parseJobRead(await response.json())
+      if (job === null) {
+        throw new ApiResponseValidationError('Invalid job response.')
+      }
+      return job
     },
     async getResult(jobId) {
       const response = await dependencies.fetch(
@@ -99,7 +114,13 @@ export function createJobsApi(
         }
         throw error
       }
-      return (await response.json()) as VerificationResult
+      const result = createVerificationResultSnapshot(await response.json())
+      if (result === null) {
+        throw new ApiResponseValidationError(
+          'Invalid verification result response.'
+        )
+      }
+      return result
     },
     subscribe(jobId, onEvent, onError) {
       const eventSource = dependencies.eventSourceFactory(
@@ -132,15 +153,30 @@ export function createJobsApi(
         })
       }
 
+      const reportFatalProtocolError = () => {
+        close()
+        onError({
+          kind: 'fatal',
+          message: PROGRESS_CONNECTION_ERROR
+        })
+      }
+
       const handleProgress = (event: MessageEvent<string>) => {
         if (closed) {
           return
         }
 
+        const sequence = parseEventSequence(event.lastEventId)
+        if (sequence === null) {
+          reportFatalProtocolError()
+          return
+        }
+        if (sequence <= lastSequence) {
+          return
+        }
         try {
           const payload = parseProgressPayload(event.data)
-          const sequence = Number.parseInt(event.lastEventId, 10)
-          lastSequence = Number.isFinite(sequence) ? sequence : lastSequence
+          lastSequence = sequence
           lastProgress = payload.progress
           onEvent({
             sequence: lastSequence,
@@ -151,8 +187,7 @@ export function createJobsApi(
             created_at: payload.created_at
           })
         } catch {
-          close()
-          onError(PROGRESS_CONNECTION_ERROR)
+          reportFatalProtocolError()
         }
       }
 
@@ -175,7 +210,10 @@ export function createJobsApi(
         if (closed) {
           return
         }
-        onError(TEMPORARY_CONNECTION_NOTICE)
+        onError({
+          kind: 'transient',
+          message: TEMPORARY_CONNECTION_NOTICE
+        })
       }
 
       return close
@@ -198,6 +236,14 @@ function parseProgressPayload(data: string): JobProgressEvent {
     message: parsed.message,
     created_at: parsed.created_at
   }
+}
+
+function parseEventSequence(value: string): number | null {
+  if (!/^(0|[1-9]\d*)$/.test(value)) {
+    return null
+  }
+  const sequence = Number(value)
+  return Number.isSafeInteger(sequence) ? sequence : null
 }
 
 function isProgressPayload(value: unknown): value is {
@@ -232,6 +278,13 @@ function isJobStatus(value: unknown): value is JobStatus {
   )
 }
 
+function isJobFileType(value: unknown): value is JobRead['file_type'] {
+  return (
+    typeof value === 'string' &&
+    JOB_FILE_TYPE_VALUES.some((fileType) => fileType === value)
+  )
+}
+
 function isJobProgressStage(value: unknown): value is JobProgressStage {
   return (
     typeof value === 'string' &&
@@ -241,4 +294,92 @@ function isJobProgressStage(value: unknown): value is JobProgressStage {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
+}
+
+function parseJobRead(value: unknown): JobRead | null {
+  if (
+    !isRecord(value) ||
+    typeof value.job_id !== 'string' ||
+    !isUuid(value.job_id) ||
+    typeof value.source_name !== 'string' ||
+    value.source_name.length === 0 ||
+    !isJobFileType(value.file_type) ||
+    !isNonnegativeInteger(value.size_bytes) ||
+    !isJobStatus(value.status) ||
+    !isJobProgressStage(value.stage) ||
+    !isProgress(value.progress) ||
+    value.stage !== expectedJobStage(value.status, value.progress) ||
+    !isNullableString(value.error_code) ||
+    !isNullableString(value.error_message) ||
+    !isNullableString(value.error_stage) ||
+    !isNullableBoolean(value.error_retryable) ||
+    !isDateTime(value.created_at) ||
+    !isDateTime(value.expires_at) ||
+    Date.parse(value.expires_at) < Date.parse(value.created_at)
+  ) {
+    return null
+  }
+  return Object.freeze({
+    job_id: value.job_id,
+    source_name: value.source_name,
+    file_type: value.file_type,
+    size_bytes: value.size_bytes,
+    status: value.status,
+    stage: value.stage,
+    progress: value.progress,
+    error_code: value.error_code,
+    error_message: value.error_message,
+    error_stage: value.error_stage,
+    error_retryable: value.error_retryable,
+    created_at: value.created_at,
+    expires_at: value.expires_at
+  })
+}
+
+function expectedJobStage(
+  status: JobStatus,
+  progress: number
+): JobProgressStage {
+  if (status === 'parsing' && progress >= 40) {
+    return 'ocr'
+  }
+  if (status === 'checking_english' && progress >= 95) {
+    return 'finalizing'
+  }
+  return status
+}
+
+function isProgress(value: unknown): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isInteger(value) &&
+    value >= 0 &&
+    value <= 100
+  )
+}
+
+function isNonnegativeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0
+}
+
+function isNullableString(value: unknown): value is string | null {
+  return value === null || typeof value === 'string'
+}
+
+function isNullableBoolean(value: unknown): value is boolean | null {
+  return value === null || typeof value === 'boolean'
+}
+
+function isDateTime(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.trim().length > 0 &&
+    Number.isFinite(Date.parse(value))
+  )
+}
+
+function isUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    value
+  )
 }

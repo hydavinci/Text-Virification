@@ -23,6 +23,68 @@ const ALL_JOB_FILE_TYPES = [
   'csv'
 ] as const
 
+function buildCanonicalBackendResult(
+  overrides: Record<string, unknown> = {}
+) {
+  return {
+    verification_run_id: '22222222-2222-4222-8222-222222222222',
+    document_id: '11111111-1111-4111-8111-111111111111',
+    source_version:
+      'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    source_name: 'sample.txt',
+    file_type: 'txt',
+    scenario: 'technical',
+    text: '检查',
+    blocks: [
+      {
+        block_id: 'p-0',
+        kind: 'paragraph',
+        text: '检查',
+        global_start: 0,
+        global_end: 2,
+        block_start: 0,
+        block_end: 2,
+        page: null,
+        paragraph_index: 0,
+        table_index: null,
+        row_index: null,
+        cell_index: null,
+        bbox: null,
+        parent_id: null,
+        style: {},
+        source_locator: { paragraph_index: 0 }
+      }
+    ],
+    parser_name: 'compatibility-flat-text',
+    parser_version: '1',
+    metadata: { pdf: null },
+    ocr_requirement: null,
+    stats: {
+      char_count: 2,
+      char_count_no_space: 2,
+      line_count: 1,
+      paragraph_count: 1,
+      language: 'zh',
+      primary_count: 2,
+      primary_label: '总字数'
+    },
+    issues: [],
+    summary: {
+      total: 0,
+      by_type: {},
+      by_severity: {},
+      by_rule: {},
+      by_layer: {},
+      llm_review: null
+    },
+    execution_mode: 'asynchronous',
+    analysis_mode: 'local_only',
+    dictionary_versions: {},
+    degradation: { is_degraded: false, reasons: [] },
+    ...overrides
+  }
+}
+
 class FakeEventSource {
   public onerror: ((event: Event) => void) | null = null
 
@@ -129,10 +191,10 @@ describe('createJobsApi', () => {
       enableSensitive: true,
       enableAdExtreme: false,
       glossary: [
-        { original: '', standard: '保留空字符串' },
+        { original: '保留空字符串', standard: '' },
         { original: 'AI', standard: '人工智能' }
       ],
-      bannedWords: ['', '最好']
+      bannedWords: ['最好']
     }
 
     const job = await api.createJob(file, options)
@@ -150,9 +212,9 @@ describe('createJobsApi', () => {
     expect(body.get('enable_sensitive')).toBe('true')
     expect(body.get('enable_ad_extreme')).toBe('false')
     expect(body.get('custom_glossary')).toBe(
-      '[{"original":"","standard":"保留空字符串"},{"original":"AI","standard":"人工智能"}]'
+      '[{"original":"保留空字符串","standard":""},{"original":"AI","standard":"人工智能"}]'
     )
-    expect(body.get('banned_words')).toBe('["","最好"]')
+    expect(body.get('banned_words')).toBe('["最好"]')
   })
 
   it('serializes empty terminology arrays instead of omitting them', async () => {
@@ -238,10 +300,45 @@ describe('createJobsApi', () => {
     ).rejects.toThrow('Upload exceeds the configured maximum size.')
   })
 
-  it('loads the retained canonical result from the job result endpoint', async () => {
-    const payload = {
-      document_id: '11111111-1111-4111-8111-111111111111'
-    }
+  it('rejects a malformed successful create-job response', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        job_id: 'not-a-uuid',
+        source_name: 'sample.txt',
+        file_type: 'txt',
+        size_bytes: 6,
+        status: 'queued',
+        stage: 'queued',
+        progress: 0,
+        error_code: null,
+        error_message: null,
+        error_stage: null,
+        error_retryable: null,
+        created_at: '2026-08-14T00:00:00Z',
+        expires_at: '2026-08-15T00:00:00Z'
+      })
+    })
+    const api = createJobsApi({
+      fetch: fetchMock,
+      eventSourceFactory: (url) =>
+        new FakeEventSource(url) as unknown as EventSource
+    })
+
+    await expect(
+      api.createJob(new File(['body'], 'sample.txt'), {
+        scenario: 'general',
+        enableSecurity: true,
+        enableSensitive: true,
+        enableAdExtreme: false,
+        glossary: [],
+        bannedWords: []
+      })
+    ).rejects.toThrow('Invalid job response.')
+  })
+
+  it('validates and adapts the authoritative retained-result response', async () => {
+    const payload = buildCanonicalBackendResult()
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => payload
@@ -256,7 +353,104 @@ describe('createJobsApi', () => {
     expect(fetchMock).toHaveBeenCalledWith(
       '/api/v1/jobs/job%2Fwith%20spaces/result'
     )
-    expect(result).toBe(payload)
+    expect(result).toMatchObject({
+      success: true,
+      filename: 'sample.txt',
+      source_name: 'sample.txt',
+      file_type: 'txt',
+      file_id: '11111111-1111-4111-8111-111111111111',
+      file_ext: '.txt',
+      document_id: '11111111-1111-4111-8111-111111111111',
+      execution_mode: 'asynchronous'
+    })
+    expect(result).not.toHaveProperty('metadata')
+    expect(result).not.toHaveProperty('ocr_requirement')
+  })
+
+  it('adapts canonical backend issue offsets to the workspace aliases', async () => {
+    const issue = {
+      issue_id: '33333333-3333-4333-8333-333333333333',
+      document_id: '11111111-1111-4111-8111-111111111111',
+      verification_run_id: '22222222-2222-4222-8222-222222222222',
+      block_id: 'p-0',
+      page: null,
+      start: 0,
+      end: 1,
+      block_start: 0,
+      block_end: 1,
+      original: '检',
+      suggestion: '校',
+      alternatives: [],
+      type: 'typo',
+      severity: 'warning',
+      layer: 'character',
+      message: '疑似错别字',
+      description: '疑似错别字',
+      rule_id: 'cn_typo',
+      rule_version: '1',
+      source: 'test',
+      source_version: '1',
+      confidence: 0.8,
+      auto_fixable: true,
+      context: '检查',
+      review: null,
+      review_reason: null
+    }
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () =>
+        buildCanonicalBackendResult({
+          issues: [issue],
+          summary: {
+            total: 1,
+            by_type: { typo: 1 },
+            by_severity: { warning: 1 },
+            by_rule: { cn_typo: 1 },
+            by_layer: { character: 1 },
+            llm_review: null
+          }
+        })
+    })
+    const api = createJobsApi({
+      fetch: fetchMock,
+      eventSourceFactory: (url) =>
+        new FakeEventSource(url) as unknown as EventSource
+    })
+
+    const result = await api.getResult('job-1')
+
+    expect(result.issues[0]).toMatchObject({
+      start: 0,
+      end: 1,
+      position: 0,
+      end_position: 1
+    })
+  })
+
+  it('rejects a malformed successful retained-result response', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () =>
+        buildCanonicalBackendResult({
+          summary: {
+            total: 1,
+            by_type: {},
+            by_severity: {},
+            by_rule: {},
+            by_layer: {},
+            llm_review: null
+          }
+        })
+    })
+    const api = createJobsApi({
+      fetch: fetchMock,
+      eventSourceFactory: (url) =>
+        new FakeEventSource(url) as unknown as EventSource
+    })
+
+    await expect(api.getResult('job-1')).rejects.toThrow(
+      'Invalid verification result response.'
+    )
   })
 
   it('throws a typed expired-result error for HTTP 410', async () => {
@@ -345,7 +539,10 @@ describe('createJobsApi', () => {
         message: '处理完成'
       })
     )
-    expect(onError).toHaveBeenCalledWith('Connection interrupted. Waiting to reconnect…')
+    expect(onError).toHaveBeenCalledWith({
+      kind: 'transient',
+      message: 'Connection interrupted. Waiting to reconnect…'
+    })
     expect(eventSource.closed).toBe(false)
     expect(eventSource.closeCalls).toBe(0)
   })
@@ -360,10 +557,13 @@ describe('createJobsApi', () => {
     const onError = vi.fn()
 
     api.subscribe('job-1', onEvent, onError)
-    eventSource.emitRaw('progress', '{"status":"parsing",')
+    eventSource.emitRaw('progress', '{"status":"parsing",', '1')
 
     expect(onEvent).not.toHaveBeenCalled()
-    expect(onError).toHaveBeenCalledWith('Unable to receive job progress updates.')
+    expect(onError).toHaveBeenCalledWith({
+      kind: 'fatal',
+      message: 'Unable to receive job progress updates.'
+    })
     expect(eventSource.closeCalls).toBe(1)
   })
 
@@ -389,7 +589,10 @@ describe('createJobsApi', () => {
     eventSource.emitRaw('progress', payload, '4')
 
     expect(onEvent).not.toHaveBeenCalled()
-    expect(onError).toHaveBeenCalledWith('Unable to receive job progress updates.')
+    expect(onError).toHaveBeenCalledWith({
+      kind: 'fatal',
+      message: 'Unable to receive job progress updates.'
+    })
     expect(eventSource.closeCalls).toBe(1)
   })
 
@@ -419,6 +622,105 @@ describe('createJobsApi', () => {
     expect(eventSource.closeCalls).toBe(0)
   })
 
+  it.each(['', '-1', '1.5', '3junk', '9007199254740992'])(
+    'treats an invalid SSE replay id as a fatal protocol error: %s',
+    (lastEventId) => {
+      const eventSource = new FakeEventSource('/api/v1/jobs/job-1/events')
+      const api = createJobsApi({
+        fetch: vi.fn(),
+        eventSourceFactory: () => eventSource as unknown as EventSource
+      })
+      const onEvent = vi.fn()
+      const onError = vi.fn()
+
+      api.subscribe('job-1', onEvent, onError)
+      eventSource.emit(
+        'progress',
+        {
+          status: 'parsing',
+          stage: 'parsing',
+          progress: 25,
+          message: '开始解析',
+          created_at: '2026-08-14T00:02:00Z'
+        },
+        lastEventId
+      )
+
+      expect(onEvent).not.toHaveBeenCalled()
+      expect(onError).toHaveBeenCalledWith({
+        kind: 'fatal',
+        message: 'Unable to receive job progress updates.'
+      })
+      expect(eventSource.closeCalls).toBe(1)
+    }
+  )
+
+  it('ignores duplicate and decreasing SSE sequences without regressing progress', () => {
+    const eventSource = new FakeEventSource('/api/v1/jobs/job-1/events')
+    const api = createJobsApi({
+      fetch: vi.fn(),
+      eventSourceFactory: () => eventSource as unknown as EventSource
+    })
+    const onEvent = vi.fn()
+
+    api.subscribe('job-1', onEvent, vi.fn())
+    eventSource.emit(
+      'progress',
+      {
+        status: 'checking_format',
+        stage: 'checking_format',
+        progress: 50,
+        message: '正在检查格式',
+        created_at: '2026-08-14T00:02:00Z'
+      },
+      '5'
+    )
+    eventSource.emit(
+      'progress',
+      {
+        status: 'parsing',
+        stage: 'parsing',
+        progress: 25,
+        message: '重复事件',
+        created_at: '2026-08-14T00:01:00Z'
+      },
+      '5'
+    )
+    eventSource.emit(
+      'progress',
+      {
+        status: 'parsing',
+        stage: 'parsing',
+        progress: 10,
+        message: '倒序事件',
+        created_at: '2026-08-14T00:00:00Z'
+      },
+      '4'
+    )
+    eventSource.emit(
+      'progress',
+      {
+        status: 'checking_sensitive',
+        stage: 'checking_sensitive',
+        progress: 60,
+        message: '继续处理',
+        created_at: '2026-08-14T00:03:00Z'
+      },
+      '6'
+    )
+
+    expect(onEvent).toHaveBeenCalledTimes(2)
+    expect(onEvent.mock.calls.map(([event]) => event.sequence)).toEqual([5, 6])
+    expect(onEvent).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        status: 'checking_sensitive',
+        progress: 60,
+        message: '继续处理'
+      })
+    )
+    expect(eventSource.closeCalls).toBe(0)
+  })
+
   it.each([
     ['ocr', 'parsing'],
     ['finalizing', 'checking_english'],
@@ -440,7 +742,7 @@ describe('createJobsApi', () => {
         progress: 50,
         message: stage,
         created_at: '2026-08-14T00:02:00Z'
-      })
+      }, '1')
 
       expect(onEvent).toHaveBeenCalledWith(
         expect.objectContaining({ status, stage })

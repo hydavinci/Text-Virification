@@ -8,7 +8,11 @@ import {
   appendAnalyzeOptions,
   createAnalyzeOptionsSnapshot
 } from './analyzeOptions'
-import { readApiRequestError } from './errors'
+import {
+  ApiResponseValidationError,
+  readApiRequestError
+} from './errors'
+import { createVerificationResultSnapshot } from '../composables/useVerificationWorkspace'
 
 const API_BASE = '/api/v1'
 
@@ -42,7 +46,13 @@ export function createVerificationApi(fetchImpl: typeof fetch = fetch): Verifica
     if (!response.ok) {
       throw await readApiRequestError(response)
     }
-    return (await response.json()) as VerificationResult
+    const result = createVerificationResultSnapshot(await response.json())
+    if (result === null) {
+      throw new ApiResponseValidationError(
+        'Invalid verification result response.'
+      )
+    }
+    return result
   }
 
   return {

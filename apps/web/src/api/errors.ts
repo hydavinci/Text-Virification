@@ -18,6 +18,13 @@ export class ApiRequestError extends Error {
   }
 }
 
+export class ApiResponseValidationError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ApiResponseValidationError'
+  }
+}
+
 export async function readApiRequestError(
   response: Response,
   fallbackMessage = `请求失败（${response.status}）`

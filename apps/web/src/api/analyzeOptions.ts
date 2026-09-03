@@ -12,6 +12,9 @@ const SCENARIOS: readonly Scenario[] = [
   'news',
   'technical'
 ]
+const MAX_TERMINOLOGY_ITEMS = 500
+const MAX_TERMINOLOGY_CODE_POINTS = 200
+const MAX_OPTIONS_JSON_BYTES = 64 * 1024
 
 export class AnalyzeOptionsError extends Error {
   constructor(message: string) {
@@ -36,17 +39,35 @@ export function createAnalyzeOptionsSnapshot(
     throw new AnalyzeOptionsError('Verification options are invalid.')
   }
 
-  const glossary = options.glossary.map(cloneGlossaryTerm)
-  const bannedWords = options.bannedWords.map((word) => {
+  const glossary = options.glossary
+    .map(cloneGlossaryTerm)
+    .filter((term) => term.original !== term.standard)
+  const bannedWords: string[] = []
+  const seenBannedWords = new Set<string>()
+  for (const word of options.bannedWords) {
     if (typeof word !== 'string') {
-      throw new AnalyzeOptionsError('Verification options are invalid.')
+      throw invalidOptions()
     }
-    return word
-  })
+    const normalized = word.trim()
+    if (!normalized || seenBannedWords.has(normalized)) {
+      continue
+    }
+    if (codePointLength(normalized) > MAX_TERMINOLOGY_CODE_POINTS) {
+      throw invalidOptions()
+    }
+    bannedWords.push(normalized)
+    seenBannedWords.add(normalized)
+  }
+  if (
+    glossary.length > MAX_TERMINOLOGY_ITEMS ||
+    bannedWords.length > MAX_TERMINOLOGY_ITEMS
+  ) {
+    throw invalidOptions()
+  }
 
   Object.freeze(glossary)
   Object.freeze(bannedWords)
-  return Object.freeze({
+  const snapshot = Object.freeze({
     scenario: options.scenario,
     enableSecurity: options.enableSecurity,
     enableSensitive: options.enableSensitive,
@@ -54,6 +75,10 @@ export function createAnalyzeOptionsSnapshot(
     glossary,
     bannedWords
   })
+  if (serializedBackendBytes(snapshot) > MAX_OPTIONS_JSON_BYTES) {
+    throw invalidOptions()
+  }
+  return snapshot
 }
 
 export function appendAnalyzeOptions(
@@ -75,10 +100,38 @@ function cloneGlossaryTerm(term: GlossaryTerm): GlossaryTerm {
     typeof term.original !== 'string' ||
     typeof term.standard !== 'string'
   ) {
-    throw new AnalyzeOptionsError('Verification options are invalid.')
+    throw invalidOptions()
+  }
+  if (
+    codePointLength(term.original) < 1 ||
+    codePointLength(term.original) > MAX_TERMINOLOGY_CODE_POINTS ||
+    codePointLength(term.standard) > MAX_TERMINOLOGY_CODE_POINTS
+  ) {
+    throw invalidOptions()
   }
   return Object.freeze({
     original: term.original,
     standard: term.standard
   })
+}
+
+function codePointLength(value: string): number {
+  return Array.from(value).length
+}
+
+function serializedBackendBytes(options: AnalyzeOptions): number {
+  return new TextEncoder().encode(
+    JSON.stringify({
+      scenario: options.scenario,
+      enable_security: options.enableSecurity,
+      enable_sensitive: options.enableSensitive,
+      enable_ad_extreme: options.enableAdExtreme,
+      custom_glossary: options.glossary,
+      banned_words: options.bannedWords
+    })
+  ).byteLength
+}
+
+function invalidOptions(): AnalyzeOptionsError {
+  return new AnalyzeOptionsError('Verification options are invalid.')
 }

@@ -674,6 +674,15 @@ onBeforeUnmount(() => {
 
     <main v-else class="review-workspace">
       <p
+        v-if="errorMessage"
+        class="execution-error"
+        data-review-execution-error
+        role="alert"
+        aria-live="assertive"
+      >
+        {{ errorMessage }}
+      </p>
+      <p
         v-if="execution.jobStatus.value === 'partial'"
         class="execution-warning"
         data-execution-warning
@@ -968,15 +977,15 @@ input:focus, select:focus { border-color: var(--primary); outline: 3px solid rgb
 .stats-strip strong { margin-top: 2px; font-size: 18px; }
 .stats-strip .filename { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 .success { color: #059669; }.warning { color: #d97706; }.muted-text { color: var(--muted); }
-.execution-warning {
+.execution-warning,
+.execution-error {
   margin: 0;
   padding: 10px 13px;
-  border: 1px solid #f59e0b;
   border-radius: 12px;
-  color: #92400e;
-  background: #fffbeb;
   font-size: 12px;
 }
+.execution-warning { border: 1px solid #f59e0b; color: #92400e; background: #fffbeb; }
+.execution-error { border: 1px solid #ef4444; color: #991b1b; background: #fef2f2; }
 .review-toolbar, .find-panel { padding: 9px; display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
 .review-toolbar > div:first-child { display: flex; gap: 7px; }
 .find-panel { justify-content: flex-start; }

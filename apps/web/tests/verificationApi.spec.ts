@@ -9,12 +9,12 @@ const resultPayload: VerificationResult = {
   filename: 'sample.txt',
   source_name: 'sample.txt',
   file_type: 'txt',
-  text: '这是测试。',
+  text: '帐号测试。',
   blocks: [
     {
       block_id: 'p-0',
       kind: 'paragraph',
-      text: '这是测试。',
+      text: '帐号测试。',
       global_start: 0,
       global_end: 5,
       block_start: 0,
@@ -43,9 +43,9 @@ const resultPayload: VerificationResult = {
   },
   issues: [
     {
-      issue_id: '33333333-3333-3333-3333-333333333333',
-      document_id: '11111111-1111-1111-1111-111111111111',
-      verification_run_id: '22222222-2222-2222-2222-222222222222',
+      issue_id: '33333333-3333-4333-8333-333333333333',
+      document_id: '11111111-1111-4111-8111-111111111111',
+      verification_run_id: '22222222-2222-4222-8222-222222222222',
       block_id: 'p-0',
       page: null,
       start: 0,
@@ -74,16 +74,16 @@ const resultPayload: VerificationResult = {
     }
   ],
   summary: {
-    total: 0,
-    by_type: {},
-    by_severity: {},
-    by_rule: {},
-    by_layer: {}
+    total: 1,
+    by_type: { typo: 1 },
+    by_severity: { warning: 1 },
+    by_rule: { cn_typo: 1 },
+    by_layer: { character: 1 }
   },
   file_id: null,
   file_ext: null,
-  document_id: '11111111-1111-1111-1111-111111111111',
-  verification_run_id: '22222222-2222-2222-2222-222222222222',
+  document_id: '11111111-1111-4111-8111-111111111111',
+  verification_run_id: '22222222-2222-4222-8222-222222222222',
   source_version: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
   execution_mode: 'synchronous',
   analysis_mode: 'local_only',
@@ -124,15 +124,15 @@ describe('createVerificationApi', () => {
     })
 
     expect(result.scenario).toBe('technical')
-    expect(result.document_id).toBe('11111111-1111-1111-1111-111111111111')
-    expect(result.verification_run_id).toBe('22222222-2222-2222-2222-222222222222')
+    expect(result.document_id).toBe('11111111-1111-4111-8111-111111111111')
+    expect(result.verification_run_id).toBe('22222222-2222-4222-8222-222222222222')
     expect(result.source_version).toBe(
       'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
     )
     expect(result.execution_mode).toBe('synchronous')
     expect(result.analysis_mode).toBe('local_only')
     expect(result.degradation).toEqual({ is_degraded: false, reasons: [] })
-    expect(result.issues[0].issue_id).toBe('33333333-3333-3333-3333-333333333333')
+    expect(result.issues[0].issue_id).toBe('33333333-3333-4333-8333-333333333333')
     expect(result.issues[0].block_start).toBe(0)
     expect(fetchMock).toHaveBeenCalledWith('/api/v1/analyze', expect.objectContaining({
       method: 'POST'
@@ -149,7 +149,11 @@ describe('createVerificationApi', () => {
   it('submits a file without changing its name', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({ ...resultPayload, filename: 'source.docx', file_id: 'file-1' })
+      json: async () => ({
+        ...resultPayload,
+        filename: 'source.docx',
+        file_id: '44444444-4444-4444-8444-444444444444'
+      })
     })
     const api = createVerificationApi(fetchMock as typeof fetch)
     const file = new File(['document'], 'source.docx', {
@@ -186,6 +190,28 @@ describe('createVerificationApi', () => {
     })
 
     expect(result.issues[0].suggestion).toBeNull()
+  })
+
+  it('rejects a malformed successful direct-analysis response', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        ...resultPayload,
+        summary: { ...resultPayload.summary, total: 2 }
+      })
+    })
+    const api = createVerificationApi(fetchMock as typeof fetch)
+
+    await expect(
+      api.analyzeText('这是测试。', {
+        scenario: 'general',
+        enableSecurity: true,
+        enableSensitive: true,
+        enableAdExtreme: false,
+        glossary: [],
+        bannedWords: []
+      })
+    ).rejects.toThrow('Invalid verification result response.')
   })
 
   it('uses the shared typed API error shape for direct analysis failures', async () => {
