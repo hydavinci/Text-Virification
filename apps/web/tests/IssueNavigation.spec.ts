@@ -127,14 +127,9 @@ describe('useIssueNavigation', () => {
     expect(navigation.selectedIssueId.value).toBeNull()
   })
 
-  it('scrolls both source and list controls after selecting a stable id', async () => {
+  it('does not query or scroll global document controls after selecting a stable id', async () => {
     const issue = buildIssue('scroll-me', 0, 1)
-    for (const role of ['source', 'list']) {
-      const element = document.createElement('button')
-      element.dataset.issueId = issue.issue_id
-      element.dataset.issueRole = role
-      document.body.append(element)
-    }
+    const querySelectorAll = vi.spyOn(document, 'querySelectorAll')
     const navigation = useIssueNavigation({
       issues: ref<readonly VerificationIssue[]>([issue])
     })
@@ -142,7 +137,31 @@ describe('useIssueNavigation', () => {
     navigation.selectIssue(issue.issue_id)
     await nextTick()
 
-    expect(scrollIntoView).toHaveBeenCalledTimes(2)
+    expect(querySelectorAll).not.toHaveBeenCalled()
+    expect(scrollIntoView).not.toHaveBeenCalled()
+  })
+
+  it('uses full canonical order when filter eligibility changes', async () => {
+    const early = buildIssue('early', 0, 1, { severity: 'error' })
+    const selected = buildIssue('selected', 1, 2, { severity: 'error' })
+    const later = buildIssue('later', 2, 3, { severity: 'warning' })
+    const issues = ref<readonly VerificationIssue[]>([
+      early,
+      selected,
+      later
+    ])
+    const navigation = useIssueNavigation({ issues })
+    navigation.selectedSeverity.value = 'error'
+    navigation.selectIssue(selected.issue_id)
+
+    issues.value = [
+      early,
+      buildIssue('selected', 1, 2, { severity: 'warning' }),
+      buildIssue('later', 2, 3, { severity: 'error' })
+    ]
+    await nextTick()
+
+    expect(navigation.selectedIssueId.value).toBe(later.issue_id)
   })
 })
 
@@ -196,6 +215,19 @@ describe('IssueDetails', () => {
 
 describe('IssueList', () => {
   const issueStates: Readonly<Record<string, IssueState>> = Object.freeze({})
+  let scrollIntoView: ReturnType<typeof vi.fn>
+
+  beforeEach(() => {
+    scrollIntoView = vi.fn()
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+      configurable: true,
+      value: scrollIntoView
+    })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
 
   it('activates the same stable id by click and keyboard', async () => {
     const issue = buildIssue('list-issue', 0, 1)
@@ -235,5 +267,111 @@ describe('IssueList', () => {
     expect(
       wrapper.get(`[data-issue-id="${issue.issue_id}"]`).attributes('aria-current')
     ).toBe('true')
+  })
+
+  it('scrolls a preselected list control when mounted', async () => {
+    const issue = buildIssue('preselected-list-issue', 0, 1)
+    const wrapper = mount(IssueList, {
+      props: {
+        issues: [issue],
+        selectedIssueId: issue.issue_id,
+        issueStates,
+        selectedSuggestions: Object.freeze({})
+      }
+    })
+
+    await nextTick()
+
+    expect(scrollIntoView).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('scrolls the same selected list control after remount', async () => {
+    const issue = buildIssue('remounted-list-issue', 0, 1)
+    const props = {
+      issues: [issue],
+      selectedIssueId: issue.issue_id,
+      issueStates,
+      selectedSuggestions: Object.freeze({})
+    }
+    const first = mount(IssueList, { props })
+    await nextTick()
+    first.unmount()
+    const second = mount(IssueList, { props })
+
+    await nextTick()
+
+    expect(scrollIntoView).toHaveBeenCalledTimes(2)
+    second.unmount()
+  })
+
+  it('scrolls only the latest list selection after rapid changes', async () => {
+    const firstIssue = buildIssue('rapid-list-a', 0, 1)
+    const secondIssue = buildIssue('rapid-list-b', 1, 2)
+    const wrapper = mount(IssueList, {
+      props: {
+        issues: [firstIssue, secondIssue],
+        selectedIssueId: null,
+        issueStates,
+        selectedSuggestions: Object.freeze({})
+      }
+    })
+    const firstScroll = vi.fn()
+    const secondScroll = vi.fn()
+    Object.defineProperty(
+      wrapper.get(`[data-issue-id="${firstIssue.issue_id}"]`).element,
+      'scrollIntoView',
+      { configurable: true, value: firstScroll }
+    )
+    Object.defineProperty(
+      wrapper.get(`[data-issue-id="${secondIssue.issue_id}"]`).element,
+      'scrollIntoView',
+      { configurable: true, value: secondScroll }
+    )
+
+    const firstUpdate = wrapper.setProps({
+      selectedIssueId: firstIssue.issue_id
+    })
+    const secondUpdate = wrapper.setProps({
+      selectedIssueId: secondIssue.issue_id
+    })
+    await Promise.all([firstUpdate, secondUpdate])
+    await nextTick()
+
+    expect(firstScroll).not.toHaveBeenCalled()
+    expect(secondScroll).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('scrolls only inside the list instance whose selection changed', async () => {
+    const issue = buildIssue('shared-list-issue', 0, 1)
+    const props = {
+      issues: [issue],
+      selectedIssueId: null,
+      issueStates,
+      selectedSuggestions: Object.freeze({})
+    }
+    const first = mount(IssueList, { props, attachTo: document.body })
+    const second = mount(IssueList, { props, attachTo: document.body })
+    const firstScroll = vi.fn()
+    const secondScroll = vi.fn()
+    Object.defineProperty(
+      first.get(`[data-issue-id="${issue.issue_id}"]`).element,
+      'scrollIntoView',
+      { configurable: true, value: firstScroll }
+    )
+    Object.defineProperty(
+      second.get(`[data-issue-id="${issue.issue_id}"]`).element,
+      'scrollIntoView',
+      { configurable: true, value: secondScroll }
+    )
+
+    await first.setProps({ selectedIssueId: issue.issue_id })
+    await nextTick()
+
+    expect(firstScroll).toHaveBeenCalledTimes(1)
+    expect(secondScroll).not.toHaveBeenCalled()
+    first.unmount()
+    second.unmount()
   })
 })

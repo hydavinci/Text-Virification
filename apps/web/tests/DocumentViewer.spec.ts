@@ -218,6 +218,68 @@ describe('DocumentViewer', () => {
     expect(wrapper.get('[data-source-text]').text()).toBe(text)
   })
 
+  it('keeps nested overlaps navigable while rendering source text once', () => {
+    const text = '甲乙丙丁戊'
+    const outer = buildIssue({
+      issue_id: '33333333-3333-3333-3333-333333333333',
+      start: 0,
+      end: 5,
+      block_start: 0,
+      block_end: 5,
+      original: text
+    })
+    const inner = buildIssue({
+      issue_id: '44444444-4444-4444-4444-444444444444',
+      start: 1,
+      end: 4,
+      block_start: 1,
+      block_end: 4,
+      original: '乙丙丁'
+    })
+    const result = buildResult(text, [outer, inner])
+    const wrapper = mount(DocumentViewer, {
+      props: { result, issues: result.issues, selectedIssueId: null }
+    })
+
+    expect(wrapper.findAll(`[data-issue-id="${outer.issue_id}"]`)).toHaveLength(1)
+    expect(wrapper.findAll(`[data-issue-id="${inner.issue_id}"]`)).toHaveLength(1)
+    expect(wrapper.get('[data-source-text]').text()).toBe(text)
+  })
+
+  it('keeps identical ranges navigable while rendering source text once', () => {
+    const text = '甲乙丙丁'
+    const first = buildIssue({
+      issue_id: '33333333-3333-3333-3333-333333333333'
+    })
+    const second = buildIssue({
+      issue_id: '44444444-4444-4444-4444-444444444444'
+    })
+    const result = buildResult(text, [first, second])
+    const wrapper = mount(DocumentViewer, {
+      props: { result, issues: result.issues, selectedIssueId: null }
+    })
+
+    expect(wrapper.findAll(`[data-issue-id="${first.issue_id}"]`)).toHaveLength(1)
+    expect(wrapper.findAll(`[data-issue-id="${second.issue_id}"]`)).toHaveLength(1)
+    expect(wrapper.get('[data-source-text]').text()).toBe(text)
+  })
+
+  it('renders an empty source exactly once without source markers', () => {
+    const result = buildResult('', [])
+    const wrapper = mount(DocumentViewer, {
+      props: {
+        result,
+        issues: result.issues,
+        selectedIssueId: null,
+        mode: 'sentence'
+      }
+    })
+
+    expect(wrapper.get('[data-source-text]').text()).toBe('')
+    expect(wrapper.findAll('[data-issue-role="source"]')).toHaveLength(0)
+    expect(wrapper.findAll('[data-line-number]')).toHaveLength(1)
+  })
+
   it('supports keyboard activation and exposes the current source selection', async () => {
     const issue = buildIssue()
     const result = buildResult('甲乙丙丁', [issue])
@@ -272,6 +334,7 @@ describe('DocumentViewer', () => {
     })
 
     await wrapper.setProps({ selectedIssueId: issue.issue_id })
+    await wrapper.vm.$nextTick()
 
     expect(scrollIntoView).toHaveBeenCalledWith({
       behavior: 'smooth',
@@ -279,5 +342,125 @@ describe('DocumentViewer', () => {
       inline: 'nearest'
     })
     wrapper.unmount()
+  })
+
+  it('scrolls a preselected source control when mounted', async () => {
+    const issue = buildIssue()
+    const result = buildResult('甲乙丙丁', [issue])
+    const wrapper = mount(DocumentViewer, {
+      props: {
+        result,
+        issues: result.issues,
+        selectedIssueId: issue.issue_id
+      }
+    })
+
+    await wrapper.vm.$nextTick()
+
+    expect(scrollIntoView).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('scrolls the same selected source control after remount', async () => {
+    const issue = buildIssue()
+    const result = buildResult('甲乙丙丁', [issue])
+    const props = {
+      result,
+      issues: result.issues,
+      selectedIssueId: issue.issue_id
+    }
+    const first = mount(DocumentViewer, { props })
+    await first.vm.$nextTick()
+    first.unmount()
+    const second = mount(DocumentViewer, { props })
+
+    await second.vm.$nextTick()
+
+    expect(scrollIntoView).toHaveBeenCalledTimes(2)
+    second.unmount()
+  })
+
+  it('scrolls only the latest source selection after rapid changes', async () => {
+    const firstIssue = buildIssue({
+      issue_id: '33333333-3333-3333-3333-333333333333',
+      start: 0,
+      end: 1,
+      block_start: 0,
+      block_end: 1,
+      original: '甲'
+    })
+    const secondIssue = buildIssue({
+      issue_id: '44444444-4444-4444-4444-444444444444',
+      start: 2,
+      end: 3,
+      block_start: 2,
+      block_end: 3,
+      original: '丙'
+    })
+    const result = buildResult('甲乙丙丁', [firstIssue, secondIssue])
+    const wrapper = mount(DocumentViewer, {
+      props: {
+        result,
+        issues: result.issues,
+        selectedIssueId: null
+      }
+    })
+    const firstScroll = vi.fn()
+    const secondScroll = vi.fn()
+    Object.defineProperty(
+      wrapper.get(`[data-issue-id="${firstIssue.issue_id}"]`).element,
+      'scrollIntoView',
+      { configurable: true, value: firstScroll }
+    )
+    Object.defineProperty(
+      wrapper.get(`[data-issue-id="${secondIssue.issue_id}"]`).element,
+      'scrollIntoView',
+      { configurable: true, value: secondScroll }
+    )
+
+    const firstUpdate = wrapper.setProps({
+      selectedIssueId: firstIssue.issue_id
+    })
+    const secondUpdate = wrapper.setProps({
+      selectedIssueId: secondIssue.issue_id
+    })
+    await Promise.all([firstUpdate, secondUpdate])
+    await wrapper.vm.$nextTick()
+
+    expect(firstScroll).not.toHaveBeenCalled()
+    expect(secondScroll).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('scrolls only inside the viewer instance whose selection changed', async () => {
+    const issue = buildIssue()
+    const result = buildResult('甲乙丙丁', [issue])
+    const props = {
+      result,
+      issues: result.issues,
+      selectedIssueId: null
+    }
+    const first = mount(DocumentViewer, { props, attachTo: document.body })
+    const second = mount(DocumentViewer, { props, attachTo: document.body })
+    const firstScroll = vi.fn()
+    const secondScroll = vi.fn()
+    Object.defineProperty(
+      first.get(`[data-issue-id="${issue.issue_id}"]`).element,
+      'scrollIntoView',
+      { configurable: true, value: firstScroll }
+    )
+    Object.defineProperty(
+      second.get(`[data-issue-id="${issue.issue_id}"]`).element,
+      'scrollIntoView',
+      { configurable: true, value: secondScroll }
+    )
+
+    await first.setProps({ selectedIssueId: issue.issue_id })
+    await first.vm.$nextTick()
+
+    expect(firstScroll).toHaveBeenCalledTimes(1)
+    expect(secondScroll).not.toHaveBeenCalled()
+    first.unmount()
+    second.unmount()
   })
 })

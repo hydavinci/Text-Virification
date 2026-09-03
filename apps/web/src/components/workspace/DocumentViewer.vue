@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 
 import type {
   IssueState,
@@ -136,13 +136,21 @@ function activateIssue(issueId: string): void {
   emit('select-issue', issueId)
 }
 
-function scrollSelectedSource(issueId: string | null): void {
+async function scrollSelectedSource(issueId: string | null): Promise<void> {
   if (issueId === null) {
+    return
+  }
+  await nextTick()
+  if (props.selectedIssueId !== issueId) {
     return
   }
   const control = Array.from(
     root.value?.querySelectorAll<HTMLElement>('[data-issue-id]') ?? []
-  ).find((element) => element.dataset.issueId === issueId)
+  ).find(
+    (element) =>
+      element.dataset.issueId === issueId &&
+      element.dataset.issueRole === 'source'
+  )
   if (control && typeof control.scrollIntoView === 'function') {
     control.scrollIntoView({
       behavior: 'smooth',
@@ -155,9 +163,9 @@ function scrollSelectedSource(issueId: string | null): void {
 watch(
   () => props.selectedIssueId,
   (issueId) => {
-    scrollSelectedSource(issueId)
+    void scrollSelectedSource(issueId)
   },
-  { flush: 'post' }
+  { flush: 'post', immediate: true }
 )
 </script>
 

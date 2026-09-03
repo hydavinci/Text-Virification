@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { nextTick, ref, watch } from 'vue'
+
 import IssueDetails from './IssueDetails.vue'
 import type {
   IssueState,
@@ -14,7 +16,7 @@ interface LayerOption {
   name: string
 }
 
-withDefaults(
+const props = withDefaults(
   defineProps<{
     issues: readonly VerificationIssue[]
     selectedIssueId: string | null
@@ -41,8 +43,34 @@ const emit = defineEmits<{
   'set-state': [issueId: string, state: IssueState]
 }>()
 
+const root = ref<HTMLElement | null>(null)
+
 function activateIssue(issueId: string): void {
   emit('select-issue', issueId)
+}
+
+async function scrollSelectedIssue(issueId: string | null): Promise<void> {
+  if (issueId === null) {
+    return
+  }
+  await nextTick()
+  if (props.selectedIssueId !== issueId) {
+    return
+  }
+  const control = Array.from(
+    root.value?.querySelectorAll<HTMLElement>('[data-issue-id]') ?? []
+  ).find(
+    (element) =>
+      element.dataset.issueId === issueId &&
+      element.dataset.issueRole === 'list'
+  )
+  if (control && typeof control.scrollIntoView === 'function') {
+    control.scrollIntoView({
+      behavior: 'smooth',
+      block: 'center',
+      inline: 'nearest'
+    })
+  }
 }
 
 function updateLayer(event: Event): void {
@@ -63,10 +91,18 @@ function updateSeverity(event: Event): void {
       emit('update:selected-severity', event.target.value)
   }
 }
+
+watch(
+  () => props.selectedIssueId,
+  (issueId) => {
+    void scrollSelectedIssue(issueId)
+  },
+  { flush: 'post', immediate: true }
+)
 </script>
 
 <template>
-  <div class="issue-list-shell">
+  <div ref="root" class="issue-list-shell">
     <div class="filters">
       <label>
         <span>检查层级</span>

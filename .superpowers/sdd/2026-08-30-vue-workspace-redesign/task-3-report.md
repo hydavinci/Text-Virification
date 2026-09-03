@@ -92,3 +92,48 @@ The Task 3 commit contains only the document/issue components, issue-navigation
 composable, stable-ID workspace integration and reset support, focused tests,
 and Task 3 SDD evidence. It does not implement the Task 4 search/free-edit
 redesign or the Task 5 API/execution redesign.
+
+## Review fixes — 2026-09-03
+
+- Modified export now fails closed before either text-download fallback or
+  `exportOriginal` when accepted effective replacements overlap. The
+  deterministic toast is
+  `存在重叠的已接受修改，请先解决冲突后再导出`.
+- Workspace batch accept/reject and undo now delegate to the canonical
+  identity-bound composable operations. The sealed reactive
+  `canUndoLastBatch` facade drives the undo affordance and clears on result
+  load, reset, manual revision, undo, and session restoration.
+- Overlapping batch acceptance is one atomic state transition. Conflicts are
+  exposed without publishing an intermediate partial revision, and exact undo
+  restores property absence versus explicit state.
+- Filter fallback now locates the hidden selection in full canonical
+  `orderedIssues`, then chooses the first visible issue after it, the nearest
+  visible issue before it, or `null`.
+- Global document scrolling was removed from `useIssueNavigation`.
+  `DocumentViewer` and `IssueList` now schedule role-specific scrolling inside
+  their own roots, run on mount/remount as well as selection changes, guard
+  unsupported `scrollIntoView`, and discard stale scheduled IDs.
+- Added crossing, nested, identical, and empty-source coverage for conflict
+  export and exact-once source segmentation without changing Task 4-6 scope.
+
+### Review-fix TDD and validation evidence
+
+- Focused pre-fix baseline:
+  `npm test -- DocumentViewer.spec.ts IssueNavigation.spec.ts useVerificationWorkspace.spec.ts WorkspaceView.spec.ts --reporter=dot`
+  passed 87 tests across 4 files.
+- RED: the same focused command failed with 22 failures and 89 passes after
+  adding the regressions. Failures covered missing conflict export gating,
+  missing canonical undo eligibility, non-atomic View-local batching, stale
+  filter fallback, global composable scrolling, and mount/remount-safe
+  component scrolling. The segmentation-only cases were already green.
+- Focused GREEN: the focused command passed 111 tests across 4 files.
+- Full frontend GREEN:
+  `npm test -- --run --reporter=dot` passed 176 tests across 10 files. Node
+  emitted the existing experimental `localStorage` warning.
+- Production build GREEN: `npm run build` passed `vue-tsc -b` and Vite 6.4.3
+  with 40 modules transformed.
+- `git diff --check` passed with no output.
+
+The review-fix commit remains limited to Task 3 navigation/export hardening,
+the Task 1 composable facade needed by that integration, focused regressions,
+and these evidence updates. Tasks 4-6 remain unimplemented.

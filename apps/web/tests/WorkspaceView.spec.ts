@@ -94,7 +94,8 @@ function buildWorkspaceIssue(
 
 function buildWorkspaceResult(
   issues: VerificationIssue[],
-  text = '甲乙丙丁'
+  text = '甲乙丙丁',
+  overrides: Partial<VerificationResult> = {}
 ): VerificationResult {
   const length = Array.from(text).length
   return {
@@ -151,8 +152,59 @@ function buildWorkspaceResult(
     analysis_mode: 'local_only',
     dictionary_versions: {},
     degradation: { is_degraded: false, reasons: [] },
-    scenario: 'general'
+    scenario: 'general',
+    ...overrides
   }
+}
+
+function buildConflictIssues(
+  kind: 'crossing' | 'nested' | 'identical'
+): VerificationIssue[] {
+  const ranges = {
+    crossing: [
+      { start: 0, end: 3, original: 'abc' },
+      { start: 2, end: 5, original: 'cde' }
+    ],
+    nested: [
+      { start: 0, end: 5, original: 'abcde' },
+      { start: 1, end: 4, original: 'bcd' }
+    ],
+    identical: [
+      { start: 1, end: 4, original: 'bcd' },
+      { start: 1, end: 4, original: 'bcd' }
+    ]
+  }[kind]
+  return ranges.map((range, index) =>
+    buildWorkspaceIssue({
+      issue_id:
+        index === 0
+          ? '33333333-3333-3333-3333-333333333333'
+          : '44444444-4444-4444-4444-444444444444',
+      start: range.start,
+      end: range.end,
+      block_start: range.start,
+      block_end: range.end,
+      original: range.original,
+      suggestion: index === 0 ? 'X' : 'Y',
+      context: 'abcdef'
+    })
+  )
+}
+
+function canonicalWorkspace(wrapper: ReturnType<typeof mount>) {
+  return (
+    wrapper.vm as unknown as {
+      verificationWorkspace: {
+        currentRevision: { readonly value: unknown }
+        modifiedText: { readonly value: string }
+        issueStates: {
+          readonly value: Readonly<Record<string, string>>
+        }
+        hasReplacementConflicts: { readonly value: boolean }
+        canUndoLastBatch: { readonly value: boolean }
+      }
+    }
+  ).verificationWorkspace
 }
 
 describe('WorkspaceView', () => {
@@ -664,6 +716,172 @@ describe('WorkspaceView', () => {
     expect(wrapper.text()).not.toContain('null')
     confirm.mockRestore()
   })
+
+  it('accepts an overlapping batch atomically and undoes the exact batch', async () => {
+    const payload = buildWorkspaceResult(
+      buildConflictIssues('crossing'),
+      'abcdef'
+    )
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const wrapper = mount(WorkspaceView, {
+      global: {
+        provide: {
+          [jobsApiKey as symbol]: {
+            createJob: vi.fn(),
+            subscribe: vi.fn(() => vi.fn())
+          },
+          [verificationApiKey as symbol]: {
+            analyzeFile: vi.fn(),
+            analyzeText: vi.fn().mockResolvedValue(payload),
+            exportReport: vi.fn(),
+            exportOriginal: vi.fn()
+          }
+        }
+      }
+    })
+    wrapper
+      .getComponent(SourceInputPanel)
+      .vm.$emit('submit-text', 'abcdef')
+    await flushPromises()
+    const workspace = canonicalWorkspace(wrapper)
+    const sourceRevision = workspace.currentRevision.value
+
+    await wrapper.get('.review-toolbar .btn.accept').trigger('click')
+
+    expect(workspace.currentRevision.value).toBe(sourceRevision)
+    expect(workspace.modifiedText.value).toBe('abcdef')
+    expect(workspace.hasReplacementConflicts.value).toBe(true)
+    expect(workspace.canUndoLastBatch.value).toBe(true)
+    expect(wrapper.text()).toContain('撤销批量操作')
+
+    const undo = wrapper
+      .findAll('button')
+      .find((button) => button.text() === '撤销批量操作')
+    if (!undo) {
+      throw new Error('Expected canonical batch undo control.')
+    }
+    await undo.trigger('click')
+
+    expect(workspace.issueStates.value).toEqual({})
+    expect(workspace.currentRevision.value).toBe(sourceRevision)
+    expect(workspace.hasReplacementConflicts.value).toBe(false)
+    expect(workspace.canUndoLastBatch.value).toBe(false)
+    expect(wrapper.text()).not.toContain('撤销批量操作')
+  })
+
+  it('restores session decisions without restoring batch undo eligibility', async () => {
+    const issue = buildWorkspaceIssue({
+      start: 1,
+      end: 2,
+      block_start: 1,
+      block_end: 2,
+      original: 'b'
+    })
+    const payload = buildWorkspaceResult([issue], 'abc')
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const api = {
+      analyzeFile: vi.fn(),
+      analyzeText: vi.fn().mockResolvedValue(payload),
+      exportReport: vi.fn(),
+      exportOriginal: vi.fn()
+    }
+    const global = {
+      provide: {
+        [jobsApiKey as symbol]: {
+          createJob: vi.fn(),
+          subscribe: vi.fn(() => vi.fn())
+        },
+        [verificationApiKey as symbol]: api
+      }
+    }
+    const first = mount(WorkspaceView, { global })
+    first
+      .getComponent(SourceInputPanel)
+      .vm.$emit('submit-text', 'abc')
+    await flushPromises()
+    await first.get('.review-toolbar .btn.accept').trigger('click')
+    expect(canonicalWorkspace(first).canUndoLastBatch.value).toBe(true)
+    first.unmount()
+
+    const restored = mount(WorkspaceView, { global })
+    await flushPromises()
+
+    expect(canonicalWorkspace(restored).issueStates.value).toEqual({
+      [issue.issue_id]: 'accepted'
+    })
+    expect(canonicalWorkspace(restored).canUndoLastBatch.value).toBe(false)
+    expect(restored.text()).not.toContain('撤销批量操作')
+    restored.unmount()
+  })
+
+  it.each(
+    (['crossing', 'nested', 'identical'] as const).flatMap((kind) =>
+      (['fallback', 'original-file'] as const).map((path) => [kind, path] as const)
+    )
+  )(
+    'blocks %s accepted-range conflicts before the %s export path',
+    async (kind, path) => {
+      const exportOriginal = vi.fn()
+      const createObjectURL = vi.fn(() => 'blob:test')
+      Object.defineProperty(URL, 'createObjectURL', {
+        configurable: true,
+        value: createObjectURL
+      })
+      Object.defineProperty(URL, 'revokeObjectURL', {
+        configurable: true,
+        value: vi.fn()
+      })
+      const anchorClick = vi
+        .spyOn(HTMLAnchorElement.prototype, 'click')
+        .mockImplementation(() => {})
+      vi.spyOn(window, 'confirm').mockReturnValue(true)
+      const payload = buildWorkspaceResult(
+        buildConflictIssues(kind),
+        'abcdef',
+        path === 'original-file'
+          ? {
+              file_id: '55555555-5555-4555-8555-555555555555',
+              file_ext: 'docx'
+            }
+          : {}
+      )
+      const wrapper = mount(WorkspaceView, {
+        global: {
+          provide: {
+            [jobsApiKey as symbol]: {
+              createJob: vi.fn(),
+              subscribe: vi.fn(() => vi.fn())
+            },
+            [verificationApiKey as symbol]: {
+              analyzeFile: vi.fn(),
+              analyzeText: vi.fn().mockResolvedValue(payload),
+              exportReport: vi.fn(),
+              exportOriginal
+            }
+          }
+        }
+      })
+      wrapper
+        .getComponent(SourceInputPanel)
+        .vm.$emit('submit-text', 'abcdef')
+      await flushPromises()
+      const workspace = canonicalWorkspace(wrapper)
+      const sourceRevision = workspace.currentRevision.value
+      await wrapper.get('.review-toolbar .btn.accept').trigger('click')
+
+      await wrapper.get('.top-actions .btn.primary').trigger('click')
+
+      expect(wrapper.get('.toast').text()).toBe(
+        '存在重叠的已接受修改，请先解决冲突后再导出'
+      )
+      expect(createObjectURL).not.toHaveBeenCalled()
+      expect(anchorClick).not.toHaveBeenCalled()
+      expect(exportOriginal).not.toHaveBeenCalled()
+      expect(workspace.currentRevision.value).toBe(sourceRevision)
+      expect(workspace.modifiedText.value).toBe('abcdef')
+      wrapper.unmount()
+    }
+  )
 
   it('exports tracked text at canonical code-point offsets', async () => {
     const payload = buildWorkspaceResult(

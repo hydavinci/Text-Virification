@@ -88,6 +88,7 @@ const result = ref<VerificationResult | null>(null)
 const verificationWorkspace = useVerificationWorkspace()
 const issueStates = verificationWorkspace.issueStates
 const selectedSuggestions = verificationWorkspace.selectedSuggestions
+const canUndoLastBatch = verificationWorkspace.canUndoLastBatch
 const currentIssueStates = computed(() => issueStates.value)
 const currentSelectedSuggestions = computed(
   () => selectedSuggestions.value
@@ -115,7 +116,6 @@ const replaceText = ref('')
 const caseSensitive = ref(false)
 const showFindReplace = ref(false)
 const activeFindIndex = ref(0)
-const batchSnapshot = ref<Record<string, IssueState | null> | null>(null)
 const editBackup = ref('')
 const jobState = ref<JobProgressState | null>(null)
 
@@ -326,32 +326,21 @@ function setIssueState(issueId: string, state: IssueState) {
 }
 
 function setAllIssues(state: IssueState) {
-  batchSnapshot.value = Object.fromEntries(
-    visibleIssues.value.map((issue) => [
-      issue.issue_id,
-      Object.prototype.hasOwnProperty.call(issueStates.value, issue.issue_id)
-        ? issueStates.value[issue.issue_id]
-        : null
-    ])
-  )
-  for (const issue of visibleIssues.value) {
-    verificationWorkspace.setIssueState(issue.issue_id, state)
+  const issueIds = visibleIssues.value.map((issue) => issue.issue_id)
+  if (state === 'accepted') {
+    verificationWorkspace.acceptIssues(issueIds)
+  } else if (state === 'rejected') {
+    verificationWorkspace.rejectIssues(issueIds)
+  } else {
+    for (const issueId of issueIds) {
+      verificationWorkspace.undoIssue(issueId)
+    }
   }
   saveSession()
 }
 
 function undoBatch() {
-  if (!batchSnapshot.value) {
-    return
-  }
-  for (const [issueId, state] of Object.entries(batchSnapshot.value)) {
-    if (state === null) {
-      verificationWorkspace.undoIssue(issueId)
-    } else {
-      verificationWorkspace.setIssueState(issueId, state)
-    }
-  }
-  batchSnapshot.value = null
+  verificationWorkspace.undoLastBatch()
   saveSession()
 }
 
@@ -483,6 +472,10 @@ async function exportReport() {
 
 async function exportModified() {
   if (!result.value) {
+    return
+  }
+  if (verificationWorkspace.hasReplacementConflicts.value) {
+    notify('存在重叠的已接受修改，请先解决冲突后再导出')
     return
   }
   if (workingText.value !== result.value.text && acceptedCount.value > 0) {
@@ -848,7 +841,7 @@ onBeforeUnmount(() => {
           <button class="btn accept small" @click="setAllIssues('accepted')">全部接受</button>
           <button class="btn reject small" @click="setAllIssues('rejected')">全部忽略</button>
           <button class="btn ghost small" @click="setAllIssues('pending')">重置状态</button>
-          <button v-if="batchSnapshot" class="btn ghost small" @click="undoBatch">撤销批量操作</button>
+          <button v-if="canUndoLastBatch" class="btn ghost small" @click="undoBatch">撤销批量操作</button>
         </div>
       </section>
 

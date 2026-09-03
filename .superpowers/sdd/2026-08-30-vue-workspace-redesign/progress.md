@@ -486,3 +486,53 @@ deduplicated against the primary suggestion and the first remaining actual
 alternative is marked recommended — this matches the Task 1 replacement
 boundary; cost if wrong is changing the legacy UI label that previously
 conflated nullable suggestions with deletion.
+
+## Task 3 review fixes — 2026-09-03
+
+- Modified export now checks canonical replacement conflicts before any Blob
+  fallback or original-file API call. Crossing, nested, and identical accepted
+  ranges all fail closed with one deterministic conflict-resolution message
+  while preserving the last valid canonical revision.
+- WorkspaceView delegates accept-all, reject-all, and batch undo to
+  `acceptIssues`, `rejectIssues`, and `undoLastBatch`. The composable exposes a
+  frozen reactive `canUndoLastBatch` facade backed by identity-bound batch
+  history; loads, clear/reset, manual revision, undo, and session restoration
+  clear eligibility.
+- Batch acceptance publishes the complete stable-ID state once. Accepted
+  overlap conflicts retain the prior revision instead of exposing an
+  intermediate partial replacement, and undo restores the exact prior state.
+- Hidden-selection fallback uses the selected issue's index in full
+  `orderedIssues`; newly visible later findings win over earlier visible
+  findings, followed by nearest prior and then `null`.
+- `useIssueNavigation` no longer queries or scrolls the global document.
+  `DocumentViewer` and `IssueList` each own a root, query only their own
+  role-specific stable-ID control, scroll on mount/remount and selection
+  changes, guard unsupported scrolling, and reject stale scheduled IDs.
+- Added exact-once segmentation coverage for nested and identical ranges plus
+  empty source text. No Task 4-6 behavior was introduced.
+
+### Task 3 review-fix TDD and validation evidence
+
+- Focused pre-fix baseline:
+  `npm test -- DocumentViewer.spec.ts IssueNavigation.spec.ts useVerificationWorkspace.spec.ts WorkspaceView.spec.ts --reporter=dot`
+  passed 87 tests across 4 files.
+- RED: the focused command failed with 22 failures and 89 passes after the new
+  regressions were added. The new segmentation-only cases already passed.
+- Focused GREEN: the focused command passed 111 tests across 4 files.
+- Full frontend GREEN: `npm test -- --run --reporter=dot` passed 176 tests
+  across 10 files. Node emitted the existing experimental `localStorage`
+  warning.
+- Production build GREEN: `npm run build` passed `vue-tsc -b` and Vite 6.4.3
+  with 40 modules transformed.
+- `git diff --check` passed with no output.
+
+Ruling: Export conflict checks precede every output path and use the canonical
+workspace conflict flag — no renderer or API path may independently choose an
+overlap winner; cost if wrong is requiring the user to resolve accepted
+overlaps before exporting.
+
+Ruling: Scrolling belongs to each mounted rendering component, not the
+selection composable. A scheduled scroll is valid only while its captured
+stable ID remains selected in that same component instance — this prevents
+stale rapid-selection scrolls and cross-workspace DOM effects; cost if wrong is
+duplicating a small scheduling helper in the two role-specific components.

@@ -929,11 +929,79 @@ describe('useVerificationWorkspace', () => {
     workspace.setIssueState(issueB.issue_id, 'pending')
 
     workspace.acceptIssues([issueA.issue_id, issueB.issue_id])
+    expect(workspace.canUndoLastBatch.value).toBe(true)
     workspace.undoLastBatch()
 
     expect(Object.hasOwn(workspace.issueStates.value, issueA.issue_id)).toBe(false)
     expect(Object.hasOwn(workspace.issueStates.value, issueB.issue_id)).toBe(true)
     expect(workspace.issueStates.value[issueB.issue_id]).toBe('pending')
+    expect(workspace.canUndoLastBatch.value).toBe(false)
+  })
+
+  it('undoes an overlapping batch exactly without publishing a partial revision', () => {
+    const earlier = buildIssue({
+      issue_id: '40000000-0000-0000-0000-000000000001',
+      start: 1,
+      end: 4,
+      block_start: 1,
+      block_end: 4,
+      original: 'bcd',
+      suggestion: 'X',
+      context: 'abcdef'
+    })
+    const later = buildIssue({
+      issue_id: '40000000-0000-0000-0000-000000000002',
+      start: 2,
+      end: 5,
+      block_start: 2,
+      block_end: 5,
+      original: 'cde',
+      suggestion: 'Y',
+      context: 'abcdef'
+    })
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(buildResult([later, earlier], { text: 'abcdef' }))
+    const source = workspace.currentRevision.value
+
+    workspace.acceptIssues([later.issue_id, earlier.issue_id])
+
+    expect(workspace.currentRevision.value).toBe(source)
+    expect(workspace.hasReplacementConflicts.value).toBe(true)
+    expect(workspace.canUndoLastBatch.value).toBe(true)
+
+    workspace.undoLastBatch()
+
+    expect(workspace.issueStates.value).toEqual({})
+    expect(workspace.hasReplacementConflicts.value).toBe(false)
+    expect(workspace.currentRevision.value).toBe(source)
+    expect(workspace.canUndoLastBatch.value).toBe(false)
+  })
+
+  it.each([
+    ['new result', (workspace: ReturnType<typeof useVerificationWorkspace>) => {
+      const nextRunId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+      workspace.loadResult(buildResult([
+        buildIssue({ verification_run_id: nextRunId })
+      ], {
+        verification_run_id: nextRunId
+      }))
+    }],
+    ['clear result', (workspace: ReturnType<typeof useVerificationWorkspace>) => {
+      workspace.clearResult()
+    }],
+    ['manual edit', (workspace: ReturnType<typeof useVerificationWorkspace>) => {
+      workspace.saveManualEdit('手工修改')
+    }]
+  ])('clears batch undo eligibility after %s', (_label, resetWorkspace) => {
+    const issue = buildIssue()
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(buildResult([issue]))
+    workspace.acceptIssues([issue.issue_id])
+    expect(workspace.canUndoLastBatch.value).toBe(true)
+
+    resetWorkspace(workspace)
+
+    expect(workspace.canUndoLastBatch.value).toBe(false)
   })
 
   it('supports individual accept, reject, and undo with stable-id summary counts', () => {
@@ -1271,6 +1339,7 @@ describe('useVerificationWorkspace', () => {
     const reviewSummary = workspace.summary.value
     const conflictIds = workspace.replacementConflictIssueIds.value
     const visible = workspace.visibleIssues.value
+    const canUndo = workspace.canUndoLastBatch.value
 
     attemptAccessorReplacement(workspace.summary, {
       total: 0,
@@ -1280,10 +1349,13 @@ describe('useVerificationWorkspace', () => {
     })
     attemptAccessorReplacement(workspace.replacementConflictIssueIds, [])
     attemptAccessorReplacement(workspace.visibleIssues, [])
+    attemptAccessorReplacement(workspace.canUndoLastBatch, false)
 
     expect(workspace.summary.value).toBe(reviewSummary)
     expect(workspace.replacementConflictIssueIds.value).toBe(conflictIds)
     expect(workspace.visibleIssues.value).toBe(visible)
+    expect(workspace.canUndoLastBatch.value).toBe(canUndo)
+    expectSealedReactiveFacade(workspace.canUndoLastBatch, false)
     expect(Object.isFrozen(loaded)).toBe(true)
     expect(Object.isFrozen(revision)).toBe(true)
     expect(Object.isFrozen(decisions)).toBe(true)

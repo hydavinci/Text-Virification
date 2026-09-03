@@ -335,7 +335,7 @@ export function useVerificationWorkspace() {
   const safeIssues = shallowRef<readonly VerificationIssue[]>(Object.freeze([]))
   const currentRevision = shallowRef<Readonly<DocumentRevision> | null>(null)
   const requiresReverification = ref(false)
-  const batchHistory: BatchStateSnapshot[] = []
+  const batchHistory = ref<BatchStateSnapshot[]>([])
 
   const visibleIssues = computed<readonly VerificationIssue[]>(() =>
     requiresReverification.value ? Object.freeze([]) : safeIssues.value
@@ -513,7 +513,7 @@ export function useVerificationWorkspace() {
     issueStates.value = nextStates
     selectedSuggestions.value = nextSuggestions
     requiresReverification.value = false
-    batchHistory.length = 0
+    batchHistory.value = []
     if (!sameSourceRevision) {
       currentRevision.value = sourceRevision(canonicalResult)
       return
@@ -528,7 +528,7 @@ export function useVerificationWorkspace() {
     selectedSuggestions.value = {}
     currentRevision.value = null
     requiresReverification.value = false
-    batchHistory.length = 0
+    batchHistory.value = []
   }
 
   function setIssueState(issueId: string, state: IssueState): void {
@@ -581,7 +581,7 @@ export function useVerificationWorkspace() {
         : { hadValue: false }
       nextStates[issueId] = state
     }
-    batchHistory.push({
+    batchHistory.value.push({
       documentId: currentResult.document_id,
       verificationRunId: currentResult.verification_run_id,
       sourceVersion: currentResult.source_version,
@@ -601,7 +601,7 @@ export function useVerificationWorkspace() {
 
   function undoLastBatch(): void {
     const currentResult = result.value
-    const snapshot = batchHistory.pop()
+    const snapshot = batchHistory.value.pop()
     if (
       currentResult === null ||
       snapshot === undefined ||
@@ -657,7 +657,7 @@ export function useVerificationWorkspace() {
     requiresReverification.value = true
     issueStates.value = {}
     selectedSuggestions.value = {}
-    batchHistory.length = 0
+    batchHistory.value = []
     return revision
   }
 
@@ -686,6 +686,9 @@ export function useVerificationWorkspace() {
     ),
     hasReplacementConflicts: workspaceReadonlyValue(
       () => hasReplacementConflicts.value
+    ),
+    canUndoLastBatch: workspaceReadonlyValue(
+      () => batchHistory.value.length > 0
     ),
     loadResult,
     clearResult,
