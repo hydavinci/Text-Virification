@@ -1222,3 +1222,118 @@ Task 5 review fix round 3 implementation commit:
 Task 5: complete (commits
 `cd61497e860a528f70bd4fd0f4cd23552ceb0907..a709f6a34dd3c34558272866172adc8ed2fc0121`,
 review clean).
+
+## Task 6 implementation — 2026-09-03
+
+- Added a real review-revision persistence path:
+  `POST /api/v1/jobs/{job_id}/revisions` accepts a browser UUID plus
+  run/document/source identity, parent, kind, and text, but no revision number.
+  `ReviewRevisionService` and `VerificationRepository` validate identity,
+  serialize writers on the verification-run lock, enforce the latest parent,
+  allocate the next positive per-run number, and return an idempotent persisted
+  revision.
+- Added Alembic revision `0010_add_review_revision_chain` with persisted parent
+  and kind columns, a same-run parent foreign key, and a kind constraint.
+- Reconstruction export now accepts a persisted `revision_id`, validates its
+  result identity, maps revised text into canonical blocks, exports through the
+  existing DOCX reconstruction exporter, and persists/downloads a
+  revision-keyed artifact without changing source-artifact identity or lock
+  ordering.
+- Added `ExportPanel`, `WorkspaceHeader`, `PrivacyDialog`,
+  `useWorkspaceSession`, and the workspace theme boundary. The existing
+  verification workspace and execution composables remain the only review and
+  lifecycle authorities.
+- The workspace now retains an immutable source/authored revision chain and
+  hydrates each matching draft only from a server response with a positive
+  number. Async PDF export persists draft ancestors in order and submits export
+  by the real current revision ID.
+- Version-3 session persistence covers canonical result, stable decisions,
+  explicit suggestions, revision chain, options/terminology, filters, view
+  mode, required UI state, and async job identity. Restore is prepare-then-
+  commit; corrupt, partial, foreign, and noncanonical payloads do not partially
+  replace current state. Quota/write failures retain memory state and display
+  an assertive warning.
+- File uploads use jobs/SSE in the production workspace; direct text remains
+  synchronous. Accepted replacement conflicts and re-verification-required
+  drafts block report and modified export.
+- Added pre-mount theme application, labelled/keyboard-operable header
+  controls, polite status and assertive error regions, modal focus trapping,
+  Escape/opener restoration, responsive controls, and reduced-motion behavior.
+- Added Playwright Chromium with production preview and deterministic route
+  fixtures for direct text, async terminal/result loading, acceptance, free
+  edit, reload/session restore, revision persistence, export submission, and
+  reduced viewport/privacy focus. A separate live-backend boundary skips
+  honestly without `LIVE_API_URL`.
+
+### Task 6 TDD evidence
+
+- Backend RED: missing review service module; missing ORM parent/kind columns;
+  four missing route/dependency failures; revision-aware reconstruction rejected
+  the new keyword and route payload.
+- PostgreSQL repository allocation, identity, retry, stale-parent, and
+  concurrency cases were added to the existing real-database suite and skipped
+  locally because `TEST_DATABASE_URL` was unset; SQLite was not substituted.
+- Frontend RED: 3 revision-chain failures with 145 passing; missing session and
+  theme modules; missing final components; 2 missing revision API methods;
+  missing atomic UI/session integration; direct file execution incorrectly
+  bypassing jobs; noncanonical session options accepted; and an unbound browser
+  fetch receiver.
+- E2E RED: absent `test:e2e`, absent preview script, absent Chromium runtime,
+  then real-browser direct/async lifecycle failures. Chromium installation and
+  the browser fetch receiver fix brought the deterministic lifecycle green.
+
+### Task 6 validation
+
+- Focused frontend Task 6: 207 tests passed across 7 files.
+- Full frontend: 451 tests passed across 21 files; the existing Node
+  experimental `localStorage` warning remains.
+- Production build: `vue-tsc -b` and Vite 6.4.3 passed, 69 modules transformed.
+- Playwright Chromium: 3 passed; 1 honest live-backend skip because
+  `LIVE_API_URL` was unset.
+- Focused backend: 75 passed, 40 PostgreSQL-gated skips.
+- Full backend: 912 passed, 73 established environment/optional-runtime skips.
+- Full backend Ruff passed. Mypy passed on 7 changed backend source files.
+- Alembic head: `0010_add_review_revision_chain`.
+- `git diff --check` passed.
+
+Ruling: Browser revisions carry globally unique draft UUIDs and canonical
+ownership/text metadata, while the database alone assigns positive per-run
+numbers under the verification-run lock — accepting browser numbering would
+break multi-client uniqueness; cost if wrong is one persistence round trip
+before revision-keyed export.
+
+Ruling: New authored revisions must parent the latest persisted revision for
+their run, while identical UUID retries return the original row — this keeps a
+single append-only chain and rejects stale branches; cost if wrong is rejecting
+intentional branching, which is outside the approved single-user workspace
+scope.
+
+Ruling: Revision-aware reconstruction projects the persisted complete text onto
+canonical block boundaries and removes stale span metadata only from changed
+blocks before using the existing exporter — frontend-only reconstruction would
+be noncanonical; cost if wrong is an explicit `revision_text_unmappable` error
+for edits that cannot preserve a valid block graph.
+
+Ruling: Session version 3 requires async job identity and the complete canonical
+revision chain, prepares every nested value before one workspace commit, and
+accepts only canonical option values — permissive partial restoration would
+mix unrelated runs or stale UI intent; cost if wrong is discarding a malformed
+saved session while preserving the active in-memory workspace.
+
+Ruling: Production file uploads use jobs/SSE while direct text stays
+synchronous — this connects OCR/PDF reconstruction to the normal browser
+workflow without a second execution authority; cost if wrong is moving
+ordinary file checks to the asynchronous infrastructure path.
+
+Ruling: Deterministic Playwright route fixtures validate browser state and wire
+contracts only. `live-backend.spec.ts` remains a distinct environment-gated
+boundary and is never reported as deterministic proof of backend internals.
+
+Task 6 implementation commits:
+
+- `4d1623f511b83a876b391cbaad0b3c3058f12592`
+  (`feat: persist review revisions for reconstruction export`)
+- `e5bbfa156cd0813d69ac7565bb172d687f21524e`
+  (`feat: complete workspace export session and accessibility`)
+
+Task 6: implementation complete; awaiting controller independent review.
