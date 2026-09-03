@@ -8,6 +8,7 @@ import {
 
 const props = defineProps<{
   text: string
+  disabled?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -36,6 +37,7 @@ const search = useSearchReplace({
         data-search-input
         aria-label="查找内容"
         autocomplete="off"
+        :disabled="disabled"
       />
     </label>
     <label>
@@ -45,6 +47,7 @@ const search = useSearchReplace({
         data-replacement-input
         aria-label="替换内容"
         autocomplete="off"
+        :disabled="disabled"
       />
     </label>
     <label class="case-sensitive">
@@ -53,6 +56,7 @@ const search = useSearchReplace({
         data-case-sensitive
         type="checkbox"
         aria-label="区分大小写"
+        :disabled="disabled"
       />
       <span>区分大小写</span>
     </label>
@@ -71,7 +75,7 @@ const search = useSearchReplace({
       <button
         type="button"
         data-action="search-previous"
-        :disabled="search.matches.value.length === 0"
+        :disabled="disabled || search.matches.value.length === 0"
         @click="search.previous"
       >
         上一个
@@ -79,7 +83,7 @@ const search = useSearchReplace({
       <button
         type="button"
         data-action="search-next"
-        :disabled="search.matches.value.length === 0"
+        :disabled="disabled || search.matches.value.length === 0"
         @click="search.next"
       >
         下一个
@@ -87,7 +91,7 @@ const search = useSearchReplace({
       <button
         type="button"
         data-action="replace-current"
-        :disabled="search.matches.value.length === 0"
+        :disabled="disabled || search.matches.value.length === 0"
         @click="search.replaceCurrent"
       >
         替换当前
@@ -96,7 +100,7 @@ const search = useSearchReplace({
         class="primary"
         type="button"
         data-action="replace-all"
-        :disabled="search.matches.value.length === 0"
+        :disabled="disabled || search.matches.value.length === 0"
         @click="search.replaceAll"
       >
         全部替换

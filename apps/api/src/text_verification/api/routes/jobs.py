@@ -121,6 +121,7 @@ class JobExportRequest(BaseModel):
 
     format: ExportFormat
     revision_id: UUID | None = None
+    track_changes: bool = False
 
 
 def dispatch_process_job(job_id: str) -> None:
@@ -273,6 +274,7 @@ def create_job_export(
             job,
             payload.format,
             review_revision_id=payload.revision_id,
+            track_changes=payload.track_changes,
             progress_observer=record_remaining,
         )
     except TerminalJobStateError as error:
@@ -650,10 +652,12 @@ def _export_http_error(error: VerificationError) -> HTTPException:
         "document_not_reconstructable": status.HTTP_422_UNPROCESSABLE_CONTENT,
         "unsupported_export_format": status.HTTP_422_UNPROCESSABLE_CONTENT,
         "document_reconstruction_failed": status.HTTP_422_UNPROCESSABLE_CONTENT,
+        "original_format_export_failed": status.HTTP_422_UNPROCESSABLE_CONTENT,
         "export_artifact_conflict": status.HTTP_409_CONFLICT,
         "export_source_superseded": status.HTTP_409_CONFLICT,
         "revision_not_found": status.HTTP_404_NOT_FOUND,
         "revision_identity_mismatch": status.HTTP_409_CONFLICT,
+        "revision_export_stale": status.HTTP_409_CONFLICT,
         "revision_text_unmappable": status.HTTP_422_UNPROCESSABLE_CONTENT,
         "export_artifact_repair_cleanup_failed": status.HTTP_409_CONFLICT,
         "export_artifact_repair_pending": status.HTTP_409_CONFLICT,

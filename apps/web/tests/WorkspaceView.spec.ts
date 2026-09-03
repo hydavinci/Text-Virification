@@ -488,12 +488,13 @@ describe('WorkspaceView', () => {
       filename: 'sample.pdf',
       source_name: 'sample.pdf',
       file_type: 'pdf',
-      file_id: '6d96fe0f-f4fc-4b43-90fd-68e5bd09f21f',
-      file_ext: 'pdf',
+      file_id: null,
+      file_ext: null,
       execution_mode: 'asynchronous'
     })
     const createJob = vi.fn().mockResolvedValue(
       buildJobRead({
+        job_id: result.document_id,
         source_name: 'sample.pdf',
         file_type: 'pdf'
       })
@@ -549,7 +550,7 @@ describe('WorkspaceView', () => {
     })
     expect(getResult).toHaveBeenCalledTimes(1)
     expect(getResult).toHaveBeenCalledWith(
-      '6d96fe0f-f4fc-4b43-90fd-68e5bd09f21f'
+      result.document_id
     )
     expect(close).toHaveBeenCalledTimes(1)
     expect(canonicalWorkspace(wrapper).result.value).toEqual(result)

@@ -180,6 +180,10 @@ class DocumentRevisionKind(StrEnum):
     MANUAL = "manual"
 
 
+class StaleReviewRevisionError(ValueError):
+    pass
+
+
 class ReviewRevisionDraft(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 

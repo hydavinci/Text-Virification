@@ -10,6 +10,7 @@ from typing import Protocol
 from uuid import UUID
 
 from text_verification.domain.artifacts import (
+    ArtifactFinalizationRejection,
     ArtifactLifecycleStatus,
     ArtifactReservation,
     ArtifactSnapshot,
@@ -30,8 +31,13 @@ class ArtifactReconciliationRequiredError(RuntimeError):
 
 
 class ArtifactFinalizationRejectedError(RuntimeError):
-    def __init__(self, export_artifact_id: UUID) -> None:
+    def __init__(
+        self,
+        export_artifact_id: UUID,
+        reason: ArtifactFinalizationRejection | None = None,
+    ) -> None:
         self.export_artifact_id = export_artifact_id
+        self.reason = reason
         super().__init__("Artifact finalization authorization was rejected.")
 
 
@@ -60,7 +66,7 @@ class ArtifactRepository(Protocol):
         ready_at: datetime,
         consistency_check: Callable[[], None],
         require_current_result: bool,
-    ) -> ArtifactSnapshot | None: ...
+    ) -> ArtifactSnapshot | ArtifactFinalizationRejection | None: ...
 
     def begin_export_artifact_repair(
         self,
@@ -301,7 +307,10 @@ class ArtifactPersistenceService:
                     error,
                 )
 
-        if snapshot is None:
+        if snapshot is None or isinstance(
+            snapshot,
+            ArtifactFinalizationRejection,
+        ):
             try:
                 handle.unlink_if_current()
             except Exception as error:
@@ -310,7 +319,10 @@ class ArtifactPersistenceService:
                     "Rejected artifact could not be safely removed.",
                 ) from error
             raise ArtifactFinalizationRejectedError(
-                reservation.export_artifact_id
+                reservation.export_artifact_id,
+                snapshot
+                if isinstance(snapshot, ArtifactFinalizationRejection)
+                else None,
             )
         try:
             handle.assert_current()

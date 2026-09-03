@@ -304,7 +304,7 @@ describe('createVerificationApi', () => {
     )
   })
 
-  it('submits reconstruction export by persisted revision id and downloads it', async () => {
+  it('submits a guarded job export by persisted revision id and downloads it', async () => {
     const anchorClick = vi
       .spyOn(HTMLAnchorElement.prototype, 'click')
       .mockImplementation(() => {})
@@ -346,9 +346,12 @@ describe('createVerificationApi', () => {
     })
     const api = createVerificationApi(fetchMock as typeof fetch)
 
-    await api.exportReconstruction(
+    await api.exportJob(
       '55555555-5555-4555-8555-555555555555',
-      '44444444-4444-4444-8444-444444444444'
+      'docx_reconstruction',
+      '44444444-4444-4444-8444-444444444444',
+      true,
+      () => true
     )
 
     expect(fetchMock.mock.calls[0]).toEqual([
@@ -358,13 +361,47 @@ describe('createVerificationApi', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           format: 'docx_reconstruction',
-          revision_id: '44444444-4444-4444-8444-444444444444'
+          revision_id: '44444444-4444-4444-8444-444444444444',
+          track_changes: true
         })
       }
     ])
     expect(fetchMock.mock.calls[1]?.[0]).toBe(
       `/api/v1/jobs/55555555-5555-4555-8555-555555555555/exports/${artifactId}`
     )
+    anchorClick.mockRestore()
+  })
+
+  it('does not download a stale job export after an awaited response', async () => {
+    let resolveResponse: (value: unknown) => void = () => {}
+    const fetchMock = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          resolveResponse = resolve
+        })
+    )
+    const anchorClick = vi
+      .spyOn(HTMLAnchorElement.prototype, 'click')
+      .mockImplementation(() => {})
+    let current = true
+    const api = createVerificationApi(fetchMock as typeof fetch)
+    const pending = api.exportJob(
+      '55555555-5555-4555-8555-555555555555',
+      'original_format',
+      null,
+      false,
+      () => current
+    )
+
+    current = false
+    resolveResponse({
+      ok: true,
+      json: async () => ({})
+    })
+    await pending
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(anchorClick).not.toHaveBeenCalled()
     anchorClick.mockRestore()
   })
 

@@ -2283,7 +2283,7 @@ describe('useVerificationWorkspace', () => {
     expect(
       workspace.hydratePersistedRevision({
         ...draft,
-        revision_number: 7,
+        revision_number: 1,
         created_at: '2026-09-03T04:00:00.000Z',
         persistence_state: 'persisted'
       })
@@ -2291,7 +2291,7 @@ describe('useVerificationWorkspace', () => {
 
     expect(workspace.currentRevision.value).toMatchObject({
       revision_id: draft.revision_id,
-      revision_number: 7,
+      revision_number: 1,
       created_at: '2026-09-03T04:00:00.000Z',
       persistence_state: 'persisted'
     })

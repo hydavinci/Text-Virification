@@ -1,9 +1,10 @@
 import { expect, test } from '@playwright/test'
+import scannedResult from './fixtures/scanned-result'
 
 const documentId = '11111111-1111-4111-8111-111111111111'
 const runId = '22222222-2222-4222-8222-222222222222'
 const issueId = '33333333-3333-4333-8333-333333333333'
-const jobId = '44444444-4444-4444-8444-444444444444'
+const jobId = documentId
 const artifactId = '66666666-6666-4666-8666-666666666666'
 const sourceVersion = `sha256:${'a'.repeat(64)}`
 
@@ -129,7 +130,7 @@ test('direct text review, free edit, and versioned reload restore', async ({
   await input.press('Control+Enter')
   await expect(page.getByText('发现问题')).toBeVisible()
   await page.getByRole('button', { name: '全部接受' }).click()
-  await expect(page.getByText('已接受').first()).toBeVisible()
+  await expect(page.locator('[data-count="accepted"]')).toHaveText('1')
 
   await page.getByRole('button', { name: '编辑原文' }).click()
   await page.getByLabel('编辑文档内容').fill('手工修订文本')
@@ -144,7 +145,7 @@ test('direct text review, free edit, and versioned reload restore', async ({
   await expect(page.getByText(/重新检查后再导出/)).toBeVisible()
 })
 
-test('async file terminal result persists revision before reconstruction export', async ({
+test('ordinary DOCX job persists its revision before job-owned original-format export', async ({
   page
 }) => {
   const text = '帐号测试'
@@ -155,9 +156,9 @@ test('async file terminal result persists revision before reconstruction export'
       contentType: 'application/json',
       body: JSON.stringify({
         job_id: jobId,
-        source_name: 'sample.pdf',
-        file_type: 'pdf',
-        size_bytes: 8,
+        source_name: 'sample.docx',
+        file_type: 'docx',
+        size_bytes: 36580,
         status: 'queued',
         stage: 'queued',
         progress: 0,
@@ -194,12 +195,12 @@ test('async file terminal result persists revision before reconstruction export'
         verification_run_id: runId,
         document_id: documentId,
         source_version: sourceVersion,
-        source_name: 'sample.pdf',
-        file_type: 'pdf',
+        source_name: 'sample.docx',
+        file_type: 'docx',
         scenario: 'general',
         text,
-        blocks: [block(text, 1)],
-        parser_name: 'pdf-layout',
+        blocks: [block(text)],
+        parser_name: 'docx',
         parser_version: '1',
         metadata: { pdf: null },
         ocr_requirement: null,
@@ -236,9 +237,9 @@ test('async file terminal result persists revision before reconstruction export'
         export_artifact_id: artifactId,
         job_id: jobId,
         verification_run_id: runId,
-        format: 'docx_reconstruction',
+        format: 'original_format',
         file_type: 'docx',
-        file_name: 'sample-reconstructed.docx',
+        file_name: 'sample-modified.docx',
         media_type:
           'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
         size_bytes: 9,
@@ -256,7 +257,7 @@ test('async file terminal result persists revision before reconstruction export'
           'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
         headers: {
           'Content-Disposition':
-            "attachment; filename*=UTF-8''sample-reconstructed.docx"
+            "attachment; filename*=UTF-8''sample-modified.docx"
         },
         body: 'fixture-docx'
       })
@@ -267,9 +268,10 @@ test('async file terminal result persists revision before reconstruction export'
   await page.goto('/')
   await page
     .locator('input[type="file"]')
-    .setInputFiles('tests/e2e/fixtures/sample.pdf')
-  await expect(page.getByText('sample.pdf')).toBeVisible()
+    .setInputFiles('tests/e2e/fixtures/sample.docx')
+  await expect(page.getByText('sample.docx')).toBeVisible()
   await page.getByRole('button', { name: '全部接受' }).click()
+  await expect(page.locator('[data-count="accepted"]')).toHaveText('1')
 
   const downloadPromise = page.waitForEvent('download')
   await page.getByRole('button', { name: '导出修改文件' }).click()
@@ -287,11 +289,204 @@ test('async file terminal result persists revision before reconstruction export'
   expect(revisionRequests[0]).not.toHaveProperty('revision_number')
   expect(exportRequests).toEqual([
     {
-      format: 'docx_reconstruction',
-      revision_id: revisionRequests[0].revision_id
+      format: 'original_format',
+      revision_id: revisionRequests[0].revision_id,
+      track_changes: true
     }
   ])
-  expect(download.suggestedFilename()).toBe('sample-reconstructed.docx')
+  expect(download.suggestedFilename()).toBe('sample-modified.docx')
+})
+
+test('scanned PDF exposes OCR progress, canonical result, and reconstruction export', async ({
+  page
+}) => {
+  await page.addInitScript(() => {
+    type Listener = (event: Event) => void
+    const listeners = new Map<string, Set<Listener>>()
+    const emit = (
+      type: string,
+      data: Record<string, unknown>,
+      lastEventId = ''
+    ) => {
+      const event = new MessageEvent(type, {
+        data: JSON.stringify(data),
+        lastEventId
+      })
+      for (const listener of listeners.get(type) ?? []) {
+        listener(event)
+      }
+    }
+    class FixtureEventSource {
+      static readonly CONNECTING = 0
+      static readonly OPEN = 1
+      static readonly CLOSED = 2
+      readonly CONNECTING = 0
+      readonly OPEN = 1
+      readonly CLOSED = 2
+      readonly url: string
+      readonly withCredentials = false
+      readyState = 1
+      onerror: ((event: Event) => void) | null = null
+
+      constructor(url: string) {
+        this.url = url
+        window.setTimeout(() => {
+          emit(
+            'progress',
+            {
+              status: 'parsing',
+              stage: 'ocr',
+              progress: 40,
+              message: '正在执行扫描件 OCR',
+              created_at: '2026-09-03T04:00:30Z'
+            },
+            '1'
+          )
+        }, 0)
+      }
+
+      addEventListener(type: string, listener: EventListenerOrEventListenerObject) {
+        const callback =
+          typeof listener === 'function'
+            ? listener
+            : (event: Event) => listener.handleEvent(event)
+        const current = listeners.get(type) ?? new Set<Listener>()
+        current.add(callback)
+        listeners.set(type, current)
+      }
+
+      removeEventListener(
+        type: string,
+        listener: EventListenerOrEventListenerObject
+      ) {
+        if (typeof listener === 'function') {
+          listeners.get(type)?.delete(listener)
+        }
+      }
+
+      dispatchEvent(): boolean {
+        return true
+      }
+
+      close() {
+        this.readyState = 2
+      }
+    }
+    Object.defineProperty(window, 'EventSource', {
+      configurable: true,
+      value: FixtureEventSource
+    })
+    Object.assign(window, {
+      __finishOcrJob() {
+        emit(
+          'progress',
+          {
+            status: 'completed',
+            stage: 'completed',
+            progress: 100,
+            message: 'OCR 处理完成',
+            created_at: '2026-09-03T04:01:00Z'
+          },
+          '2'
+        )
+        emit('done', { event: 'done' })
+      }
+    })
+  })
+  const exportRequests: Record<string, unknown>[] = []
+  await page.route('**/api/v1/jobs', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        job_id: jobId,
+        source_name: 'scanned-page.pdf',
+        file_type: 'pdf',
+        size_bytes: 1352,
+        status: 'queued',
+        stage: 'queued',
+        progress: 0,
+        error_code: null,
+        error_message: null,
+        error_stage: null,
+        error_retryable: null,
+        created_at: '2026-09-03T04:00:00Z',
+        expires_at: '2026-09-04T04:00:00Z'
+      })
+    })
+  })
+  await page.route(`**/api/v1/jobs/${jobId}/result`, async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify(scannedResult)
+    })
+  })
+  await page.route(`**/api/v1/jobs/${jobId}/exports`, async (route) => {
+    exportRequests.push(
+      route.request().postDataJSON() as Record<string, unknown>
+    )
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        export_artifact_id: artifactId,
+        job_id: jobId,
+        verification_run_id: runId,
+        format: 'docx_reconstruction',
+        file_type: 'docx',
+        file_name: 'scanned-page-reconstructed.docx',
+        media_type:
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        size_bytes: 9,
+        content_sha256: 'c'.repeat(64),
+        status: 'ready',
+        created_at: '2026-09-03T04:03:00Z'
+      })
+    })
+  })
+  await page.route(
+    `**/api/v1/jobs/${jobId}/exports/${artifactId}`,
+    async (route) => {
+      await route.fulfill({
+        contentType:
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        headers: {
+          'Content-Disposition':
+            "attachment; filename*=UTF-8''scanned-page-reconstructed.docx"
+        },
+        body: 'fixture-docx'
+      })
+    }
+  )
+  page.on('dialog', (dialog) => dialog.accept())
+
+  await page.goto('/')
+  await page
+    .locator('input[type="file"]')
+    .setInputFiles('tests/e2e/fixtures/scanned-page.pdf')
+  await expect(
+    page.getByText('Status: parsing · 40% · 正在执行扫描件 OCR')
+  ).toBeVisible()
+  await page.evaluate(() => {
+    ;(window as unknown as { __finishOcrJob: () => void }).__finishOcrJob()
+  })
+  await expect(page.locator('.stats-strip .filename')).toHaveText(
+    'scanned-page.pdf'
+  )
+  await expect(page.getByText('test@example.com')).toBeVisible()
+
+  const downloadPromise = page.waitForEvent('download')
+  await page.getByRole('button', { name: '导出修改文件' }).click()
+  const download = await downloadPromise
+
+  expect(exportRequests).toEqual([
+    {
+      format: 'docx_reconstruction',
+      revision_id: null,
+      track_changes: true
+    }
+  ])
+  expect(download.suggestedFilename()).toBe(
+    'scanned-page-reconstructed.docx'
+  )
 })
 
 test('reduced viewport keeps header controls and privacy dialog usable', async ({

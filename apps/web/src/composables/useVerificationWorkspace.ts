@@ -1490,9 +1490,9 @@ export function createVerificationResultSnapshot(
   }
 
   const fileId =
-    value.file_id === undefined ? value.document_id : value.file_id
+    value.file_id === undefined ? null : value.file_id
   const fileExt =
-    value.file_ext === undefined ? `.${value.file_type}` : value.file_ext
+    value.file_ext === undefined ? null : value.file_ext
   if (
     (fileId !== null && (typeof fileId !== 'string' || !isUuid(fileId))) ||
     (fileExt !== null && typeof fileExt !== 'string')
@@ -1836,6 +1836,8 @@ function restoredRevisionChain(
   }
   const chain: Readonly<DocumentRevision>[] = []
   const ids = new Set<string>()
+  let nextPersistedNumber = 1
+  let draftSeen = false
   for (const [index, candidate] of value.entries()) {
     const revision = restoredRevision(candidate, result)
     if (revision === null) {
@@ -1853,6 +1855,17 @@ function restoredRevisionChain(
         ids.has(revision.revision_id)
       ) {
         return null
+      }
+      if (revision.persistence_state === 'persisted') {
+        if (
+          draftSeen ||
+          revision.revision_number !== nextPersistedNumber
+        ) {
+          return null
+        }
+        nextPersistedNumber += 1
+      } else {
+        draftSeen = true
       }
       ids.add(revision.revision_id)
     }
@@ -2461,6 +2474,17 @@ export function useVerificationWorkspace() {
       draft.persistence_state === 'persisted' &&
       (draft.revision_number !== persisted.revision_number ||
         draft.created_at !== persisted.created_at)
+    ) {
+      return false
+    }
+    const persistedBefore = revisionChain.value
+      .slice(1, index)
+      .filter((revision) => revision.persistence_state === 'persisted')
+    if (
+      revisionChain.value
+        .slice(1, index)
+        .some((revision) => revision.persistence_state !== 'persisted') ||
+      persisted.revision_number !== persistedBefore.length + 1
     ) {
       return false
     }

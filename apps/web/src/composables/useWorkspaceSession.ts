@@ -288,7 +288,7 @@ function prepareSession(
     (jobId !== null &&
       (typeof jobId !== 'string' || !UUID_PATTERN.test(jobId))) ||
     (preparedWorkspace.result.execution_mode === 'asynchronous' &&
-      jobId === null) ||
+      jobId !== preparedWorkspace.result.document_id) ||
     (preparedWorkspace.result.execution_mode === 'synchronous' &&
       jobId !== null)
   ) {

@@ -25,6 +25,7 @@ import {
 import { useVerificationWorkspace } from '../composables/useVerificationWorkspace'
 import type {
   AnalyzeOptions,
+  DocumentRevision,
   DraftDocumentRevision,
   IssueState,
   VerificationIssue,
@@ -123,8 +124,8 @@ const showHelp = ref(false)
 const showPrivacy = ref(false)
 const segmentedView = ref(true)
 const showFindReplace = ref(false)
-const activeJobId = ref<string | null>(null)
 const isExporting = ref(false)
+const exportError = ref<string | null>(null)
 const jobState = computed(() => {
   const job = execution.job.value
   const status = execution.jobStatus.value
@@ -148,6 +149,8 @@ const jobState = computed(() => {
 let analysisTimer: ReturnType<typeof setInterval> | null = null
 let loadedExecutionResult: VerificationResult | null = null
 let toastTimer: ReturnType<typeof setTimeout> | null = null
+let exportGeneration = 0
+let disposed = false
 
 const currentOptions = computed<AnalyzeOptions>(() => ({
   scenario: selectedScenario.value,
@@ -177,9 +180,11 @@ const selectedIssueState = computed<IssueState | null>(() => {
 })
 const reviewActionsDisabled = computed(
   () =>
+    isExporting.value ||
     verificationWorkspace.requiresReverification.value ||
     verificationWorkspace.visibleIssues.value.length === 0
 )
+const workspaceMutationLocked = computed(() => isExporting.value)
 const exportBlockedReason = computed(() => {
   if (verificationWorkspace.hasReplacementConflicts.value) {
     return '存在重叠的已接受修改，请先解决冲突'
@@ -188,6 +193,15 @@ const exportBlockedReason = computed(() => {
     return '当前文本已修改，请重新检查后再导出'
   }
   return null
+})
+const pdfExportNote = computed(() => {
+  if (result.value?.file_type !== 'pdf') {
+    return null
+  }
+  return result.value.pdf_metadata === undefined ||
+    result.value.ocr_requirement !== undefined
+    ? '扫描或混合 PDF 将导出为重建 DOCX，以保留 OCR 文本与版面。'
+    : '文本 PDF 将保留 PDF 格式；纯插入修改可能被导出器明确拒绝。'
 })
 const statusAnnouncement = computed(() => {
   if (execution.isActive.value) {
@@ -355,9 +369,11 @@ async function exportReport() {
     return
   }
   try {
+    exportError.value = null
     await verificationApi.exportReport(result.value)
   } catch (error) {
-    notify(error instanceof Error ? error.message : '报告导出失败')
+    exportError.value =
+      error instanceof Error ? error.message : '报告导出失败'
   }
 }
 
@@ -374,25 +390,39 @@ async function exportModified() {
     return
   }
   if (
-    result.value.execution_mode === 'asynchronous' &&
-    result.value.file_type === 'pdf'
+    result.value.execution_mode === 'asynchronous'
   ) {
-    if (!verificationApi || activeJobId.value === null) {
-      notify('异步文档缺少可验证的任务身份，无法导出')
+    const operation = beginExportOperation()
+    if (!verificationApi || operation === null) {
+      if (!verificationApi) {
+        exportError.value = '异步文档导出服务不可用'
+      }
       return
     }
-    isExporting.value = true
     try {
-      const revisionId = await persistDraftRevisionChain(activeJobId.value)
-      await verificationApi.exportReconstruction(
-        activeJobId.value,
-        revisionId
+      const revisionId = await persistDraftRevisionChain(operation)
+      assertCurrentExportOperation(operation)
+      await verificationApi.exportJob(
+        operation.jobId,
+        jobExportFormat(operation),
+        revisionId,
+        operation.trackChanges,
+        () => isCurrentExportOperation(operation)
       )
+      assertCurrentExportOperation(operation)
       notify('导出文件已生成')
     } catch (error) {
-      notify(error instanceof Error ? error.message : '修改文件导出失败')
+      if (
+        !(error instanceof StaleExportOperationError) &&
+        isCurrentExportOperation(operation)
+      ) {
+        exportError.value =
+          error instanceof Error ? error.message : '修改文件导出失败'
+      }
     } finally {
-      isExporting.value = false
+      if (isCurrentExportOperation(operation)) {
+        isExporting.value = false
+      }
     }
     return
   }
@@ -453,28 +483,149 @@ async function exportModified() {
       trackChanges.value
     )
   } catch (error) {
-    notify(error instanceof Error ? error.message : '修改文件导出失败')
+    exportError.value =
+      error instanceof Error ? error.message : '修改文件导出失败'
   }
 }
 
-async function persistDraftRevisionChain(
+function jobExportFormat(
+  operation: ExportOperation
+): 'docx_reconstruction' | 'original_format' {
+  if (operation.requiresOcrReconstruction) {
+    return 'docx_reconstruction'
+  }
+  return 'original_format'
+}
+
+interface ExportOperation {
+  generation: number
   jobId: string
+  documentId: string
+  verificationRunId: string
+  sourceVersion: string
+  fileType: VerificationResult['file_type']
+  requiresOcrReconstruction: boolean
+  currentRevisionId: string | null
+  currentRevisionText: string
+  revisionFingerprint: string
+  trackChanges: boolean
+  chain: readonly Readonly<DocumentRevision>[]
+}
+
+class StaleExportOperationError extends Error {}
+
+function beginExportOperation(): ExportOperation | null {
+  const currentResult = result.value
+  const currentRevision = verificationWorkspace.currentRevision.value
+  const jobId = execution.jobId.value
+  if (
+    isExporting.value ||
+    currentResult === null ||
+    currentRevision === null ||
+    jobId === null ||
+    currentResult.document_id !== jobId
+  ) {
+    exportError.value = '异步文档缺少可验证的任务身份，无法导出'
+    return null
+  }
+  exportGeneration += 1
+  isExporting.value = true
+  exportError.value = null
+  const chain = [...verificationWorkspace.revisionChain.value]
+  return {
+    generation: exportGeneration,
+    jobId,
+    documentId: currentResult.document_id,
+    verificationRunId: currentResult.verification_run_id,
+    sourceVersion: currentResult.source_version,
+    fileType: currentResult.file_type,
+    requiresOcrReconstruction:
+      currentResult.file_type === 'pdf' &&
+      (currentResult.pdf_metadata === undefined ||
+        currentResult.pdf_metadata.pages.some(
+          (page) => page.kind !== 'text'
+        )),
+    currentRevisionId: currentRevision.revision_id,
+    currentRevisionText: currentRevision.text,
+    revisionFingerprint: revisionChainFingerprint(chain),
+    trackChanges: trackChanges.value,
+    chain
+  }
+}
+
+function revisionChainFingerprint(
+  chain: readonly Readonly<{
+    revision_id: string | null
+    document_id: string
+    verification_run_id: string
+    source_version: string
+    parent_revision_id: string | null
+    kind: string
+    text: string
+  }>[]
+): string {
+  return JSON.stringify(
+    chain.map((revision) => [
+      revision.revision_id,
+      revision.document_id,
+      revision.verification_run_id,
+      revision.source_version,
+      revision.parent_revision_id,
+      revision.kind,
+      revision.text
+    ])
+  )
+}
+
+function isCurrentExportOperation(operation: ExportOperation): boolean {
+  const currentResult = result.value
+  const currentRevision = verificationWorkspace.currentRevision.value
+  return (
+    !disposed &&
+    operation.generation === exportGeneration &&
+    currentResult !== null &&
+    currentRevision !== null &&
+    execution.jobId.value === operation.jobId &&
+    currentResult.document_id === operation.documentId &&
+    currentResult.verification_run_id === operation.verificationRunId &&
+    currentResult.source_version === operation.sourceVersion &&
+    currentRevision.revision_id === operation.currentRevisionId &&
+    currentRevision.text === operation.currentRevisionText &&
+    revisionChainFingerprint(verificationWorkspace.revisionChain.value) ===
+      operation.revisionFingerprint
+  )
+}
+
+function assertCurrentExportOperation(operation: ExportOperation): void {
+  if (!isCurrentExportOperation(operation)) {
+    throw new StaleExportOperationError('Export operation was superseded.')
+  }
+}
+
+function invalidateExportOperation(): void {
+  exportGeneration += 1
+  isExporting.value = false
+}
+
+async function persistDraftRevisionChain(
+  operation: ExportOperation
 ): Promise<string | null> {
   if (!verificationApi) {
     throw new Error('修订持久化服务不可用')
   }
-  const chain = [...verificationWorkspace.revisionChain.value]
-  for (const revision of chain) {
+  for (const revision of operation.chain) {
     if (revision.persistence_state !== 'draft') {
       continue
     }
     const persisted = await verificationApi.persistRevision(
-      jobId,
+      operation.jobId,
       revision as DraftDocumentRevision
     )
+    assertCurrentExportOperation(operation)
     if (!verificationWorkspace.hydratePersistedRevision(persisted)) {
       throw new Error('服务端修订与当前工作区不一致')
     }
+    assertCurrentExportOperation(operation)
   }
   saveSession()
   const current = verificationWorkspace.currentRevision.value
@@ -493,6 +644,8 @@ function downloadText(text: string, filename: string) {
 }
 
 function resetWorkspace() {
+  invalidateExportOperation()
+  exportError.value = null
   execution.reset()
   verificationWorkspace.clearResult()
   loadedExecutionResult = null
@@ -502,7 +655,6 @@ function resetWorkspace() {
   fileSource.value = null
   textInput.value = ''
   analysisStep.value = 0
-  activeJobId.value = null
   workspaceSession.clear()
 }
 
@@ -547,7 +699,7 @@ function saveSession() {
       trackChanges: trackChanges.value,
       selectedIssueId: selectedIssueId.value
     },
-    jobId: activeJobId.value
+    jobId: execution.jobId.value
   })
 }
 
@@ -565,7 +717,14 @@ function restoreSession() {
   showFindReplace.value = restored.ui.showFindReplace
   trackChanges.value = restored.ui.trackChanges
   selectedIssueId.value = restored.ui.selectedIssueId
-  activeJobId.value = restored.jobId
+  if (
+    restored.jobId !== null &&
+    result.value !== null &&
+    !execution.restoreJobContext(restored.jobId, result.value)
+  ) {
+    resetWorkspace()
+    return
+  }
   if (verificationWorkspace.requiresReverification.value) {
     invalidateSourceNavigation()
   }
@@ -623,6 +782,7 @@ watch(
   [() => execution.state.value, () => execution.result.value],
   ([executionState, executionResult]) => {
     if (executionState === 'submitting') {
+      invalidateExportOperation()
       loadedExecutionResult = null
       return
     }
@@ -634,8 +794,9 @@ watch(
       return
     }
     loadedExecutionResult = executionResult
+    invalidateExportOperation()
+    exportError.value = null
     verificationWorkspace.loadResult(executionResult)
-    activeJobId.value = execution.job.value?.job_id ?? null
     invalidateSourceNavigation()
     resultTab.value = 'issues'
     showFindReplace.value = false
@@ -672,6 +833,8 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  disposed = true
+  invalidateExportOperation()
   execution.dispose()
   document.removeEventListener('keydown', handleKeyboard)
   if (analysisTimer) {
@@ -707,10 +870,10 @@ onBeforeUnmount(() => {
           @export-modified="exportModified"
         />
         <small
-          v-if="result?.file_ext === 'pdf'"
+          v-if="pdfExportNote"
           class="pdf-export-note"
         >
-          PDF 原格式导出支持替换和删除，不支持纯插入
+          {{ pdfExportNote }}
         </small>
       </template>
     </WorkspaceHeader>
@@ -733,6 +896,23 @@ onBeforeUnmount(() => {
     >
       {{ workspaceSession.warning.value }}
     </p>
+    <div
+      v-if="exportError"
+      class="export-error"
+      data-export-error
+      role="alert"
+      aria-live="assertive"
+    >
+      <span>{{ exportError }}</span>
+      <button
+        type="button"
+        data-dismiss-export-error
+        aria-label="关闭导出错误"
+        @click="exportError = null"
+      >
+        ×
+      </button>
+    </div>
 
     <main v-if="!result" class="landing">
       <section class="hero">
@@ -829,6 +1009,7 @@ onBeforeUnmount(() => {
       <SearchReplacePanel
         v-if="showFindReplace"
         :text="currentRevisionText"
+        :disabled="workspaceMutationLocked"
         @replace-text="saveSearchReplacement"
         @close="showFindReplace = false"
       />
@@ -840,6 +1021,7 @@ onBeforeUnmount(() => {
             type="button"
             data-action="toggle-search-replace"
             :aria-expanded="showFindReplace"
+            :disabled="workspaceMutationLocked"
             @click="showFindReplace = !showFindReplace"
           >
             查找替换
@@ -889,6 +1071,7 @@ onBeforeUnmount(() => {
           <EditPreview
             :text="currentRevisionText"
             :preview-text="modifiedText"
+            :disabled="workspaceMutationLocked"
             @save="saveFreeEdit"
           >
             <pre
@@ -937,6 +1120,7 @@ onBeforeUnmount(() => {
               :selected-severity="selectedSeverity"
               :layer-options="layers"
               :type-labels="typeLabels"
+              :disabled="workspaceMutationLocked"
               @select-issue="issueNavigation.selectIssue"
               @update:selected-layer="selectedLayer = $event"
               @update:selected-severity="selectedSeverity = $event"
@@ -1114,6 +1298,26 @@ input:focus, select:focus { border-color: var(--primary); outline: 3px solid rgb
   color: #991b1b;
   background: #fef2f2;
   font-size: 12px;
+}
+.export-error {
+  margin: 12px 18px 0;
+  padding: 10px 13px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid #ef4444;
+  border-radius: 12px;
+  color: #991b1b;
+  background: #fef2f2;
+  font-size: 12px;
+}
+.export-error button {
+  border: 0;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+  font-size: 18px;
 }
 .visually-hidden {
   width: 1px;

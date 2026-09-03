@@ -26,12 +26,14 @@ const props = withDefaults(
     selectedSeverity?: IssueSeverityFilter
     layerOptions?: readonly LayerOption[]
     typeLabels?: Readonly<Record<string, string>>
+    disabled?: boolean
   }>(),
   {
     selectedLayer: 'all',
     selectedSeverity: 'all',
     layerOptions: () => [],
-    typeLabels: () => ({})
+    typeLabels: () => ({}),
+    disabled: false
   }
 )
 
@@ -109,6 +111,7 @@ watch(
         <select
           :value="selectedLayer"
           aria-label="检查层级"
+          :disabled="disabled"
           @change="updateLayer"
         >
           <option value="all">全部层级</option>
@@ -126,6 +129,7 @@ watch(
         <select
           :value="selectedSeverity"
           aria-label="问题级别"
+          :disabled="disabled"
           @change="updateSeverity"
         >
           <option value="all">全部级别</option>
@@ -156,6 +160,7 @@ watch(
           "
           :data-issue-id="issue.issue_id"
           data-issue-role="list"
+          :disabled="disabled"
           @click="activateIssue(issue.issue_id)"
           @keydown.enter.prevent="activateIssue(issue.issue_id)"
           @keydown.space.prevent="activateIssue(issue.issue_id)"
@@ -173,6 +178,7 @@ watch(
         <IssueDetails
           :issue="issue"
           :selected-suggestion="selectedSuggestions[issue.issue_id]"
+          :disabled="disabled"
           @update:suggestion="
             emit('update:suggestion', issue.issue_id, $event)
           "
@@ -182,6 +188,7 @@ watch(
           <button
             class="accept"
             type="button"
+            :disabled="disabled"
             @click="emit('set-state', issue.issue_id, 'accepted')"
           >
             接受
@@ -189,6 +196,7 @@ watch(
           <button
             class="reject"
             type="button"
+            :disabled="disabled"
             @click="emit('set-state', issue.issue_id, 'rejected')"
           >
             忽略
@@ -196,6 +204,7 @@ watch(
           <button
             class="undo"
             type="button"
+            :disabled="disabled"
             @click="emit('set-state', issue.issue_id, 'pending')"
           >
             撤销

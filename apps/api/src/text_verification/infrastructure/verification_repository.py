@@ -12,6 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from text_verification.domain.artifacts import (
+    ArtifactFinalizationRejection,
     ArtifactLifecycleStatus,
     ArtifactReservation,
     ArtifactSnapshot,
@@ -32,6 +33,7 @@ from text_verification.domain.verification import (
     PersistedDocumentRevision,
     ReviewRevisionDraft,
     Scenario,
+    StaleReviewRevisionError,
     VerificationAnalysisMode,
     VerificationDegradation,
     VerificationExecutionMode,
@@ -382,6 +384,33 @@ class VerificationRepository:
         row = self._session.get(ReviewRevisionRow, review_revision_id)
         return None if row is None else _persisted_revision_from_row(row)
 
+    def read_export_revision(
+        self,
+        job_id: UUID,
+        verification_run_id: UUID,
+        review_revision_id: UUID | None,
+    ) -> PersistedDocumentRevision | None:
+        run = self._lock_run(verification_run_id)
+        job = self._lock_job(run.job_id)
+        if job.job_id != job_id:
+            raise ValueError("Verification run does not belong to the requested job.")
+        if JobStatus(job.status) not in RESULT_READY_STATUSES:
+            raise ValueError("Export requires a result-ready job.")
+        revision = self._review_revision_for_run(
+            verification_run_id,
+            review_revision_id,
+        )
+        latest = self._latest_review_revision(verification_run_id)
+        if (revision is None) != (latest is None) or (
+            revision is not None
+            and latest is not None
+            and revision.review_revision_id != latest.review_revision_id
+        ):
+            raise StaleReviewRevisionError(
+                "Requested revision is not the latest persisted revision."
+            )
+        return None if revision is None else _persisted_revision_from_row(revision)
+
     def reserve_export_artifact(
         self,
         *,
@@ -416,6 +445,16 @@ class VerificationRepository:
             verification_run_id,
             review_revision_id,
         )
+        latest_revision = self._latest_review_revision(verification_run_id)
+        if (review_revision is None) != (latest_revision is None) or (
+            review_revision is not None
+            and latest_revision is not None
+            and review_revision.review_revision_id
+            != latest_revision.review_revision_id
+        ):
+            raise StaleReviewRevisionError(
+                "Requested revision is not the latest persisted revision."
+            )
         expected_source_version = (
             review_revision.source_version
             if review_revision is not None
@@ -527,13 +566,26 @@ class VerificationRepository:
         ready_at: datetime,
         consistency_check: Callable[[], None],
         require_current_result: bool = False,
-    ) -> ArtifactSnapshot | None:
+    ) -> ArtifactSnapshot | ArtifactFinalizationRejection | None:
         run = self._lock_run(reservation.verification_run_id)
         if run.job_id != reservation.job_id:
             raise ValueError("Artifact reservation does not belong to the requested job.")
         job = self._lock_job(run.job_id)
         row = self._lock_artifact_or_none(reservation.export_artifact_id)
         if row is None:
+            return None
+        if (
+            require_current_result
+            and not self._artifact_revision_is_latest(run, row)
+        ):
+            if (
+                ArtifactLifecycleStatus(row.status)
+                is ArtifactLifecycleStatus.PENDING
+                and _artifact_row_matches_reservation(row, reservation)
+            ):
+                self._session.delete(row)
+                self._session.flush()
+                return ArtifactFinalizationRejection.STALE_REVISION
             return None
         if require_current_result and not _artifact_finalization_is_authorized(
             job,
@@ -861,6 +913,31 @@ class VerificationRepository:
                 f"verification run {verification_run_id}."
             )
         return revision
+
+    def _latest_review_revision(
+        self,
+        verification_run_id: UUID,
+    ) -> ReviewRevisionRow | None:
+        return self._session.scalar(
+            select(ReviewRevisionRow)
+            .where(
+                ReviewRevisionRow.verification_run_id == verification_run_id
+            )
+            .order_by(ReviewRevisionRow.revision_number.desc())
+            .limit(1)
+            .execution_options(populate_existing=True)
+        )
+
+    def _artifact_revision_is_latest(
+        self,
+        run: VerificationRunRow,
+        artifact: ExportArtifactRow,
+    ) -> bool:
+        latest = self._latest_review_revision(run.verification_run_id)
+        return (artifact.review_revision_id is None) == (latest is None) and (
+            latest is None
+            or artifact.review_revision_id == latest.review_revision_id
+        )
 
 
 def _map_result_to_rows(

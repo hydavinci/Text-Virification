@@ -4,6 +4,7 @@ import { nextTick, ref, watch } from 'vue'
 const props = defineProps<{
   text: string
   previewText: string
+  disabled?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -20,6 +21,9 @@ const editor = ref<HTMLTextAreaElement | null>(null)
 const startButton = ref<HTMLButtonElement | null>(null)
 
 async function startEdit(): Promise<void> {
+  if (props.disabled) {
+    return
+  }
   baseText.value = props.text
   draft.value = props.text
   conflicted.value = false
@@ -95,6 +99,7 @@ watch(
         ref="startButton"
         type="button"
         data-action="start-edit"
+        :disabled="disabled"
         @click="startEdit"
       >
         编辑原文
@@ -104,7 +109,7 @@ watch(
         class="accept"
         type="button"
         data-action="save-edit"
-        :disabled="conflicted"
+        :disabled="conflicted || disabled"
         @click="saveEdit"
       >
         保存编辑
@@ -122,6 +127,7 @@ watch(
         v-if="!editing"
         type="button"
         data-action="toggle-preview"
+        :disabled="disabled"
         :aria-pressed="previewing"
         @click="togglePreview"
       >
@@ -141,6 +147,7 @@ watch(
       v-if="editing"
       ref="editor"
       v-model="draft"
+      :disabled="disabled"
       class="document-editor"
       data-edit-input
       aria-label="编辑文档内容"

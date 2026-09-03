@@ -29,7 +29,7 @@ def test_finalize_export_artifact_locks_run_job_artifact_in_canonical_order() ->
     )
 
     assert snapshot is not None
-    assert order == ["run", "job", "artifact"]
+    assert order == ["run", "job", "artifact", "run-query"]
 
 
 def test_finalize_stale_artifact_locks_run_job_artifact_in_canonical_order() -> None:

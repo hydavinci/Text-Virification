@@ -15,6 +15,10 @@ class ArtifactLifecycleStatus(StrEnum):
     READY = "ready"
 
 
+class ArtifactFinalizationRejection(StrEnum):
+    STALE_REVISION = "stale_revision"
+
+
 @dataclass(frozen=True)
 class ArtifactReservation:
     export_artifact_id: UUID

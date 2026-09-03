@@ -19,6 +19,7 @@ class FileType(StrEnum):
 
 class ExportFormat(StrEnum):
     DOCX_RECONSTRUCTION = "docx_reconstruction"
+    ORIGINAL_FORMAT = "original_format"
 
 
 class TextBlock(BaseModel):

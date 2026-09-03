@@ -33,9 +33,12 @@ export interface VerificationApi {
     jobId: string,
     revision: DraftDocumentRevision
   ): Promise<PersistedDocumentRevision>
-  exportReconstruction(
+  exportJob(
     jobId: string,
-    revisionId: string | null
+    format: ExportArtifactReference['format'],
+    revisionId: string | null,
+    trackChanges: boolean,
+    isCurrent: () => boolean
   ): Promise<void>
 }
 
@@ -119,28 +122,49 @@ export function createVerificationApi(fetchImpl: typeof fetch = fetch): Verifica
       }
       return persisted
     },
-    exportReconstruction: async (jobId, revisionId) => {
+    exportJob: async (
+      jobId,
+      format,
+      revisionId,
+      trackChanges,
+      isCurrent
+    ) => {
       const response = await fetchImpl(`${API_BASE}/jobs/${jobId}/exports`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          format: 'docx_reconstruction',
-          revision_id: revisionId
+          format,
+          revision_id: revisionId,
+          track_changes: trackChanges
         })
       })
-      if (!response.ok) {
-        throw await readApiRequestError(response)
+      if (!isCurrent()) {
+        return
       }
-      const artifact = exportArtifactResponse(await response.json(), jobId)
+      if (!response.ok) {
+        const error = await readApiRequestError(response)
+        if (!isCurrent()) {
+          return
+        }
+        throw error
+      }
+      const payload = await response.json()
+      if (!isCurrent()) {
+        return
+      }
+      const artifact = exportArtifactResponse(payload, jobId, format)
       if (artifact === null) {
         throw new ApiResponseValidationError(
-          'Invalid reconstruction export response.'
+          'Invalid job export response.'
         )
       }
       const download = await fetchImpl(
         `${API_BASE}/jobs/${jobId}/exports/${artifact.export_artifact_id}`
       )
-      await downloadResponse(download, artifact.file_name)
+      if (!isCurrent()) {
+        return
+      }
+      await downloadResponse(download, artifact.file_name, isCurrent)
     }
   }
 }
@@ -184,15 +208,19 @@ function persistedRevisionResponse(
 
 function exportArtifactResponse(
   value: unknown,
-  jobId: string
+  jobId: string,
+  format: ExportArtifactReference['format']
 ): ExportArtifactReference | null {
   if (
     !isRecord(value) ||
     !isUuid(value.export_artifact_id) ||
     value.job_id !== jobId ||
     !isUuid(value.verification_run_id) ||
-    value.format !== 'docx_reconstruction' ||
-    value.file_type !== 'docx' ||
+    value.format !== format ||
+    !['docx', 'doc', 'pdf', 'txt', 'rtf', 'md', 'csv'].includes(
+      String(value.file_type)
+    ) ||
+    (format === 'docx_reconstruction' && value.file_type !== 'docx') ||
     typeof value.file_name !== 'string' ||
     value.file_name.length === 0 ||
     typeof value.media_type !== 'string' ||
@@ -229,11 +257,22 @@ function isUuid(value: unknown): value is string {
   )
 }
 
-async function downloadResponse(response: Response, fallbackName: string) {
+async function downloadResponse(
+  response: Response,
+  fallbackName: string,
+  isCurrent: () => boolean = () => true
+) {
   if (!response.ok) {
-    throw await readApiRequestError(response)
+    const error = await readApiRequestError(response)
+    if (!isCurrent()) {
+      return
+    }
+    throw error
   }
   const blob = await response.blob()
+  if (!isCurrent()) {
+    return
+  }
   const disposition = response.headers.get('content-disposition') ?? ''
   const encodedName = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1]
   const plainName = disposition.match(/filename="?([^";]+)"?/i)?.[1]

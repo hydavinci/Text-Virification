@@ -58,6 +58,7 @@ export function useVerificationExecution({
   const message = ref('')
   const error = ref<Error | null>(null)
   const connectionMessage = ref<string | null>(null)
+  const restoredJobId = ref<string | null>(null)
 
   let requestGeneration = 0
   let requestActive = false
@@ -84,6 +85,7 @@ export function useVerificationExecution({
     state.value = 'submitting'
     result.value = null
     job.value = null
+    restoredJobId.value = null
     jobStatus.value = null
     progress.value = 0
     stage.value = null
@@ -368,12 +370,29 @@ export function useVerificationExecution({
     state.value = 'idle'
     result.value = null
     job.value = null
+    restoredJobId.value = null
     jobStatus.value = null
     progress.value = 0
     stage.value = null
     message.value = ''
     error.value = null
     connectionMessage.value = null
+  }
+
+  function restoreJobContext(
+    jobId: string,
+    restoredResult: VerificationResult
+  ): boolean {
+    if (
+      disposed ||
+      requestActive ||
+      restoredResult.execution_mode !== 'asynchronous' ||
+      restoredResult.document_id !== jobId
+    ) {
+      return false
+    }
+    restoredJobId.value = jobId
+    return true
   }
 
   function dispose(): void {
@@ -392,6 +411,7 @@ export function useVerificationExecution({
     state: computed(() => state.value),
     result: computed(() => result.value),
     job: computed(() => job.value),
+    jobId: computed(() => job.value?.job_id ?? restoredJobId.value),
     jobStatus: computed(() => jobStatus.value),
     progress: computed(() => progress.value),
     stage: computed(() => stage.value),
@@ -403,6 +423,7 @@ export function useVerificationExecution({
     ),
     analyzeText,
     analyzeFile,
+    restoreJobContext,
     reset,
     dispose
   }

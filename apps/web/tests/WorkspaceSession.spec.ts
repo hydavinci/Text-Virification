@@ -150,7 +150,7 @@ function uiState() {
       trackChanges: false,
       selectedIssueId: issue.issue_id
     },
-    jobId: '44444444-4444-4444-8444-444444444444'
+    jobId: result.document_id
   }
 }
 
@@ -243,5 +243,82 @@ describe('useWorkspaceSession', () => {
     expect(session.warning.value).toContain('无法保存')
     expect(workspace.currentRevision.value).toBe(revision)
     expect(workspace.modifiedText.value).toBe('账号测试')
+  })
+
+  it('rejects an async session whose job identity is foreign to the result', () => {
+    const storage = new MemoryStorage()
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(result)
+    const session = useWorkspaceSession(storage, workspace)
+    expect(session.save(uiState())).toBe(true)
+    const saved = JSON.parse(
+      storage.getItem('text-verification-session') ?? '{}'
+    )
+    saved.jobId = '44444444-4444-4444-8444-444444444444'
+    storage.setItem('text-verification-session', JSON.stringify(saved))
+
+    const restoredWorkspace = useVerificationWorkspace()
+    const restoredSession = useWorkspaceSession(storage, restoredWorkspace)
+
+    expect(restoredSession.restore()).toBeNull()
+    expect(restoredWorkspace.result.value).toBeNull()
+  })
+
+  it('rejects persisted revision gaps, duplicates, and persisted-after-draft order', () => {
+    const storage = new MemoryStorage()
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(result)
+    workspace.acceptIssue(issue.issue_id)
+    const firstDraft = workspace.currentRevision.value
+    expect(firstDraft?.persistence_state).toBe('draft')
+    expect(
+      workspace.hydratePersistedRevision({
+        ...firstDraft,
+        revision_number: 1,
+        created_at: '2026-09-03T04:00:00.000Z',
+        persistence_state: 'persisted'
+      })
+    ).toBe(true)
+    workspace.rejectIssue(issue.issue_id)
+    const secondDraft = workspace.currentRevision.value
+    expect(secondDraft?.persistence_state).toBe('draft')
+    expect(
+      workspace.hydratePersistedRevision({
+        ...secondDraft,
+        revision_number: 2,
+        created_at: '2026-09-03T04:01:00.000Z',
+        persistence_state: 'persisted'
+      })
+    ).toBe(true)
+    const session = useWorkspaceSession(storage, workspace)
+    expect(session.save(uiState())).toBe(true)
+    const valid = JSON.parse(
+      storage.getItem('text-verification-session') ?? '{}'
+    )
+
+    for (const mutate of [
+      (saved: Record<string, any>) => {
+        saved.workspace.revisionChain[2].revision_number = 3
+        saved.workspace.currentRevision.revision_number = 3
+      },
+      (saved: Record<string, any>) => {
+        saved.workspace.revisionChain[2].revision_number = 1
+        saved.workspace.currentRevision.revision_number = 1
+      },
+      (saved: Record<string, any>) => {
+        saved.workspace.revisionChain[1].persistence_state = 'draft'
+        saved.workspace.revisionChain[1].revision_number = null
+      }
+    ]) {
+      const invalid = structuredClone(valid)
+      mutate(invalid)
+      storage.setItem(
+        'text-verification-session',
+        JSON.stringify(invalid)
+      )
+      const candidate = useVerificationWorkspace()
+      expect(useWorkspaceSession(storage, candidate).restore()).toBeNull()
+      expect(candidate.result.value).toBeNull()
+    }
   })
 })

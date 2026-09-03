@@ -444,7 +444,7 @@ def test_job_reconstruction_export_route_returns_stable_artifact_reference(
         created_at=completed_job.created_at,
     )
     revision_id = uuid4()
-    calls: list[tuple[JobRead, ExportFormat, UUID | None]] = []
+    calls: list[tuple[JobRead, ExportFormat, UUID | None, bool]] = []
 
     class FakeService:
         def export(
@@ -453,9 +453,10 @@ def test_job_reconstruction_export_route_returns_stable_artifact_reference(
             export_format,
             *,
             review_revision_id=None,
+            track_changes=False,
             progress_observer=None,
         ):
-            calls.append((job, export_format, review_revision_id))
+            calls.append((job, export_format, review_revision_id, track_changes))
             assert progress_observer is not None
             progress_observer(JobProgressStage.EXPORTING)
             progress_observer(JobProgressStage.FINALIZING)
@@ -474,7 +475,7 @@ def test_job_reconstruction_export_route_returns_stable_artifact_reference(
     assert response.status_code == 200
     assert response.json() == artifact.model_dump(mode="json")
     assert calls == [
-        (completed_job, ExportFormat.DOCX_RECONSTRUCTION, revision_id)
+        (completed_job, ExportFormat.DOCX_RECONSTRUCTION, revision_id, False)
     ]
     export_events = repository.list_events_after(completed_job.job_id, 10)
     assert [event.status for event in export_events] == [
@@ -485,6 +486,98 @@ def test_job_reconstruction_export_route_returns_stable_artifact_reference(
         JobProgressStage.EXPORTING,
         JobProgressStage.FINALIZING,
     ]
+
+
+def test_job_original_format_export_route_preserves_job_owned_options(
+    client,
+    app: FastAPI,
+    completed_job: JobRead,
+) -> None:
+    from text_verification.api.dependencies import get_reconstruction_export_service
+
+    revision_id = uuid4()
+    calls: list[tuple[ExportFormat, UUID | None, bool]] = []
+
+    class FakeService:
+        def export(
+            self,
+            job,
+            export_format,
+            *,
+            review_revision_id=None,
+            track_changes=False,
+            progress_observer=None,
+        ):
+            del job, progress_observer
+            calls.append((export_format, review_revision_id, track_changes))
+            return ExportArtifactReference(
+                export_artifact_id=uuid4(),
+                job_id=completed_job.job_id,
+                verification_run_id=uuid4(),
+                format=ExportFormat("original_format"),
+                file_type=FileType.DOCX,
+                file_name="sample-modified.docx",
+                media_type=(
+                    "application/vnd.openxmlformats-officedocument."
+                    "wordprocessingml.document"
+                ),
+                size_bytes=42,
+                content_sha256="a" * 64,
+                status=ArtifactLifecycleStatus.READY,
+                created_at=completed_job.created_at,
+            )
+
+    app.dependency_overrides[get_reconstruction_export_service] = FakeService
+
+    response = client.post(
+        f"/api/v1/jobs/{completed_job.job_id}/exports",
+        json={
+            "format": "original_format",
+            "revision_id": str(revision_id),
+            "track_changes": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["format"] == "original_format"
+    assert calls == [
+        (ExportFormat("original_format"), revision_id, True)
+    ]
+
+
+def test_job_export_maps_stale_revision_to_typed_409(
+    client,
+    app: FastAPI,
+    completed_job: JobRead,
+) -> None:
+    from text_verification.api.dependencies import get_reconstruction_export_service
+    from text_verification.application.errors import VerificationError
+
+    class StaleService:
+        def export(self, *args: object, **kwargs: object):
+            raise VerificationError(
+                "revision_export_stale",
+                "finalizing",
+                "The requested revision is no longer the latest persisted revision.",
+                False,
+            )
+
+    app.dependency_overrides[get_reconstruction_export_service] = StaleService
+
+    response = client.post(
+        f"/api/v1/jobs/{completed_job.job_id}/exports",
+        json={"format": "docx_reconstruction", "revision_id": str(uuid4())},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "revision_export_stale",
+        "stage": "finalizing",
+        "message": (
+            "The requested revision is no longer the latest persisted revision."
+        ),
+        "retryable": False,
+    }
 
 
 def test_job_export_maps_expiry_before_exporting_event_to_410_without_service_call(

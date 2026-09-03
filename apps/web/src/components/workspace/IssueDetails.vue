@@ -6,6 +6,7 @@ import type { VerificationIssue } from '../../types/verification'
 const props = defineProps<{
   issue: VerificationIssue
   selectedSuggestion?: string | null
+  disabled?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -84,6 +85,7 @@ function updateSuggestion(event: Event): void {
           )
         "
         aria-label="选择修改建议"
+        :disabled="disabled"
         @change="updateSuggestion"
       >
         <option

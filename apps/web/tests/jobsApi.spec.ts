@@ -413,8 +413,8 @@ describe('createJobsApi', () => {
       filename: 'sample.txt',
       source_name: 'sample.txt',
       file_type: 'txt',
-      file_id: '11111111-1111-4111-8111-111111111111',
-      file_ext: '.txt',
+      file_id: null,
+      file_ext: null,
       document_id: '11111111-1111-4111-8111-111111111111',
       execution_mode: 'asynchronous'
     })

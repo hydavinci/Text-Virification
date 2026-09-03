@@ -36,6 +36,7 @@ from text_verification.document_processing.pdf_models import (
     PdfTextCharacter,
     PdfTextSpan,
 )
+from text_verification.domain.artifacts import ArtifactFinalizationRejection
 from text_verification.domain.documents import DocumentMetadata, FileType, TextBlock
 from text_verification.domain.issues import Issue, IssueSeverity
 from text_verification.domain.jobs import JobStatus
@@ -899,6 +900,114 @@ def test_persist_review_revision_rejects_stale_parent_after_newer_revision(
         )
 
 
+def test_reserve_export_artifact_rejects_a_superseded_review_revision(
+    db_session: Session,
+) -> None:
+    _create_job(db_session)
+    repository = VerificationRepository(db_session)
+    repository.save_result(JOB_ID, _result())
+    first = repository.persist_review_revision(
+        JOB_ID,
+        ReviewRevisionDraft(
+            revision_id=REVISION_ID,
+            document_id=DOCUMENT_ID,
+            verification_run_id=RUN_ID,
+            source_version="sha256:source-v7",
+            parent_revision_id=None,
+            kind=DocumentRevisionKind.REVIEW,
+            text="first",
+        ),
+        created_at=CREATED_AT,
+    )
+    repository.persist_review_revision(
+        JOB_ID,
+        ReviewRevisionDraft(
+            revision_id=SECOND_REVISION_ID,
+            document_id=DOCUMENT_ID,
+            verification_run_id=RUN_ID,
+            source_version="sha256:source-v7",
+            parent_revision_id=first.revision_id,
+            kind=DocumentRevisionKind.MANUAL,
+            text="second",
+        ),
+        created_at=CREATED_AT + timedelta(minutes=1),
+    )
+
+    with pytest.raises(ValueError, match="latest persisted revision"):
+        repository.reserve_export_artifact(
+            export_artifact_id=ARTIFACT_ID,
+            verification_run_id=RUN_ID,
+            review_revision_id=first.revision_id,
+            source_version="sha256:source-v7",
+            file_type=FileType.DOCX,
+            file_name="sample.docx",
+            media_type="application/octet-stream",
+            storage_key=ARTIFACT_STORAGE_KEY,
+            size_bytes=1,
+            content_sha256="0" * 64,
+            reserved_at=CREATED_AT,
+            created_at=CREATED_AT,
+        )
+
+
+def test_finalize_export_artifact_deletes_reservation_if_revision_became_stale(
+    db_session: Session,
+) -> None:
+    _create_job(db_session)
+    repository = VerificationRepository(db_session)
+    repository.save_result(JOB_ID, _result())
+    first = repository.persist_review_revision(
+        JOB_ID,
+        ReviewRevisionDraft(
+            revision_id=REVISION_ID,
+            document_id=DOCUMENT_ID,
+            verification_run_id=RUN_ID,
+            source_version="sha256:source-v7",
+            parent_revision_id=None,
+            kind=DocumentRevisionKind.REVIEW,
+            text="first",
+        ),
+        created_at=CREATED_AT,
+    )
+    reservation = repository.reserve_export_artifact(
+        export_artifact_id=ARTIFACT_ID,
+        verification_run_id=RUN_ID,
+        review_revision_id=first.revision_id,
+        source_version="sha256:source-v7",
+        file_type=FileType.DOCX,
+        file_name="sample.docx",
+        media_type="application/octet-stream",
+        storage_key=ARTIFACT_STORAGE_KEY,
+        size_bytes=1,
+        content_sha256="0" * 64,
+        reserved_at=CREATED_AT,
+        created_at=CREATED_AT,
+    )
+    repository.persist_review_revision(
+        JOB_ID,
+        ReviewRevisionDraft(
+            revision_id=SECOND_REVISION_ID,
+            document_id=DOCUMENT_ID,
+            verification_run_id=RUN_ID,
+            source_version="sha256:source-v7",
+            parent_revision_id=first.revision_id,
+            kind=DocumentRevisionKind.MANUAL,
+            text="second",
+        ),
+        created_at=CREATED_AT + timedelta(minutes=1),
+    )
+
+    result = repository.finalize_export_artifact(
+        reservation,
+        ready_at=CREATED_AT + timedelta(minutes=2),
+        consistency_check=lambda: None,
+        require_current_result=True,
+    )
+
+    assert result is ArtifactFinalizationRejection.STALE_REVISION
+    assert repository.read_export_artifact(ARTIFACT_ID) is None
+
+
 def test_reserve_export_artifact_rejects_key_for_another_job(
     db_session: Session,
 ) -> None:
@@ -1530,6 +1639,238 @@ def test_concurrent_review_revision_conflict_raises_value_error(
         error = second_future.result(timeout=5)
 
     assert isinstance(error, ValueError)
+    assert not isinstance(error, IntegrityError)
+
+
+def test_concurrent_persist_review_revisions_allocate_unique_sequential_numbers(
+    db_session_factory: sessionmaker[Session],
+) -> None:
+    seed_session = db_session_factory()
+    try:
+        _create_job(seed_session)
+        repository = VerificationRepository(seed_session)
+        repository.save_result(JOB_ID, _result())
+        repository.commit()
+    finally:
+        seed_session.close()
+
+    first_saved = Event()
+    second_started = Event()
+    second_finished = Event()
+    allow_first_commit = Event()
+    first_draft = ReviewRevisionDraft(
+        revision_id=REVISION_ID,
+        document_id=DOCUMENT_ID,
+        verification_run_id=RUN_ID,
+        source_version="sha256:source-v7",
+        parent_revision_id=None,
+        kind=DocumentRevisionKind.REVIEW,
+        text="first",
+    )
+    second_draft = ReviewRevisionDraft(
+        revision_id=SECOND_REVISION_ID,
+        document_id=DOCUMENT_ID,
+        verification_run_id=RUN_ID,
+        source_version="sha256:source-v7",
+        parent_revision_id=REVISION_ID,
+        kind=DocumentRevisionKind.MANUAL,
+        text="second",
+    )
+
+    def first_worker() -> PersistedDocumentRevision:
+        session = db_session_factory()
+        repository = VerificationRepository(session)
+        try:
+            session.execute(text("SET lock_timeout = '4s'"))
+            persisted = repository.persist_review_revision(
+                JOB_ID,
+                first_draft,
+                created_at=CREATED_AT,
+            )
+            first_saved.set()
+            if not allow_first_commit.wait(timeout=2):
+                raise TimeoutError("timed out waiting to commit first revision")
+            repository.commit()
+            return persisted
+        finally:
+            session.close()
+
+    def second_worker() -> PersistedDocumentRevision:
+        session = db_session_factory()
+        repository = VerificationRepository(session)
+        try:
+            session.execute(text("SET lock_timeout = '4s'"))
+            second_started.set()
+            persisted = repository.persist_review_revision(
+                JOB_ID,
+                second_draft,
+                created_at=CREATED_AT + timedelta(minutes=1),
+            )
+            repository.commit()
+            return persisted
+        finally:
+            second_finished.set()
+            session.close()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first_future = executor.submit(first_worker)
+        assert first_saved.wait(timeout=2)
+        second_future = executor.submit(second_worker)
+        assert second_started.wait(timeout=1)
+        assert not second_finished.wait(timeout=0.2)
+        allow_first_commit.set()
+        first = first_future.result(timeout=5)
+        second = second_future.result(timeout=5)
+
+    assert (first.revision_number, second.revision_number) == (1, 2)
+    assert second.parent_revision_id == first.revision_id
+
+
+def test_concurrent_persist_review_revision_uuid_retry_is_idempotent(
+    db_session_factory: sessionmaker[Session],
+) -> None:
+    seed_session = db_session_factory()
+    try:
+        _create_job(seed_session)
+        repository = VerificationRepository(seed_session)
+        repository.save_result(JOB_ID, _result())
+        repository.commit()
+    finally:
+        seed_session.close()
+
+    first_saved = Event()
+    allow_first_commit = Event()
+    draft = ReviewRevisionDraft(
+        revision_id=REVISION_ID,
+        document_id=DOCUMENT_ID,
+        verification_run_id=RUN_ID,
+        source_version="sha256:source-v7",
+        parent_revision_id=None,
+        kind=DocumentRevisionKind.REVIEW,
+        text="same",
+    )
+
+    def worker(created_at: datetime, hold: bool) -> PersistedDocumentRevision:
+        session = db_session_factory()
+        repository = VerificationRepository(session)
+        try:
+            session.execute(text("SET lock_timeout = '4s'"))
+            persisted = repository.persist_review_revision(
+                JOB_ID,
+                draft,
+                created_at=created_at,
+            )
+            if hold:
+                first_saved.set()
+                if not allow_first_commit.wait(timeout=2):
+                    raise TimeoutError("timed out waiting to commit retry")
+            repository.commit()
+            return persisted
+        finally:
+            session.close()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first_future = executor.submit(worker, CREATED_AT, True)
+        assert first_saved.wait(timeout=2)
+        retry_future = executor.submit(
+            worker,
+            CREATED_AT + timedelta(minutes=1),
+            False,
+        )
+        allow_first_commit.set()
+        first = first_future.result(timeout=5)
+        retried = retry_future.result(timeout=5)
+
+    assert retried == first
+    assert retried.revision_number == 1
+    assert retried.created_at == CREATED_AT
+
+
+@pytest.mark.parametrize(
+    ("second_revision_id", "second_text", "expected_message"),
+    [
+        (SECOND_REVISION_ID, "stale", "latest persisted revision"),
+        (REVISION_ID, "collision", "different data"),
+    ],
+)
+def test_concurrent_persist_review_revision_rejects_stale_parent_or_uuid_collision(
+    db_session_factory: sessionmaker[Session],
+    second_revision_id: UUID,
+    second_text: str,
+    expected_message: str,
+) -> None:
+    seed_session = db_session_factory()
+    try:
+        _create_job(seed_session)
+        repository = VerificationRepository(seed_session)
+        repository.save_result(JOB_ID, _result())
+        repository.commit()
+    finally:
+        seed_session.close()
+
+    first_saved = Event()
+    allow_first_commit = Event()
+
+    def first_worker() -> None:
+        session = db_session_factory()
+        repository = VerificationRepository(session)
+        try:
+            repository.persist_review_revision(
+                JOB_ID,
+                ReviewRevisionDraft(
+                    revision_id=REVISION_ID,
+                    document_id=DOCUMENT_ID,
+                    verification_run_id=RUN_ID,
+                    source_version="sha256:source-v7",
+                    parent_revision_id=None,
+                    kind=DocumentRevisionKind.REVIEW,
+                    text="first",
+                ),
+                created_at=CREATED_AT,
+            )
+            first_saved.set()
+            if not allow_first_commit.wait(timeout=2):
+                raise TimeoutError("timed out waiting to commit conflict")
+            repository.commit()
+        finally:
+            session.close()
+
+    def second_worker() -> Exception | None:
+        session = db_session_factory()
+        repository = VerificationRepository(session)
+        try:
+            session.execute(text("SET lock_timeout = '4s'"))
+            repository.persist_review_revision(
+                JOB_ID,
+                ReviewRevisionDraft(
+                    revision_id=second_revision_id,
+                    document_id=DOCUMENT_ID,
+                    verification_run_id=RUN_ID,
+                    source_version="sha256:source-v7",
+                    parent_revision_id=None,
+                    kind=DocumentRevisionKind.MANUAL,
+                    text=second_text,
+                ),
+                created_at=CREATED_AT + timedelta(minutes=1),
+            )
+            repository.commit()
+            return None
+        except Exception as error:
+            repository.rollback()
+            return error
+        finally:
+            session.close()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first_future = executor.submit(first_worker)
+        assert first_saved.wait(timeout=2)
+        second_future = executor.submit(second_worker)
+        allow_first_commit.set()
+        first_future.result(timeout=5)
+        error = second_future.result(timeout=5)
+
+    assert isinstance(error, ValueError)
+    assert expected_message in str(error)
     assert not isinstance(error, IntegrityError)
 
 

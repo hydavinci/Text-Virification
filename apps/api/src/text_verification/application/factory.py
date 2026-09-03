@@ -20,7 +20,12 @@ from text_verification.config import Settings, get_settings
 from text_verification.document_processing.ocr_provider import OcrProvider
 from text_verification.domain.documents import DocumentModel, ExportFormat, FileType
 from text_verification.domain.issues import Issue, IssueSeverity
-from text_verification.domain.ports import AnchoredSourcePathResolver, Parser
+from text_verification.domain.ports import (
+    AnchoredSourcePathResolver,
+    Parser,
+    SourcePathResolver,
+)
+from text_verification.exporters.compatibility_exporter import CompatibilityExporter
 from text_verification.exporters.docx_reconstruction import (
     DocxReconstructionExporter,
     DocxReconstructionLimits,
@@ -101,6 +106,16 @@ def build_default_exporter_registry(
                 limits=DocxReconstructionLimits(max_output_bytes=max_output_bytes),
                 anchored_source_resolver=anchored_source_resolver,
                 file_type=ExportFormat.DOCX_RECONSTRUCTION,
+            ),
+            *(
+                CompatibilityExporter(
+                    file_type=file_type,
+                    source_path_resolver=cast(
+                        SourcePathResolver,
+                        anchored_source_resolver,
+                    ),
+                )
+                for file_type in FileType
             ),
         )
     )

@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 
 import PrivacyDialog from '../src/components/workspace/PrivacyDialog.vue'
 import WorkspaceHeader from '../src/components/workspace/WorkspaceHeader.vue'
+import appSource from '../src/App.vue?raw'
 
 afterEach(() => {
   document.body.innerHTML = ''
@@ -57,5 +58,12 @@ describe('workspace accessibility surfaces', () => {
     await wrapper.setProps({ open: false })
     await nextTick()
     expect(document.activeElement).toBe(opener)
+  })
+
+  it('globally near-disables animations and transitions for reduced motion', () => {
+    expect(appSource).toContain('@media (prefers-reduced-motion: reduce)')
+    expect(appSource).toMatch(/animation-duration:\s*\.01ms\s*!important/)
+    expect(appSource).toMatch(/transition-duration:\s*\.01ms\s*!important/)
+    expect(appSource).toMatch(/transition-delay:\s*0ms\s*!important/)
   })
 })

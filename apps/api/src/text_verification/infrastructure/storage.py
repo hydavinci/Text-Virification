@@ -401,3 +401,13 @@ class JobOwnedSourcePathResolver:
         if source_path.parent.resolve(strict=False) != expected_parent:
             raise InvalidUpload("Stored source is outside the job-owned namespace.")
         return ResolvedSourcePath.from_path(source_path)
+
+    def resolve(
+        self,
+        document: DocumentModel,
+        *,
+        source_path: Path | None = None,
+    ) -> Path:
+        if source_path is not None:
+            raise ValueError("Job-owned source paths cannot be overridden.")
+        return self.resolve_anchored(document).path

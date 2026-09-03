@@ -49,6 +49,7 @@ defineEmits<{
       <input
         data-track-changes
         type="checkbox"
+        :disabled="busy"
         :checked="trackChanges"
         aria-label="导出时保留修订标记"
         @change="

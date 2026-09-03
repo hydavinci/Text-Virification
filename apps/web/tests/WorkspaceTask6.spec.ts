@@ -8,12 +8,18 @@ import {
 } from '../src/api/verification'
 import EditPreview from '../src/components/workspace/EditPreview.vue'
 import { useWorkspaceSession } from '../src/composables/useWorkspaceSession'
-import { useVerificationWorkspace } from '../src/composables/useVerificationWorkspace'
+import {
+  createVerificationResultSnapshot,
+  useVerificationWorkspace
+} from '../src/composables/useVerificationWorkspace'
 import type {
+  DraftDocumentRevision,
+  PersistedDocumentRevision,
   VerificationIssue,
   VerificationResult
 } from '../src/types/verification'
 import WorkspaceView from '../src/views/WorkspaceView.vue'
+import scannedResult from './e2e/fixtures/scanned-result'
 
 const themeValues = new Map<string, string>()
 const themeStorage: Storage = {
@@ -152,14 +158,17 @@ function verificationApi(
     exportReport: vi.fn(),
     exportOriginal: vi.fn(),
     persistRevision: vi.fn(),
-    exportReconstruction: vi.fn(),
+    exportJob: vi.fn(),
     ...overrides
   }
 }
 
-function seedSession(): void {
+function seedSession(
+  sessionResult: VerificationResult = result,
+  sessionJobId: string = sessionResult.document_id
+): void {
   const workspace = useVerificationWorkspace()
-  workspace.loadResult(result)
+  workspace.loadResult(sessionResult)
   const session = useWorkspaceSession(window.sessionStorage, workspace)
   expect(
     session.save({
@@ -180,7 +189,7 @@ function seedSession(): void {
         trackChanges: true,
         selectedIssueId: null
       },
-      jobId: '44444444-4444-4444-8444-444444444444'
+      jobId: sessionJobId
     })
   ).toBe(true)
 }
@@ -202,9 +211,23 @@ describe('WorkspaceView Task 6 integration', () => {
       configurable: true,
       value: browserSessionStorage
     })
+
     window.sessionStorage.clear()
     window.localStorage.clear()
     document.documentElement.removeAttribute('data-theme')
+  })
+
+  it('does not synthesize compatibility file identity for canonical job results', () => {
+    const {
+      file_id: _fileId,
+      file_ext: _fileExt,
+      ...canonical
+    } = result
+
+    const snapshot = createVerificationResultSnapshot(canonical)
+
+    expect(snapshot?.file_id).toBeNull()
+    expect(snapshot?.file_ext).toBeNull()
   })
 
   it('persists the draft chain before revision-keyed reconstruction export', async () => {
@@ -222,9 +245,9 @@ describe('WorkspaceView Task 6 integration', () => {
       created_at: '2026-09-03T04:00:00.000Z',
       persistence_state: 'persisted' as const
     }))
-    const exportReconstruction = vi.fn()
+    const exportJob = vi.fn()
     const wrapper = mountWorkspace(
-      verificationApi({ persistRevision, exportReconstruction })
+      verificationApi({ persistRevision, exportJob })
     )
     await flushPromises()
 
@@ -234,7 +257,7 @@ describe('WorkspaceView Task 6 integration', () => {
 
     expect(persistRevision).toHaveBeenCalledTimes(1)
     expect(persistRevision.mock.calls[0]?.[0]).toBe(
-      '44444444-4444-4444-8444-444444444444'
+      result.document_id
     )
     expect(persistRevision.mock.calls[0]?.[1]).toMatchObject({
       revision_number: null,
@@ -242,12 +265,16 @@ describe('WorkspaceView Task 6 integration', () => {
       kind: 'review',
       text: '账号测试'
     })
-    expect(exportReconstruction).toHaveBeenCalledWith(
-      '44444444-4444-4444-8444-444444444444',
+    expect(exportJob).toHaveBeenCalledWith(
+      result.document_id,
+      'docx_reconstruction',
       persistRevision.mock.results[0]?.value
         ? expect.any(String)
-        : null
+        : null,
+      true,
+      expect.any(Function)
     )
+    expect(wrapper.text()).toContain('重建 DOCX')
     expect(
       (
         wrapper.vm as unknown as {
@@ -263,9 +290,9 @@ describe('WorkspaceView Task 6 integration', () => {
   it('blocks export after free editing until re-verification', async () => {
     seedSession()
     const persistRevision = vi.fn()
-    const exportReconstruction = vi.fn()
+    const exportJob = vi.fn()
     const wrapper = mountWorkspace(
-      verificationApi({ persistRevision, exportReconstruction })
+      verificationApi({ persistRevision, exportJob })
     )
     await flushPromises()
 
@@ -274,7 +301,7 @@ describe('WorkspaceView Task 6 integration', () => {
     await wrapper.get('[data-action="export-modified"]').trigger('click')
 
     expect(persistRevision).not.toHaveBeenCalled()
-    expect(exportReconstruction).not.toHaveBeenCalled()
+    expect(exportJob).not.toHaveBeenCalled()
     expect(wrapper.text()).toContain('重新检查后再导出')
   })
 
@@ -325,6 +352,193 @@ describe('WorkspaceView Task 6 integration', () => {
 
     expect(document.documentElement.dataset.theme).toBe('dark')
     expect(window.localStorage.getItem('text-verification-theme')).toBe('dark')
+  })
+
+  it('uses job-owned original-format export for an ordinary async DOCX', async () => {
+    const docxResult: VerificationResult = {
+      ...result,
+      filename: 'sample.docx',
+      source_name: 'sample.docx',
+      file_type: 'docx',
+      parser_name: 'docx',
+      blocks: result.blocks.map((block) => ({ ...block, page: null, bbox: null }))
+    }
+    seedSession(docxResult)
+    const exportOriginal = vi.fn()
+    const exportJob = vi.fn()
+    const wrapper = mountWorkspace(
+      verificationApi({ exportOriginal, exportJob })
+    )
+    await flushPromises()
+
+    await wrapper.get('[data-action="export-modified"]').trigger('click')
+    await flushPromises()
+
+    expect(exportOriginal).not.toHaveBeenCalled()
+    expect(exportJob).toHaveBeenCalledWith(
+      docxResult.document_id,
+      'original_format',
+      null,
+      true,
+      expect.any(Function)
+    )
+  })
+
+  it('keeps text-based async PDF export in the original PDF format', async () => {
+    const rawTextPdf = structuredClone(scannedResult) as any
+    rawTextPdf.metadata.pdf.pages[0].kind = 'text'
+    rawTextPdf.metadata.pdf.pages[0].ocr_required = false
+    rawTextPdf.metadata.pdf.warnings = []
+    rawTextPdf.metadata.pdf.ocr_requirement = null
+    rawTextPdf.ocr_requirement = null
+    const textPdfResult = createVerificationResultSnapshot(rawTextPdf)
+    if (textPdfResult === null) {
+      throw new Error('Expected a canonical text PDF result.')
+    }
+    seedSession(textPdfResult)
+    const exportJob = vi.fn()
+    const wrapper = mountWorkspace(verificationApi({ exportJob }))
+    await flushPromises()
+
+    await wrapper.get('[data-action="export-modified"]').trigger('click')
+    await flushPromises()
+
+    expect(exportJob).toHaveBeenCalledWith(
+      textPdfResult.document_id,
+      'original_format',
+      null,
+      true,
+      expect.any(Function)
+    )
+    expect(wrapper.text()).toContain('保留 PDF 格式')
+  })
+
+  it('invalidates a pending export when reset replaces the workspace', async () => {
+    seedSession()
+    let resolvePersist: (value: PersistedDocumentRevision) => void = () => {}
+    const persistRevision = vi.fn(
+      (
+        _jobId: string,
+        draft: DraftDocumentRevision
+      ): Promise<PersistedDocumentRevision> =>
+        new Promise<PersistedDocumentRevision>((resolve) => {
+          resolvePersist = resolve
+        })
+    )
+    const exportJob = vi.fn()
+    const wrapper = mountWorkspace(
+      verificationApi({ persistRevision, exportJob })
+    )
+    await flushPromises()
+    await wrapper.get('[data-action="accept-batch"]').trigger('click')
+    await wrapper.get('[data-action="export-modified"]').trigger('click')
+    await flushPromises()
+
+    await wrapper.get('[data-reset-workspace]').trigger('click')
+    const pendingDraft = persistRevision.mock.calls[0]?.[1]
+    if (pendingDraft === undefined) {
+      throw new Error('Expected a pending revision draft.')
+    }
+    resolvePersist({
+      ...pendingDraft,
+      revision_number: 1,
+      created_at: '2026-09-03T04:00:00.000Z',
+      persistence_state: 'persisted'
+    })
+    await flushPromises()
+
+    expect(exportJob).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-export-error]').exists()).toBe(false)
+    expect(wrapper.find('.toast').exists()).toBe(false)
+  })
+
+  it('locks document mutations while revision persistence is pending', async () => {
+    seedSession()
+    const persistRevision = vi.fn(
+      (): Promise<PersistedDocumentRevision> =>
+        new Promise<PersistedDocumentRevision>(() => undefined)
+    )
+    const wrapper = mountWorkspace(
+      verificationApi({ persistRevision, exportJob: vi.fn() })
+    )
+    await flushPromises()
+    await wrapper.get('[data-action="accept-batch"]').trigger('click')
+    await wrapper.get('[data-action="export-modified"]').trigger('click')
+    await flushPromises()
+
+    expect(
+      wrapper.get<HTMLButtonElement>('[data-action="start-edit"]').element
+        .disabled
+    ).toBe(true)
+    expect(
+      wrapper.get<HTMLButtonElement>('[data-action="toggle-search-replace"]')
+        .element.disabled
+    ).toBe(true)
+    expect(
+      wrapper.get<HTMLInputElement>('[data-track-changes]').element.disabled
+    ).toBe(true)
+    expect(
+      wrapper.get<HTMLButtonElement>('.issue-actions .accept').element.disabled
+    ).toBe(true)
+  })
+
+  it('keeps export failures assertive until dismissed', async () => {
+    seedSession()
+    const wrapper = mountWorkspace(
+      verificationApi({
+        exportJob: vi.fn().mockRejectedValue(new Error('导出服务失败'))
+      })
+    )
+    await flushPromises()
+
+    await wrapper.get('[data-action="export-modified"]').trigger('click')
+    await flushPromises()
+
+    const alert = wrapper.get('[data-export-error]')
+    expect(alert.attributes('role')).toBe('alert')
+    expect(alert.attributes('aria-live')).toBe('assertive')
+    expect(alert.text()).toContain('导出服务失败')
+    expect(
+      wrapper.get<HTMLButtonElement>('[data-action="export-modified"]').element
+        .disabled
+    ).toBe(false)
+    await flushPromises()
+    expect(wrapper.find('[data-export-error]').exists()).toBe(true)
+
+    await wrapper.get('[data-dismiss-export-error]').trigger('click')
+    expect(wrapper.find('[data-export-error]').exists()).toBe(false)
+  })
+
+  it('invalidates the export guard when the workspace unmounts', async () => {
+    seedSession()
+    let releaseExport: () => void = () => {}
+    let downloadCount = 0
+    const exportJob = vi.fn(
+      async (
+        _jobId,
+        _format,
+        _revisionId,
+        _trackChanges,
+        isCurrent: () => boolean
+      ) => {
+        await new Promise<void>((resolve) => {
+          releaseExport = resolve
+        })
+        if (isCurrent()) {
+          downloadCount += 1
+        }
+      }
+    )
+    const wrapper = mountWorkspace(verificationApi({ exportJob }))
+    await flushPromises()
+
+    await wrapper.get('[data-action="export-modified"]').trigger('click')
+    await flushPromises()
+    wrapper.unmount()
+    releaseExport()
+    await flushPromises()
+
+    expect(downloadCount).toBe(0)
   })
 
   it('persists directly required view, selection, tab, and export UI state', async () => {

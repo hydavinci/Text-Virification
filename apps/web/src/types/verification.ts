@@ -270,8 +270,8 @@ export interface ExportArtifactReference {
   export_artifact_id: string
   job_id: string
   verification_run_id: string
-  format: 'docx_reconstruction'
-  file_type: 'docx'
+  format: 'docx_reconstruction' | 'original_format'
+  file_type: FileType
   file_name: string
   media_type: string
   size_bytes: number

@@ -643,7 +643,7 @@ describe('useVerificationExecution', () => {
       exportReport: vi.fn(),
       exportOriginal: vi.fn(),
       persistRevision: vi.fn(),
-      exportReconstruction: vi.fn()
+      exportJob: vi.fn()
     }
     const harness = createHarness({ verificationApi })
 
@@ -669,7 +669,7 @@ describe('useVerificationExecution', () => {
       exportReport: vi.fn(),
       exportOriginal: vi.fn(),
       persistRevision: vi.fn(),
-      exportReconstruction: vi.fn()
+      exportJob: vi.fn()
     }
     const harness = createHarness({
       verificationApi,
@@ -725,7 +725,7 @@ describe('useVerificationExecution', () => {
       exportReport: vi.fn(),
       exportOriginal: vi.fn(),
       persistRevision: vi.fn(),
-      exportReconstruction: vi.fn()
+      exportJob: vi.fn()
     }
     const harness = createHarness({ verificationApi })
 
@@ -762,7 +762,7 @@ describe('useVerificationExecution', () => {
       exportReport: vi.fn(),
       exportOriginal: vi.fn(),
       persistRevision: vi.fn(),
-      exportReconstruction: vi.fn()
+      exportJob: vi.fn()
     }
     const harness = createHarness({ verificationApi })
 
@@ -788,7 +788,7 @@ describe('useVerificationExecution', () => {
       exportReport: vi.fn(),
       exportOriginal: vi.fn(),
       persistRevision: vi.fn(),
-      exportReconstruction: vi.fn()
+      exportJob: vi.fn()
     }
     const direct = createHarness({ verificationApi })
 
@@ -840,7 +840,7 @@ describe('useVerificationExecution', () => {
           exportReport: vi.fn(),
           exportOriginal: vi.fn(),
           persistRevision: vi.fn(),
-          exportReconstruction: vi.fn()
+          exportJob: vi.fn()
         }
         const harness = createHarness({ verificationApi })
 
@@ -877,7 +877,7 @@ describe('useVerificationExecution', () => {
       exportReport: vi.fn(),
       exportOriginal: vi.fn(),
       persistRevision: vi.fn(),
-      exportReconstruction: vi.fn()
+      exportJob: vi.fn()
     }
     const direct = createHarness({ verificationApi })
     const directOptions: AnalyzeOptions = structuredClone(options)
@@ -901,5 +901,28 @@ describe('useVerificationExecution', () => {
     expect(asyncSnapshot).toEqual(directSnapshot)
     expect(asyncSnapshot).not.toBe(asyncOptions)
     expect(Object.isFrozen(asyncSnapshot)).toBe(true)
+  })
+
+  it('restores validated async job context without inventing a completed job', () => {
+    const harness = createHarness()
+    const result = buildResult({ execution_mode: 'asynchronous' })
+
+    expect(
+      harness.execution.restoreJobContext(result.document_id, result)
+    ).toBe(true)
+    expect(harness.execution.jobId.value).toBe(result.document_id)
+    expect(harness.execution.job.value).toBeNull()
+    expect(harness.execution.state.value).toBe('idle')
+    expect(
+      harness.execution.restoreJobContext(
+        '44444444-4444-4444-8444-444444444444',
+        result
+      )
+    ).toBe(false)
+    expect(harness.execution.jobId.value).toBe(result.document_id)
+
+    harness.execution.reset()
+
+    expect(harness.execution.jobId.value).toBeNull()
   })
 })
