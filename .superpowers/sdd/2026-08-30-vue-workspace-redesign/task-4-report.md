@@ -10,6 +10,8 @@ Fix round 2 was completed on 2026-09-03 from Task 4 fix-round-1 HEAD
 `e40192e3aff3541180cc7143deed6a2606fd49b5`.
 Fix round 3 was completed on 2026-09-03 from Task 4 fix-round-2 HEAD
 `85b5e4592a6d4cabaa8f2104084e4fa1ac7a6a2f`.
+Fix round 4 was completed on 2026-09-03 from Task 4 fix-round-3 HEAD
+`6212a58f4b798c23c1db5c1e89cee259341703a1`.
 
 ## Files
 
@@ -212,3 +214,47 @@ in fix round 2.
 
 No Task 5 result-loading/API work or Task 6 backend revision persistence work
 was included in fix round 3.
+
+## Fix round 4
+
+- Query folding now uses the same extended-grapheme pipeline as source-text
+  folding. Each query cluster is independently normalized with whole-cluster
+  NFKD, stable `und` uppercase/lowercase, and final NFKD, so context-sensitive
+  final and non-final Greek sigma forms canonicalize identically without
+  changing accent sensitivity, expansion boundaries, KMP matching, or
+  original code-point mappings.
+- Added `unicode-segmenter` `^0.17.3` as an `apps/web` runtime dependency.
+  Native `Intl.Segmenter` remains preferred when available; otherwise the
+  Unicode 17 UAX #29 extended-grapheme implementation supplies the same
+  internal segment/start/end contract without a module-startup exception.
+- Native and fallback regressions cover decomposed combining sequences,
+  astral code-point offsets, Greek sigma variants, ligature expansion, and
+  equivalent relevant ranges. Greek replacement coverage verifies exact
+  original ranges for uppercase, final-sigma, and normal-sigma text.
+- The normalization complexity assertion is derived from 10,001 text clusters
+  plus 512 query clusters. Each cluster is folded once with two normalization
+  calls, preserving deterministic O(n+m) segmentation, folding, and KMP
+  matching.
+
+### Fix round 4 TDD and validation evidence
+
+- Search RED:
+  `npm test -- --run tests/useSearchReplace.spec.ts --reporter=dot` failed 6
+  tests with 16 passing. All three `ΟΣ`/`ος`/`οσ` query variants and the
+  replacement regression returned no ranges, the normalization probe observed
+  20,004 calls instead of the cluster-derived 21,026, and importing after
+  removing `Intl.Segmenter` threw `TypeError: Intl.Segmenter is not a
+  constructor`.
+- Focused search GREEN: the same command passed 22 tests in 1 file.
+- Task 4/workspace GREEN:
+  `npm test -- --run tests/ReviewActions.spec.ts tests/SearchReplacePanel.spec.ts tests/EditPreview.spec.ts tests/useSearchReplace.spec.ts tests/useVerificationWorkspace.spec.ts tests/WorkspaceView.spec.ts --reporter=dot`
+  passed 197 tests across 6 files. Node emitted the existing experimental
+  `localStorage` warning.
+- Full frontend GREEN: `npm test -- --run --reporter=dot` passed 291 tests
+  across 14 files with the same existing warning.
+- Production build GREEN: `npm run build` passed `vue-tsc -b` and Vite 6.4.3
+  with 53 modules transformed.
+- `git diff --check` passed with no output.
+
+No Task 5 result-loading/API work or Task 6 backend revision persistence work
+was included in fix round 4.

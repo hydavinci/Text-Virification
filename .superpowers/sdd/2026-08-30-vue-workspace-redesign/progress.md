@@ -868,3 +868,52 @@ code-point boundaries.
 
 Task 4: fix round 3/5 (2 addressed, 0 open — grapheme-safe Unicode matching
 and bounded once-folded KMP search; commit `fix: bound Unicode search matching`)
+
+## Task 4 fix round 4 — 2026-09-03
+
+- Folded query text with the same extended-grapheme algorithm used for source
+  text. Whole-cluster NFKD reordering, stable `und` uppercase/lowercase,
+  expansion behavior, and final NFKD now run once per query cluster, removing
+  context-sensitive final-sigma differences between `ΟΣ`, `ος`, and `οσ`.
+- Added the frontend runtime dependency `unicode-segmenter` `^0.17.3`.
+  `Intl.Segmenter` is constructed only when its constructor exists; missing
+  implementations use the dependency's Unicode 17 UAX #29 extended-grapheme
+  generator. Both paths expose segment text with code-point start/end offsets
+  to the folding layer.
+- Added native/fallback equivalence coverage with an import performed after
+  removing `Intl.Segmenter`. The regression proves startup succeeds, combining
+  sequences remain indivisible, astral offsets stay code-point based, and
+  Greek/ligature ranges remain exact.
+- Updated the bounded-normalization regression to derive its expectation from
+  10,001 source clusters and 512 query clusters: 21,026 calls, exactly two per
+  independently folded cluster. Segmentation, folding, prefix construction,
+  and KMP matching remain O(n+m).
+
+### Task 4 fix round 4 TDD and validation evidence
+
+- Search RED:
+  `npm test -- --run tests/useSearchReplace.spec.ts --reporter=dot` failed 6
+  tests with 16 passing. Greek queries and replacement returned no matches,
+  normalization calls were 20,004 rather than 21,026, and fallback module
+  initialization threw `TypeError: Intl.Segmenter is not a constructor`.
+- Focused search GREEN: the same command passed 22 tests in 1 file.
+- Task 4/workspace GREEN:
+  `npm test -- --run tests/ReviewActions.spec.ts tests/SearchReplacePanel.spec.ts tests/EditPreview.spec.ts tests/useSearchReplace.spec.ts tests/useVerificationWorkspace.spec.ts tests/WorkspaceView.spec.ts --reporter=dot`
+  passed 197 tests across 6 files. Node emitted the existing experimental
+  `localStorage` warning.
+- Full frontend GREEN: `npm test -- --run --reporter=dot` passed 291 tests
+  across 14 files with the same existing warning.
+- Production build GREEN: `npm run build` passed `vue-tsc -b` and Vite 6.4.3
+  with 53 modules transformed.
+- `git diff --check` passed with no output.
+
+Ruling: Insensitive search segments and folds both query and source text by
+the same extended-grapheme units. Native `Intl.Segmenter` is preferred, while
+the maintained Unicode 17 `unicode-segmenter` runtime fallback makes the
+production browser target portable without weakening grapheme boundaries;
+cost if wrong is a small always-bundled fallback implementation rather than a
+startup failure in older browsers.
+
+Task 4: fix round 4/5 (2 addressed, 0 open — context-stable grapheme query
+folding and portable extended-grapheme segmentation; commit
+`fix: support portable grapheme search`)

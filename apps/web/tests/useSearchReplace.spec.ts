@@ -45,6 +45,44 @@ describe('useSearchReplace', () => {
     ])
   })
 
+  it.each(['ΟΣ', 'ος', 'οσ'])(
+    'matches Greek sigma forms when the query is %s',
+    (query) => {
+      const search = useSearchReplace({ text: () => 'ΟΣ ος οσ' })
+
+      search.query.value = query
+
+      expect(search.matches.value).toEqual([
+        { start: 0, end: 2 },
+        { start: 3, end: 5 },
+        { start: 6, end: 8 }
+      ])
+    }
+  )
+
+  it('replaces complete Greek sigma ranges using code-point offsets', () => {
+    const text = ref('😀ΟΣ ος οσ')
+    const onReplace = vi.fn((nextText: string) => {
+      text.value = nextText
+    })
+    const search = useSearchReplace({ text, onReplace })
+
+    search.query.value = 'οσ'
+    expect(search.matches.value).toEqual([
+      { start: 1, end: 3 },
+      { start: 4, end: 6 },
+      { start: 7, end: 9 }
+    ])
+
+    search.replacement.value = 'X'
+    expect(search.replaceAll()).toBe(true)
+    expect(text.value).toBe('😀X X X')
+    expect(onReplace).toHaveBeenCalledWith('😀X X X', {
+      kind: 'all',
+      count: 3
+    })
+  })
+
   it('maps length-changing Unicode folds back to original code-point ranges', () => {
     const ligatures = useSearchReplace({ text: () => 'oﬃce office' })
     ligatures.query.value = 'office'
@@ -160,7 +198,7 @@ describe('useSearchReplace', () => {
     expect(onReplace).not.toHaveBeenCalled()
   })
 
-  it('folds each text grapheme and the complete query only once', () => {
+  it('folds every text and query grapheme exactly once', () => {
     const originalNormalize = String.prototype.normalize
     const normalizeSpy = vi
       .spyOn(String.prototype, 'normalize')
@@ -170,16 +208,75 @@ describe('useSearchReplace', () => {
       ) {
         return originalNormalize.call(this, form)
       })
+    const textClusterCount = 10_001
+    const queryClusterCount = 512
     const search = useSearchReplace({
-      text: () => `${'a'.repeat(10_000)}b`
+      text: () => `${'a'.repeat(textClusterCount - 1)}b`
     })
 
     try {
-      search.query.value = 'a'.repeat(512)
+      search.query.value = 'a'.repeat(queryClusterCount)
       expect(search.matches.value).toHaveLength(19)
-      expect(normalizeSpy).toHaveBeenCalledTimes(2 * (10_001 + 1))
+      expect(normalizeSpy).toHaveBeenCalledTimes(
+        2 * (textClusterCount + queryClusterCount)
+      )
     } finally {
       normalizeSpy.mockRestore()
+    }
+  })
+
+  it('uses equivalent grapheme ranges without Intl.Segmenter at module startup', async () => {
+    const segmenterDescriptor = Object.getOwnPropertyDescriptor(
+      Intl,
+      'Segmenter'
+    )
+    const sample = '😀a\u0301 ΟΣ ος οσ oﬃce'
+    const expectedMatches = [
+      { query: 'a', matches: [] },
+      { query: 'á', matches: [{ start: 1, end: 3 }] },
+      {
+        query: 'ΟΣ',
+        matches: [
+          { start: 4, end: 6 },
+          { start: 7, end: 9 },
+          { start: 10, end: 12 }
+        ]
+      },
+      { query: 'office', matches: [{ start: 13, end: 17 }] }
+    ] as const
+    const nativeMatches = expectedMatches.map(({ query }) => {
+      const nativeSearch = useSearchReplace({ text: () => sample })
+      nativeSearch.query.value = query
+      return nativeSearch.matches.value
+    })
+
+    Object.defineProperty(Intl, 'Segmenter', {
+      configurable: true,
+      value: undefined,
+      writable: true
+    })
+    vi.resetModules()
+
+    try {
+      const {
+        useSearchReplace: useFallbackSearchReplace
+      } = await import('../src/composables/useSearchReplace')
+
+      for (const [index, { query, matches }] of expectedMatches.entries()) {
+        expect(nativeMatches[index]).toEqual(matches)
+        const fallbackSearch = useFallbackSearchReplace({
+          text: () => sample
+        })
+        fallbackSearch.query.value = query
+        expect(fallbackSearch.matches.value).toEqual(matches)
+      }
+    } finally {
+      if (segmenterDescriptor === undefined) {
+        Reflect.deleteProperty(Intl, 'Segmenter')
+      } else {
+        Object.defineProperty(Intl, 'Segmenter', segmenterDescriptor)
+      }
+      vi.resetModules()
     }
   })
 

@@ -5,6 +5,7 @@ import {
   watch,
   type MaybeRefOrGetter
 } from 'vue'
+import { graphemeSegments } from 'unicode-segmenter/grapheme'
 
 export interface SearchMatch {
   start: number
@@ -22,9 +23,30 @@ interface UseSearchReplaceOptions {
 }
 
 const MAX_FOLDED_QUERY_LENGTH = 4096
-const graphemeSegmenter = new Intl.Segmenter('und', {
-  granularity: 'grapheme'
-})
+const nativeGraphemeSegmenter =
+  typeof Intl.Segmenter === 'function'
+    ? new Intl.Segmenter('und', { granularity: 'grapheme' })
+    : null
+
+interface GraphemeSegment {
+  segment: string
+  start: number
+  end: number
+}
+
+function* segmentGraphemes(value: string): Generator<GraphemeSegment> {
+  const segments =
+    nativeGraphemeSegmenter === null
+      ? graphemeSegments(value)
+      : nativeGraphemeSegmenter.segment(value)
+  let start = 0
+
+  for (const { segment } of segments) {
+    const end = start + Array.from(segment).length
+    yield { segment, start, end }
+    start = end
+  }
+}
 
 function foldSearchValue(value: string): string[] {
   return Array.from(
@@ -34,6 +56,16 @@ function foldSearchValue(value: string): string[] {
       .toLocaleLowerCase('und')
       .normalize('NFKD')
   )
+}
+
+function foldValueByGrapheme(value: string): string[] {
+  const characters: string[] = []
+
+  for (const { segment } of segmentGraphemes(value)) {
+    characters.push(...foldSearchValue(segment))
+  }
+
+  return characters
 }
 
 interface FoldedGraphemeText {
@@ -46,14 +78,12 @@ function foldTextByGrapheme(value: string): FoldedGraphemeText {
   const characters: string[] = []
   const originalStarts: (number | undefined)[] = []
   const originalEnds: (number | undefined)[] = []
-  let originalOffset = 0
 
-  for (const { segment } of graphemeSegmenter.segment(value)) {
+  for (const { segment, start, end } of segmentGraphemes(value)) {
     const foldedStart = characters.length
-    originalStarts[foldedStart] = originalOffset
-    originalOffset += Array.from(segment).length
+    originalStarts[foldedStart] = start
     characters.push(...foldSearchValue(segment))
-    originalEnds[characters.length] = originalOffset
+    originalEnds[characters.length] = end
   }
 
   return {
@@ -169,7 +199,7 @@ export function useSearchReplace({
       return Object.freeze(found.map((match) => Object.freeze(match)))
     }
 
-    const foldedQuery = foldSearchValue(query.value)
+    const foldedQuery = foldValueByGrapheme(query.value)
     if (
       foldedQuery.length === 0 ||
       foldedQuery.length > MAX_FOLDED_QUERY_LENGTH
