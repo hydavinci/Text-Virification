@@ -1511,3 +1511,25 @@ is not claimed clean.
 
 Task 6: review fix round 4 implemented; awaiting independent re-review. Review
 is not claimed clean.
+
+## Task 6 review fix round 5 — 2026-09-03
+
+- Closed the critical optional-grant bypass by making the base verification
+  result explicit, deriving original-result revisions only from server-loaded
+  canonical issues, requiring a signed grant for rechecked text, and persisting
+  verified provenance for grant-independent export authorization.
+- Added migration `0012_add_revision_provenance`.
+- Completed multiline repeated structural alignment and moved raw result
+  preflight before bounded ordered `DocumentModel` overlap validation.
+- Replaced framework-default request parsing for the reviewed boundaries with
+  bounded streaming form and incremental JSON readers whose errors never echo
+  text or opaque grants.
+- Deployed/staging startup now requires a secret of at least 32 UTF-8 bytes;
+  development/test modes remain explicit and secret-safe.
+- Fresh validation: focused backend 214 passed; focused frontend 32 passed;
+  full backend 1050 passed/81 gated skips; full frontend 487 passed; production
+  build passed; Playwright 4 passed/1 live skip; Ruff, mypy, Alembic
+  upgrade/downgrade SQL, Compose config, and `git diff --check` passed.
+
+Task 6: review fix round 5 implemented; awaiting final scoped re-review. Review
+is not claimed clean.

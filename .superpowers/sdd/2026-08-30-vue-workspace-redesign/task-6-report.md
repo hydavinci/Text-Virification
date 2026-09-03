@@ -650,6 +650,89 @@ independent re-review; it does not claim the review is clean.
   complex edit scripts even when individual visual edits are small.
 - Independent re-review is still required. Review cleanliness is not claimed.
 
+## Review fix round 5 — 2026-09-03
+
+### Finding decisions and implementation
+
+1. **Accepted — mandatory server-enforced revision provenance.** Revision
+   submissions now identify an explicit base verification result. The server
+   loads the original persisted job result, proves whether the submitted text
+   is a bounded derivation of that original result, and requires a valid
+   recheck grant whenever the base identity differs or the text cannot be
+   derived from the original issues. Verified provenance is persisted in the
+   new `review_revisions.verified_provenance` JSONB column. Reconstruction
+   export authorizes from that stored provenance, so omitting a request grant
+   cannot downgrade a rechecked revision to an original-result revision.
+2. **Accepted — complete structural alignment.** Projection aligns complete
+   constrained owner sequences instead of trimming raw prefixes/suffixes
+   before ownership. Multiline repeated owners may become empty or absorb
+   representable text while structural separators remain exact; artifact-level
+   regressions cover the reviewed multiline empty-block case.
+3. **Accepted — raw preflight before canonical model construction.** Raw
+   verification result block and aggregate-size limits are checked before
+   constructing `DocumentModel`. Backend block graph overlap validation now
+   uses an ordered ancestry-aware sweep with the established zero-length,
+   ancestor, sibling, and cross-branch semantics rather than pairwise scans.
+4. **Accepted — bounded and sanitized HTTP parsing.** Job recheck form data
+   uses an explicit bounded streaming parser. Revision/export JSON uses bounded
+   incremental parsing with duplicate-field, nesting, decoded-string, raw,
+   and materialized-size limits, including requests without Content-Length.
+   Validation responses are sanitized and do not echo submitted text or opaque
+   grants.
+5. **Accepted — deployed secret requirement.** `Settings` stores the HMAC
+   secret as `SecretStr`; deployed/staging environments fail startup unless it
+   contains at least 32 UTF-8 bytes. Development and tests remain explicit
+   non-deployed modes. `.env.example`, README, and Compose configuration
+   document and pass the secret without exposing it in representations or
+   validation errors.
+
+Alembic revision `0012_add_revision_provenance` adds the nullable JSONB
+provenance column and object-shape constraint. The downgrade removes both.
+
+### Round-5 TDD evidence
+
+- Authorization exploit regressions cover omitted grants with arbitrary text,
+  spoofed original identities, valid original issue-derived drafts, valid
+  recheck grants, export without a request grant, and stored provenance
+  cross-job/tamper rejection.
+- Structural RED cases covered complete multiline repeated owner sequences;
+  GREEN artifact checks confirm exact exported paragraph text.
+- Raw-model preflight and ordered-overlap regressions cover oversized block
+  payloads before element construction plus zero-length and hierarchy parity.
+- HTTP boundary regressions cover inclusive/exclusive limits, chunked requests,
+  escaped text, oversized grants, malformed bodies, and non-reflection in
+  response/log output.
+- Configuration regressions cover empty/short deployed secrets, valid 32-byte
+  secrets, explicit test mode, startup validation, and secret-safe repr/errors.
+
+### Final validation after round 5
+
+- Focused backend authorization/structure/body/config collection:
+  214 passed.
+- Focused frontend revision/export API collection: 32 passed.
+- Full backend: `.venv/bin/python -m pytest -q` — 1050 passed, 81 skipped.
+  Skips were the established PostgreSQL, live API, and optional OCR-runtime
+  gates.
+- Full backend Ruff passed.
+- Full backend mypy passed on 77 source files.
+- Full frontend: `npm test -- --run --reporter=dot` — 487 passed across 21
+  files.
+- Production frontend build passed with 70 modules transformed.
+- Playwright Chromium: 4 deterministic tests passed; 1 live-backend test
+  skipped because `LIVE_API_URL` was unset.
+- Alembic head is `0012_add_revision_provenance`; offline upgrade and
+  `0012:0011` downgrade SQL generation passed.
+- Compose configuration passed with an explicit 32-byte recheck secret.
+- `git diff --check` passed.
+
+### Round-5 residual concerns
+
+- PostgreSQL locking/migration execution remains gated by
+  `TEST_DATABASE_URL`; SQLite was not substituted.
+- The live API/worker/OCR browser boundary remains gated by `LIVE_API_URL`.
+- Independent final scoped review is still required. Review cleanliness is not
+  claimed.
+
 ## Review fix round 4 — 2026-09-03
 
 Implementation commit:
