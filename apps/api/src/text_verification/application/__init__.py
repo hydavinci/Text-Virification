@@ -18,6 +18,7 @@ from text_verification.application.reconstruction_export import (
     ArtifactDownload,
     ReconstructionExportService,
 )
+from text_verification.application.review_revision import ReviewRevisionService
 from text_verification.application.verification_pipeline import (
     VerificationCommand,
     VerificationPipeline,
@@ -45,6 +46,7 @@ __all__ = [
     "ExportArtifactReference",
     "ArtifactDownload",
     "ReconstructionExportService",
+    "ReviewRevisionService",
     "VerificationCommand",
     "VerificationError",
     "VerificationPipeline",

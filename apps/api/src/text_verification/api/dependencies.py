@@ -10,6 +10,10 @@ from text_verification.application.reconstruction_export import (
     ReconstructionExportService,
     ReconstructionRepositoryFactory,
 )
+from text_verification.application.review_revision import (
+    ReviewRevisionRepositoryFactory,
+    ReviewRevisionService,
+)
 from text_verification.application.verification_pipeline import VerificationPipeline
 from text_verification.config import Settings, get_settings
 from text_verification.infrastructure.database import get_session_factory
@@ -62,6 +66,18 @@ def get_reconstruction_export_service(
             anchored_source_resolver=resolver,
             max_output_bytes=storage.max_document_bytes,
         ),
+    )
+
+
+def get_review_revision_service(
+    session: Annotated[Session, Depends(get_db_session)],
+) -> ReviewRevisionService:
+    @contextmanager
+    def repository_factory() -> Iterator[VerificationRepository]:
+        yield VerificationRepository(session)
+
+    return ReviewRevisionService(
+        cast(ReviewRevisionRepositoryFactory, repository_factory)
     )
 
 

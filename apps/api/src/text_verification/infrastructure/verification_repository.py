@@ -28,6 +28,9 @@ from text_verification.domain.jobs import (
     TerminalJobStateError,
 )
 from text_verification.domain.verification import (
+    DocumentRevisionKind,
+    PersistedDocumentRevision,
+    ReviewRevisionDraft,
     Scenario,
     VerificationAnalysisMode,
     VerificationDegradation,
@@ -262,6 +265,8 @@ class VerificationRepository:
                         document_id=run.document_id,
                         source_version=source_version,
                         revision_number=revision_number,
+                        parent_revision_id=None,
+                        kind=DocumentRevisionKind.REVIEW.value,
                         text=text,
                         created_at=created_at,
                     )
@@ -271,6 +276,111 @@ class VerificationRepository:
             raise ValueError(
                 f"Review revision {review_revision_id} conflicts with existing data."
             ) from error
+
+    def persist_review_revision(
+        self,
+        job_id: UUID,
+        draft: ReviewRevisionDraft,
+        *,
+        created_at: datetime,
+    ) -> PersistedDocumentRevision:
+        run = self._lock_run(draft.verification_run_id)
+        if run.job_id != job_id:
+            raise ValueError(
+                f"Verification run {draft.verification_run_id} does not belong "
+                f"to requested job {job_id}."
+            )
+        if run.document_id != draft.document_id:
+            raise ValueError(
+                f"Review document {draft.document_id} does not match "
+                f"{run.document_id}."
+            )
+        if run.document.source_version != draft.source_version:
+            raise ValueError(
+                f"Review source version {draft.source_version!r} does not match "
+                f"{run.document.source_version!r}."
+            )
+
+        existing = self._session.scalar(
+            select(ReviewRevisionRow)
+            .where(ReviewRevisionRow.review_revision_id == draft.revision_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if existing is not None:
+            persisted = _persisted_revision_from_row(existing)
+            if _revision_draft_identity(persisted) != draft:
+                raise ValueError(
+                    f"Review revision {draft.revision_id} is already persisted "
+                    "with different data."
+                )
+            return persisted
+
+        latest = self._session.scalar(
+            select(ReviewRevisionRow)
+            .where(
+                ReviewRevisionRow.verification_run_id
+                == draft.verification_run_id
+            )
+            .order_by(ReviewRevisionRow.revision_number.desc())
+            .limit(1)
+            .execution_options(populate_existing=True)
+        )
+        if latest is None:
+            if draft.parent_revision_id is not None:
+                parent = self._session.get(
+                    ReviewRevisionRow,
+                    draft.parent_revision_id,
+                )
+                if parent is None:
+                    raise LookupError(
+                        f"Parent revision {draft.parent_revision_id} does not exist."
+                    )
+                raise ValueError(
+                    f"Parent revision {draft.parent_revision_id} does not belong "
+                    f"to verification run {draft.verification_run_id}."
+                )
+            revision_number = 1
+        else:
+            if draft.parent_revision_id != latest.review_revision_id:
+                raise ValueError(
+                    "Revision parent must be the latest persisted revision "
+                    f"{latest.review_revision_id}."
+                )
+            if (
+                latest.document_id != draft.document_id
+                or latest.source_version != draft.source_version
+            ):
+                raise ValueError("Parent revision identity is not canonical.")
+            revision_number = latest.revision_number + 1
+
+        row = ReviewRevisionRow(
+            review_revision_id=draft.revision_id,
+            verification_run_id=draft.verification_run_id,
+            document_id=draft.document_id,
+            source_version=draft.source_version,
+            revision_number=revision_number,
+            parent_revision_id=draft.parent_revision_id,
+            kind=draft.kind.value,
+            text=draft.text,
+            created_at=created_at,
+        )
+        try:
+            with self._session.begin_nested():
+                self._session.add(row)
+                self._session.flush()
+        except IntegrityError as error:
+            raise ValueError(
+                f"Review revision {draft.revision_id} conflicts with existing data."
+            ) from error
+        return _persisted_revision_from_row(row)
+
+    def read_review_revision(
+        self,
+        review_revision_id: UUID,
+    ) -> PersistedDocumentRevision | None:
+        row = self._session.get(ReviewRevisionRow, review_revision_id)
+        return None if row is None else _persisted_revision_from_row(row)
 
     def reserve_export_artifact(
         self,
@@ -807,6 +917,37 @@ def _map_result_to_rows(
         for index, issue in enumerate(result.issues)
     ]
     return document_row, run_row
+
+
+def _persisted_revision_from_row(
+    row: ReviewRevisionRow,
+) -> PersistedDocumentRevision:
+    return PersistedDocumentRevision(
+        revision_id=row.review_revision_id,
+        document_id=row.document_id,
+        verification_run_id=row.verification_run_id,
+        source_version=row.source_version,
+        revision_number=row.revision_number,
+        created_at=row.created_at,
+        parent_revision_id=row.parent_revision_id,
+        persistence_state="persisted",
+        kind=DocumentRevisionKind(row.kind),
+        text=row.text,
+    )
+
+
+def _revision_draft_identity(
+    revision: PersistedDocumentRevision,
+) -> ReviewRevisionDraft:
+    return ReviewRevisionDraft(
+        revision_id=revision.revision_id,
+        document_id=revision.document_id,
+        verification_run_id=revision.verification_run_id,
+        source_version=revision.source_version,
+        parent_revision_id=revision.parent_revision_id,
+        kind=revision.kind,
+        text=revision.text,
+    )
 
 
 def _map_rows_to_result(

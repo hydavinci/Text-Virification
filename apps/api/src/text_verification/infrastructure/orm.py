@@ -395,7 +395,20 @@ class ReviewRevisionRow(Base):
             "verification_run_id",
             name="uq_review_revisions_revision_run",
         ),
+        ForeignKeyConstraint(
+            ["parent_revision_id", "verification_run_id"],
+            [
+                "review_revisions.review_revision_id",
+                "review_revisions.verification_run_id",
+            ],
+            name="fk_review_revisions_parent_run",
+            ondelete="RESTRICT",
+        ),
         CheckConstraint("revision_number > 0", name="ck_review_revisions_number"),
+        CheckConstraint(
+            "kind IN ('review', 'manual')",
+            name="ck_review_revisions_kind",
+        ),
     )
 
     review_revision_id: Mapped[UUID] = mapped_column(
@@ -406,6 +419,11 @@ class ReviewRevisionRow(Base):
     document_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True))
     source_version: Mapped[str] = mapped_column(Text)
     revision_number: Mapped[int] = mapped_column(Integer)
+    parent_revision_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        nullable=True,
+    )
+    kind: Mapped[str] = mapped_column(String(16))
     text: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     run: Mapped[VerificationRunRow] = relationship(back_populates="review_revisions")

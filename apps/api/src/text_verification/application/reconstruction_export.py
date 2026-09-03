@@ -5,6 +5,7 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Protocol, cast
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
@@ -28,7 +29,10 @@ from text_verification.domain.artifacts import (
 from text_verification.domain.documents import DocumentModel, ExportFormat, FileType
 from text_verification.domain.jobs import JobProgressStage, JobRead
 from text_verification.domain.ports import AnchoredSourcePathResolver
-from text_verification.domain.verification import VerificationResult
+from text_verification.domain.verification import (
+    PersistedDocumentRevision,
+    VerificationResult,
+)
 from text_verification.exporters.docx_reconstruction import DocxReconstructionExporter
 from text_verification.exporters.registry import ExporterRegistry
 from text_verification.infrastructure.artifact_storage import (
@@ -53,6 +57,11 @@ ExporterRegistryFactory = Callable[[AnchoredSourcePathResolver], ExporterRegistr
 
 class ReconstructionRepository(ArtifactRepository, Protocol):
     def read_result_snapshot(self, job_id: UUID) -> JobResultSnapshot: ...
+
+    def read_review_revision(
+        self,
+        review_revision_id: UUID,
+    ) -> PersistedDocumentRevision | None: ...
 
     def read_export_artifact(
         self,
@@ -96,6 +105,7 @@ class ReconstructionExportService:
         job: JobRead,
         export_format: ExportFormat,
         *,
+        review_revision_id: UUID | None = None,
         progress_observer: ExportProgressObserver | None = None,
     ) -> ExportArtifactReference:
         if export_format is not ExportFormat.DOCX_RECONSTRUCTION:
@@ -107,9 +117,18 @@ class ReconstructionExportService:
             )
         result = self._load_result(job.job_id)
         document = _document_from_result(result)
+        if review_revision_id is not None:
+            revision = self._load_revision(review_revision_id)
+            _validate_revision_identity(revision, result)
+            document = _document_with_revision_text(document, revision.text)
         _validate_reconstruction_eligibility(document)
 
-        artifact_id = _artifact_id(job, result.verification_run_id, export_format)
+        artifact_id = _artifact_id(
+            job,
+            result.verification_run_id,
+            export_format,
+            review_revision_id,
+        )
         file_name = _file_name(job.source_name)
         storage_key = build_artifact_storage_key(job.job_id, artifact_id, FileType.DOCX)
         existing = self._read_artifact(artifact_id)
@@ -119,6 +138,7 @@ class ReconstructionExportService:
                 existing,
                 job=job,
                 verification_run_id=result.verification_run_id,
+                review_revision_id=review_revision_id,
                 export_format=export_format,
                 file_name=file_name,
                 storage_key=storage_key,
@@ -186,7 +206,7 @@ class ReconstructionExportService:
             job_id=job.job_id,
             export_artifact_id=artifact_id,
             verification_run_id=result.verification_run_id,
-            review_revision_id=None,
+            review_revision_id=review_revision_id,
             source_version=result.source_version,
             file_type=FileType.DOCX,
             file_name=file_name,
@@ -272,10 +292,17 @@ class ReconstructionExportService:
                 result_snapshot = repository.read_result_snapshot(job_id)
                 result = self._download_result(result_snapshot)
                 artifact = repository.read_export_artifact(export_artifact_id)
+                revision = (
+                    repository.read_review_revision(artifact.review_revision_id)
+                    if artifact is not None
+                    and artifact.review_revision_id is not None
+                    else None
+                )
                 if artifact is None or not _artifact_belongs_to_result(
                     artifact,
                     job_id,
                     result,
+                    revision,
                 ):
                     raise VerificationError(
                         "export_artifact_not_found",
@@ -364,6 +391,24 @@ class ReconstructionExportService:
                 "The verification result was superseded before export.",
                 False,
             )
+
+    def _load_revision(
+        self,
+        review_revision_id: UUID,
+    ) -> PersistedDocumentRevision:
+        with self._repository_factory() as repository:
+            try:
+                revision = repository.read_review_revision(review_revision_id)
+            finally:
+                repository.rollback()
+        if revision is None:
+            raise VerificationError(
+                "revision_not_found",
+                "exporting",
+                "The requested persisted revision was not found.",
+                False,
+            )
+        return revision
 
     def _read_artifact(self, export_artifact_id: UUID) -> ArtifactSnapshot | None:
         with self._repository_factory() as repository:
@@ -488,6 +533,98 @@ def _document_from_result(result: VerificationResult) -> DocumentModel:
     )
 
 
+def _validate_revision_identity(
+    revision: PersistedDocumentRevision,
+    result: VerificationResult,
+) -> None:
+    if (
+        revision.verification_run_id != result.verification_run_id
+        or revision.document_id != result.document_id
+        or revision.source_version != result.source_version
+    ):
+        raise VerificationError(
+            "revision_identity_mismatch",
+            "exporting",
+            "The requested revision does not belong to this verification result.",
+            False,
+        )
+
+
+def _document_with_revision_text(
+    document: DocumentModel,
+    revised_text: str,
+) -> DocumentModel:
+    if revised_text == document.text:
+        return document
+    opcodes = SequenceMatcher(
+        None,
+        document.text,
+        revised_text,
+        autojunk=False,
+    ).get_opcodes()
+
+    def mapped_boundary(position: int) -> int:
+        if position == len(document.text):
+            return len(revised_text)
+        for tag, source_start, source_end, target_start, target_end in opcodes:
+            if source_start <= position <= source_end:
+                if tag == "equal":
+                    return target_start + position - source_start
+                if source_end == source_start:
+                    return target_start
+                source_width = source_end - source_start
+                target_width = target_end - target_start
+                return target_start + (
+                    (position - source_start) * target_width // source_width
+                )
+        raise ValueError("Revision boundary could not be mapped.")
+
+    blocks = []
+    for block in document.blocks:
+        start = mapped_boundary(block.global_start)
+        end = mapped_boundary(block.global_end)
+        if end < start:
+            raise VerificationError(
+                "revision_text_unmappable",
+                "exporting",
+                "The persisted revision cannot be mapped to canonical document blocks.",
+                False,
+            )
+        text = revised_text[start:end]
+        style = dict(block.style)
+        if text != block.text:
+            style.pop("spans", None)
+        blocks.append(
+            block.model_copy(
+                update={
+                    "text": text,
+                    "global_start": start,
+                    "global_end": end,
+                    "block_start": 0,
+                    "block_end": len(text),
+                    "style": style,
+                }
+            )
+        )
+    try:
+        return document.model_copy(
+            update={"text": revised_text, "blocks": blocks}
+        ).model_validate(
+            {
+                **document.model_dump(),
+                "text": revised_text,
+                "blocks": [block.model_dump() for block in blocks],
+            }
+        )
+    except ValueError as error:
+        raise VerificationError(
+            "revision_text_unmappable",
+            "exporting",
+            "The persisted revision cannot be mapped to canonical document blocks.",
+            False,
+        ) from error
+
+
 def _validate_reconstruction_eligibility(document: DocumentModel) -> None:
     if (
         document.file_type is not FileType.PDF
@@ -511,12 +648,18 @@ def _artifact_id(
     job: JobRead,
     verification_run_id: UUID,
     export_format: ExportFormat,
+    review_revision_id: UUID | None = None,
 ) -> UUID:
+    revision_key = (
+        ""
+        if review_revision_id is None
+        else f"{review_revision_id}:"
+    )
     return uuid5(
         NAMESPACE_URL,
         (
             f"export:{job.job_id}:{verification_run_id}:"
-            f"{export_format.value}:{job.created_at.isoformat()}"
+            f"{revision_key}{export_format.value}:{job.created_at.isoformat()}"
         ),
     )
 
@@ -531,6 +674,7 @@ def _reference_from_snapshot(
     *,
     job: JobRead,
     verification_run_id: UUID,
+    review_revision_id: UUID | None,
     export_format: ExportFormat,
     file_name: str,
     storage_key: str,
@@ -538,6 +682,7 @@ def _reference_from_snapshot(
     expected = (
         job.job_id,
         verification_run_id,
+        review_revision_id,
         FileType.DOCX,
         file_name,
         DOCX_MEDIA_TYPE,
@@ -547,6 +692,7 @@ def _reference_from_snapshot(
     actual = (
         snapshot.job_id,
         snapshot.verification_run_id,
+        snapshot.review_revision_id,
         snapshot.file_type,
         snapshot.file_name,
         snapshot.media_type,
@@ -579,11 +725,25 @@ def _artifact_belongs_to_result(
     artifact: ArtifactSnapshot,
     job_id: UUID,
     result: VerificationResult,
+    revision: PersistedDocumentRevision | None,
 ) -> bool:
     return (
         artifact.job_id == job_id
         and artifact.verification_run_id == result.verification_run_id
-        and artifact.review_revision_id is None
         and artifact.source_version == result.source_version
         and artifact.file_type is FileType.DOCX
+        and (
+            (
+                artifact.review_revision_id is None
+                and revision is None
+            )
+            or (
+                artifact.review_revision_id is not None
+                and revision is not None
+                and revision.revision_id == artifact.review_revision_id
+                and revision.verification_run_id == result.verification_run_id
+                and revision.document_id == result.document_id
+                and revision.source_version == result.source_version
+            )
+        )
     )

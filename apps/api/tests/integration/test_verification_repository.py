@@ -40,6 +40,9 @@ from text_verification.domain.documents import DocumentMetadata, FileType, TextB
 from text_verification.domain.issues import Issue, IssueSeverity
 from text_verification.domain.jobs import JobStatus
 from text_verification.domain.verification import (
+    DocumentRevisionKind,
+    PersistedDocumentRevision,
+    ReviewRevisionDraft,
     Scenario,
     VerificationAnalysisMode,
     VerificationDegradation,
@@ -749,6 +752,151 @@ def test_save_review_revision_and_export_artifact_preserves_identity_and_source(
     assert artifact.content_sha256 == first.content_sha256
     assert first.created is True
     assert second.created is False
+
+
+def test_persist_review_revision_allocates_server_numbers_and_preserves_parent_chain(
+    db_session: Session,
+) -> None:
+    _create_job(db_session)
+    repository = VerificationRepository(db_session)
+    repository.save_result(JOB_ID, _result())
+    first_draft = ReviewRevisionDraft(
+        revision_id=REVISION_ID,
+        document_id=DOCUMENT_ID,
+        verification_run_id=RUN_ID,
+        source_version="sha256:source-v7",
+        parent_revision_id=None,
+        kind=DocumentRevisionKind.REVIEW,
+        text="账号测试\n第二行",
+    )
+    second_draft = ReviewRevisionDraft(
+        revision_id=SECOND_REVISION_ID,
+        document_id=DOCUMENT_ID,
+        verification_run_id=RUN_ID,
+        source_version="sha256:source-v7",
+        parent_revision_id=REVISION_ID,
+        kind=DocumentRevisionKind.MANUAL,
+        text="最终文本",
+    )
+
+    first = repository.persist_review_revision(
+        JOB_ID,
+        first_draft,
+        created_at=CREATED_AT + timedelta(minutes=1),
+    )
+    second = repository.persist_review_revision(
+        JOB_ID,
+        second_draft,
+        created_at=CREATED_AT + timedelta(minutes=2),
+    )
+    retried = repository.persist_review_revision(
+        JOB_ID,
+        first_draft,
+        created_at=CREATED_AT + timedelta(minutes=3),
+    )
+    repository.commit()
+
+    assert first == PersistedDocumentRevision(
+        **first_draft.model_dump(),
+        revision_number=1,
+        created_at=CREATED_AT + timedelta(minutes=1),
+    )
+    assert second == PersistedDocumentRevision(
+        **second_draft.model_dump(),
+        revision_number=2,
+        created_at=CREATED_AT + timedelta(minutes=2),
+    )
+    assert retried == first
+    rows = db_session.scalars(
+        select(ReviewRevisionRow).order_by(ReviewRevisionRow.revision_number)
+    ).all()
+    assert [row.parent_revision_id for row in rows] == [None, REVISION_ID]
+    assert [row.kind for row in rows] == ["review", "manual"]
+
+
+@pytest.mark.parametrize(
+    ("job_id", "draft_update", "message"),
+    [
+        (
+            SECOND_JOB_ID,
+            {},
+            "requested job",
+        ),
+        (
+            JOB_ID,
+            {"document_id": SECOND_DOCUMENT_ID},
+            "document",
+        ),
+        (
+            JOB_ID,
+            {"source_version": "sha256:stale"},
+            "source version",
+        ),
+        (
+            JOB_ID,
+            {"parent_revision_id": SECOND_REVISION_ID},
+            "parent revision",
+        ),
+    ],
+)
+def test_persist_review_revision_rejects_foreign_or_stale_identity(
+    db_session: Session,
+    job_id: UUID,
+    draft_update: dict[str, object],
+    message: str,
+) -> None:
+    _create_job(db_session)
+    repository = VerificationRepository(db_session)
+    repository.save_result(JOB_ID, _result())
+    draft = ReviewRevisionDraft(
+        revision_id=REVISION_ID,
+        document_id=DOCUMENT_ID,
+        verification_run_id=RUN_ID,
+        source_version="sha256:source-v7",
+        parent_revision_id=None,
+        kind=DocumentRevisionKind.REVIEW,
+        text="账号测试",
+    ).model_copy(update=draft_update)
+
+    with pytest.raises((LookupError, ValueError), match=message):
+        repository.persist_review_revision(
+            job_id,
+            draft,
+            created_at=CREATED_AT,
+        )
+
+
+def test_persist_review_revision_rejects_stale_parent_after_newer_revision(
+    db_session: Session,
+) -> None:
+    _create_job(db_session)
+    repository = VerificationRepository(db_session)
+    repository.save_result(JOB_ID, _result())
+    first = ReviewRevisionDraft(
+        revision_id=REVISION_ID,
+        document_id=DOCUMENT_ID,
+        verification_run_id=RUN_ID,
+        source_version="sha256:source-v7",
+        parent_revision_id=None,
+        kind=DocumentRevisionKind.REVIEW,
+        text="账号测试",
+    )
+    repository.persist_review_revision(JOB_ID, first, created_at=CREATED_AT)
+
+    with pytest.raises(ValueError, match="latest persisted revision"):
+        repository.persist_review_revision(
+            JOB_ID,
+            ReviewRevisionDraft(
+                revision_id=SECOND_REVISION_ID,
+                document_id=DOCUMENT_ID,
+                verification_run_id=RUN_ID,
+                source_version="sha256:source-v7",
+                parent_revision_id=None,
+                kind=DocumentRevisionKind.MANUAL,
+                text="分叉文本",
+            ),
+            created_at=CREATED_AT + timedelta(minutes=1),
+        )
 
 
 def test_reserve_export_artifact_rejects_key_for_another_job(

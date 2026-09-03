@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from datetime import datetime
 from enum import StrEnum
 from math import isfinite
 from typing import Annotated, Literal
@@ -172,6 +173,35 @@ class VerificationExecutionMode(StrEnum):
 class VerificationAnalysisMode(StrEnum):
     LOCAL_ONLY = "local_only"
     LOCAL_PLUS_LLM = "local_plus_llm"
+
+
+class DocumentRevisionKind(StrEnum):
+    REVIEW = "review"
+    MANUAL = "manual"
+
+
+class ReviewRevisionDraft(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    revision_id: UUID
+    document_id: UUID
+    verification_run_id: UUID
+    source_version: str = Field(min_length=1)
+    parent_revision_id: UUID | None = None
+    kind: DocumentRevisionKind
+    text: str
+
+    @model_validator(mode="after")
+    def validate_parent(self) -> ReviewRevisionDraft:
+        if self.parent_revision_id == self.revision_id:
+            raise ValueError("revision cannot be its own parent")
+        return self
+
+
+class PersistedDocumentRevision(ReviewRevisionDraft):
+    revision_number: int = Field(gt=0)
+    created_at: datetime
+    persistence_state: Literal["persisted"] = "persisted"
 
 
 class VerificationDegradation(BaseModel):

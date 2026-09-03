@@ -32,6 +32,8 @@ from text_verification.domain.documents import (
 )
 from text_verification.domain.jobs import JobProgressStage, JobRead, JobStatus
 from text_verification.domain.verification import (
+    DocumentRevisionKind,
+    PersistedDocumentRevision,
     Scenario,
     VerificationAnalysisMode,
     VerificationDegradation,
@@ -69,6 +71,7 @@ class _FakeOcr:
 @dataclass
 class _RepositoryState:
     result_by_job: dict[UUID, VerificationResult]
+    revisions: dict[UUID, PersistedDocumentRevision] = field(default_factory=dict)
     artifacts: dict[UUID, ArtifactSnapshot] = field(default_factory=dict)
     result_state_by_job: dict[UUID, JobResultState] = field(default_factory=dict)
     reserve_error: Exception | None = None
@@ -99,6 +102,12 @@ class _InMemoryExportRepository:
             state,
             result if state is JobResultState.READY else None,
         )
+
+    def read_review_revision(
+        self,
+        review_revision_id: UUID,
+    ) -> PersistedDocumentRevision | None:
+        return self._state.revisions.get(review_revision_id)
 
     def begin_export_artifact_repair(
         self,
@@ -306,6 +315,82 @@ def test_reconstructs_persisted_ocr_document_and_downloads_verified_artifact(
     assert any("test@example.com" in paragraph.text for paragraph in rebuilt.paragraphs)
     assert download.handle.content_sha256 == artifact.content_sha256
     download.handle.close()
+
+
+def test_reconstructs_the_persisted_revision_text_and_keys_artifact_by_revision(
+    tmp_path: Path,
+) -> None:
+    storage = JobStorage(tmp_path / "jobs", max_upload_bytes=5 * 1024 * 1024)
+    job, result = _job_and_result(storage)
+    revision_id = uuid4()
+    revision = PersistedDocumentRevision(
+        revision_id=revision_id,
+        document_id=result.document_id,
+        verification_run_id=result.verification_run_id,
+        source_version=result.source_version,
+        revision_number=1,
+        created_at=job.created_at + timedelta(minutes=1),
+        parent_revision_id=None,
+        persistence_state="persisted",
+        kind=DocumentRevisionKind.REVIEW,
+        text=result.text.replace("test@example.com", "reviewed@example.com"),
+    )
+    state = _RepositoryState(
+        {job.job_id: result},
+        revisions={revision_id: revision},
+    )
+
+    artifact = _service(storage, state).export(
+        job,
+        ExportFormat.DOCX_RECONSTRUCTION,
+        review_revision_id=revision_id,
+    )
+    download = _service(storage, state).download(
+        job.job_id,
+        artifact.export_artifact_id,
+    )
+
+    assert state.artifacts[artifact.export_artifact_id].review_revision_id == revision_id
+    rebuilt = Document(download.path)
+    text = "\n".join(paragraph.text for paragraph in rebuilt.paragraphs)
+    assert "reviewed@example.com" in text
+    assert "test@example.com" not in text
+    download.handle.close()
+
+
+def test_reconstruction_rejects_a_revision_from_another_result(
+    tmp_path: Path,
+) -> None:
+    storage = JobStorage(tmp_path / "jobs", max_upload_bytes=5 * 1024 * 1024)
+    job, result = _job_and_result(storage)
+    revision_id = uuid4()
+    state = _RepositoryState(
+        {job.job_id: result},
+        revisions={
+            revision_id: PersistedDocumentRevision(
+                revision_id=revision_id,
+                document_id=uuid4(),
+                verification_run_id=result.verification_run_id,
+                source_version=result.source_version,
+                revision_number=1,
+                created_at=job.created_at,
+                parent_revision_id=None,
+                persistence_state="persisted",
+                kind=DocumentRevisionKind.REVIEW,
+                text="foreign",
+            )
+        },
+    )
+
+    with pytest.raises(VerificationError) as raised:
+        _service(storage, state).export(
+            job,
+            ExportFormat.DOCX_RECONSTRUCTION,
+            review_revision_id=revision_id,
+        )
+
+    assert raised.value.code == "revision_identity_mismatch"
+    assert state.artifacts == {}
 
 
 def test_reconstruction_eligibility_uses_canonical_structure_not_filename(

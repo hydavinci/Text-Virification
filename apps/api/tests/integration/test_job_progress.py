@@ -443,11 +443,19 @@ def test_job_reconstruction_export_route_returns_stable_artifact_reference(
         status=ArtifactLifecycleStatus.READY,
         created_at=completed_job.created_at,
     )
-    calls: list[tuple[JobRead, ExportFormat]] = []
+    revision_id = uuid4()
+    calls: list[tuple[JobRead, ExportFormat, UUID | None]] = []
 
     class FakeService:
-        def export(self, job, export_format, *, progress_observer=None):
-            calls.append((job, export_format))
+        def export(
+            self,
+            job,
+            export_format,
+            *,
+            review_revision_id=None,
+            progress_observer=None,
+        ):
+            calls.append((job, export_format, review_revision_id))
             assert progress_observer is not None
             progress_observer(JobProgressStage.EXPORTING)
             progress_observer(JobProgressStage.FINALIZING)
@@ -457,12 +465,17 @@ def test_job_reconstruction_export_route_returns_stable_artifact_reference(
 
     response = client.post(
         f"/api/v1/jobs/{completed_job.job_id}/exports",
-        json={"format": "docx_reconstruction"},
+        json={
+            "format": "docx_reconstruction",
+            "revision_id": str(revision_id),
+        },
     )
 
     assert response.status_code == 200
     assert response.json() == artifact.model_dump(mode="json")
-    assert calls == [(completed_job, ExportFormat.DOCX_RECONSTRUCTION)]
+    assert calls == [
+        (completed_job, ExportFormat.DOCX_RECONSTRUCTION, revision_id)
+    ]
     export_events = repository.list_events_after(completed_job.job_id, 10)
     assert [event.status for event in export_events] == [
         JobStatus.COMPLETED,

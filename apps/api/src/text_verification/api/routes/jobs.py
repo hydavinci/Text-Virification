@@ -33,11 +33,13 @@ from text_verification.api.dependencies import (
     get_job_repository,
     get_job_storage,
     get_reconstruction_export_service,
+    get_review_revision_service,
 )
 from text_verification.application.errors import VerificationError
 from text_verification.application.reconstruction_export import (
     ReconstructionExportService,
 )
+from text_verification.application.review_revision import ReviewRevisionService
 from text_verification.compatibility.service import (
     AnalysisInputError,
     build_verification_options,
@@ -57,7 +59,12 @@ from text_verification.domain.jobs import (
     JobStatus,
     TerminalJobStateError,
 )
-from text_verification.domain.verification import Scenario, VerificationResult
+from text_verification.domain.verification import (
+    PersistedDocumentRevision,
+    ReviewRevisionDraft,
+    Scenario,
+    VerificationResult,
+)
 from text_verification.infrastructure.database import get_session_factory
 from text_verification.infrastructure.document_storage import validate_declared_mime
 from text_verification.infrastructure.repositories import JobRepository
@@ -113,6 +120,7 @@ class JobExportRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     format: ExportFormat
+    revision_id: UUID | None = None
 
 
 def dispatch_process_job(job_id: str) -> None:
@@ -165,6 +173,24 @@ def get_job_result(
     if snapshot.result is None:
         raise AssertionError("ready result snapshot must contain a result")
     return snapshot.result
+
+
+@router.post(
+    "/jobs/{job_id}/revisions",
+    response_model=PersistedDocumentRevision,
+)
+def create_review_revision(
+    job_id: UUID,
+    payload: ReviewRevisionDraft,
+    service: Annotated[
+        ReviewRevisionService,
+        Depends(get_review_revision_service),
+    ],
+) -> PersistedDocumentRevision:
+    try:
+        return service.persist(job_id, payload)
+    except VerificationError as error:
+        raise _revision_http_error(error) from error
 
 
 @router.post(
@@ -246,6 +272,7 @@ def create_job_export(
         return service.export(
             job,
             payload.format,
+            review_revision_id=payload.revision_id,
             progress_observer=record_remaining,
         )
     except TerminalJobStateError as error:
@@ -625,6 +652,9 @@ def _export_http_error(error: VerificationError) -> HTTPException:
         "document_reconstruction_failed": status.HTTP_422_UNPROCESSABLE_CONTENT,
         "export_artifact_conflict": status.HTTP_409_CONFLICT,
         "export_source_superseded": status.HTTP_409_CONFLICT,
+        "revision_not_found": status.HTTP_404_NOT_FOUND,
+        "revision_identity_mismatch": status.HTTP_409_CONFLICT,
+        "revision_text_unmappable": status.HTTP_422_UNPROCESSABLE_CONTENT,
         "export_artifact_repair_cleanup_failed": status.HTTP_409_CONFLICT,
         "export_artifact_repair_pending": status.HTTP_409_CONFLICT,
         "export_artifact_repair_unsafe": status.HTTP_409_CONFLICT,
@@ -632,6 +662,21 @@ def _export_http_error(error: VerificationError) -> HTTPException:
         "export_persistence_failed": status.HTTP_503_SERVICE_UNAVAILABLE,
         "export_workspace_cleanup_failed": status.HTTP_503_SERVICE_UNAVAILABLE,
         "job_result_expired": status.HTTP_410_GONE,
+    }.get(error.code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+    return _typed_http_error(
+        status_code,
+        error.code,
+        error.stage,
+        error.message,
+        error.retryable,
+    )
+
+
+def _revision_http_error(error: VerificationError) -> HTTPException:
+    status_code = {
+        "revision_identity_not_found": status.HTTP_404_NOT_FOUND,
+        "revision_conflict": status.HTTP_409_CONFLICT,
+        "revision_persistence_failed": status.HTTP_503_SERVICE_UNAVAILABLE,
     }.get(error.code, status.HTTP_500_INTERNAL_SERVER_ERROR)
     return _typed_http_error(
         status_code,
