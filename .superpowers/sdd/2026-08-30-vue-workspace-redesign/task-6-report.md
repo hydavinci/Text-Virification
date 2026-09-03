@@ -649,3 +649,162 @@ independent re-review; it does not claim the review is clean.
 - The export-wide diff budget intentionally fails closed for sufficiently
   complex edit scripts even when individual visual edits are small.
 - Independent re-review is still required. Review cleanliness is not claimed.
+
+## Review fix round 4 — 2026-09-03
+
+Implementation commit:
+
+- `4cc9b7522664126a48f212cee4d1b34416299614`
+  (`fix: address task 6 review round 4`)
+
+All five findings were accepted after verification against the canonical block
+model, reconstruction renderer, existing size and diff limits, artifact
+repository lock order, filesystem descriptor rules, revision persistence,
+frontend recheck flow, strict session restore, and settings infrastructure. No
+finding received technical pushback. This round is implemented and awaits
+independent re-review; it does not claim the review is clean.
+
+### Finding dispositions and design/security decisions
+
+1. **Accepted — immutable structural alignment for repeated adjacent blocks.**
+   Reconstruction no longer derives block ownership from a global
+   `SequenceMatcher` edit script. It trims unchanged prefix/suffix text, then
+   runs a bounded structural alignment whose state permits edits only while a
+   canonical renderable owner is active. Structural code points may only match
+   exactly and in order; insertions at a boundary belong deterministically to
+   the ending owner before the starting owner. The resulting target characters
+   are assigned directly to owner ranges, structural slices are copied from
+   canonical offsets, and the complete rebuilt text must equal the persisted
+   revision. Artifact-level regressions cover repeated equal paragraphs in
+   both directions, empty first/second paragraph results, repeated strings,
+   astral Unicode, multiline blocks, tables, and the prior true-gap conflicts.
+2. **Accepted — preflight plus one cumulative checked work budget.** Projection
+   checks the canonical block count and source/revision/aggregate block text
+   bounds before alignment. Owner lookup uses sorted interval starts with
+   binary search; structural-range mapping uses indexed anchors; hierarchy
+   depth is memoized rather than rescanned per block. Prefix/suffix scans,
+   owner lookups, structural rebuilding, dynamic alignment work, hierarchy
+   projection, and generated edit regions all debit one
+   `CheckedTextWorkBudget`. `build_bounded_text_edits()` now rejects a known
+   zero-operation budget before constructing a matcher and reserves bounded
+   matching/edit-generation work before starting it. Counter-based and
+   adversarial tests avoid timing assertions.
+3. **Accepted — version-owned publication and compensation.** Alembic revision
+   `0011_add_artifact_reservation_version` adds a monotonically refreshed
+   artifact reservation version. Publication authorization now occurs under
+   the canonical run → job → artifact lock sequence and requires the exact
+   pending reservation version. Compensation reacquires the same locks,
+   verifies the row is still this request's matching `PENDING` reservation,
+   verifies the retained filesystem handle still names the created inode, and
+   only then removes the file and metadata. A creator that loses ownership to
+   an adopter/finalizer cannot unlink the adopted `READY` inode. Creator-first
+   and adopter-first finalization interleavings are covered.
+4. **Accepted — tokenized inode-bound repair quarantines.** Repair quarantines
+   now use a unique UUID token in the path and return an immutable descriptor
+   containing canonical job/artifact/storage identity, token, path, device,
+   and inode. A retry adopts an older or legacy quarantine by renaming it to a
+   fresh token path while the artifact row is locked. Cleanup accepts only the
+   descriptor and unlinks only if the token-derived path still names its exact
+   inode; an old owner cannot delete a replacement or a newer repair's
+   quarantine. Orphan discovery validates both legacy fixed names and the new
+   canonical tokenized form. Concurrent repair callers converge on one ready
+   artifact; a caller whose reservation was superseded may receive the existing
+   retryable repair-pending response without publishing under stale ownership.
+5. **Accepted — server-signed expiring recheck provenance.** Added
+   `POST /api/v1/jobs/{job_id}/recheck`, which runs the verification pipeline
+   against the submitted text for the persisted job result and returns the
+   fresh result plus a server-issued HMAC-SHA-256 grant. The signed version-1
+   claims bind audience, issuance/expiry, original job/document/run/source,
+   submitted recheck text SHA-256, and fresh result document/run/source. The
+   secret and TTL come from `Settings` (`recheck_grant_secret` and
+   `recheck_grant_ttl_seconds`); no fallback secret exists. Verification uses
+   strict bounded base64/JSON parsing and constant-time signature and claim
+   comparisons. Revision persistence and job export accept the opaque grant
+   plus the current fresh result identity and recheck text, verify it before
+   using the original job authority, and retain existing latest-revision and
+   artifact authorization checks. Stateless replay is limited by expiry and
+   remains idempotent through existing revision UUID and deterministic artifact
+   semantics. Ordinary original-result revision/export flows remain grant-free.
+   Version-6 sessions persist only the bounded opaque grant; valid version-5
+   client-hash sessions migrate while dropping untrusted retained authority.
+   New input and reset continue clearing authority.
+
+### Round-4 RED/GREEN evidence
+
+- Repeated-block projection RED:
+  `pytest -q --tb=short tests/integration/test_job_reconstruction_export.py
+  -k 'repeated_adjacent_blocks_without_crossing_separator'` — 4 failed and 2
+  passed because the global edit script crossed or ambiguously owned the
+  separator. GREEN with surrounding structural regressions: 21 passed; the
+  final complete projection/artifact focused collection is included below.
+- Work-bound RED: the zero-operation test entered the matcher and failed with
+  the structural probe assertion. Projection preflight/budget tests reported 3
+  failed and 1 passed because block/source preflight and cumulative linear
+  charging were absent. GREEN: 6 bounded-text-edit tests and 25 selected
+  projection/budget cases passed.
+- Compensation RED: the creator/adopter interleaving reported 1 failed and 1
+  passed; the stale creator removed the inode already finalized by the
+  adopter. GREEN: both interleavings plus the owned-pending failure case passed.
+- Quarantine RED: the focused storage module failed collection because the
+  inode/token-bound `ArtifactRepairState` and descriptor contract did not
+  exist. GREEN: 6 quarantine/repair storage cases passed, followed by the
+  reconstruction repair collection.
+- Provenance RED: backend grant/recheck tests failed collection because the
+  grant and job-recheck modules did not exist. Frontend recheck/session/API
+  regressions reported 11 failed and 37 passed because the client-generated
+  hash remained, `recheckJob()` was absent, and provenance was not forwarded.
+  GREEN: backend provenance route/service/revision/export selection passed 21
+  tests; frontend API/session/Task-6 selection passed 48.
+- A full verification run exposed a nondeterministic concurrent-repair test
+  assertion: both safe callers sometimes returned the same ready reference,
+  while the test required exactly one retryable loser. The invariant was
+  corrected to permit one or two identical ready references and at most one
+  retryable superseded caller. The regression then passed 10/10 repeated runs
+  without timing-based assertions.
+
+### Final validation after round 4
+
+- Complete focused backend projection/budget/artifact/quarantine/provenance/
+  route/service/revision/export/repository collection:
+  235 passed, 43 PostgreSQL-gated skipped.
+- Complete focused frontend recheck/session/export/workspace/API collection:
+  118 passed across 6 files. Node emitted the existing experimental
+  `localStorage` warning.
+- Full backend: `.venv/bin/python -m pytest -q` — 996 passed, 79 skipped.
+  Skips were the established `TEST_DATABASE_URL`, `LIVE_API_URL`, and optional
+  OCR-runtime gates.
+- Full backend Ruff: `.venv/bin/python -m ruff check src tests alembic` —
+  passed.
+- Full backend mypy: `.venv/bin/python -m mypy src` — 75 source files, no
+  issues.
+- Full frontend: `npm test -- --run --reporter=dot` — 487 passed across 21
+  files. The existing Node experimental `localStorage` warning remains.
+- Production frontend: `npm run build` — `vue-tsc -b` and Vite 6.4.3 passed;
+  70 modules transformed.
+- Playwright: `npm run test:e2e` — 4 deterministic Chromium tests passed; 1
+  live-backend test skipped because `LIVE_API_URL` was unset.
+- Alembic: `alembic heads` reported
+  `0011_add_artifact_reservation_version (head)`; offline `upgrade head --sql`
+  generated the complete chain through 0011. Live `alembic check` was skipped
+  because `TEST_DATABASE_URL` was unset.
+- Concurrent repair stress: the focused convergence regression passed 10/10
+  repeated invocations.
+- `git diff --check` passed before the implementation commit and before the
+  documentation update.
+
+### Round-4 residual concerns
+
+- Reservation-version migration, PostgreSQL row locking, and live concurrency
+  execution remain environment-gated because `TEST_DATABASE_URL` was unset.
+  No SQLite substitute was used.
+- The live API/worker/OCR browser boundary remains skipped because
+  `LIVE_API_URL` was unset; deterministic browser fixtures validate frontend
+  behavior and request contracts rather than live backend internals.
+- Deployments must configure a secret of at least 32 UTF-8 bytes through
+  `recheck_grant_secret` before job-bound recheck can issue grants. Missing or
+  short configuration fails the recheck flow closed while ordinary
+  original-result persistence/export remains available.
+- Structural alignment intentionally fails with
+  `revision_diff_too_complex` when the cumulative checked budget is exhausted,
+  even if an unbounded algorithm could eventually find a representation.
+- Independent re-review is still required. Review cleanliness is not claimed.

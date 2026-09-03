@@ -1471,3 +1471,43 @@ is not claimed clean.
 
 Task 6: review fix round 3 implemented; awaiting independent re-review. Review
 is not claimed clean.
+
+## Task 6 review fix round 4 — 2026-09-03
+
+- Accepted and addressed all five findings in implementation commit
+  `4cc9b7522664126a48f212cee4d1b34416299614`.
+- Replaced global `SequenceMatcher` ownership with bounded structural
+  alignment: structural code points are immutable, renderable owner edits are
+  assigned directly, boundary insertions are deterministic, repeated equal
+  adjacent blocks may become empty/grow in either direction, and prior true
+  structural-gap changes still fail closed.
+- Added block/source/aggregate-text preflight and one cumulative checked work
+  budget for scans, indexed owner lookup, structural projection, hierarchy
+  mapping, alignment, and edit generation. Owner and structural ranges use
+  binary-search indexes and memoized hierarchy depths; counter tests avoid
+  timing-only assertions.
+- Added artifact reservation version migration 0011. Publication and
+  compensation validate the exact pending reservation under run → job →
+  artifact locks and the retained inode, preventing a stale creator from
+  deleting an adopter's ready artifact.
+- Replaced fixed/boolean repair quarantine ownership with UUID-tokenized,
+  inode-bound descriptors. Adoption renames to a fresh token; exact descriptor
+  cleanup cannot remove replacement/newer quarantine inodes, and orphan
+  discovery recognizes the canonical tokenized format.
+- Added a job-bound recheck endpoint and settings-backed HMAC-SHA-256 expiring
+  grants binding original job/run/source, submitted recheck text digest, and
+  fresh result identity/source. Revision persistence and job export verify the
+  opaque grant; version-6 sessions store only the bounded grant and migrate
+  version 5 without trusting its client hash. Original-result flows remain
+  unchanged.
+- RED/GREEN evidence, per-finding decisions, concurrency outcome analysis, and
+  security details are recorded in `task-6-report.md`.
+- Final validation: focused backend 235 passed/43 skipped; focused frontend
+  118 passed; full backend 996 passed/79 skipped; full frontend 487 passed;
+  build passed with 70 modules; Playwright 4 passed/1 live skip; full Ruff and
+  mypy on 75 source files passed; Alembic head/offline SQL passed at 0011;
+  live Alembic/PostgreSQL remained gated by `TEST_DATABASE_URL`; concurrent
+  repair stress passed 10/10; `git diff --check` passed.
+
+Task 6: review fix round 4 implemented; awaiting independent re-review. Review
+is not claimed clean.
