@@ -1422,3 +1422,52 @@ is not claimed clean.
 
 Task 6: review fix round 2 implemented; awaiting independent re-review. Review
 is not claimed clean.
+
+## Task 6 review fix round 3 — 2026-09-03
+
+- Accepted and addressed all seven findings in implementation commit
+  `74a7a7247c4bb2368c67391bec1b41825c7d3626`.
+- Reconstruction now derives ownership from one bounded source-range edit
+  script rather than raw gap substring searches. True structural code points
+  remain immutable; edits crossing owners fail typed 409; deterministic
+  boundary ownership allows multiline, sole-block prepend/append, repeated
+  Unicode, and paragraph/table-adjacent insertions that the artifact can
+  represent exactly.
+- Diff work and operations are export-wide by construction. Many-small-block
+  and reduced-operation-budget regressions fail before matcher/mutation with
+  typed 422.
+- Persisted revisions are identity/size validated before either reconstruction
+  or original-format branching. Compatibility exporters receive configured
+  text bytes; compatibility JSON uses a 32 MiB streaming body cap and a
+  5,000,000-code-point model cap. TXT/original and compatibility tests cover
+  exact and exclusive byte/code-point boundaries with no partial artifacts.
+- Rejected artifact finalization only unlinks request-created publications.
+  Repair state distinguishes new and reused quarantines, including descriptor
+  rename races. Deterministic READY-reuse and two-repair/new-revision
+  interleavings preserve another request's READY file and restrict quarantine
+  cleanup to its owner.
+- Version-5 retained authority binds the validated original job/run/source and
+  revision state to the exact fresh synchronous result identity, run,
+  SHA-256 source-version field, and deterministic UTF-8 text fingerprint.
+  Recheck, atomic restore, persistence, and export all revalidate the binding.
+  Valid version-4 state migrates without unprovable authority; new input/reset
+  clear authority. Cross-job and tampered-result restores are rejected
+  atomically.
+- PostgreSQL revision concurrency tests now record both backend PIDs and prove
+  the second transaction is blocked by the expected first backend using
+  `pg_stat_activity`, ungranted `pg_locks`, and `pg_blocking_pids()` before
+  release. They collected successfully but remained environment-gated because
+  `TEST_DATABASE_URL` was unset.
+- Retained-authority component coverage now includes DOCX, DOC, PDF, TXT, RTF,
+  Markdown, and CSV. A base probe reported DOC/TXT/MD/CSV missing; the current
+  probe reports all seven.
+- RED/GREEN details and design rulings are recorded in `task-6-report.md`.
+- Final validation: focused backend 180 passed; broader focused backend 255
+  passed; repository focus 6 passed/15 PostgreSQL skips; full backend 959
+  passed/79 skipped; focused frontend 263 passed; full frontend 483 passed;
+  build passed with 70 modules; Playwright 4 passed/1 live skip; full Ruff,
+  full mypy on 73 source files, Alembic head/offline SQL, and
+  `git diff --check` passed.
+
+Task 6: review fix round 3 implemented; awaiting independent re-review. Review
+is not claimed clean.

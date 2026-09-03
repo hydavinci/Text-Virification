@@ -475,3 +475,177 @@ clean.
 - The retained recheck export authority is revalidated by revision
   persistence/export endpoints, but independent re-review should scrutinize
   multi-client parent conflicts and uncommon document gap graphs.
+
+## Review fix round 3 — 2026-09-03
+
+Implementation commit:
+
+- `74a7a7247c4bb2368c67391bec1b41825c7d3626`
+  (`fix: address task 6 review round 3`)
+
+All seven findings were accepted after verification against the canonical
+block offsets, DOCX renderer behavior, bounded diff implementation,
+compatibility request parsing, artifact descriptor ownership, PostgreSQL lock
+order, synchronous direct-text source identity, and strict session restore.
+No finding received technical pushback. This round is implemented and awaits
+independent re-review; it does not claim the review is clean.
+
+### Finding dispositions and design decisions
+
+1. **Accepted — source-range-aware structural ownership.** Reconstruction now
+   builds one bounded edit script over the canonical source and revised text.
+   Every non-empty edit must fit wholly inside exactly one renderable leaf
+   owner; deletion/replacement of prefix, suffix, paragraph separators, table
+   separators, or any range crossing owners is a typed
+   `revision_structure_conflict`. Insertions inside an owner remain local.
+   Boundary insertions deterministically belong to the ending owner first and
+   otherwise the starting owner, so sole-block prepend/append and edits
+   immediately beside preserved structure are representable. Structural source
+   slices are copied by global offsets, edited owner text is rebuilt from local
+   source offsets, and the complete reconstruction must equal the persisted
+   revised text exactly. This removes raw substring searches, including their
+   confusion between real inter-block newlines and newlines inside multiline
+   blocks.
+2. **Accepted — export-wide diff budget.** The source-aware design uses a
+   single export-wide `SequenceMatcher`, so the existing pre-match work check
+   and operation count are cumulative by construction rather than resetting
+   per owner. A 101-block adversarial case exceeds the 1,000,000 work budget,
+   and a separate reduced-limit case proves the fourth edit operation is
+   rejected. Both fail with typed `revision_diff_too_complex` before document
+   or artifact mutation.
+3. **Accepted — validation before every export branch and bounded HTTP input.**
+   A selected persisted revision is identity-checked and byte/code-point
+   validated before choosing reconstructed or original-format export.
+   `CompatibilityExporter` receives the configured maximum text bytes from the
+   registry and forwards it to `export_original`. The compatibility request
+   model caps `modified_text` at 5,000,000 code points. The route now reads JSON
+   through a 32 MiB streaming body boundary, rejects oversized declared or
+   observed bodies with 413 before JSON/model parsing, and converts bounded
+   Pydantic errors back to normal FastAPI 422 responses without echoing the
+   oversized input. TXT original-format tests cover exact/exclusive UTF-8 and
+   code-point limits and assert no partial metadata or artifact.
+4. **Accepted — request-owned stale compensation.** Finalization rejection now
+   unlinks only a publication whose retained descriptor says this request
+   created it. Repair preparation distinguishes already-current,
+   newly-quarantined, and reused-quarantine states, including the rename race
+   where another request moved the verified inode. A stale repair only removes
+   quarantine it created. Deterministic interleavings prove a stale requester
+   with `handle.created == false` preserves another request's READY file and
+   that two stale repairs let only the quarantine owner clean up.
+5. **Accepted — explicit retained-authority provenance.** Version-5 sessions
+   bind the validated original job/document/run/source/format/revision
+   authority to the exact fresh synchronous result document ID, verification
+   run ID, SHA-256 source-version field, and deterministic UTF-8 text
+   fingerprint. A binding fingerprint covers both sides. Recheck publishes the
+   fresh result only when its text exactly equals the submitted recheck text;
+   unrelated results fail without replacing the prior workspace. Restore
+   validates the complete binding before one atomic workspace commit, and
+   export revalidates it before persistence and after every await. Valid
+   version-4 state migrates, but its unprovable retained authority is dropped;
+   version-3 migration still restores no authority. New text/file input and
+   reset continue clearing retained authority. The client binding is a
+   continuity guard, not a replacement for backend job/revision authorization.
+6. **Accepted — PostgreSQL lock-wait proof.** Distinct chained drafts,
+   same-UUID retry, stale-parent, and UUID-collision cases record both backend
+   PIDs. Before releasing the first transaction, the tests poll
+   `pg_stat_activity`, ungranted `pg_locks`, and `pg_blocking_pids()` until the
+   second backend is waiting on a lock held by the expected first backend.
+   Polling is bounded and timeout failures include the last wait event,
+   ungranted locks, blocking PIDs, and expected blocker. Fixed sleeps are no
+   longer used as concurrency proof.
+7. **Accepted — all retained-authority formats covered.** The component
+   contract now parameterizes DOCX, DOC, PDF, TXT, RTF, Markdown, and CSV.
+   PDF continues to choose reconstructed DOCX only for scanned/unknown layout;
+   all ordinary formats select job-owned original-format export. The base
+   coverage probe found only DOCX/PDF/RTF and named DOC/TXT/MD/CSV as missing;
+   the current probe finds all seven.
+
+### Round-3 RED/GREEN evidence
+
+- Structural ownership RED:
+  `pytest -q --tb=short tests/integration/test_job_reconstruction_export.py -k
+  'source_anchored_paragraph or boundary_edits_around_table'` — 6 failed
+  because multiline, sole-block boundary, repeated Unicode, and
+  paragraph/table-boundary insertions raised `revision_structure_conflict`.
+  GREEN with genuine structural conflicts and nested cases: 18 passed.
+  Full reconstruction/diff GREEN: 56 passed.
+- Export-wide budget RED:
+  `pytest -q --tb=short tests/integration/test_job_reconstruction_export.py -k
+  'many_small_block_diffs or cumulative_edit_operations'` — 2 failed because
+  neither adversarial export raised. GREEN is included in the 18 structural
+  cases.
+- Original/compatibility limit RED:
+  the job-owned TXT subset reported 3 failures and 1 pass because
+  `max_revision_codepoints` and original-branch validation were absent; the
+  exporter propagation test failed because `CompatibilityExporter` rejected
+  `max_text_bytes`; the compatibility model case returned 413 instead of
+  model-level 422; and the declared 32 MiB+1 body returned 422 instead of
+  pre-parse 413. GREEN exporter/reconstruction/compatibility collection:
+  139 passed. The compatibility model test also passes an exact 5,000,000
+  code-point TXT request and rejects 5,000,001.
+- Artifact ownership RED:
+  the READY-reuse interleaving ended with `FileNotFoundError` because the stale
+  request unlinked the existing file; the two-repair probe observed one
+  non-owner quarantine deletion; and the descriptor rename race returned
+  `QUARANTINED` instead of `REUSED_QUARANTINE`. GREEN artifact repair,
+  storage, and compensation regressions passed.
+- Provenance RED:
+  `WorkspaceSession.spec.ts` reported 4 failures with 10 passing because the
+  binding API was absent. `WorkspaceTask6.spec.ts` reported 1 failure with 20
+  passing because an unrelated synchronous result replaced the asynchronous
+  job result and retained its export authority. GREEN focused Task 6/session/
+  workspace/API set: 84 passed; broader focused Task 6 set: 263 passed.
+- PostgreSQL lock proof RED:
+  an AST structural probe exited 1 and named the distinct-draft, same-UUID,
+  and stale/collision `persist_review_revision` tests as missing backend PID
+  and lock-wait proof. The updated four parameterized cases collect
+  successfully. Runtime execution remains honestly gated because
+  `TEST_DATABASE_URL` was unset.
+- Seven-format coverage RED:
+  a base-commit probe found retained-authority coverage for DOCX/PDF/RTF only
+  and reported DOC/TXT/MD/CSV missing. The current probe reports all seven and
+  no missing format.
+
+### Final validation after round 3
+
+- Focused backend reconstruction/export/compatibility/artifact/storage:
+  180 passed.
+- Broader focused backend Task 6 collection: 255 passed.
+- Focused repository collection: 6 passed, 15 PostgreSQL-gated skipped;
+  the four strengthened concurrency cases collected successfully.
+- Full backend: `.venv/bin/python -m pytest -q` — 959 passed, 79 skipped.
+  Skips were the established `TEST_DATABASE_URL`, `LIVE_API_URL`, and optional
+  OCR-runtime gates.
+- Full backend Ruff: `.venv/bin/python -m ruff check src tests alembic` —
+  passed.
+- Full backend mypy: `.venv/bin/python -m mypy src` — 73 source files, no
+  issues.
+- Alembic: `alembic heads` reported
+  `0010_add_review_revision_chain (head)`; offline `upgrade head --sql`
+  generated the complete chain through 0010. A live `alembic check` was not
+  run because no PostgreSQL URL was configured.
+- Focused frontend Task 6 authority/session/workspace set: 263 passed across
+  7 files.
+- Full frontend: `npm test -- --run --reporter=dot` — 483 passed across
+  21 files. Node emitted the existing experimental `localStorage` warning.
+- Production frontend: `npm run build` — `vue-tsc -b` and Vite 6.4.3 passed;
+  70 modules transformed.
+- Playwright: `npm run test:e2e` — 4 deterministic Chromium tests passed;
+  1 live-backend test skipped because `LIVE_API_URL` was unset.
+- `git diff --check` passed before the implementation commit.
+
+### Round-3 residual concerns
+
+- The PID/`pg_stat_activity`/`pg_locks`/`pg_blocking_pids()` assertions are
+  structurally verified and collected but were not executed because
+  `TEST_DATABASE_URL` was unset. No SQLite substitute was used.
+- The live API/worker/OCR browser boundary remains skipped because
+  `LIVE_API_URL` was unset; deterministic browser fixtures prove browser state
+  and request contracts, not live backend internals.
+- Retained-authority provenance is deliberately a deterministic client
+  continuity binding. The backend remains the security boundary and still
+  validates job, run, document, source version, latest parent, revision, and
+  artifact identity.
+- The export-wide diff budget intentionally fails closed for sufficiently
+  complex edit scripts even when individual visual edits are small.
+- Independent re-review is still required. Review cleanliness is not claimed.
