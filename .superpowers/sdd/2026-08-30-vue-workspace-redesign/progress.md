@@ -408,3 +408,7 @@ Ruling: File extensions select strict CSV or TSV grammar, while only TXT uses
 delimiter auto-detection. This preserves delimiters inside declared-format
 fields and makes multiline quote handling deterministic; cost if wrong is
 requiring users to choose the correct extension for their delimiter grammar.
+
+Task 2: fix round 1/5 (5 addressed, 0 open — complete options size, format-faithful multiline import, duplicate submission lock, Unicode manual limits, visible focus semantics; commits 537bd80..8d0e407)
+
+Task 2: complete (commits 6bbe971..8d0e407, review clean)
