@@ -11,7 +11,9 @@ import {
   type JobsApi
 } from '../api/jobs'
 import { createAnalyzeOptionsSnapshot } from '../api/analyzeOptions'
+import { ApiResponseValidationError } from '../api/errors'
 import type { VerificationApi } from '../api/verification'
+import { createVerificationResultSnapshot } from './useVerificationWorkspace'
 import {
   isTerminalJobStatus,
   type JobProgressEvent,
@@ -133,7 +135,10 @@ export function useVerificationExecution({
       if (!isCurrent(generation)) {
         return
       }
-      finishDirect(generation, transformResult(payload))
+      finishDirect(
+        generation,
+        requireVerificationResultSnapshot(transformResult(payload))
+      )
     } catch (caught) {
       finishWithError(generation, 'failed', toError(caught))
     }
@@ -294,7 +299,7 @@ export function useVerificationExecution({
       if (!isCurrent(generation)) {
         return
       }
-      result.value = payload
+      result.value = requireVerificationResultSnapshot(payload)
       state.value = 'completed'
       requestActive = false
     } catch (caught) {
@@ -426,4 +431,16 @@ function toError(value: unknown): Error {
 
 function identityResult(result: VerificationResult): VerificationResult {
   return result
+}
+
+function requireVerificationResultSnapshot(
+  value: unknown
+): VerificationResult {
+  const snapshot = createVerificationResultSnapshot(value)
+  if (snapshot === null) {
+    throw new ApiResponseValidationError(
+      'Invalid verification result response.'
+    )
+  }
+  return snapshot
 }

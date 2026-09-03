@@ -1,7 +1,11 @@
 import { reactive, toRaw } from 'vue'
 import { describe, expect, it, vi } from 'vitest'
 
-import { useVerificationWorkspace } from '../src/composables/useVerificationWorkspace'
+import {
+  createVerificationResultSnapshot,
+  hasCanonicalBlocks,
+  useVerificationWorkspace
+} from '../src/composables/useVerificationWorkspace'
 import type {
   PdfDocumentMetadata,
   PersistedDocumentRevision,
@@ -17,7 +21,7 @@ const uuidPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
 function buildIssue(overrides: Partial<VerificationIssue> = {}): VerificationIssue {
-  return {
+  const issue: VerificationIssue = {
     issue_id: '33333333-3333-3333-8333-333333333333',
     document_id: documentId,
     verification_run_id: runId,
@@ -42,12 +46,19 @@ function buildIssue(overrides: Partial<VerificationIssue> = {}): VerificationIss
     confidence: 0.8,
     auto_fixable: true,
     context: '甲乙丙丁',
-    position: 99,
-    end_position: 100,
+    position: 1,
+    end_position: 2,
     review: null,
     review_reason: null,
     ...overrides
   }
+  if (!Object.prototype.hasOwnProperty.call(overrides, 'position')) {
+    issue.position = issue.start
+  }
+  if (!Object.prototype.hasOwnProperty.call(overrides, 'end_position')) {
+    issue.end_position = issue.end
+  }
+  return issue
 }
 
 function buildBlock(overrides: Partial<TextBlock> = {}): TextBlock {
@@ -78,6 +89,12 @@ function buildResult(
 ): VerificationResult {
   const text = overrides.text ?? '甲乙丙丁'
   const codePointLength = Array.from(text).length
+  const countBy = (keyFor: (issue: VerificationIssue) => string) =>
+    issues.reduce<Record<string, number>>((counts, issue) => {
+      const key = keyFor(issue)
+      counts[key] = (counts[key] ?? 0) + 1
+      return counts
+    }, {})
   return {
     success: true,
     filename: 'sample.txt',
@@ -107,10 +124,10 @@ function buildResult(
     issues,
     summary: {
       total: issues.length,
-      by_type: { typo: issues.length },
-      by_severity: { warning: issues.length },
-      by_rule: { cn_typo: issues.length },
-      by_layer: { character: issues.length }
+      by_type: countBy((issue) => issue.type),
+      by_severity: countBy((issue) => issue.severity),
+      by_rule: countBy((issue) => issue.rule_id),
+      by_layer: countBy((issue) => issue.layer)
     },
     file_id: null,
     file_ext: null,
@@ -316,7 +333,7 @@ describe('useVerificationWorkspace', () => {
   it('keeps decisions and selected suggestions attached to issue ids after reordering', () => {
     const issueA = buildIssue()
     const issueB = buildIssue({
-      issue_id: '44444444-4444-4444-4444-444444444444',
+      issue_id: '44444444-4444-4444-8444-444444444444',
       start: 2,
       end: 3,
       block_start: 2,
@@ -339,7 +356,7 @@ describe('useVerificationWorkspace', () => {
   it('prunes absent issue ids on the same source revision', () => {
     const issueA = buildIssue()
     const issueB = buildIssue({
-      issue_id: '44444444-4444-4444-4444-444444444444',
+      issue_id: '44444444-4444-4444-8444-444444444444',
       start: 2,
       end: 3,
       block_start: 2,
@@ -361,10 +378,10 @@ describe('useVerificationWorkspace', () => {
     {
       label: 'document',
       result: buildResult([buildIssue()], {
-        document_id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+        document_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
         issues: [
           buildIssue({
-            document_id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+            document_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
           })
         ]
       })
@@ -432,7 +449,7 @@ describe('useVerificationWorkspace', () => {
       suggestion: 'FIRST'
     })
     const second = buildIssue({
-      issue_id: '44444444-4444-4444-4444-444444444444',
+      issue_id: '44444444-4444-4444-8444-444444444444',
       start: 4,
       end: 5,
       block_start: 4,
@@ -760,6 +777,62 @@ describe('useVerificationWorkspace', () => {
     expect(workspace.summary.value.total).toBe(0)
   })
 
+  it('fails closed when one sibling block range contains another', () => {
+    const workspace = useVerificationWorkspace()
+
+    workspace.loadResult(
+      buildResult([buildIssue()], {
+        blocks: [
+          buildBlock(),
+          buildBlock({
+            block_id: 'p-1',
+            text: '乙丙',
+            global_start: 1,
+            global_end: 3,
+            block_end: 2,
+            paragraph_index: 1,
+            source_locator: { paragraph_index: 1 }
+          })
+        ]
+      })
+    )
+
+    expect(workspace.result.value).toBeNull()
+    expect(workspace.visibleIssues.value).toEqual([])
+  })
+
+  it('checks large disjoint block sets without quadratic range comparisons', () => {
+    const blockCount = 2_000
+    let rangeReads = 0
+    const text = 'x'.repeat(blockCount)
+    const blocks = Array.from({ length: blockCount }, (_, index) => {
+      const block = buildBlock({
+        block_id: `p-${index}`,
+        text: 'x',
+        global_start: index,
+        global_end: index + 1,
+        block_end: 1,
+        paragraph_index: index,
+        source_locator: { paragraph_index: index }
+      })
+      for (const key of ['global_start', 'global_end'] as const) {
+        const value = block[key]
+        Object.defineProperty(block, key, {
+          configurable: true,
+          enumerable: true,
+          get() {
+            rangeReads += 1
+            return value
+          }
+        })
+      }
+      return block
+    })
+
+    expect(hasCanonicalBlocks(buildResult([], { text, blocks }))).toBe(true)
+    expect(rangeReads).toBeLessThan(blockCount * 50)
+  })
+
   it('allows overlapping ancestor and descendant blocks with astral code-point ranges', () => {
     const text = '前😀乙后'
     const issue = buildIssue({
@@ -819,50 +892,12 @@ describe('useVerificationWorkspace', () => {
     expect(workspace.modifiedText.value).toBe('甲表情乙')
   })
 
-  it('uses canonical start and end while safely ignoring stale or invalid issues', () => {
+  it('uses canonical start and end while ignoring stale compatibility aliases', () => {
     const valid = buildIssue({ position: -50, end_position: -25 })
-    const staleDocument = buildIssue({
-      issue_id: '40000000-0000-0000-0000-000000000001',
-      document_id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
-    })
-    const staleRun = buildIssue({
-      issue_id: '40000000-0000-0000-0000-000000000002',
-      verification_run_id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
-    })
-    const outOfRange = buildIssue({
-      issue_id: '40000000-0000-0000-0000-000000000004',
-      start: 3,
-      end: 8,
-      block_start: 3,
-      block_end: 8,
-      original: '丁'
-    })
-    const mismatchedOriginal = buildIssue({
-      issue_id: '40000000-0000-0000-0000-000000000005',
-      original: '甲'
-    })
-    const fractionalOffset = buildIssue({
-      issue_id: '40000000-0000-0000-0000-000000000006',
-      start: 1.5
-    })
     const workspace = useVerificationWorkspace()
 
-    workspace.loadResult(buildResult([
-      staleDocument,
-      staleRun,
-      outOfRange,
-      mismatchedOriginal,
-      fractionalOffset,
-      valid
-    ]))
-    workspace.acceptIssues([
-      staleDocument.issue_id,
-      staleRun.issue_id,
-      outOfRange.issue_id,
-      mismatchedOriginal.issue_id,
-      fractionalOffset.issue_id,
-      valid.issue_id
-    ])
+    workspace.loadResult(buildResult([valid]))
+    workspace.acceptIssue(valid.issue_id)
 
     expect(workspace.visibleIssues.value.map((issue) => issue.issue_id)).toEqual([valid.issue_id])
     expect(workspace.issueStates.value).toEqual({ [valid.issue_id]: 'accepted' })
@@ -874,7 +909,7 @@ describe('useVerificationWorkspace', () => {
     ['reversed', true]
   ])('preserves and counts overlapping issues in %s input order', (_label, reversed) => {
     const earlier = buildIssue({
-      issue_id: '40000000-0000-0000-0000-000000000001',
+      issue_id: '40000000-0000-4000-8000-000000000001',
       start: 1,
       end: 4,
       block_start: 1,
@@ -884,7 +919,7 @@ describe('useVerificationWorkspace', () => {
       context: 'abcdef'
     })
     const later = buildIssue({
-      issue_id: '40000000-0000-0000-0000-000000000002',
+      issue_id: '40000000-0000-4000-8000-000000000002',
       start: 2,
       end: 5,
       block_start: 2,
@@ -919,7 +954,7 @@ describe('useVerificationWorkspace', () => {
     '%s a conflicting accepted replacement clears the conflict and resumes revisions',
     (_label, resolveConflict) => {
       const earlier = buildIssue({
-        issue_id: '40000000-0000-0000-0000-000000000001',
+        issue_id: '40000000-0000-4000-8000-000000000001',
         start: 1,
         end: 4,
         block_start: 1,
@@ -929,7 +964,7 @@ describe('useVerificationWorkspace', () => {
         context: 'abcdef'
       })
       const later = buildIssue({
-        issue_id: '40000000-0000-0000-0000-000000000002',
+        issue_id: '40000000-0000-4000-8000-000000000002',
         start: 2,
         end: 5,
         block_start: 2,
@@ -977,7 +1012,7 @@ describe('useVerificationWorkspace', () => {
 
   it('fails closed when batch accepting conflicting replacements from the source revision', () => {
     const earlier = buildIssue({
-      issue_id: '40000000-0000-0000-0000-000000000001',
+      issue_id: '40000000-0000-4000-8000-000000000001',
       start: 1,
       end: 4,
       block_start: 1,
@@ -987,7 +1022,7 @@ describe('useVerificationWorkspace', () => {
       context: 'abcdef'
     })
     const later = buildIssue({
-      issue_id: '40000000-0000-0000-0000-000000000002',
+      issue_id: '40000000-0000-4000-8000-000000000002',
       start: 2,
       end: 5,
       block_start: 2,
@@ -1022,7 +1057,7 @@ describe('useVerificationWorkspace', () => {
 
   it('does not report overlap conflicts for accepted issues with an effective null suggestion', () => {
     const earlier = buildIssue({
-      issue_id: '40000000-0000-0000-0000-000000000001',
+      issue_id: '40000000-0000-4000-8000-000000000001',
       start: 1,
       end: 4,
       block_start: 1,
@@ -1032,7 +1067,7 @@ describe('useVerificationWorkspace', () => {
       context: 'abcdef'
     })
     const later = buildIssue({
-      issue_id: '40000000-0000-0000-0000-000000000002',
+      issue_id: '40000000-0000-4000-8000-000000000002',
       start: 2,
       end: 5,
       block_start: 2,
@@ -1059,7 +1094,7 @@ describe('useVerificationWorkspace', () => {
   it('restores exact prior batch state including absence versus explicit pending', () => {
     const issueA = buildIssue()
     const issueB = buildIssue({
-      issue_id: '44444444-4444-4444-4444-444444444444',
+      issue_id: '44444444-4444-4444-8444-444444444444',
       start: 2,
       end: 3,
       block_start: 2,
@@ -1084,7 +1119,7 @@ describe('useVerificationWorkspace', () => {
   it('treats reset-all as the latest atomic batch and retains older batch history', () => {
     const issueA = buildIssue()
     const issueB = buildIssue({
-      issue_id: '44444444-4444-4444-4444-444444444444',
+      issue_id: '44444444-4444-4444-8444-444444444444',
       start: 2,
       end: 3,
       block_start: 2,
@@ -1125,7 +1160,7 @@ describe('useVerificationWorkspace', () => {
 
   it('undoes an overlapping batch exactly without publishing a partial revision', () => {
     const earlier = buildIssue({
-      issue_id: '40000000-0000-0000-0000-000000000001',
+      issue_id: '40000000-0000-4000-8000-000000000001',
       start: 1,
       end: 4,
       block_start: 1,
@@ -1135,7 +1170,7 @@ describe('useVerificationWorkspace', () => {
       context: 'abcdef'
     })
     const later = buildIssue({
-      issue_id: '40000000-0000-0000-0000-000000000002',
+      issue_id: '40000000-0000-4000-8000-000000000002',
       start: 2,
       end: 5,
       block_start: 2,
@@ -1200,7 +1235,7 @@ describe('useVerificationWorkspace', () => {
       context: 'abcd'
     })
     const issueB = buildIssue({
-      issue_id: '44444444-4444-4444-4444-444444444444',
+      issue_id: '44444444-4444-4444-8444-444444444444',
       start: 2,
       end: 3,
       block_start: 2,
@@ -1254,7 +1289,7 @@ describe('useVerificationWorkspace', () => {
       context: 'abcd'
     })
     const issueB = buildIssue({
-      issue_id: '44444444-4444-4444-4444-444444444444',
+      issue_id: '44444444-4444-4444-8444-444444444444',
       start: 2,
       end: 3,
       block_start: 2,
@@ -1308,7 +1343,7 @@ describe('useVerificationWorkspace', () => {
       context: 'abcdefg'
     })
     const crossingA = buildIssue({
-      issue_id: '44444444-4444-4444-4444-444444444444',
+      issue_id: '44444444-4444-4444-8444-444444444444',
       start: 2,
       end: 5,
       block_start: 2,
@@ -1384,7 +1419,7 @@ describe('useVerificationWorkspace', () => {
   it('supports individual accept, reject, and undo with stable-id summary counts', () => {
     const issueA = buildIssue()
     const issueB = buildIssue({
-      issue_id: '44444444-4444-4444-4444-444444444444',
+      issue_id: '44444444-4444-4444-8444-444444444444',
       start: 2,
       end: 3,
       block_start: 2,
@@ -1482,6 +1517,48 @@ describe('useVerificationWorkspace', () => {
     expect(workspace.modifiedText.value).toBe('甲B丙丁')
   })
 
+  it('reuses an already validated frozen result snapshot without cloning it again', () => {
+    const snapshot = createVerificationResultSnapshot(
+      buildResult([buildIssue()])
+    )
+    if (snapshot === null) {
+      throw new Error('Expected a valid result snapshot.')
+    }
+    const workspace = useVerificationWorkspace()
+
+    expect(createVerificationResultSnapshot(snapshot)).toBe(snapshot)
+    workspace.loadResult(snapshot)
+
+    expect(workspace.result.value).toBe(snapshot)
+  })
+
+  it('does not publish an unchecked result over the current canonical snapshot', () => {
+    const workspace = useVerificationWorkspace()
+    const valid = buildResult([buildIssue()])
+    workspace.loadResult(valid)
+    const prior = workspace.result.value
+    const invalid = buildResult([buildIssue()], {
+      blocks: [buildBlock({ text: '不匹配' })]
+    })
+
+    workspace.loadResult(invalid)
+
+    expect(workspace.result.value).toBe(prior)
+    expect(workspace.visibleIssues.value).toHaveLength(1)
+  })
+
+  it('rejects invalid block structure even when the result has no issues', () => {
+    const workspace = useVerificationWorkspace()
+
+    workspace.loadResult(
+      buildResult([], {
+        blocks: [buildBlock({ text: '不匹配' })]
+      })
+    )
+
+    expect(workspace.result.value).toBeNull()
+  })
+
   it('clones Vue reactive result proxies before freezing canonical state', () => {
     const issue = buildIssue()
     const input = buildResult([issue])
@@ -1529,7 +1606,7 @@ describe('useVerificationWorkspace', () => {
 
   it('exposes every reactive value through a frozen facade without Vue internals', () => {
     const earlier = buildIssue({
-      issue_id: '40000000-0000-0000-0000-000000000001',
+      issue_id: '40000000-0000-4000-8000-000000000001',
       start: 1,
       end: 4,
       block_start: 1,
@@ -1539,7 +1616,7 @@ describe('useVerificationWorkspace', () => {
       context: 'abcdef'
     })
     const later = buildIssue({
-      issue_id: '40000000-0000-0000-0000-000000000002',
+      issue_id: '40000000-0000-4000-8000-000000000002',
       start: 2,
       end: 5,
       block_start: 2,
@@ -1685,7 +1762,7 @@ describe('useVerificationWorkspace', () => {
 
   it('returns frozen public snapshots and computed containers', () => {
     const earlier = buildIssue({
-      issue_id: '40000000-0000-0000-0000-000000000001',
+      issue_id: '40000000-0000-4000-8000-000000000001',
       start: 1,
       end: 4,
       block_start: 1,
@@ -1695,7 +1772,7 @@ describe('useVerificationWorkspace', () => {
       context: 'abcdef'
     })
     const later = buildIssue({
-      issue_id: '40000000-0000-0000-0000-000000000002',
+      issue_id: '40000000-0000-4000-8000-000000000002',
       start: 2,
       end: 5,
       block_start: 2,

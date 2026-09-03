@@ -66,7 +66,7 @@ function createDeferred<T>() {
 function buildWorkspaceIssue(
   overrides: Partial<VerificationIssue> = {}
 ): VerificationIssue {
-  return {
+  const issue: VerificationIssue = {
     issue_id: '33333333-3333-3333-8333-333333333333',
     document_id: '11111111-1111-1111-8111-111111111111',
     verification_run_id: '22222222-2222-2222-8222-222222222222',
@@ -91,12 +91,19 @@ function buildWorkspaceIssue(
     confidence: 0.8,
     auto_fixable: true,
     context: '甲乙丙丁',
-    position: 99,
-    end_position: 100,
+    position: 0,
+    end_position: 3,
     review: null,
     review_reason: null,
     ...overrides
   }
+  if (!Object.prototype.hasOwnProperty.call(overrides, 'position')) {
+    issue.position = issue.start
+  }
+  if (!Object.prototype.hasOwnProperty.call(overrides, 'end_position')) {
+    issue.end_position = issue.end
+  }
+  return issue
 }
 
 function buildWorkspaceResult(
@@ -105,6 +112,12 @@ function buildWorkspaceResult(
   overrides: Partial<VerificationResult> = {}
 ): VerificationResult {
   const length = Array.from(text).length
+  const countBy = (keyFor: (issue: VerificationIssue) => string) =>
+    issues.reduce<Record<string, number>>((counts, issue) => {
+      const key = keyFor(issue)
+      counts[key] = (counts[key] ?? 0) + 1
+      return counts
+    }, {})
   return {
     success: true,
     filename: 'direct.txt',
@@ -145,10 +158,10 @@ function buildWorkspaceResult(
     issues,
     summary: {
       total: issues.length,
-      by_type: { typo: issues.length },
-      by_severity: { warning: issues.length },
-      by_rule: { cn_typo: issues.length },
-      by_layer: { character: issues.length }
+      by_type: countBy((issue) => issue.type),
+      by_severity: countBy((issue) => issue.severity),
+      by_rule: countBy((issue) => issue.rule_id),
+      by_layer: countBy((issue) => issue.layer)
     },
     file_id: null,
     file_ext: null,

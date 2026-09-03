@@ -34,6 +34,11 @@ interface Utf16Range {
   end: number
 }
 
+const canonicalIssuesBySnapshot = new WeakMap<
+  object,
+  readonly VerificationIssue[]
+>()
+
 export interface WorkspaceReviewStateRestore {
   documentId: string
   verificationRunId: string
@@ -179,9 +184,10 @@ function replaceCodePointRange(
   return `${value.slice(0, range.start)}${replacement}${value.slice(range.end)}`
 }
 
-function hasCanonicalBlocks(result: VerificationResult): boolean {
+export function hasCanonicalBlocks(result: VerificationResult): boolean {
   const blocksById = new Map<string, TextBlock>()
-  const documentLength = codePointLength(result.text)
+  const documentOffsets = utf16OffsetsByCodePoint(result.text)
+  const documentLength = documentOffsets.length - 1
 
   for (const block of result.blocks) {
     if (
@@ -211,8 +217,9 @@ function hasCanonicalBlocks(result: VerificationResult): boolean {
       block.block_start !== 0 ||
       block.block_end !== blockLength ||
       block.global_end > documentLength ||
-      sliceCodePointRange(
+      sliceCodePointRangeWithOffsets(
         result.text,
+        documentOffsets,
         block.global_start,
         block.global_end
       ) !== block.text
@@ -237,50 +244,147 @@ function hasCanonicalBlocks(result: VerificationResult): boolean {
     }
   }
 
-  const ancestorsById = new Map<string, ReadonlySet<string>>()
+  const depthById = new Map<string, number>()
   for (const block of result.blocks) {
-    const visited = new Set([block.block_id])
-    const ancestors = new Set<string>()
-    let parentId = block.parent_id
-    while (parentId !== null) {
-      if (visited.has(parentId)) {
-        return false
-      }
-      const parent = blocksById.get(parentId)
-      if (parent === undefined) {
-        return false
-      }
-      visited.add(parentId)
-      ancestors.add(parentId)
-      parentId = parent.parent_id
+    if (depthById.has(block.block_id)) {
+      continue
     }
-    ancestorsById.set(block.block_id, ancestors)
+    const path: TextBlock[] = []
+    const pathIndexes = new Map<string, number>()
+    let current: TextBlock | undefined = block
+    let parentDepth = -1
+    while (current !== undefined) {
+      const knownDepth = depthById.get(current.block_id)
+      if (knownDepth !== undefined) {
+        parentDepth = knownDepth
+        break
+      }
+      if (pathIndexes.has(current.block_id)) {
+        return false
+      }
+      pathIndexes.set(current.block_id, path.length)
+      path.push(current)
+      if (current.parent_id === null) {
+        break
+      }
+      current = blocksById.get(current.parent_id)
+    }
+    for (let index = path.length - 1; index >= 0; index -= 1) {
+      parentDepth += 1
+      depthById.set(path[index].block_id, parentDepth)
+    }
   }
 
-  for (let firstIndex = 0; firstIndex < result.blocks.length; firstIndex += 1) {
-    const first = result.blocks[firstIndex]
-    for (
-      let secondIndex = firstIndex + 1;
-      secondIndex < result.blocks.length;
-      secondIndex += 1
-    ) {
-      const second = result.blocks[secondIndex]
-      if (
-        first.global_start >= second.global_end ||
-        second.global_start >= first.global_end
-      ) {
-        continue
-      }
-      if (
-        ancestorsById.get(first.block_id)?.has(second.block_id) ||
-        ancestorsById.get(second.block_id)?.has(first.block_id)
-      ) {
-        continue
-      }
-      return false
+  const childrenById = new Map<string, string[]>()
+  const roots: string[] = []
+  for (const block of result.blocks) {
+    childrenById.set(block.block_id, [])
+  }
+  for (const block of result.blocks) {
+    if (block.parent_id === null) {
+      roots.push(block.block_id)
+    } else {
+      childrenById.get(block.parent_id)?.push(block.block_id)
     }
   }
+
+  const enteredAt = new Map<string, number>()
+  const exitedAt = new Map<string, number>()
+  let traversalIndex = 0
+  for (const root of roots) {
+    const traversal: Array<{ blockId: string; exiting: boolean }> = [
+      { blockId: root, exiting: false }
+    ]
+    while (traversal.length > 0) {
+      const current = traversal.pop()
+      if (current === undefined) {
+        break
+      }
+      if (current.exiting) {
+        exitedAt.set(current.blockId, traversalIndex)
+        traversalIndex += 1
+        continue
+      }
+      enteredAt.set(current.blockId, traversalIndex)
+      traversalIndex += 1
+      traversal.push({ blockId: current.blockId, exiting: true })
+      const children = childrenById.get(current.blockId) ?? []
+      for (let index = children.length - 1; index >= 0; index -= 1) {
+        traversal.push({ blockId: children[index], exiting: false })
+      }
+    }
+  }
+
+  const orderedBlocks = result.blocks
+    .filter((block) => block.global_start < block.global_end)
+    .slice()
+    .sort(
+      (left, right) =>
+        left.global_start - right.global_start ||
+        right.global_end - left.global_end ||
+        (depthById.get(left.block_id) ?? 0) -
+          (depthById.get(right.block_id) ?? 0) ||
+        left.block_id.localeCompare(right.block_id)
+    )
+  const active: TextBlock[] = []
+  for (const block of orderedBlocks) {
+    while (
+      active.length > 0 &&
+      (active[active.length - 1]?.global_end ?? 0) <= block.global_start
+    ) {
+      active.pop()
+    }
+    const overlapping = active[active.length - 1]
+    if (
+      overlapping !== undefined &&
+      !isAncestor(overlapping.block_id, block.block_id, enteredAt, exitedAt)
+    ) {
+      return false
+    }
+    active.push(block)
+  }
   return true
+}
+
+function utf16OffsetsByCodePoint(value: string): number[] {
+  const offsets = [0]
+  for (const character of value) {
+    offsets.push((offsets[offsets.length - 1] ?? 0) + character.length)
+  }
+  return offsets
+}
+
+function sliceCodePointRangeWithOffsets(
+  value: string,
+  offsets: readonly number[],
+  start: number,
+  end: number
+): string | null {
+  const utf16Start = offsets[start]
+  const utf16End = offsets[end]
+  return utf16Start === undefined || utf16End === undefined
+    ? null
+    : value.slice(utf16Start, utf16End)
+}
+
+function isAncestor(
+  ancestorId: string,
+  descendantId: string,
+  enteredAt: ReadonlyMap<string, number>,
+  exitedAt: ReadonlyMap<string, number>
+): boolean {
+  const ancestorStart = enteredAt.get(ancestorId)
+  const ancestorEnd = exitedAt.get(ancestorId)
+  const descendantStart = enteredAt.get(descendantId)
+  const descendantEnd = exitedAt.get(descendantId)
+  return (
+    ancestorStart !== undefined &&
+    ancestorEnd !== undefined &&
+    descendantStart !== undefined &&
+    descendantEnd !== undefined &&
+    ancestorStart <= descendantStart &&
+    descendantEnd <= ancestorEnd
+  )
 }
 
 function isCanonicalIssue(
@@ -332,9 +436,9 @@ function isCanonicalIssue(
 
 function canonicalIssues(
   result: VerificationResult
-): readonly VerificationIssue[] {
+): readonly VerificationIssue[] | null {
   if (!hasCanonicalBlocks(result)) {
-    return Object.freeze([])
+    return null
   }
   const blocksById = new Map(result.blocks.map((block) => [block.block_id, block]))
   const candidates = result.issues
@@ -543,9 +647,8 @@ function copyVerificationIssue(value: unknown): VerificationIssue | null {
       : typeof value.review_reason === 'string'
         ? value.review_reason
         : false
-  const position = value.position === undefined ? value.start : value.position
-  const endPosition =
-    value.end_position === undefined ? value.end : value.end_position
+  const position = value.start
+  const endPosition = value.end
   if (
     typeof value.issue_id !== 'string' ||
     !isUuid(value.issue_id) ||
@@ -1316,6 +1419,13 @@ function isScenario(value: unknown): value is VerificationResult['scenario'] {
 export function createVerificationResultSnapshot(
   value: unknown
 ): VerificationResult | null {
+  if (
+    typeof value === 'object' &&
+    value !== null &&
+    canonicalIssuesBySnapshot.has(value)
+  ) {
+    return value as VerificationResult
+  }
   if (!isRecord(value)) {
     return null
   }
@@ -1462,9 +1572,10 @@ export function createVerificationResultSnapshot(
   if (ocrRequirement !== undefined) {
     result.ocr_requirement = ocrRequirement
   }
+  const safeIssues = canonicalIssues(result)
   if (
-    !hasCanonicalBlocks(result) ||
-    canonicalIssues(result).length !== result.issues.length ||
+    safeIssues === null ||
+    safeIssues.length !== result.issues.length ||
     !hasIssueDerivedSummary(result.summary, result.issues) ||
     result.issues.some(
       (issue) =>
@@ -1474,7 +1585,9 @@ export function createVerificationResultSnapshot(
   ) {
     return null
   }
-  return freezeRecursively(result)
+  const snapshot = freezeRecursively(result)
+  canonicalIssuesBySnapshot.set(snapshot, safeIssues)
+  return snapshot
 }
 
 function sourceRevision(result: VerificationResult): Readonly<DocumentRevision> {
@@ -1696,7 +1809,10 @@ function prepareWorkspaceRestore(
   if (result === null) {
     return null
   }
-  const safeIssues = canonicalIssues(result)
+  const safeIssues = canonicalIssuesBySnapshot.get(result)
+  if (safeIssues === undefined) {
+    return null
+  }
   const validIds = new Set(safeIssues.map((issue) => issue.issue_id))
   const issueStates = restoredStableState(saved.issueStates, validIds)
   const selectedSuggestions = restoredSuggestions(
@@ -1967,7 +2083,10 @@ export function useVerificationWorkspace() {
   }
 
   function loadResult(nextResult: VerificationResult): void {
-    const canonicalResult = freezeRecursively(structuredClone(toRaw(nextResult)))
+    const canonicalResult = createVerificationResultSnapshot(toRaw(nextResult))
+    if (canonicalResult === null) {
+      return
+    }
     const priorResult = result.value
     const sameSourceRevision =
       !requiresReverification.value &&
@@ -1975,7 +2094,10 @@ export function useVerificationWorkspace() {
       priorResult.document_id === canonicalResult.document_id &&
       priorResult.source_version === canonicalResult.source_version &&
       priorResult.verification_run_id === canonicalResult.verification_run_id
-    const nextIssues = canonicalIssues(canonicalResult)
+    const nextIssues = canonicalIssuesBySnapshot.get(canonicalResult)
+    if (nextIssues === undefined) {
+      return
+    }
     const nextIds = new Set(nextIssues.map((issue) => issue.issue_id))
     const nextStates: Record<string, IssueState> = {}
     const nextSuggestions: Record<string, string | null> = {}

@@ -66,6 +66,22 @@ function buildOptionsAtSerializedSize(
 }
 
 describe('terminology import parsers', () => {
+  it('uses Python strip whitespace semantics for imported terminology', () => {
+    expect(
+      parseGlossary(
+        '\u001cAI\u001c,\u0085人工智能\u0085\n\ufeffAPP\ufeff,\ufeff应用程序\ufeff'
+      )
+    ).toEqual([
+      { original: 'AI', standard: '人工智能' },
+      { original: '\ufeffAPP\ufeff', standard: '\ufeff应用程序\ufeff' }
+    ])
+    expect(
+      parseBannedWords(
+        '\u001c最好\u001c\n\u0085第一\u0085\n\ufeff唯一\ufeff'
+      )
+    ).toEqual(['最好', '第一', '\ufeff唯一\ufeff'])
+  })
+
   it('handles a UTF-8 BOM, comments, blanks, quoted CSV, TSV, and arrows', () => {
     expect(
       parseGlossary(

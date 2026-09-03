@@ -22,6 +22,8 @@ const ALL_JOB_FILE_TYPES = [
   'md',
   'csv'
 ] as const
+const EVENT_SOURCE_CONNECTING = 0
+const EVENT_SOURCE_CLOSED = 2
 
 function buildCanonicalBackendResult(
   overrides: Record<string, unknown> = {}
@@ -87,6 +89,7 @@ function buildCanonicalBackendResult(
 
 class FakeEventSource {
   public onerror: ((event: Event) => void) | null = null
+  public readyState = EVENT_SOURCE_CONNECTING
 
   private listeners = new Map<string, Set<(event: MessageEvent<string>) => void>>()
   private _closed = false
@@ -116,6 +119,7 @@ class FakeEventSource {
   close() {
     this._closeCalls += 1
     this._closed = true
+    this.readyState = EVENT_SOURCE_CLOSED
   }
 
   emit(type: string, data: Record<string, unknown>, lastEventId = '0') {
@@ -145,7 +149,8 @@ class FakeEventSource {
     }
   }
 
-  emitError() {
+  emitError(readyState = EVENT_SOURCE_CONNECTING) {
+    this.readyState = readyState
     this.onerror?.(new Event('error'))
   }
 
@@ -547,6 +552,25 @@ describe('createJobsApi', () => {
     expect(eventSource.closeCalls).toBe(0)
   })
 
+  it('treats a permanently closed EventSource connection as fatal', () => {
+    const eventSource = new FakeEventSource('/api/v1/jobs/job-1/events')
+    const api = createJobsApi({
+      fetch: vi.fn(),
+      eventSourceFactory: () => eventSource as unknown as EventSource
+    })
+    const onError = vi.fn()
+
+    api.subscribe('job-1', vi.fn(), onError)
+    eventSource.emitError(EVENT_SOURCE_CLOSED)
+
+    expect(onError).toHaveBeenCalledWith({
+      kind: 'fatal',
+      message: 'Unable to receive job progress updates.'
+    })
+    expect(eventSource.closed).toBe(true)
+    expect(eventSource.closeCalls).toBe(1)
+  })
+
   it('closes once and reports an error for malformed JSON progress payloads', () => {
     const eventSource = new FakeEventSource('/api/v1/jobs/job-1/events')
     const api = createJobsApi({
@@ -573,7 +597,14 @@ describe('createJobsApi', () => {
     ['bad status', '{"status":"unknown","stage":"parsing","progress":25,"message":"开始解析","created_at":"2026-08-14T00:02:00Z"}'],
     ['bad stage', '{"status":"parsing","stage":"unknown","progress":25,"message":"开始解析","created_at":"2026-08-14T00:02:00Z"}'],
     ['non-finite progress', '{"status":"parsing","stage":"parsing","progress":1e999,"message":"开始解析","created_at":"2026-08-14T00:02:00Z"}'],
+    ['fractional progress', '{"status":"parsing","stage":"parsing","progress":25.5,"message":"开始解析","created_at":"2026-08-14T00:02:00Z"}'],
     ['out-of-range progress', '{"status":"parsing","stage":"parsing","progress":101,"message":"开始解析","created_at":"2026-08-14T00:02:00Z"}'],
+    ['queued with parsing stage', '{"status":"queued","stage":"parsing","progress":0,"message":"作业已创建","created_at":"2026-08-14T00:02:00Z"}'],
+    ['pre-OCR parsing with OCR stage', '{"status":"parsing","stage":"ocr","progress":39,"message":"开始解析","created_at":"2026-08-14T00:02:00Z"}'],
+    ['OCR parsing with parsing stage', '{"status":"parsing","stage":"parsing","progress":40,"message":"正在进行 OCR","created_at":"2026-08-14T00:02:00Z"}'],
+    ['pre-finalizing English check with finalizing stage', '{"status":"checking_english","stage":"finalizing","progress":94,"message":"正在检查英文","created_at":"2026-08-14T00:02:00Z"}'],
+    ['finalizing English check with checking stage', '{"status":"checking_english","stage":"checking_english","progress":95,"message":"正在保存结果","created_at":"2026-08-14T00:02:00Z"}'],
+    ['failed status with finalizing stage', '{"status":"failed","stage":"finalizing","progress":95,"message":"处理失败","created_at":"2026-08-14T00:02:00Z"}'],
     ['wrong message type', '{"status":"parsing","stage":"parsing","progress":25,"message":42,"created_at":"2026-08-14T00:02:00Z"}'],
     ['wrong created_at type', '{"status":"parsing","stage":"parsing","progress":25,"message":"开始解析","created_at":42}']
   ])('closes once and reports an error for invalid progress payload shape: %s', (_label, payload) => {
@@ -621,6 +652,54 @@ describe('createJobsApi', () => {
     })
     expect(eventSource.closeCalls).toBe(0)
   })
+
+  it.each([
+    ['queued', 'queued', 0],
+    ['upload_validated', 'upload_validated', 10],
+    ['parsing', 'parsing', 25],
+    ['parsing', 'ocr', 40],
+    ['checking_format', 'checking_format', 50],
+    ['checking_sensitive', 'checking_sensitive', 65],
+    ['checking_chinese', 'checking_chinese', 80],
+    ['checking_english', 'checking_english', 90],
+    ['checking_english', 'finalizing', 95],
+    ['completed', 'completed', 100],
+    ['partial', 'partial', 95],
+    ['failed', 'failed', 65],
+    ['expired', 'expired', 65],
+    ['completed', 'exporting', 100],
+    ['completed', 'finalizing', 100],
+    ['partial', 'exporting', 95],
+    ['partial', 'finalizing', 95]
+  ] as const)(
+    'accepts backend-published progress relationship %s/%s at %i',
+    (status, stage, progress) => {
+      const eventSource = new FakeEventSource('/api/v1/jobs/job-1/events')
+      const api = createJobsApi({
+        fetch: vi.fn(),
+        eventSourceFactory: () => eventSource as unknown as EventSource
+      })
+      const onEvent = vi.fn()
+
+      api.subscribe('job-1', onEvent, vi.fn())
+      eventSource.emit(
+        'progress',
+        {
+          status,
+          stage,
+          progress,
+          message: stage,
+          created_at: '2026-08-14T00:02:00Z'
+        },
+        '1'
+      )
+
+      expect(onEvent).toHaveBeenCalledWith(
+        expect.objectContaining({ status, stage, progress })
+      )
+      expect(eventSource.closeCalls).toBe(0)
+    }
+  )
 
   it.each(['', '-1', '1.5', '3junk', '9007199254740992'])(
     'treats an invalid SSE replay id as a fatal protocol error: %s',
@@ -722,12 +801,12 @@ describe('createJobsApi', () => {
   })
 
   it.each([
-    ['ocr', 'parsing'],
-    ['finalizing', 'checking_english'],
-    ['exporting', 'completed']
+    ['ocr', 'parsing', 40],
+    ['finalizing', 'checking_english', 95],
+    ['exporting', 'completed', 100]
   ] as const)(
     'parses the derived %s stage without changing coarse status %s',
-    (stage, status) => {
+    (stage, status, progress) => {
       const eventSource = new FakeEventSource('/api/v1/jobs/job-1/events')
       const api = createJobsApi({
         fetch: vi.fn(),
@@ -739,7 +818,7 @@ describe('createJobsApi', () => {
       eventSource.emit('progress', {
         status,
         stage,
-        progress: 50,
+        progress,
         message: stage,
         created_at: '2026-08-14T00:02:00Z'
       }, '1')
@@ -750,17 +829,48 @@ describe('createJobsApi', () => {
     }
   )
 
-  it('closes the stream once on done even if unsubscribe is called later', () => {
+  it('reports premature done without terminal progress as a fatal protocol error', () => {
     const eventSource = new FakeEventSource('/api/v1/jobs/job-1/events')
     const api = createJobsApi({
       fetch: vi.fn(),
       eventSourceFactory: () => eventSource as unknown as EventSource
     })
+    const onError = vi.fn()
 
-    const unsubscribe = api.subscribe('job-1', vi.fn(), vi.fn())
+    api.subscribe('job-1', vi.fn(), onError)
+    eventSource.emitControl('done')
+
+    expect(onError).toHaveBeenCalledWith({
+      kind: 'fatal',
+      message: 'Unable to receive job progress updates.'
+    })
+    expect(eventSource.closeCalls).toBe(1)
+  })
+
+  it('closes the stream once on done after terminal progress even if unsubscribe is called later', () => {
+    const eventSource = new FakeEventSource('/api/v1/jobs/job-1/events')
+    const api = createJobsApi({
+      fetch: vi.fn(),
+      eventSourceFactory: () => eventSource as unknown as EventSource
+    })
+    const onError = vi.fn()
+
+    const unsubscribe = api.subscribe('job-1', vi.fn(), onError)
+    eventSource.emit(
+      'progress',
+      {
+        status: 'completed',
+        stage: 'completed',
+        progress: 100,
+        message: '处理完成',
+        created_at: '2026-08-14T00:02:00Z'
+      },
+      '1'
+    )
     eventSource.emitControl('done')
     unsubscribe()
 
+    expect(onError).not.toHaveBeenCalled()
     expect(eventSource.closed).toBe(true)
     expect(eventSource.closeCalls).toBe(1)
   })

@@ -1,5 +1,9 @@
 import { readonly, ref } from 'vue'
 
+import {
+  isPythonWhitespace,
+  stripPythonWhitespace
+} from '../api/pythonWhitespace'
 import type { AnalyzeOptions, GlossaryTerm } from '../types/verification'
 
 export const MAX_TERMINOLOGY_IMPORT_BYTES = 64 * 1024
@@ -95,7 +99,7 @@ export function validateVerificationOptionsSize(
 }
 
 function validateValue(value: string, line: number, label: string): string {
-  const normalized = value.trim()
+  const normalized = stripPythonWhitespace(value)
   if (!normalized) {
     importError('empty-value', `第 ${line} 行的${label}不能为空。`, line)
   }
@@ -113,7 +117,10 @@ function nonCommentLines(value: string): Array<{ line: number; value: string }> 
   const normalized = value.replace(/^\ufeff/, '')
   return normalized
     .split(/\r\n?|\n/)
-    .map((line, index) => ({ line: index + 1, value: line.trim() }))
+    .map((line, index) => ({
+      line: index + 1,
+      value: stripPythonWhitespace(line)
+    }))
     .filter(({ value: line }) => line !== '' && !line.startsWith('#'))
 }
 
@@ -193,14 +200,14 @@ function parseDelimitedLine(
     }
 
     if (value.startsWith(delimiter, index)) {
-      fields.push(field.trim())
+      fields.push(stripPythonWhitespace(field))
       field = ''
       closedQuote = false
       index += delimiter.length - 1
       continue
     }
     if (character === '"') {
-      if (field.trim() === '' && !closedQuote) {
+      if (stripPythonWhitespace(field) === '' && !closedQuote) {
         field = ''
         inQuotes = true
         continue
@@ -211,7 +218,7 @@ function parseDelimitedLine(
         line
       )
     }
-    if (closedQuote && !/\s/.test(character)) {
+    if (closedQuote && !isPythonWhitespace(character)) {
       importError(
         'malformed-delimited-line',
         `第 ${line} 行的引号字段格式无效。`,
@@ -228,7 +235,7 @@ function parseDelimitedLine(
       line
     )
   }
-  fields.push(field.trim())
+  fields.push(stripPythonWhitespace(field))
   return fields
 }
 
@@ -254,11 +261,11 @@ function parseDelimitedRecords(
   let quoteLine = 1
 
   const finishRecord = () => {
-    const source = recordText.trim()
+    const source = stripPythonWhitespace(recordText)
     if (source && !source.startsWith('#')) {
       records.push({
         line: recordLine,
-        fields: [...fields, field.trim()]
+        fields: [...fields, stripPythonWhitespace(field)]
       })
     }
     fields = []
@@ -294,8 +301,8 @@ function parseDelimitedRecords(
       !inQuotes &&
       !inComment &&
       fields.length === 0 &&
-      field.trim() === '' &&
-      recordText.trim() === '' &&
+      stripPythonWhitespace(field) === '' &&
+      stripPythonWhitespace(recordText) === '' &&
       character === '#'
     ) {
       inComment = true
@@ -321,14 +328,14 @@ function parseDelimitedRecords(
     }
 
     if (normalized.startsWith(delimiter, index)) {
-      fields.push(field.trim())
+      fields.push(stripPythonWhitespace(field))
       field = ''
       closedQuote = false
       index += delimiter.length - 1
       continue
     }
     if (character === '"') {
-      if (field.trim() === '' && !closedQuote) {
+      if (stripPythonWhitespace(field) === '' && !closedQuote) {
         field = ''
         inQuotes = true
         quoteLine = line
@@ -340,7 +347,7 @@ function parseDelimitedRecords(
         line
       )
     }
-    if (closedQuote && !/\s/.test(character)) {
+    if (closedQuote && !isPythonWhitespace(character)) {
       importError(
         'malformed-delimited-line',
         `第 ${line} 行的引号字段格式无效。`,
@@ -483,7 +490,7 @@ export function parseBannedWords(
 
   for (const entry of parsedRecords(value, format)) {
     for (const field of entry.fields) {
-      if (!field.trim()) {
+      if (!stripPythonWhitespace(field)) {
         continue
       }
       const word = validateValue(field, entry.line, '禁用词')

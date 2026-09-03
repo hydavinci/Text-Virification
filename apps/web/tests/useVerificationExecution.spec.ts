@@ -3,12 +3,14 @@ import { effectScope } from 'vue'
 import { describe, expect, it, vi } from 'vitest'
 
 import {
+  createJobsApi,
   JobResultExpiredError,
   type JobsApi,
   type JobSubscriptionError
 } from '../src/api/jobs'
 import type { VerificationApi } from '../src/api/verification'
 import { useVerificationExecution } from '../src/composables/useVerificationExecution'
+import { useVerificationWorkspace } from '../src/composables/useVerificationWorkspace'
 import type { JobProgressEvent, JobRead } from '../src/types/jobs'
 import type {
   AnalyzeOptions,
@@ -22,6 +24,70 @@ const options: AnalyzeOptions = {
   enableAdExtreme: true,
   glossary: [{ original: 'AI', standard: '人工智能' }],
   bannedWords: ['最好']
+}
+const EVENT_SOURCE_CLOSED = 2
+
+class IntegratedEventSource {
+  public onerror: ((event: Event) => void) | null = null
+  public readyState = 0
+
+  private listeners = new Map<
+    string,
+    Set<(event: MessageEvent<string>) => void>
+  >()
+
+  addEventListener(
+    type: string,
+    listener: EventListenerOrEventListenerObject
+  ): void {
+    const callback =
+      typeof listener === 'function'
+        ? (listener as (event: MessageEvent<string>) => void)
+        : ((event: MessageEvent<string>) => listener.handleEvent(event))
+    if (!this.listeners.has(type)) {
+      this.listeners.set(type, new Set())
+    }
+    this.listeners.get(type)?.add(callback)
+  }
+
+  removeEventListener(
+    type: string,
+    listener: EventListenerOrEventListenerObject
+  ): void {
+    const callback =
+      typeof listener === 'function'
+        ? (listener as (event: MessageEvent<string>) => void)
+        : ((event: MessageEvent<string>) => listener.handleEvent(event))
+    this.listeners.get(type)?.delete(callback)
+  }
+
+  close(): void {
+    this.readyState = EVENT_SOURCE_CLOSED
+  }
+
+  emitControl(type: string): void {
+    const event = {
+      data: JSON.stringify({ event: type })
+    } as MessageEvent<string>
+    for (const listener of this.listeners.get(type) ?? []) {
+      listener(event)
+    }
+  }
+
+  emitProgress(event: JobProgressEvent): void {
+    const messageEvent = {
+      data: JSON.stringify(event),
+      lastEventId: String(event.sequence)
+    } as MessageEvent<string>
+    for (const listener of this.listeners.get('progress') ?? []) {
+      listener(messageEvent)
+    }
+  }
+
+  emitClosedError(): void {
+    this.readyState = EVENT_SOURCE_CLOSED
+    this.onerror?.(new Event('error'))
+  }
 }
 
 function buildResult(
@@ -158,6 +224,7 @@ function createHarness(overrides: {
       return close
     })
   }
+
   const verificationApi =
     overrides.verificationApi === undefined
       ? null
@@ -169,6 +236,32 @@ function createHarness(overrides: {
     close,
     emit: (event: JobProgressEvent) => onEvent?.(event),
     emitError: (error: JobSubscriptionError) => onError?.(error)
+  }
+}
+
+function createIntegratedHarness(result?: VerificationResult) {
+  const eventSource = new IntegratedEventSource()
+  const fetchMock = vi
+    .fn()
+    .mockResolvedValueOnce({
+      ok: true,
+      json: async () => buildJob()
+    })
+    .mockResolvedValueOnce({
+      ok: true,
+      json: async () =>
+        result ?? buildResult({ execution_mode: 'asynchronous' })
+    })
+  const jobsApi = createJobsApi({
+    fetch: fetchMock,
+    eventSourceFactory: () => eventSource as unknown as EventSource
+  })
+  return {
+    eventSource,
+    execution: useVerificationExecution({
+      jobsApi,
+      verificationApi: null
+    })
   }
 }
 
@@ -410,6 +503,61 @@ describe('useVerificationExecution', () => {
     expect(harness.close).toHaveBeenCalledTimes(1)
   })
 
+  it.each([
+    ['premature done', (source: IntegratedEventSource) => source.emitControl('done')],
+    ['a permanently closed connection', (source: IntegratedEventSource) => source.emitClosedError()]
+  ])('integrates JobsApi fatal handling for %s', async (_label, trigger) => {
+    const harness = createIntegratedHarness()
+
+    await harness.execution.analyzeFile(
+      new File(['pdf'], 'sample.pdf'),
+      options
+    )
+    trigger(harness.eventSource)
+
+    expect(harness.execution.state.value).toBe('failed')
+    expect(harness.execution.isActive.value).toBe(false)
+    expect(harness.execution.error.value?.message).toBe(
+      'Unable to receive job progress updates.'
+    )
+  })
+
+  it('ignores stale JobsApi done and closed-error callbacks after reset', async () => {
+    const harness = createIntegratedHarness()
+
+    await harness.execution.analyzeFile(
+      new File(['pdf'], 'sample.pdf'),
+      options
+    )
+    harness.execution.reset()
+    harness.eventSource.emitControl('done')
+    harness.eventSource.emitClosedError()
+
+    expect(harness.execution.state.value).toBe('idle')
+    expect(harness.execution.error.value).toBeNull()
+    expect(harness.execution.connectionMessage.value).toBeNull()
+  })
+
+  it('reuses one JobsApi-validated snapshot through execution and workspace loading', async () => {
+    const harness = createIntegratedHarness()
+    const workspace = useVerificationWorkspace()
+
+    await harness.execution.analyzeFile(
+      new File(['pdf'], 'sample.pdf'),
+      options
+    )
+    harness.eventSource.emitProgress(buildEvent('completed'))
+    await flushPromises()
+    const published = harness.execution.result.value
+    if (published === null) {
+      throw new Error('Expected a published result.')
+    }
+
+    workspace.loadResult(published)
+
+    expect(workspace.result.value).toBe(published)
+  })
+
   it('invalidates an unresolved create request on reset', async () => {
     const pending = createDeferred<JobRead>()
     const harness = createHarness()
@@ -562,6 +710,38 @@ describe('useVerificationExecution', () => {
     expect(harness.execution.state.value).toBe('completed')
     expect(harness.execution.result.value).toEqual(fileResult)
     expect(harness.jobsApi.subscribe).not.toHaveBeenCalled()
+  })
+
+  it('validates and freezes raw direct and asynchronous dependency results before publication', async () => {
+    const directPayload = buildResult()
+    const verificationApi: VerificationApi = {
+      analyzeText: vi.fn().mockResolvedValue(directPayload),
+      analyzeFile: vi.fn(),
+      exportReport: vi.fn(),
+      exportOriginal: vi.fn()
+    }
+    const direct = createHarness({ verificationApi })
+
+    await direct.execution.analyzeText('检查文本', options)
+
+    expect(direct.execution.result.value).not.toBe(directPayload)
+    expect(Object.isFrozen(direct.execution.result.value)).toBe(true)
+    directPayload.text = '调用方篡改'
+    expect(direct.execution.result.value?.text).toBe('检查文本')
+
+    const asyncPayload = buildResult({ execution_mode: 'asynchronous' })
+    const asynchronous = createHarness({ result: asyncPayload })
+    await asynchronous.execution.analyzeFile(
+      new File(['pdf'], 'sample.pdf'),
+      options
+    )
+    asynchronous.emit(buildEvent('completed'))
+    await flushPromises()
+
+    expect(asynchronous.execution.result.value).not.toBe(asyncPayload)
+    expect(Object.isFrozen(asynchronous.execution.result.value)).toBe(true)
+    asyncPayload.text = '调用方篡改'
+    expect(asynchronous.execution.result.value?.text).toBe('检查文本')
   })
 
   it('passes one immutable cloned options snapshot to direct and asynchronous APIs', async () => {

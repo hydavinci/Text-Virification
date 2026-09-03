@@ -58,6 +58,34 @@ function optionsWithSerializedBytes(target: number): AnalyzeOptions {
 }
 
 describe('createAnalyzeOptionsSnapshot', () => {
+  it.each([
+    ['U+001C', '\u001c'],
+    ['U+001D', '\u001d'],
+    ['U+001E', '\u001e'],
+    ['U+001F', '\u001f'],
+    ['U+0085', '\u0085']
+  ])('strips Python whitespace %s from banned words', (_label, whitespace) => {
+    const snapshot = createAnalyzeOptionsSnapshot(
+      baseOptions({
+        bannedWords: [
+          `${whitespace}forbidden${whitespace}`,
+          whitespace,
+          'forbidden'
+        ]
+      })
+    )
+
+    expect(snapshot.bannedWords).toEqual(['forbidden'])
+  })
+
+  it('preserves U+FEFF because Python str.strip does not remove it', () => {
+    const snapshot = createAnalyzeOptionsSnapshot(
+      baseOptions({ bannedWords: ['\ufeffforbidden\ufeff'] })
+    )
+
+    expect(snapshot.bannedWords).toEqual(['\ufeffforbidden\ufeff'])
+  })
+
   it('accepts the inclusive backend list and Unicode code-point limits', () => {
     const emoji200 = '😀'.repeat(200)
     const options = baseOptions({
@@ -154,6 +182,22 @@ describe('createAnalyzeOptionsSnapshot', () => {
     expect(backendPayloadBytes(options)).toBe(MAX_OPTIONS_BYTES + 1)
 
     expect(() => createAnalyzeOptionsSnapshot(options)).toThrow(
+      AnalyzeOptionsError
+    )
+  })
+
+  it('applies Python strip semantics before the serialized-size limit', () => {
+    const exact = optionsWithSerializedBytes(MAX_OPTIONS_BYTES)
+    exact.bannedWords = ['\u001c']
+    expect(backendPayloadBytes(exact)).toBeGreaterThan(MAX_OPTIONS_BYTES)
+
+    expect(() => createAnalyzeOptionsSnapshot(exact)).not.toThrow()
+
+    const oversized = optionsWithSerializedBytes(MAX_OPTIONS_BYTES)
+    oversized.bannedWords = ['\ufeff']
+    expect(backendPayloadBytes(oversized)).toBeGreaterThan(MAX_OPTIONS_BYTES)
+
+    expect(() => createAnalyzeOptionsSnapshot(oversized)).toThrow(
       AnalyzeOptionsError
     )
   })

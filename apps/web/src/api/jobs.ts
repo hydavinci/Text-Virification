@@ -4,6 +4,7 @@ import {
   JOB_FILE_TYPE_VALUES,
   JOB_PROGRESS_STAGE_VALUES,
   JOB_STATUS_VALUES,
+  isTerminalJobStatus,
   type JobProgressEvent,
   type JobProgressStage,
   type JobRead,
@@ -129,6 +130,7 @@ export function createJobsApi(
       let closed = false
       let lastSequence = 0
       let lastProgress = 0
+      let terminalProgressObserved = false
 
       const close = () => {
         if (closed) {
@@ -178,6 +180,7 @@ export function createJobsApi(
           const payload = parseProgressPayload(event.data)
           lastSequence = sequence
           lastProgress = payload.progress
+          terminalProgressObserved = isTerminalJobStatus(payload.status)
           onEvent({
             sequence: lastSequence,
             status: payload.status,
@@ -192,6 +195,10 @@ export function createJobsApi(
       }
 
       const handleDone = () => {
+        if (!terminalProgressObserved) {
+          reportFatalProtocolError()
+          return
+        }
         close()
       }
 
@@ -208,6 +215,10 @@ export function createJobsApi(
       eventSource.addEventListener('expired', handleExpired as EventListener)
       eventSource.onerror = () => {
         if (closed) {
+          return
+        }
+        if (eventSource.readyState === 2) {
+          reportFatalProtocolError()
           return
         }
         onError({
@@ -260,15 +271,27 @@ function isProgressPayload(value: unknown): value is {
   return (
     isJobStatus(value.status) &&
     isJobProgressStage(value.stage) &&
-    typeof value.progress === 'number' &&
-    Number.isFinite(value.progress) &&
-    value.progress >= 0 &&
-    value.progress <= 100 &&
+    isProgress(value.progress) &&
+    isProgressStageForStatus(value.status, value.stage, value.progress) &&
     typeof value.message === 'string' &&
     typeof value.created_at === 'string' &&
     value.created_at.trim().length > 0 &&
     Number.isFinite(Date.parse(value.created_at))
   )
+}
+
+function isProgressStageForStatus(
+  status: JobStatus,
+  stage: JobProgressStage,
+  progress: number
+): boolean {
+  if (
+    (status === 'completed' || status === 'partial') &&
+    (stage === 'exporting' || stage === 'finalizing')
+  ) {
+    return true
+  }
+  return stage === expectedJobStage(status, progress)
 }
 
 function isJobStatus(value: unknown): value is JobStatus {

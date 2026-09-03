@@ -3,6 +3,7 @@ import type {
   GlossaryTerm,
   Scenario
 } from '../types/verification'
+import { stripPythonWhitespace } from './pythonWhitespace'
 
 const SCENARIOS: readonly Scenario[] = [
   'general',
@@ -48,7 +49,7 @@ export function createAnalyzeOptionsSnapshot(
     if (typeof word !== 'string') {
       throw invalidOptions()
     }
-    const normalized = word.trim()
+    const normalized = stripPythonWhitespace(word)
     if (!normalized || seenBannedWords.has(normalized)) {
       continue
     }
