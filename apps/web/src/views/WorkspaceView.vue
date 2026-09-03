@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, inject, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import { jobsApiKey } from '../api/jobs'
 import { verificationApiKey } from '../api/verification'
@@ -13,23 +13,14 @@ import SourceInputPanel from '../components/workspace/SourceInputPanel.vue'
 import TerminologyEditor from '../components/workspace/TerminologyEditor.vue'
 import VerificationSettings from '../components/workspace/VerificationSettings.vue'
 import { useIssueNavigation } from '../composables/useIssueNavigation'
+import { useVerificationExecution } from '../composables/useVerificationExecution'
 import { useVerificationWorkspace } from '../composables/useVerificationWorkspace'
-import { isTerminalJobStatus, type JobProgressEvent, type JobRead, type JobStatus } from '../types/jobs'
 import type {
   AnalyzeOptions,
   IssueState,
   VerificationIssue,
   VerificationResult
 } from '../types/verification'
-
-interface JobProgressState {
-  sourceName: string
-  status: JobStatus
-  progress: number
-  message: string
-  failureMessage: string | null
-  connectionMessage: string | null
-}
 
 const layers = [
   { id: 'character', name: '字符层', icon: 'A文', color: '#ef4444' },
@@ -86,8 +77,9 @@ const settingsTab = ref<'settings' | 'terms' | 'banned'>('settings')
 const resultTab = ref<'issues' | 'summary'>('issues')
 const textInput = ref('')
 const fileSource = ref<File | null>(null)
-const result = ref<VerificationResult | null>(null)
 const verificationWorkspace = useVerificationWorkspace()
+const execution = useVerificationExecution({ jobsApi, verificationApi })
+const result = computed(() => verificationWorkspace.result.value)
 const issueStates = verificationWorkspace.issueStates
 const selectedSuggestions = verificationWorkspace.selectedSuggestions
 const canUndoLastBatch = computed(
@@ -106,20 +98,36 @@ const selectedIssueId = issueNavigation.selectedIssueId
 const visibleIssues = issueNavigation.visibleIssues
 const glossary = ref<AnalyzeOptions['glossary']>([])
 const bannedWords = ref<string[]>([])
-const isAnalyzing = ref(false)
+const isAnalyzing = execution.isActive
 const analysisStep = ref(0)
-const errorMessage = ref<string | null>(null)
+const errorMessage = computed(() => execution.error.value?.message ?? null)
 const toast = ref<string | null>(null)
 const showHelp = ref(false)
 const showPrivacy = ref(false)
 const segmentedView = ref(true)
 const showFindReplace = ref(false)
-const jobState = ref<JobProgressState | null>(null)
+const jobState = computed(() => {
+  const job = execution.job.value
+  const status = execution.jobStatus.value
+  const stage = execution.stage.value
+  if (!job || !status || !stage) {
+    return null
+  }
+  const isFailure =
+    status === 'failed' || status === 'partial' || status === 'expired'
+  return {
+    sourceName: job.source_name,
+    status,
+    stage,
+    progress: execution.progress.value,
+    message: execution.message.value,
+    failureMessage: isFailure ? execution.message.value : null,
+    connectionMessage: execution.connectionMessage.value
+  }
+})
 
-let unsubscribe: (() => void) | null = null
-let requestGeneration = 0
-let isMounted = true
-let sourceSubmissionPending = false
+let analysisTimer: ReturnType<typeof setInterval> | null = null
+let loadedExecutionResult: VerificationResult | null = null
 let toastTimer: ReturnType<typeof setTimeout> | null = null
 
 const currentOptions = computed<AnalyzeOptions>(() => ({
@@ -154,151 +162,32 @@ const reviewActionsDisabled = computed(
     verificationWorkspace.visibleIssues.value.length === 0
 )
 
-function closeSubscription() {
-  unsubscribe?.()
-  unsubscribe = null
-}
-
-function buildInitialState(job: JobRead): JobProgressState {
-  return {
-    sourceName: job.source_name,
-    status: job.status,
-    progress: job.progress,
-    message: job.error_message ?? defaultStatusMessage(job.status),
-    failureMessage: job.error_message,
-    connectionMessage: null
-  }
-}
-
-function handleProgress(event: JobProgressEvent) {
-  const currentSourceName = jobState.value?.sourceName ?? 'Uploaded document'
-  const failure = event.status === 'failed' || event.status === 'partial' || event.status === 'expired'
-  jobState.value = {
-    sourceName: currentSourceName,
-    status: event.status,
-    progress: event.progress,
-    message: event.message,
-    failureMessage: failure ? event.message : null,
-    connectionMessage: null
-  }
-}
-
-function handleProgressError(message: string) {
-  if (jobState.value && !isTerminalJobStatus(jobState.value.status)) {
-    jobState.value = { ...jobState.value, connectionMessage: message }
-  }
-}
-
 async function handleUpload(file: File) {
-  if (!beginSourceSubmission()) {
+  if (execution.isActive.value) {
     return
   }
-  try {
-    fileSource.value = file
-    if (verificationApi) {
-      await runFileAnalysis(file)
-      return
-    }
-    const generation = ++requestGeneration
-    errorMessage.value = null
-    closeSubscription()
-    isAnalyzing.value = true
-    try {
-      const job = await jobsApi.createJob(file)
-      if (!isRequestCurrent(generation)) {
-        return
-      }
-      jobState.value = buildInitialState(job)
-      unsubscribe = jobsApi.subscribe(
-        job.job_id,
-        (event) => isRequestCurrent(generation) && handleProgress(event),
-        (message) => isRequestCurrent(generation) && handleProgressError(message)
-      )
-    } catch (error) {
-      if (isRequestCurrent(generation)) {
-        errorMessage.value = error instanceof Error ? error.message : 'Unable to create the job.'
-      }
-    } finally {
-      if (isRequestCurrent(generation)) {
-        isAnalyzing.value = false
-      }
-    }
-  } finally {
-    finishSourceSubmission()
-  }
-}
-
-async function runFileAnalysis(file: File) {
-  if (!verificationApi || !confirmOptionalSettings()) {
+  fileSource.value = file
+  if (verificationApi && !confirmOptionalSettings()) {
     return
   }
-  await runAnalysis(() => verificationApi.analyzeFile(file, currentOptions.value))
+  await execution.analyzeFile(file, currentOptions.value)
 }
 
 async function runTextAnalysis(submittedText: string) {
-  if (!beginSourceSubmission()) {
+  if (execution.isActive.value) {
     return
   }
-  try {
-    const text = submittedText.trim()
-    if (!text) {
-      notify('请先输入需要检查的文本')
-      return
-    }
-    if (!verificationApi || !confirmOptionalSettings()) {
-      return
-    }
-    textInput.value = text
-    fileSource.value = null
-    await runAnalysis(() => verificationApi.analyzeText(text, currentOptions.value))
-  } finally {
-    finishSourceSubmission()
+  const text = submittedText.trim()
+  if (!text) {
+    notify('请先输入需要检查的文本')
+    return
   }
-}
-
-function beginSourceSubmission(): boolean {
-  if (sourceSubmissionPending) {
-    return false
+  if (!verificationApi || !confirmOptionalSettings()) {
+    return
   }
-  sourceSubmissionPending = true
-  return true
-}
-
-function finishSourceSubmission(): void {
-  sourceSubmissionPending = false
-}
-
-async function runAnalysis(action: () => Promise<VerificationResult>) {
-  const generation = ++requestGeneration
-  isAnalyzing.value = true
-  analysisStep.value = 0
-  errorMessage.value = null
-  const timer = window.setInterval(() => {
-    analysisStep.value = Math.min(analysisStep.value + 1, 5)
-  }, 420)
-  try {
-    const payload = await action()
-    if (!isRequestCurrent(generation)) {
-      return
-    }
-    verificationWorkspace.loadResult(payload)
-    result.value = verificationWorkspace.result.value
-    selectedIssueId.value = null
-    selectedLayer.value = 'all'
-    selectedSeverity.value = 'all'
-    analysisStep.value = 6
-    saveSession()
-    await nextTick()
-  } catch (error) {
-    if (isRequestCurrent(generation)) {
-      errorMessage.value = error instanceof Error ? error.message : '检查失败，请稍后重试'
-    }
-  } finally {
-    window.clearInterval(timer)
-    if (isRequestCurrent(generation)) {
-      isAnalyzing.value = false
-    }
-  }
+  textInput.value = text
+  fileSource.value = null
+  await execution.analyzeText(text, currentOptions.value)
 }
 
 function confirmOptionalSettings() {
@@ -395,28 +284,22 @@ function utf16IndexAtCodePointOffset(
 }
 
 async function recheck() {
-  if (!verificationApi || !result.value) {
+  if (!verificationApi || !result.value || execution.isActive.value) {
     return
   }
-  if (!beginSourceSubmission()) {
-    return
-  }
-  try {
-    const source = result.value
-    textInput.value = modifiedText.value
-    fileSource.value = null
-    await runAnalysis(async () => {
-      const checked = await verificationApi.analyzeText(textInput.value, currentOptions.value)
-      return {
-        ...checked,
-        filename: source.filename,
-        file_id: null,
-        file_ext: null
-      }
+  const source = result.value
+  textInput.value = modifiedText.value
+  fileSource.value = null
+  await execution.analyzeText(
+    textInput.value,
+    currentOptions.value,
+    (checked) => ({
+      ...checked,
+      filename: source.filename,
+      file_id: null,
+      file_ext: null
     })
-  } finally {
-    finishSourceSubmission()
-  }
+  )
 }
 
 async function exportReport() {
@@ -520,13 +403,15 @@ function downloadText(text: string, filename: string) {
 }
 
 function resetWorkspace() {
+  execution.reset()
   verificationWorkspace.clearResult()
-  result.value = null
-  selectedIssueId.value = null
-  jobState.value = null
+  loadedExecutionResult = null
+  invalidateSourceNavigation()
+  resultTab.value = 'issues'
+  showFindReplace.value = false
   fileSource.value = null
   textInput.value = ''
-  errorMessage.value = null
+  analysisStep.value = 0
   globalThis.sessionStorage?.removeItem('text-verification-session')
 }
 
@@ -582,37 +467,14 @@ function restoreSession() {
     if (!verificationWorkspace.restoreWorkspaceState(parsed)) {
       throw new Error('Invalid workspace session')
     }
-    result.value = verificationWorkspace.result.value
     if (verificationWorkspace.requiresReverification.value) {
       invalidateSourceNavigation()
     }
   } catch {
     verificationWorkspace.clearResult()
-    result.value = null
     invalidateSourceNavigation()
     globalThis.sessionStorage?.removeItem('text-verification-session')
   }
-}
-
-function isRequestCurrent(generation: number) {
-  return isMounted && generation === requestGeneration
-}
-
-function defaultStatusMessage(status: JobStatus) {
-  const messages: Record<JobStatus, string> = {
-    queued: '作业已创建',
-    upload_validated: '上传校验完成',
-    parsing: '开始解析',
-    checking_format: '正在检查格式',
-    checking_sensitive: '正在检查敏感词',
-    checking_chinese: '正在检查中文',
-    checking_english: '正在检查英文',
-    completed: '处理完成',
-    partial: '部分完成',
-    failed: '处理失败',
-    expired: '任务已过期'
-  }
-  return messages[status]
 }
 
 function effectiveSuggestion(issue: VerificationIssue): string | null {
@@ -647,6 +509,47 @@ watch(
   { deep: true }
 )
 
+watch(
+  [() => execution.state.value, () => execution.result.value],
+  ([executionState, executionResult]) => {
+    if (executionState === 'submitting') {
+      loadedExecutionResult = null
+      return
+    }
+    if (
+      executionState !== 'completed' ||
+      executionResult === null ||
+      executionResult === loadedExecutionResult
+    ) {
+      return
+    }
+    loadedExecutionResult = executionResult
+    verificationWorkspace.loadResult(executionResult)
+    invalidateSourceNavigation()
+    resultTab.value = 'issues'
+    showFindReplace.value = false
+    analysisStep.value = 6
+    saveSession()
+  }
+)
+
+watch(
+  () => execution.isActive.value,
+  (active) => {
+    if (analysisTimer) {
+      window.clearInterval(analysisTimer)
+      analysisTimer = null
+    }
+    if (!active) {
+      return
+    }
+    analysisStep.value = 0
+    analysisTimer = window.setInterval(() => {
+      analysisStep.value = Math.min(analysisStep.value + 1, 5)
+    }, 420)
+  }
+)
+
 onMounted(() => {
   theme.value = globalThis.localStorage?.getItem('text-verification-theme') === 'dark' ? 'dark' : 'light'
   applyTheme()
@@ -655,10 +558,11 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
-  isMounted = false
-  requestGeneration += 1
-  closeSubscription()
+  execution.dispose()
   document.removeEventListener('keydown', handleKeyboard)
+  if (analysisTimer) {
+    window.clearInterval(analysisTimer)
+  }
   if (toastTimer) {
     window.clearTimeout(toastTimer)
   }
@@ -769,6 +673,15 @@ onBeforeUnmount(() => {
     </main>
 
     <main v-else class="review-workspace">
+      <p
+        v-if="execution.jobStatus.value === 'partial'"
+        class="execution-warning"
+        data-execution-warning
+        role="status"
+        aria-live="polite"
+      >
+        {{ execution.message.value }}
+      </p>
       <section class="stats-strip">
         <article><small>{{ result.stats.primary_label }}</small><strong>{{ result.stats.primary_count }}</strong></article>
         <article><small>发现问题</small><strong>{{ result.summary.total }}</strong></article>
@@ -1055,6 +968,15 @@ input:focus, select:focus { border-color: var(--primary); outline: 3px solid rgb
 .stats-strip strong { margin-top: 2px; font-size: 18px; }
 .stats-strip .filename { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 .success { color: #059669; }.warning { color: #d97706; }.muted-text { color: var(--muted); }
+.execution-warning {
+  margin: 0;
+  padding: 10px 13px;
+  border: 1px solid #f59e0b;
+  border-radius: 12px;
+  color: #92400e;
+  background: #fffbeb;
+  font-size: 12px;
+}
 .review-toolbar, .find-panel { padding: 9px; display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
 .review-toolbar > div:first-child { display: flex; gap: 7px; }
 .find-panel { justify-content: flex-start; }

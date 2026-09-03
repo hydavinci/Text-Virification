@@ -4,6 +4,11 @@ import type {
   VerificationResult
 } from '../types/verification'
 import type { InjectionKey } from 'vue'
+import {
+  appendAnalyzeOptions,
+  createAnalyzeOptionsSnapshot
+} from './analyzeOptions'
+import { readApiRequestError } from './errors'
 
 const API_BASE = '/api/v1'
 
@@ -24,22 +29,18 @@ export const verificationApiKey: InjectionKey<VerificationApi> = Symbol('verific
 export function createVerificationApi(fetchImpl: typeof fetch = fetch): VerificationApi {
   async function analyze(source: { file?: File; text?: string }, options: AnalyzeOptions) {
     const body = new FormData()
+    const snapshot = createAnalyzeOptionsSnapshot(options)
     if (source.file) {
       body.append('file', source.file, source.file.name)
     }
     if (source.text) {
       body.append('text', source.text)
     }
-    body.append('scenario', options.scenario)
-    body.append('enable_security', String(options.enableSecurity))
-    body.append('enable_sensitive', String(options.enableSensitive))
-    body.append('enable_ad_extreme', String(options.enableAdExtreme))
-    body.append('custom_glossary', JSON.stringify(options.glossary))
-    body.append('banned_words', JSON.stringify(options.bannedWords))
+    appendAnalyzeOptions(body, snapshot)
 
     const response = await fetchImpl(`${API_BASE}/analyze`, { method: 'POST', body })
     if (!response.ok) {
-      throw new Error(await extractError(response))
+      throw await readApiRequestError(response)
     }
     return (await response.json()) as VerificationResult
   }
@@ -72,24 +73,9 @@ export function createVerificationApi(fetchImpl: typeof fetch = fetch): Verifica
   }
 }
 
-async function extractError(response: Response): Promise<string> {
-  try {
-    const payload = (await response.json()) as {
-      detail?: string | { message?: string }
-      error?: string
-    }
-    if (typeof payload.detail === 'string') {
-      return payload.detail
-    }
-    return payload.detail?.message ?? payload.error ?? `请求失败（${response.status}）`
-  } catch {
-    return `请求失败（${response.status}）`
-  }
-}
-
 async function downloadResponse(response: Response, fallbackName: string) {
   if (!response.ok) {
-    throw new Error(await extractError(response))
+    throw await readApiRequestError(response)
   }
   const blob = await response.blob()
   const disposition = response.headers.get('content-disposition') ?? ''

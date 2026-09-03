@@ -966,3 +966,101 @@ Task 4: fix round 5/5 (1 addressed, 0 open — bounded iterative grapheme
 folding; commit `fix: bound oversized grapheme folding`)
 
 Task 4: complete (commits 8bd4e6b..1b064dd, review clean)
+
+## Task 5 implementation — 2026-09-03
+
+- Added `useVerificationExecution` as the sole direct-text, synchronous-file,
+  and asynchronous-file execution state machine. It owns execution state,
+  canonical execution result, job metadata, coarse status, derived stage,
+  progress, message, typed error, connection notice, request generation,
+  synchronous submission lock, result-fetch idempotence, and subscription
+  lifecycle.
+- Direct results publish without SSE. Async file jobs receive the same frozen
+  cloned `AnalyzeOptions` snapshot, subscribe to progress, and fetch the
+  retained canonical result exactly once after a result-bearing `completed` or
+  `partial` event.
+- `completed` now means the canonical result has loaded. Result-fetch failure
+  never publishes completion. HTTP 410 and expired events map to `expired`;
+  failed events and ordinary failures map to `failed`.
+- Partial-success jobs load and publish the retained result while preserving
+  backend `partial` status, stage, progress, and warning message. The warning
+  remains visible after the review workspace opens.
+- Reset and scope disposal invalidate generations before pending create,
+  direct-analysis, or result promises can publish. Old subscriptions close on
+  terminal events, reset, new requests, and disposal. Duplicate terminal
+  events and late connection errors are ignored.
+- Updated job types to all seven backend formats and the actual durable
+  status/derived-stage schema. OCR, finalizing, and exporting remain progress
+  stages rather than new durable statuses.
+- Updated `JobsApi.createJob(file, options)` to validate, clone, freeze, and
+  serialize scenario, three switches, glossary, and banned words using the
+  exact backend multipart names. Empty arrays and string values are preserved.
+- Added `JobsApi.getResult`. HTTP 410 produces
+  `JobResultExpiredError`; other shaped failures produce `ApiRequestError`.
+  Direct verification and download methods share the same error parser.
+- Removed WorkspaceView's parallel request generation, subscription, job-state
+  mutation, `runAnalysis`, and mutable duplicate lock. Newly completed results
+  load once through `useVerificationWorkspace`, reset navigation/edit surfaces,
+  and save the strict versioned session.
+- Recheck result adaptation occurs inside the execution boundary before
+  publication, preserving the display filename while clearing stale binary
+  `file_id` and `file_ext`.
+
+### Task 5 TDD and validation evidence
+
+- Fresh baseline:
+  `npm test -- --run --reporter=dot` passed 294 tests across 14 files.
+- Initial execution/jobs RED:
+  `npm test -- useVerificationExecution.spec.ts jobsApi.spec.ts --reporter=dot`
+  failed both suites because the execution composable and new job constants
+  were absent.
+- Jobs contract RED:
+  `npm test -- jobsApi.spec.ts --reporter=dot` failed 16 tests with 12 passing.
+- Verification API RED:
+  `npm test -- verificationApi.spec.ts --reporter=dot` failed 1 test with 4
+  passing because direct failures were not typed consistently.
+- Workspace integration RED:
+  `npm test -- WorkspaceView.spec.ts --reporter=dot` failed 1 test with 37
+  passing because async submission omitted options and did not load a result.
+- Additional REDs covered partial warning visibility, progress-stage display,
+  invalid null snapshots, and stale direct-result transforms after reset.
+- Final focused GREEN:
+  `npm test -- useVerificationExecution.spec.ts jobsApi.spec.ts verificationApi.spec.ts WorkspaceView.spec.ts --reporter=dot`
+  passed 92 tests across 4 files.
+- Full frontend GREEN:
+  `npm test -- --run --reporter=dot` passed 330 tests across 15 files with the
+  existing experimental `localStorage` warning.
+- Production build GREEN: `npm run build` passed `vue-tsc -b` and Vite 6.4.3
+  with 56 modules transformed.
+- `git diff --check` passed with no output.
+
+Ruling: Durable job status remains the backend `JobStatus` union, while OCR,
+finalizing, and exporting are parsed and retained only as `JobProgressStage`
+values. Promoting derived stages into durable statuses would misrepresent the
+persisted job lifecycle; cost if wrong is consumers needing to inspect both
+fields when presenting detailed progress.
+
+Ruling: `completed` is an execution-level guarantee that a canonical result is
+present. SSE `completed` and `partial` events are control signals that start one
+idempotent result fetch; cost if wrong is a short processing interval after the
+backend terminal event while the retained result is loaded.
+
+Ruling: A retained partial result is a successful canonical execution with
+warning metadata, not a failed execution. The execution state becomes
+`completed` only after loading the result while `jobStatus`, stage, progress,
+and message remain `partial` metadata; cost if wrong is callers checking both
+execution state and backend status to distinguish clean from degraded success.
+
+Ruling: The existing dependency boundary continues to select file execution:
+when a direct verification API is provided, file analysis is synchronous;
+without it, files use jobs and SSE. Introducing a new user-facing execution
+mode selector is outside Task 5; cost if wrong is deferring explicit per-file
+mode selection to a later product decision.
+
+Ruling: Manual-revision recheck adapts the direct result before the execution
+state publishes it, preserving the prior display filename but clearing binary
+file identity. Adapting after publication would briefly load stale export
+identity into the canonical workspace; cost if wrong is a small result-copy
+step on recheck.
+
+Task 5: complete (base cd61497, implementation ready for commit)

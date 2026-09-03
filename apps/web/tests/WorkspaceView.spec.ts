@@ -17,6 +17,7 @@ import type {
   VerificationResult
 } from '../src/types/verification'
 import WorkspaceView from '../src/views/WorkspaceView.vue'
+import type { JobProgressEvent } from '../src/types/jobs'
 
 function buildJobRead(overrides: Partial<Awaited<ReturnType<JobsApi['createJob']>>> = {}) {
   return {
@@ -25,9 +26,12 @@ function buildJobRead(overrides: Partial<Awaited<ReturnType<JobsApi['createJob']
     file_type: 'txt' as const,
     size_bytes: 6,
     status: 'queued' as const,
+    stage: 'queued' as const,
     progress: 0,
     error_code: null,
     error_message: null,
+    error_stage: null,
+    error_retryable: null,
     created_at: '2026-08-14T00:00:00Z',
     expires_at: '2026-08-15T00:00:00Z',
     ...overrides
@@ -417,10 +421,12 @@ describe('WorkspaceView', () => {
 
   it('uploads an allowed file and displays durable progress', async () => {
     const createJob = vi.fn().mockResolvedValue(buildJobRead())
+    const pendingResult = createDeferred<VerificationResult>()
     const subscribe = vi.fn((_jobId, onEvent) => {
       onEvent({
         sequence: 2,
         status: 'parsing',
+        stage: 'parsing',
         progress: 25,
         message: '开始解析',
         created_at: '2026-08-14T00:01:00Z'
@@ -428,6 +434,7 @@ describe('WorkspaceView', () => {
       onEvent({
         sequence: 3,
         status: 'completed',
+        stage: 'completed',
         progress: 100,
         message: '处理完成',
         created_at: '2026-08-14T00:02:00Z'
@@ -435,20 +442,159 @@ describe('WorkspaceView', () => {
       return vi.fn()
     })
     const wrapper = mount(WorkspaceView, {
-      global: { provide: { [jobsApiKey as symbol]: { createJob, subscribe } } }
+      global: {
+        provide: {
+          [jobsApiKey as symbol]: {
+            createJob,
+            getResult: vi.fn().mockReturnValue(pendingResult.promise),
+            subscribe
+          }
+        }
+      }
     })
     const file = new File(['检查'], 'sample.txt', { type: 'text/plain' })
 
     await selectFile(wrapper, file)
     await flushPromises()
 
-    expect(createJob).toHaveBeenCalledWith(file)
+    expect(createJob).toHaveBeenCalledWith(file, expect.any(Object))
     expect(wrapper.text()).toContain('sample.txt')
     expect(wrapper.text()).toContain('100%')
     expect(wrapper.text()).toContain('处理完成')
     expect(wrapper.text()).toContain('completed')
+    expect(wrapper.get('[data-job-stage]').text()).toBe('completed')
     expect(wrapper.get('progress').attributes('aria-label')).toBe('Job progress')
     expect(wrapper.get('[role="status"]').attributes('aria-live')).toBe('polite')
+  })
+
+  it('loads one canonical asynchronous result before entering the review workspace', async () => {
+    const result = buildWorkspaceResult([], '异步结果', {
+      filename: 'sample.pdf',
+      source_name: 'sample.pdf',
+      file_type: 'pdf',
+      file_id: '6d96fe0f-f4fc-4b43-90fd-68e5bd09f21f',
+      file_ext: 'pdf',
+      execution_mode: 'asynchronous'
+    })
+    const createJob = vi.fn().mockResolvedValue(
+      buildJobRead({
+        source_name: 'sample.pdf',
+        file_type: 'pdf'
+      })
+    )
+    const getResult = vi.fn().mockResolvedValue(result)
+    let emitProgress = (_event: {
+      sequence: number
+      status: 'completed'
+      stage: 'completed'
+      progress: number
+      message: string
+      created_at: string
+    }): void => {
+      throw new Error('Subscription was not established.')
+    }
+    const close = vi.fn()
+    const subscribe = vi.fn((_jobId, onEvent) => {
+      emitProgress = onEvent
+      return close
+    })
+    const wrapper = mount(WorkspaceView, {
+      global: {
+        provide: {
+          [jobsApiKey as symbol]: { createJob, getResult, subscribe }
+        }
+      }
+    })
+    const file = new File(['pdf'], 'sample.pdf', {
+      type: 'application/pdf'
+    })
+
+    wrapper.getComponent(SourceInputPanel).vm.$emit('submit-file', file)
+    await flushPromises()
+    expect(canonicalWorkspace(wrapper).result.value).toBeNull()
+
+    emitProgress({
+      sequence: 2,
+      status: 'completed',
+      stage: 'completed',
+      progress: 100,
+      message: '处理完成',
+      created_at: '2026-09-03T00:01:00Z'
+    })
+    await flushPromises()
+
+    expect(createJob).toHaveBeenCalledWith(file, {
+      scenario: 'general',
+      enableSecurity: true,
+      enableSensitive: true,
+      enableAdExtreme: false,
+      glossary: [],
+      bannedWords: []
+    })
+    expect(getResult).toHaveBeenCalledTimes(1)
+    expect(getResult).toHaveBeenCalledWith(
+      '6d96fe0f-f4fc-4b43-90fd-68e5bd09f21f'
+    )
+    expect(close).toHaveBeenCalledTimes(1)
+    expect(canonicalWorkspace(wrapper).result.value).toEqual(result)
+    expect(wrapper.findComponent(DocumentViewer).exists()).toBe(true)
+    expect(
+      JSON.parse(
+        sessionStorage.getItem('text-verification-session') ?? 'null'
+      ).result.document_id
+    ).toBe(result.document_id)
+    wrapper.unmount()
+  })
+
+  it('keeps a partial-result warning visible after loading the canonical result', async () => {
+    const result = buildWorkspaceResult([], '部分结果', {
+      filename: 'partial.pdf',
+      source_name: 'partial.pdf',
+      file_type: 'pdf',
+      execution_mode: 'asynchronous'
+    })
+    let emitProgress = (_event: JobProgressEvent): void => {
+      throw new Error('Subscription was not established.')
+    }
+    const wrapper = mount(WorkspaceView, {
+      global: {
+        provide: {
+          [jobsApiKey as symbol]: {
+            createJob: vi.fn().mockResolvedValue(
+              buildJobRead({
+                source_name: 'partial.pdf',
+                file_type: 'pdf'
+              })
+            ),
+            getResult: vi.fn().mockResolvedValue(result),
+            subscribe: vi.fn((_jobId, onEvent) => {
+              emitProgress = onEvent
+              return vi.fn()
+            })
+          }
+        }
+      }
+    })
+
+    wrapper
+      .getComponent(SourceInputPanel)
+      .vm.$emit('submit-file', new File(['pdf'], 'partial.pdf'))
+    await flushPromises()
+    emitProgress({
+      sequence: 2,
+      status: 'partial',
+      stage: 'partial',
+      progress: 95,
+      message: '语义复核不可用，已保留本地检查结果',
+      created_at: '2026-09-03T00:01:00Z'
+    })
+    await flushPromises()
+
+    expect(wrapper.get('[data-execution-warning]').text()).toBe(
+      '语义复核不可用，已保留本地检查结果'
+    )
+    expect(canonicalWorkspace(wrapper).result.value).toEqual(result)
+    wrapper.unmount()
   })
 
   it('accepts files that are exactly 25 MiB', async () => {
@@ -472,7 +618,7 @@ describe('WorkspaceView', () => {
     await selectFile(wrapper, exactLimit)
     await flushPromises()
 
-    expect(createJob).toHaveBeenCalledWith(exactLimit)
+    expect(createJob).toHaveBeenCalledWith(exactLimit, expect.any(Object))
     expect(wrapper.find('[role="alert"]').exists()).toBe(false)
   })
 
@@ -511,7 +657,7 @@ describe('WorkspaceView', () => {
     expect(wrapper.get('[role="alert"]').text()).toContain('25 MiB')
   })
 
-  it('closes the prior subscription before a new upload and on unmount', async () => {
+  it('blocks a second upload while processing and closes the active subscription on unmount', async () => {
     const createJob = vi
       .fn()
       .mockResolvedValueOnce(buildJobRead({ job_id: 'job-1' }))
@@ -537,19 +683,24 @@ describe('WorkspaceView', () => {
     await selectFile(wrapper, new File(['second'], 'second.pdf', { type: 'application/pdf' }))
     await flushPromises()
 
-    expect(firstClose).toHaveBeenCalledTimes(1)
+    expect(createJob).toHaveBeenCalledTimes(1)
+    expect(firstClose).not.toHaveBeenCalled()
+    expect(secondClose).not.toHaveBeenCalled()
 
     wrapper.unmount()
 
-    expect(secondClose).toHaveBeenCalledTimes(1)
+    expect(firstClose).toHaveBeenCalledTimes(1)
+    expect(secondClose).not.toHaveBeenCalled()
   })
 
   it('retains the terminal state when a late subscription error arrives', async () => {
     const createJob = vi.fn().mockResolvedValue(buildJobRead())
+    const pendingResult = createDeferred<VerificationResult>()
     const subscribe = vi.fn((_jobId, onEvent, onError) => {
       onEvent({
         sequence: 2,
         status: 'completed',
+        stage: 'completed',
         progress: 100,
         message: '处理完成',
         created_at: '2026-08-14T00:02:00Z'
@@ -558,7 +709,15 @@ describe('WorkspaceView', () => {
       return vi.fn()
     })
     const wrapper = mount(WorkspaceView, {
-      global: { provide: { [jobsApiKey as symbol]: { createJob, subscribe } } }
+      global: {
+        provide: {
+          [jobsApiKey as symbol]: {
+            createJob,
+            getResult: vi.fn().mockReturnValue(pendingResult.promise),
+            subscribe
+          }
+        }
+      }
     })
 
     await selectFile(wrapper, new File(['done'], 'done.txt', { type: 'text/plain' }))
@@ -576,6 +735,7 @@ describe('WorkspaceView', () => {
       onEvent({
         sequence: 2,
         status: 'parsing',
+        stage: 'parsing',
         progress: 25,
         message: '开始解析',
         created_at: '2026-08-14T00:01:00Z'
@@ -609,7 +769,7 @@ describe('WorkspaceView', () => {
     await flushPromises()
 
     expect(createJob).toHaveBeenCalledTimes(1)
-    expect(createJob).toHaveBeenCalledWith(first)
+    expect(createJob).toHaveBeenCalledWith(first, expect.any(Object))
     expect(subscribe).not.toHaveBeenCalled()
 
     pending.resolve(buildJobRead({ source_name: 'first.txt' }))
@@ -641,6 +801,7 @@ describe('WorkspaceView', () => {
       onEvent({
         sequence: 2,
         status: 'failed',
+        stage: 'failed',
         progress: 40,
         message: '处理失败',
         created_at: '2026-08-14T00:01:00Z'

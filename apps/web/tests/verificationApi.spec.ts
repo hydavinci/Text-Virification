@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 
+import { ApiRequestError } from '../src/api/errors'
 import { createVerificationApi } from '../src/api/verification'
 import type { VerificationResult } from '../src/types/verification'
 
@@ -185,6 +186,40 @@ describe('createVerificationApi', () => {
     })
 
     expect(result.issues[0].suggestion).toBeNull()
+  })
+
+  it('uses the shared typed API error shape for direct analysis failures', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 422,
+      json: async () => ({
+        detail: {
+          code: 'invalid_verification_options',
+          stage: 'validation',
+          message: 'Verification options are invalid.',
+          retryable: false
+        }
+      })
+    })
+    const api = createVerificationApi(fetchMock as typeof fetch)
+
+    const request = api.analyzeText('检查文本', {
+      scenario: 'general',
+      enableSecurity: true,
+      enableSensitive: true,
+      enableAdExtreme: false,
+      glossary: [],
+      bannedWords: []
+    })
+
+    await expect(request).rejects.toBeInstanceOf(ApiRequestError)
+    await expect(request).rejects.toMatchObject({
+      status: 422,
+      code: 'invalid_verification_options',
+      stage: 'validation',
+      retryable: false,
+      message: 'Verification options are invalid.'
+    })
   })
 
   it('exports the complete edited text with positioned replacements', async () => {

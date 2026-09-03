@@ -1,11 +1,16 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
-import { isTerminalJobStatus, type JobStatus } from '../types/jobs'
+import {
+  isTerminalJobStatus,
+  type JobProgressStage,
+  type JobStatus
+} from '../types/jobs'
 
 interface JobProgressState {
   sourceName: string
   status: JobStatus
+  stage: JobProgressStage
   progress: number
   message: string
   failureMessage: string | null
@@ -30,6 +35,10 @@ const isTerminal = computed(() => isTerminalJobStatus(props.state.status))
       <div>
         <dt>Status</dt>
         <dd>{{ state.status }}</dd>
+      </div>
+      <div>
+        <dt>Stage</dt>
+        <dd data-job-stage>{{ state.stage }}</dd>
       </div>
       <div>
         <dt>Progress</dt>
