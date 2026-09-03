@@ -1,4 +1,10 @@
 <script setup lang="ts">
+import { ref } from 'vue'
+
+import {
+  TerminologyImportError,
+  validateVerificationOptionsSize
+} from '../../composables/useTerminology'
 import type { AnalyzeOptions, Scenario } from '../../types/verification'
 
 interface ScenarioOption {
@@ -24,14 +30,25 @@ const props = defineProps<{
 const emit = defineEmits<{
   'update:options': [options: AnalyzeOptions]
 }>()
+const errorMessage = ref<string | null>(null)
 
 function updateOptions(patch: Partial<AnalyzeOptions>): void {
-  emit('update:options', {
+  const next = {
     ...props.options,
     ...patch,
     glossary: props.options.glossary.map((term) => ({ ...term })),
     bannedWords: [...props.options.bannedWords]
-  })
+  }
+  try {
+    validateVerificationOptionsSize(next)
+    errorMessage.value = null
+    emit('update:options', next)
+  } catch (error) {
+    errorMessage.value =
+      error instanceof TerminologyImportError
+        ? error.message
+        : '检查设置处理失败。'
+  }
 }
 </script>
 
@@ -88,6 +105,7 @@ function updateOptions(patch: Partial<AnalyzeOptions>): void {
         })"
       />
     </label>
+    <p v-if="errorMessage" role="alert">{{ errorMessage }}</p>
   </section>
 </template>
 
@@ -144,6 +162,10 @@ function updateOptions(patch: Partial<AnalyzeOptions>): void {
   width: 35px;
   height: 20px;
   accent-color: var(--primary);
+}
+[role='alert'] {
+  color: #be123c;
+  font-weight: 700;
 }
 @media (max-width: 680px) {
   .scenario-grid {

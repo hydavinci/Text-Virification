@@ -106,6 +106,79 @@ describe('WorkspaceView', () => {
     } satisfies AnalyzeOptions)
   })
 
+  it('synchronously ignores a second text submission while analysis is pending', async () => {
+    const pending = createDeferred<VerificationResult>()
+    const analyzeText = vi.fn().mockReturnValue(pending.promise)
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const wrapper = mount(WorkspaceView, {
+      global: {
+        provide: {
+          [jobsApiKey as symbol]: {
+            createJob: vi.fn(),
+            subscribe: vi.fn(() => vi.fn())
+          },
+          [verificationApiKey as symbol]: {
+            analyzeFile: vi.fn(),
+            analyzeText,
+            exportReport: vi.fn(),
+            exportOriginal: vi.fn()
+          }
+        }
+      }
+    })
+    const input = wrapper.getComponent(SourceInputPanel)
+
+    input.vm.$emit('submit-text', '检查文本')
+    input.vm.$emit('submit-text', '第二次')
+    await flushPromises()
+
+    expect(confirm).toHaveBeenCalledTimes(1)
+    expect(analyzeText).toHaveBeenCalledTimes(1)
+    expect(analyzeText).toHaveBeenCalledWith(
+      '检查文本',
+      expect.any(Object)
+    )
+
+    pending.reject(new Error('finish'))
+    await flushPromises()
+  })
+
+  it('synchronously ignores a second file submission while direct analysis is pending', async () => {
+    const pending = createDeferred<VerificationResult>()
+    const analyzeFile = vi.fn().mockReturnValue(pending.promise)
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const wrapper = mount(WorkspaceView, {
+      global: {
+        provide: {
+          [jobsApiKey as symbol]: {
+            createJob: vi.fn(),
+            subscribe: vi.fn(() => vi.fn())
+          },
+          [verificationApiKey as symbol]: {
+            analyzeFile,
+            analyzeText: vi.fn(),
+            exportReport: vi.fn(),
+            exportOriginal: vi.fn()
+          }
+        }
+      }
+    })
+    const first = new File(['first'], 'first.txt')
+    const second = new File(['second'], 'second.txt')
+    const input = wrapper.getComponent(SourceInputPanel)
+
+    input.vm.$emit('submit-file', first)
+    input.vm.$emit('submit-file', second)
+    await flushPromises()
+
+    expect(confirm).toHaveBeenCalledTimes(1)
+    expect(analyzeFile).toHaveBeenCalledTimes(1)
+    expect(analyzeFile).toHaveBeenCalledWith(first, expect.any(Object))
+
+    pending.reject(new Error('finish'))
+    await flushPromises()
+  })
+
   it('uploads an allowed file and displays durable progress', async () => {
     const createJob = vi.fn().mockResolvedValue(buildJobRead())
     const subscribe = vi.fn((_jobId, onEvent) => {
@@ -284,41 +357,30 @@ describe('WorkspaceView', () => {
     expect(wrapper.text()).not.toContain('Connection interrupted. Waiting to reconnect…')
   })
 
-  it('keeps the newer upload when create-job responses resolve out of order', async () => {
-    const first = createDeferred<Awaited<ReturnType<JobsApi['createJob']>>>()
-    const second = createDeferred<Awaited<ReturnType<JobsApi['createJob']>>>()
-    const createJob = vi.fn()
-      .mockReturnValueOnce(first.promise)
-      .mockReturnValueOnce(second.promise)
-    const closeSecond = vi.fn()
-    const subscribe = vi.fn().mockImplementation(() => closeSecond)
+  it('synchronously ignores a second upload while create-job is pending', async () => {
+    const pending = createDeferred<Awaited<ReturnType<JobsApi['createJob']>>>()
+    const createJob = vi.fn().mockReturnValue(pending.promise)
+    const subscribe = vi.fn(() => vi.fn())
     const wrapper = mount(WorkspaceView, {
       global: { provide: { [jobsApiKey as symbol]: { createJob, subscribe } } }
     })
+    const first = new File(['first'], 'first.txt', { type: 'text/plain' })
+    const second = new File(['second'], 'second.txt', { type: 'text/plain' })
+    const input = wrapper.getComponent(SourceInputPanel)
 
-    await emitUpload(wrapper, new File(['first'], 'first.txt', { type: 'text/plain' }))
-    await emitUpload(wrapper, new File(['second'], 'second.txt', { type: 'text/plain' }))
-
-    second.resolve(
-      buildJobRead({
-        job_id: 'job-2',
-        source_name: 'second.txt'
-      })
-    )
+    input.vm.$emit('submit-file', first)
+    input.vm.$emit('submit-file', second)
     await flushPromises()
 
-    first.resolve(
-      buildJobRead({
-        job_id: 'job-1',
-        source_name: 'first.txt'
-      })
-    )
+    expect(createJob).toHaveBeenCalledTimes(1)
+    expect(createJob).toHaveBeenCalledWith(first)
+    expect(subscribe).not.toHaveBeenCalled()
+
+    pending.resolve(buildJobRead({ source_name: 'first.txt' }))
     await flushPromises()
 
     expect(subscribe).toHaveBeenCalledTimes(1)
-    expect(subscribe).toHaveBeenCalledWith('job-2', expect.any(Function), expect.any(Function))
-    expect(wrapper.text()).toContain('second.txt')
-    expect(wrapper.text()).not.toContain('first.txt')
+    expect(wrapper.text()).toContain('first.txt')
   })
 
   it('ignores an unresolved create-job response after unmount', async () => {

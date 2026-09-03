@@ -268,3 +268,143 @@ private Vue state, and mutable container values remain frozen snapshots — this
 closes both public setter and private-cache retargeting paths; cost if wrong is
 one tiny facade allocation per returned value and unchanged snapshot allocation
 for decision/suggestion records.
+
+## Task 2 implementation — 2026-09-02
+
+- Added `SourceInputPanel` as the controlled input boundary. It preserves file
+  and direct-text modes, draft text across mode switches, Ctrl/Command+Enter
+  submission, drag-and-drop, keyboard file-picker activation, all seven file
+  extensions, and the inclusive 25 MiB maximum.
+- Added `VerificationSettings` with six scenario choices and three independent
+  compliance switches. Every change emits a complete cloned `AnalyzeOptions`
+  snapshot instead of mutating the prop.
+- Added `TerminologyEditor` for separate glossary-pair and banned-word
+  workflows. Manual add, duplicate handling, deletion, clear, import, and
+  example download all emit complete option snapshots suitable for the later
+  execution composable.
+- Added `useTerminology` with typed glossary and banned-word parsers. Imports
+  accept CSV, TSV, and TXT files; recognize comma, tab, and arrow delimiters;
+  handle quoted fields, UTF-8 BOMs, CRLF/LF, comments, and blank lines; retain
+  first-seen order; and deduplicate without delimiter-key collisions.
+- Terminology imports are transactional and bounded to the backend option
+  contract: 64 KiB per import, 500 glossary pairs or banned words, and 200
+  Unicode code points per value. Malformed quoting, invalid pair shape, empty
+  values, identical pairs, unsupported files, and exceeded limits produce
+  stable typed error codes and deterministic user messages.
+- Terminology values render only through Vue text interpolation. Task 3's
+  existing review highlighting remains unchanged; no new raw-HTML path was
+  introduced.
+- Integrated the three components into `WorkspaceView`. Synchronous text and
+  file analysis still receive the current complete options, while the existing
+  asynchronous `JobsApi.createJob(file)` contract is intentionally unchanged
+  for Task 5. Existing analysis, progress, review, deletion-preview, export,
+  and session behavior remains in place.
+
+### Task 2 TDD and validation evidence
+
+- Fresh pre-change baseline:
+  `cd apps/web && npm test -- --run` passed 83 tests across 4 files.
+- Initial RED:
+  `npm test -- SourceInputPanel.spec.ts VerificationSettings.spec.ts useTerminology.spec.ts TerminologyEditor.spec.ts`
+  failed all 4 suites because the planned components and composable did not
+  exist.
+- Component/composable GREEN: the focused component command passed 24 tests
+  across 4 files before workspace integration.
+- Workspace integration RED:
+  `npm test -- WorkspaceView.spec.ts` failed because `WorkspaceView` did not
+  render the new component contracts; the retained unsupported-format
+  assertion also caught a wording regression during extraction.
+- Parser review RED: focused `useTerminology` runs separately reproduced
+  malformed-quote acceptance and a glossary-pair dedupe-key collision; each
+  failed before its minimal parser fix.
+- Final focused suite:
+  `npm test -- SourceInputPanel.spec.ts VerificationSettings.spec.ts useTerminology.spec.ts TerminologyEditor.spec.ts WorkspaceView.spec.ts --reporter=dot`
+  passed 38 tests across 5 files.
+- Final frontend suite:
+  `npm test -- --run --reporter=dot` passed 109 tests across 8 files. Node
+  emitted the existing experimental `localStorage` warning; all tests passed.
+- Production build: `npm run build` passed `vue-tsc -b` and Vite 6.4.3 with
+  29 modules transformed.
+
+Ruling: Task 2 mirrors the already-bound backend terminology limits
+(`64 KiB`, `500`, and `200`) at the import boundary and rejects the entire
+operation before mutation when any bound or row is invalid — partial imports
+would make correction and later session replay nondeterministic; cost if wrong
+is rejecting a mostly valid file until its invalid row is fixed.
+
+Ruling: Glossary-pair and banned-word parsers remain separate typed APIs while
+sharing only low-level delimiter and line handling — glossary rows require
+exactly two nonempty different values, while banned-word rows may contain one
+or more values; cost if wrong is a small amount of explicit schema-specific
+code.
+
+Ruling: `update:options` always carries a full cloned options snapshot, and
+`submit-text`/`submit-file` carry only the selected source — Task 5 can consume
+these contracts without moving execution or changing `JobsApi` during Task 2;
+cost if wrong is cloning two small terminology arrays for each settings edit.
+
+## Task 2 independent review fixes — 2026-09-03
+
+- Replaced per-import-only size validation with projected complete
+  `AnalyzeOptions` validation for initialization, setters, manual additions,
+  and sequential imports. The compact UTF-8 JSON mirrors backend wire names:
+  `scenario`, `enable_security`, `enable_sensitive`, `enable_ad_extreme`,
+  `custom_glossary`, and `banned_words`.
+- Exactly 64 KiB is accepted. Any projected mutation over the limit raises the
+  typed `options-too-large` error with the deterministic message
+  `完整检查设置不能超过 64 KiB。` before state changes. Independent
+  500-entry and 200-code-point limits remain intact.
+- `VerificationSettings` validates scenario and switch changes against the
+  complete supplied option context. `TerminologyEditor` initializes and
+  atomically resynchronizes the terminology composable with the supplied
+  scenario, switches, glossary, and banned words.
+- `readTerminologyFile` now returns decoded content plus its extension-derived
+  CSV/TSV/TXT format. CSV is comma-only, TSV is tab-only, and TXT alone
+  automatically detects tab, arrow, then comma.
+- The fixed-delimiter parser now supports quoted fields containing LF, CRLF,
+  escaped quotes, commas, arrows, and tabs while retaining the starting
+  physical source line for deterministic validation errors. Failed imports
+  remain transactional.
+- Removed native `maxlength` from glossary and banned-word fields so the
+  code-point validator accepts 200 astral characters and rejects 201 without
+  mutation.
+- Source upload and terminology import each expose one visible focusable
+  semantic control. Their native file inputs are programmatically activated,
+  hidden, removed from tab order, and hidden from the accessibility tree.
+- Added an immediate parent submission lock covering direct text, direct file,
+  asynchronous create-job upload, and recheck entry paths. Duplicate source
+  events are ignored before source mutation, optional-settings confirmation,
+  request-generation changes, or API invocation; existing generation checks
+  remain unchanged.
+
+### Task 2 independent review TDD and validation evidence
+
+- Focused pre-fix baseline:
+  `npm test -- SourceInputPanel.spec.ts VerificationSettings.spec.ts useTerminology.spec.ts TerminologyEditor.spec.ts WorkspaceView.spec.ts --reporter=dot`
+  passed 40 tests across 5 files.
+- RED `useTerminology.spec.ts`: 6 failed and 16 passed.
+- RED `TerminologyEditor.spec.ts`: 4 failed and 4 passed.
+- RED `VerificationSettings.spec.ts`: 1 failed and 2 passed.
+- RED `SourceInputPanel.spec.ts`: 1 failed and 7 passed.
+- RED `WorkspaceView.spec.ts`: 3 failed and 12 passed.
+- Follow-up CSV-comment RED: `useTerminology.spec.ts` failed with 1 failure
+  and 25 passes.
+- Follow-up multiline physical-line RED: `useTerminology.spec.ts` failed with
+  1 failure and 26 passes.
+- Focused GREEN: the focused command passed 61 tests across 5 files.
+- Full frontend GREEN: `npm test -- --run --reporter=dot` passed 132 tests
+  across 8 files. Node emitted the existing experimental `localStorage`
+  warning; all tests passed.
+- Production build GREEN: `npm run build` passed `vue-tsc -b` and Vite 6.4.3
+  with 29 modules transformed.
+
+Ruling: The backend's 64 KiB contract applies to the complete serialized
+verification options object, not independently accumulated import payloads.
+All option-producing UI paths must validate the projected backend-shaped
+snapshot transactionally; cost if wrong is rejecting a mutation before API
+submission rather than surfacing a backend validation failure later.
+
+Ruling: File extensions select strict CSV or TSV grammar, while only TXT uses
+delimiter auto-detection. This preserves delimiters inside declared-format
+fields and makes multiline quote handling deterministic; cost if wrong is
+requiring users to choose the correct extension for their delimiter grammar.

@@ -1,14 +1,20 @@
 import { readonly, ref } from 'vue'
 
-import type { GlossaryTerm } from '../types/verification'
+import type { AnalyzeOptions, GlossaryTerm } from '../types/verification'
 
 export const MAX_TERMINOLOGY_IMPORT_BYTES = 64 * 1024
 export const MAX_TERMINOLOGY_ENTRIES = 500
 export const MAX_TERMINOLOGY_VALUE_LENGTH = 200
+export const MAX_VERIFICATION_OPTIONS_JSON_BYTES = 64 * 1024
 
 export type TerminologyImportFormat = 'auto' | 'csv' | 'tsv' | 'txt'
+export type DetectedTerminologyImportFormat = Exclude<
+  TerminologyImportFormat,
+  'auto'
+>
 export type TerminologyImportErrorCode =
   | 'import-too-large'
+  | 'options-too-large'
   | 'too-many-entries'
   | 'invalid-glossary-line'
   | 'malformed-delimited-line'
@@ -28,9 +34,17 @@ export class TerminologyImportError extends Error {
   }
 }
 
-interface TerminologyState {
-  glossary: readonly GlossaryTerm[]
-  bannedWords: readonly string[]
+type TerminologyState = Pick<AnalyzeOptions, 'glossary' | 'bannedWords'> &
+  Partial<
+    Pick<
+      AnalyzeOptions,
+      'scenario' | 'enableSecurity' | 'enableSensitive' | 'enableAdExtreme'
+    >
+  >
+
+export interface ReadTerminologyFileResult {
+  content: string
+  format: DetectedTerminologyImportFormat
 }
 
 function importError(
@@ -46,6 +60,36 @@ function validateImportBytes(value: string): void {
     importError(
       'import-too-large',
       `导入内容不能超过 ${MAX_TERMINOLOGY_IMPORT_BYTES / 1024} KiB。`
+    )
+  }
+}
+
+export function verificationOptionsJsonBytes(options: AnalyzeOptions): number {
+  return new TextEncoder().encode(
+    JSON.stringify({
+      scenario: options.scenario,
+      enable_security: options.enableSecurity,
+      enable_sensitive: options.enableSensitive,
+      enable_ad_extreme: options.enableAdExtreme,
+      custom_glossary: options.glossary.map(({ original, standard }) => ({
+        original,
+        standard
+      })),
+      banned_words: options.bannedWords
+    })
+  ).byteLength
+}
+
+export function validateVerificationOptionsSize(
+  options: AnalyzeOptions
+): void {
+  if (
+    verificationOptionsJsonBytes(options) >
+    MAX_VERIFICATION_OPTIONS_JSON_BYTES
+  ) {
+    importError(
+      'options-too-large',
+      `完整检查设置不能超过 ${MAX_VERIFICATION_OPTIONS_JSON_BYTES / 1024} KiB。`
     )
   }
 }
@@ -188,6 +232,156 @@ function parseDelimitedLine(
   return fields
 }
 
+interface ParsedDelimitedRecord {
+  line: number
+  fields: string[]
+}
+
+function parseDelimitedRecords(
+  value: string,
+  delimiter: string
+): ParsedDelimitedRecord[] {
+  const normalized = value.replace(/^\ufeff/, '')
+  const records: ParsedDelimitedRecord[] = []
+  let fields: string[] = []
+  let field = ''
+  let recordText = ''
+  let inQuotes = false
+  let inComment = false
+  let closedQuote = false
+  let line = 1
+  let recordLine = 1
+  let quoteLine = 1
+
+  const finishRecord = () => {
+    const source = recordText.trim()
+    if (source && !source.startsWith('#')) {
+      records.push({
+        line: recordLine,
+        fields: [...fields, field.trim()]
+      })
+    }
+    fields = []
+    field = ''
+    recordText = ''
+    inComment = false
+    closedQuote = false
+  }
+
+  for (let index = 0; index < normalized.length; index += 1) {
+    const character = normalized[index] ?? ''
+    const isCrLf =
+      character === '\r' && normalized[index + 1] === '\n'
+    if (character === '\r' || character === '\n') {
+      if (inQuotes) {
+        const newline = isCrLf ? '\r\n' : character
+        field += newline
+        recordText += newline
+      } else {
+        finishRecord()
+      }
+      if (isCrLf) {
+        index += 1
+      }
+      line += 1
+      if (!inQuotes) {
+        recordLine = line
+      }
+      continue
+    }
+
+    if (
+      !inQuotes &&
+      !inComment &&
+      fields.length === 0 &&
+      field.trim() === '' &&
+      recordText.trim() === '' &&
+      character === '#'
+    ) {
+      inComment = true
+    }
+    recordText += character
+    if (inComment) {
+      continue
+    }
+    if (inQuotes) {
+      if (character === '"') {
+        if (normalized[index + 1] === '"') {
+          field += '"'
+          recordText += '"'
+          index += 1
+        } else {
+          inQuotes = false
+          closedQuote = true
+        }
+      } else {
+        field += character
+      }
+      continue
+    }
+
+    if (normalized.startsWith(delimiter, index)) {
+      fields.push(field.trim())
+      field = ''
+      closedQuote = false
+      index += delimiter.length - 1
+      continue
+    }
+    if (character === '"') {
+      if (field.trim() === '' && !closedQuote) {
+        field = ''
+        inQuotes = true
+        quoteLine = line
+        continue
+      }
+      importError(
+        'malformed-delimited-line',
+        `第 ${line} 行的引号字段格式无效。`,
+        line
+      )
+    }
+    if (closedQuote && !/\s/.test(character)) {
+      importError(
+        'malformed-delimited-line',
+        `第 ${line} 行的引号字段格式无效。`,
+        line
+      )
+    }
+    field += character
+  }
+
+  if (inQuotes) {
+    importError(
+      'malformed-delimited-line',
+      `第 ${quoteLine} 行包含未闭合的引号。`,
+      quoteLine
+    )
+  }
+  finishRecord()
+  return records
+}
+
+function parsedRecords(
+  value: string,
+  format: TerminologyImportFormat
+): ParsedDelimitedRecord[] {
+  if (format === 'csv') {
+    return parseDelimitedRecords(value, ',')
+  }
+  if (format === 'tsv') {
+    return parseDelimitedRecords(value, '\t')
+  }
+  return nonCommentLines(value).map((entry) => {
+    const delimiter = findDelimiter(entry.value, format, entry.line)
+    return {
+      line: entry.line,
+      fields: delimiter
+        ? parseDelimitedLine(entry.value, delimiter, entry.line)
+        : [entry.value]
+    }
+  })
+}
+
 function assertEntryLimit(length: number): void {
   if (length > MAX_TERMINOLOGY_ENTRIES) {
     importError(
@@ -236,25 +430,31 @@ export function parseGlossary(
   const terms: GlossaryTerm[] = []
   const seen = new Set<string>()
 
-  for (const entry of nonCommentLines(value)) {
-    const delimiter = findDelimiter(entry.value, format, entry.line)
-    if (!delimiter) {
+  for (const entry of parsedRecords(value, format)) {
+    if (entry.fields.length === 1) {
       importError(
         'invalid-glossary-line',
         `第 ${entry.line} 行必须包含逗号、制表符或 → 分隔的两个字段。`,
         entry.line
       )
     }
-    const fields = parseDelimitedLine(entry.value, delimiter, entry.line)
-    if (fields.length !== 2) {
+    if (entry.fields.length !== 2) {
       importError(
         'invalid-glossary-line',
         `第 ${entry.line} 行必须且只能包含两个字段。`,
         entry.line
       )
     }
-    const original = validateValue(fields[0] ?? '', entry.line, '原文写法')
-    const standard = validateValue(fields[1] ?? '', entry.line, '规范写法')
+    const original = validateValue(
+      entry.fields[0] ?? '',
+      entry.line,
+      '原文写法'
+    )
+    const standard = validateValue(
+      entry.fields[1] ?? '',
+      entry.line,
+      '规范写法'
+    )
     if (original === standard) {
       importError(
         'identical-glossary-values',
@@ -281,12 +481,8 @@ export function parseBannedWords(
   const words: string[] = []
   const seen = new Set<string>()
 
-  for (const entry of nonCommentLines(value)) {
-    const delimiter = findDelimiter(entry.value, format, entry.line)
-    const fields = delimiter
-      ? parseDelimitedLine(entry.value, delimiter, entry.line)
-      : [entry.value]
-    for (const field of fields) {
+  for (const entry of parsedRecords(value, format)) {
+    for (const field of entry.fields) {
       if (!field.trim()) {
         continue
       }
@@ -301,7 +497,9 @@ export function parseBannedWords(
   return words
 }
 
-export async function readTerminologyFile(file: File): Promise<string> {
+export async function readTerminologyFile(
+  file: File
+): Promise<ReadTerminologyFileResult> {
   const extension = file.name.split('.').pop()?.toLowerCase()
   if (!extension || !['csv', 'tsv', 'txt'].includes(extension)) {
     importError(
@@ -316,7 +514,7 @@ export async function readTerminologyFile(file: File): Promise<string> {
     )
   }
 
-  return await new Promise<string>((resolve, reject) => {
+  const content = await new Promise<string>((resolve, reject) => {
     const reader = new FileReader()
     reader.onload = () => resolve(String(reader.result ?? ''))
     reader.onerror = () =>
@@ -328,6 +526,10 @@ export async function readTerminologyFile(file: File): Promise<string> {
       )
     reader.readAsText(file, 'UTF-8')
   })
+  return {
+    content,
+    format: extension as DetectedTerminologyImportFormat
+  }
 }
 
 export function glossaryExampleCsv(): string {
@@ -342,25 +544,61 @@ export function useTerminology(initial: TerminologyState = {
   glossary: [],
   bannedWords: []
 }) {
+  const initialOptions: AnalyzeOptions = {
+    scenario: initial.scenario ?? 'general',
+    enableSecurity: initial.enableSecurity ?? true,
+    enableSensitive: initial.enableSensitive ?? true,
+    enableAdExtreme: initial.enableAdExtreme ?? false,
+    glossary: initial.glossary.map((term) => ({ ...term })),
+    bannedWords: [...initial.bannedWords]
+  }
+  const scenario = ref(initialOptions.scenario)
+  const enableSecurity = ref(initialOptions.enableSecurity)
+  const enableSensitive = ref(initialOptions.enableSensitive)
+  const enableAdExtreme = ref(initialOptions.enableAdExtreme)
   const glossary = ref<GlossaryTerm[]>([])
   const bannedWords = ref<string[]>([])
 
+  function projectedOptions(
+    nextGlossary: readonly GlossaryTerm[],
+    nextBannedWords: readonly string[]
+  ): AnalyzeOptions {
+    return {
+      scenario: scenario.value,
+      enableSecurity: enableSecurity.value,
+      enableSensitive: enableSensitive.value,
+      enableAdExtreme: enableAdExtreme.value,
+      glossary: nextGlossary.map((term) => ({ ...term })),
+      bannedWords: [...nextBannedWords]
+    }
+  }
+
+  function setOptions(options: AnalyzeOptions): void {
+    const nextGlossary = normalizeGlossaryTerms(options.glossary)
+    const nextBannedWords = normalizeBannedWords(options.bannedWords)
+    validateVerificationOptionsSize({
+      ...options,
+      glossary: nextGlossary,
+      bannedWords: nextBannedWords
+    })
+    scenario.value = options.scenario
+    enableSecurity.value = options.enableSecurity
+    enableSensitive.value = options.enableSensitive
+    enableAdExtreme.value = options.enableAdExtreme
+    glossary.value = nextGlossary
+    bannedWords.value = nextBannedWords
+  }
+
   function setGlossary(terms: readonly GlossaryTerm[]): void {
-    glossary.value = normalizeGlossaryTerms(terms)
+    const next = normalizeGlossaryTerms(terms)
+    validateVerificationOptionsSize(projectedOptions(next, bannedWords.value))
+    glossary.value = next
   }
 
   function setBannedWords(words: readonly string[]): void {
-    const normalized: string[] = []
-    const seen = new Set<string>()
-    for (const [index, value] of words.entries()) {
-      const word = validateValue(value, index + 1, '禁用词')
-      if (!seen.has(word)) {
-        normalized.push(word)
-        seen.add(word)
-        assertEntryLimit(normalized.length)
-      }
-    }
-    bannedWords.value = normalized
+    const next = normalizeBannedWords(words)
+    validateVerificationOptionsSize(projectedOptions(glossary.value, next))
+    bannedWords.value = next
   }
 
   function addGlossaryTerm(originalValue: string, standardValue: string): boolean {
@@ -377,7 +615,9 @@ export function useTerminology(initial: TerminologyState = {
       return false
     }
     assertEntryLimit(glossary.value.length + 1)
-    glossary.value = [...glossary.value, term]
+    const next = [...glossary.value, term]
+    validateVerificationOptionsSize(projectedOptions(next, bannedWords.value))
+    glossary.value = next
     return true
   }
 
@@ -387,7 +627,9 @@ export function useTerminology(initial: TerminologyState = {
       return false
     }
     assertEntryLimit(bannedWords.value.length + 1)
-    bannedWords.value = [...bannedWords.value, word]
+    const next = [...bannedWords.value, word]
+    validateVerificationOptionsSize(projectedOptions(glossary.value, next))
+    bannedWords.value = next
     return true
   }
 
@@ -408,6 +650,7 @@ export function useTerminology(initial: TerminologyState = {
       }
     }
     assertEntryLimit(next.length)
+    validateVerificationOptionsSize(projectedOptions(next, bannedWords.value))
     glossary.value = next
     return added
   }
@@ -428,6 +671,7 @@ export function useTerminology(initial: TerminologyState = {
       }
     }
     assertEntryLimit(next.length)
+    validateVerificationOptionsSize(projectedOptions(glossary.value, next))
     bannedWords.value = next
     return added
   }
@@ -448,12 +692,26 @@ export function useTerminology(initial: TerminologyState = {
     bannedWords.value = []
   }
 
-  setGlossary(initial.glossary)
-  setBannedWords(initial.bannedWords)
+  function normalizeBannedWords(words: readonly string[]): string[] {
+    const normalized: string[] = []
+    const seen = new Set<string>()
+    for (const [index, value] of words.entries()) {
+      const word = validateValue(value, index + 1, '禁用词')
+      if (!seen.has(word)) {
+        normalized.push(word)
+        seen.add(word)
+        assertEntryLimit(normalized.length)
+      }
+    }
+    return normalized
+  }
+
+  setOptions(initialOptions)
 
   return {
     glossary: readonly(glossary),
     bannedWords: readonly(bannedWords),
+    setOptions,
     setGlossary,
     setBannedWords,
     addGlossaryTerm,

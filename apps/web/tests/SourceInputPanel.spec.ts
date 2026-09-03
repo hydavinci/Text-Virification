@@ -91,4 +91,20 @@ describe('SourceInputPanel', () => {
       expect(click).toHaveBeenCalledTimes(1)
     }
   )
+
+  it('exposes one visible focusable upload action and hides the native picker from tab order', () => {
+    const wrapper = mount(SourceInputPanel)
+    const dropzone = wrapper.get('[data-dropzone]')
+    const input = wrapper.get('input[type="file"]')
+
+    expect(dropzone.attributes('role')).toBe('button')
+    expect(dropzone.attributes('tabindex')).toBe('0')
+    expect(dropzone.attributes('aria-label')).toBe(
+      '选择或拖放待检查文件'
+    )
+    expect(input.attributes('hidden')).toBeDefined()
+    expect(input.attributes('tabindex')).toBe('-1')
+    expect(input.attributes('aria-hidden')).toBe('true')
+    expect(dropzone.find('input[type="file"]').exists()).toBe(false)
+  })
 })

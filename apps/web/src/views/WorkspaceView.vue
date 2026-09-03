@@ -108,6 +108,7 @@ const jobState = ref<JobProgressState | null>(null)
 let unsubscribe: (() => void) | null = null
 let requestGeneration = 0
 let isMounted = true
+let sourceSubmissionPending = false
 let toastTimer: ReturnType<typeof setTimeout> | null = null
 
 const currentOptions = computed<AnalyzeOptions>(() => ({
@@ -238,34 +239,41 @@ function handleProgressError(message: string) {
 }
 
 async function handleUpload(file: File) {
-  fileSource.value = file
-  if (verificationApi) {
-    await runFileAnalysis(file)
+  if (!beginSourceSubmission()) {
     return
   }
-  const generation = ++requestGeneration
-  errorMessage.value = null
-  closeSubscription()
-  isAnalyzing.value = true
   try {
-    const job = await jobsApi.createJob(file)
-    if (!isRequestCurrent(generation)) {
+    fileSource.value = file
+    if (verificationApi) {
+      await runFileAnalysis(file)
       return
     }
-    jobState.value = buildInitialState(job)
-    unsubscribe = jobsApi.subscribe(
-      job.job_id,
-      (event) => isRequestCurrent(generation) && handleProgress(event),
-      (message) => isRequestCurrent(generation) && handleProgressError(message)
-    )
-  } catch (error) {
-    if (isRequestCurrent(generation)) {
-      errorMessage.value = error instanceof Error ? error.message : 'Unable to create the job.'
+    const generation = ++requestGeneration
+    errorMessage.value = null
+    closeSubscription()
+    isAnalyzing.value = true
+    try {
+      const job = await jobsApi.createJob(file)
+      if (!isRequestCurrent(generation)) {
+        return
+      }
+      jobState.value = buildInitialState(job)
+      unsubscribe = jobsApi.subscribe(
+        job.job_id,
+        (event) => isRequestCurrent(generation) && handleProgress(event),
+        (message) => isRequestCurrent(generation) && handleProgressError(message)
+      )
+    } catch (error) {
+      if (isRequestCurrent(generation)) {
+        errorMessage.value = error instanceof Error ? error.message : 'Unable to create the job.'
+      }
+    } finally {
+      if (isRequestCurrent(generation)) {
+        isAnalyzing.value = false
+      }
     }
   } finally {
-    if (isRequestCurrent(generation)) {
-      isAnalyzing.value = false
-    }
+    finishSourceSubmission()
   }
 }
 
@@ -277,17 +285,36 @@ async function runFileAnalysis(file: File) {
 }
 
 async function runTextAnalysis(submittedText: string) {
-  const text = submittedText.trim()
-  if (!text) {
-    notify('请先输入需要检查的文本')
+  if (!beginSourceSubmission()) {
     return
   }
-  if (!verificationApi || !confirmOptionalSettings()) {
-    return
+  try {
+    const text = submittedText.trim()
+    if (!text) {
+      notify('请先输入需要检查的文本')
+      return
+    }
+    if (!verificationApi || !confirmOptionalSettings()) {
+      return
+    }
+    textInput.value = text
+    fileSource.value = null
+    await runAnalysis(() => verificationApi.analyzeText(text, currentOptions.value))
+  } finally {
+    finishSourceSubmission()
   }
-  textInput.value = text
-  fileSource.value = null
-  await runAnalysis(() => verificationApi.analyzeText(text, currentOptions.value))
+}
+
+function beginSourceSubmission(): boolean {
+  if (sourceSubmissionPending) {
+    return false
+  }
+  sourceSubmissionPending = true
+  return true
+}
+
+function finishSourceSubmission(): void {
+  sourceSubmissionPending = false
 }
 
 async function runAnalysis(action: () => Promise<VerificationResult>) {
@@ -447,21 +474,28 @@ async function recheck() {
   if (!verificationApi || !result.value) {
     return
   }
-  const source = result.value
-  textInput.value = modifiedText.value
-  fileSource.value = null
-  await runAnalysis(async () => {
-    const checked = await verificationApi.analyzeText(textInput.value, currentOptions.value)
-    if (!source.file_id) {
-      return checked
-    }
-    return {
-      ...checked,
-      filename: source.filename,
-      file_id: source.file_id,
-      file_ext: source.file_ext
-    }
-  })
+  if (!beginSourceSubmission()) {
+    return
+  }
+  try {
+    const source = result.value
+    textInput.value = modifiedText.value
+    fileSource.value = null
+    await runAnalysis(async () => {
+      const checked = await verificationApi.analyzeText(textInput.value, currentOptions.value)
+      if (!source.file_id) {
+        return checked
+      }
+      return {
+        ...checked,
+        filename: source.filename,
+        file_id: source.file_id,
+        file_ext: source.file_ext
+      }
+    })
+  } finally {
+    finishSourceSubmission()
+  }
 }
 
 async function exportReport() {

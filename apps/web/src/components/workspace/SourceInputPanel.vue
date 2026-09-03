@@ -157,16 +157,18 @@ function handleDropzoneKeydown(event: KeyboardEvent): void {
       <span class="upload-icon" aria-hidden="true">↑</span>
       <strong>{{ busy ? '正在检查文档…' : '将文件拖到此处，或点击选择文件' }}</strong>
       <span>支持 DOCX、DOC、PDF、TXT、RTF、MD、CSV · 最大 25 MiB</span>
-      <input
-        ref="fileInput"
-        :disabled="busy"
-        type="file"
-        accept=".docx,.doc,.pdf,.txt,.rtf,.md,.csv"
-        aria-label="选择待检查文件"
-        @click.stop
-        @change="handleFileChange"
-      />
     </div>
+    <input
+      v-if="mode === 'file'"
+      ref="fileInput"
+      :disabled="busy"
+      type="file"
+      accept=".docx,.doc,.pdf,.txt,.rtf,.md,.csv"
+      hidden
+      tabindex="-1"
+      aria-hidden="true"
+      @change="handleFileChange"
+    />
 
     <div v-else class="text-mode">
       <label for="source-text">待检查文本</label>
@@ -266,12 +268,6 @@ function handleDropzoneKeydown(event: KeyboardEvent): void {
 .dropzone.busy {
   opacity: .6;
   cursor: wait;
-}
-.dropzone input {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  opacity: 0;
 }
 .upload-icon {
   width: 56px;

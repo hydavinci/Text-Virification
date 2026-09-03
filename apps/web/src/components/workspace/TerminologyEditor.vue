@@ -20,20 +20,22 @@ const emit = defineEmits<{
   notify: [message: string]
 }>()
 
-const terminology = useTerminology({
-  glossary: props.options.glossary,
-  bannedWords: props.options.bannedWords
-})
+const terminology = useTerminology(props.options)
 const termOriginal = ref('')
 const termStandard = ref('')
 const bannedInput = ref('')
 const errorMessage = ref<string | null>(null)
+const importInput = ref<HTMLInputElement | null>(null)
 
 watch(
   () => props.options,
   (options) => {
-    terminology.setGlossary(options.glossary)
-    terminology.setBannedWords(options.bannedWords)
+    try {
+      terminology.setOptions(options)
+      errorMessage.value = null
+    } catch (error) {
+      reportError(error)
+    }
   },
   { deep: true }
 )
@@ -120,11 +122,11 @@ async function importFile(event: Event): Promise<void> {
     return
   }
   try {
-    const content = await readTerminologyFile(file)
+    const { content, format } = await readTerminologyFile(file)
     const added =
       props.kind === 'glossary'
-        ? terminology.importGlossary(content)
-        : terminology.importBannedWords(content)
+        ? terminology.importGlossary(content, format)
+        : terminology.importBannedWords(content, format)
     errorMessage.value = null
     emitOptions()
     emit('notify', `成功导入 ${added} 项`)
@@ -133,6 +135,10 @@ async function importFile(event: Event): Promise<void> {
   } finally {
     input.value = ''
   }
+}
+
+function openImportPicker(): void {
+  importInput.value?.click()
 }
 
 function downloadExample(): void {
@@ -160,7 +166,6 @@ function downloadExample(): void {
         <input
           id="term-original"
           v-model="termOriginal"
-          maxlength="200"
           placeholder="原文写法"
           @keyup.enter="addGlossary"
         />
@@ -169,7 +174,6 @@ function downloadExample(): void {
         <input
           id="term-standard"
           v-model="termStandard"
-          maxlength="200"
           placeholder="规范写法"
           @keyup.enter="addGlossary"
         />
@@ -192,7 +196,6 @@ function downloadExample(): void {
         <input
           id="banned-word"
           v-model="bannedInput"
-          maxlength="200"
           placeholder="输入禁用词"
           @keyup.enter="addBannedWord"
         />
@@ -207,15 +210,23 @@ function downloadExample(): void {
       </div>
     </template>
 
-    <label class="import-btn">
+    <button
+      class="import-btn"
+      data-action="import"
+      type="button"
+      @click="openImportPicker"
+    >
       {{ kind === 'glossary' ? '导入 CSV / TSV / TXT' : '批量导入 CSV / TSV / TXT' }}
-      <input
-        type="file"
-        accept=".csv,.tsv,.txt"
-        :aria-label="kind === 'glossary' ? '导入术语表' : '导入禁用词'"
-        @change="importFile"
-      />
-    </label>
+    </button>
+    <input
+      ref="importInput"
+      type="file"
+      accept=".csv,.tsv,.txt"
+      hidden
+      tabindex="-1"
+      aria-hidden="true"
+      @change="importFile"
+    />
     <button
       class="link-btn"
       data-action="download-example"
@@ -344,14 +355,12 @@ function downloadExample(): void {
   border: 1px dashed var(--border);
   border-radius: 8px;
   color: var(--primary);
+  background: transparent;
   font-size: 12px;
   cursor: pointer;
 }
-.import-btn input {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  opacity: 0;
+.import-btn:focus-visible {
+  outline: 3px solid rgba(37, 99, 235, .14);
 }
 .link-btn {
   margin-left: 8px;
