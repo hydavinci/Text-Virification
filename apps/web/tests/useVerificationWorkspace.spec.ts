@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { useVerificationWorkspace } from '../src/composables/useVerificationWorkspace'
 import type {
+  PdfDocumentMetadata,
   PersistedDocumentRevision,
   TextBlock,
   VerificationIssue,
@@ -156,6 +157,118 @@ function buildSessionV2(
     selectedSuggestions: {},
     ...overrides
   }
+}
+
+function buildPdfMetadata(): PdfDocumentMetadata {
+  return {
+    pages: [
+      {
+        page: 1,
+        kind: 'scanned',
+        page_bbox: [0, 0, 100, 200],
+        text_length: 2,
+        text_density: 0.0001,
+        image_coverage: 0.5,
+        ocr_required: true,
+        spans: [
+          {
+            text: 'W',
+            bbox: [1, 2, 9, 12],
+            font_name: 'Helvetica',
+            font_size: 10,
+            font_flags: 0,
+            color: 0,
+            span_index: 0,
+            characters: [
+              {
+                text: 'W',
+                bbox: [1, 2, 9, 12],
+                source_start: 0,
+                source_end: 1,
+                mapping_state: 'glyph',
+                group_id: 'span-glyph-0',
+                line_direction: [1, 0],
+                writing_mode: 0,
+                raw_line_index: 0,
+                span_order: 0
+              }
+            ],
+            line_direction: [1, 0],
+            writing_mode: 0,
+            line_index: 0,
+            span_order: 0
+          }
+        ],
+        tables: [
+          {
+            table_index: 0,
+            bbox: [10, 20, 90, 80],
+            row_count: 1,
+            column_count: 1,
+            rows: [
+              [
+                {
+                  text: 'T',
+                  bbox: [11, 21, 20, 30],
+                  table_index: 0,
+                  row_index: 0,
+                  cell_index: 0,
+                  characters: [
+                    {
+                      text: 'T',
+                      bbox: [11, 21, 20, 30],
+                      source_start: 0,
+                      source_end: 1,
+                      mapping_state: 'glyph',
+                      group_id: 'cell-glyph-0',
+                      line_direction: [1, 0],
+                      writing_mode: 0,
+                      raw_line_index: 0,
+                      span_order: null
+                    }
+                  ]
+                }
+              ]
+            ]
+          }
+        ],
+        images: [
+          {
+            image_index: 0,
+            xref: 1,
+            bbox: [20, 90, 80, 190]
+          }
+        ]
+      }
+    ],
+    warnings: [
+      {
+        page: 1,
+        stage: 'ocr',
+        code: 'pdf_ocr_no_text',
+        message: 'OCR required'
+      }
+    ],
+    ocr_requirement: {
+      mode: 'required',
+      pages: [1]
+    }
+  }
+}
+
+function buildPdfResult(): VerificationResult {
+  const ocrRequirement = {
+    mode: 'required' as const,
+    pages: [1]
+  }
+  return buildResult([buildIssue({ page: 1 })], {
+    filename: 'sample.pdf',
+    source_name: 'sample.pdf',
+    file_type: 'pdf',
+    file_ext: '.pdf',
+    pdf_metadata: buildPdfMetadata(),
+    ocr_requirement: ocrRequirement
+  })
 }
 
 function attemptAccessorReplacement<T extends object>(
@@ -1835,6 +1948,220 @@ describe('useVerificationWorkspace', () => {
     expect(workspace.currentRevision.value).toEqual(sourceRevisionFor(result))
     expect(workspace.requiresReverification.value).toBe(false)
     expect(workspace.canUndoLastBatch.value).toBe(false)
+  })
+
+  it('restores issue-derived canonical and compatibility-localized summaries', () => {
+    const canonical = useVerificationWorkspace()
+    const localized = useVerificationWorkspace()
+    const localizedResult = buildResult([buildIssue()], {
+      summary: {
+        total: 1,
+        by_type: { 错别字: 1 },
+        by_severity: { 警告: 1 },
+        by_rule: { cn_typo: 1 },
+        by_layer: { 字符层: 1 }
+      }
+    })
+
+    expect(
+      canonical.restoreWorkspaceState(
+        buildSessionV2(buildResult([buildIssue()]))
+      )
+    ).toBe(true)
+    expect(
+      localized.restoreWorkspaceState(buildSessionV2(localizedResult))
+    ).toBe(true)
+    expect(localized.result.value?.summary).toEqual(localizedResult.summary)
+  })
+
+  it.each([
+    ['summary total mismatch', (result: any) => {
+      result.summary.total = 2
+    }],
+    ['canonical summary count mismatch', (result: any) => {
+      result.summary.by_type = { typo: 0, grammar: 1 }
+    }],
+    ['localized summary count mismatch', (result: any) => {
+      result.summary.by_type = { 错别字: 0, 语法: 1 }
+    }],
+    ['summary with an extra zero bucket', (result: any) => {
+      result.summary.by_severity.info = 0
+    }],
+    ['summary with a missing bucket', (result: any) => {
+      result.summary.by_rule = {}
+    }]
+  ])('rejects a %s atomically', (_label, mutate) => {
+    const saved: any = structuredClone(
+      buildSessionV2(buildResult([buildIssue()]))
+    )
+    mutate(saved.result)
+    const workspace = useVerificationWorkspace()
+
+    expect(workspace.restoreWorkspaceState(saved)).toBe(false)
+    expect(workspace.result.value).toBeNull()
+    expect(workspace.currentRevision.value).toBeNull()
+    expect(workspace.issueStates.value).toEqual({})
+  })
+
+  it('restores representative backend-valid PDF metadata', () => {
+    const result = buildPdfResult()
+    const workspace = useVerificationWorkspace()
+
+    expect(workspace.restoreWorkspaceState(buildSessionV2(result))).toBe(true)
+    expect(workspace.result.value?.pdf_metadata).toEqual(result.pdf_metadata)
+    expect(workspace.result.value?.ocr_requirement).toEqual(
+      result.ocr_requirement
+    )
+  })
+
+  it.each([
+    ['empty OCR pages', (result: any) => {
+      result.pdf_metadata.ocr_requirement.pages = []
+      result.ocr_requirement.pages = []
+    }],
+    ['zero OCR page', (result: any) => {
+      result.pdf_metadata.ocr_requirement.pages = [0]
+      result.ocr_requirement.pages = [0]
+    }],
+    ['duplicate OCR pages', (result: any) => {
+      result.pdf_metadata.ocr_requirement.pages = [1, 1]
+      result.ocr_requirement.pages = [1, 1]
+    }],
+    ['unsorted OCR pages', (result: any) => {
+      result.pdf_metadata.ocr_requirement.pages = [2, 1]
+      result.ocr_requirement.pages = [2, 1]
+    }],
+    ['top-level/PDF OCR mismatch', (result: any) => {
+      result.ocr_requirement.mode = 'partial'
+    }],
+    ['top-level OCR without PDF metadata', (result: any) => {
+      delete result.pdf_metadata
+    }],
+    ['PDF metadata on a non-PDF result', (result: any) => {
+      result.file_type = 'txt'
+    }]
+  ])('rejects %s atomically', (_label, mutate) => {
+    const saved: any = structuredClone(buildSessionV2(buildPdfResult()))
+    mutate(saved.result)
+    const workspace = useVerificationWorkspace()
+
+    expect(workspace.restoreWorkspaceState(saved)).toBe(false)
+    expect(workspace.result.value).toBeNull()
+    expect(workspace.currentRevision.value).toBeNull()
+  })
+
+  it.each([
+    ['a zero-width bbox', (result: any) => {
+      result.pdf_metadata.pages[0].spans[0].bbox = [1, 2, 1, 12]
+    }],
+    ['a zero line direction', (result: any) => {
+      result.pdf_metadata.pages[0].spans[0].line_direction = [0, 0]
+    }],
+    ['a character source range mismatch', (result: any) => {
+      result.pdf_metadata.pages[0].spans[0].characters[0].source_end = 2
+    }],
+    ['an empty character text', (result: any) => {
+      result.pdf_metadata.pages[0].spans[0].characters[0].text = ''
+    }],
+    ['an invalid glyph mapping bbox', (result: any) => {
+      result.pdf_metadata.pages[0].spans[0].characters[0].bbox = null
+    }],
+    ['whitespace mapped as a glyph', (result: any) => {
+      result.pdf_metadata.pages[0].spans[0].characters[0].text = ' '
+      result.pdf_metadata.pages[0].spans[0].text = ' '
+    }],
+    ['an empty glyph group id', (result: any) => {
+      result.pdf_metadata.pages[0].spans[0].characters[0].group_id = ''
+    }],
+    ['span character reconstruction mismatch', (result: any) => {
+      result.pdf_metadata.pages[0].spans[0].text = 'WW'
+    }],
+    ['duplicate span glyph group ids', (result: any) => {
+      const span = result.pdf_metadata.pages[0].spans[0]
+      span.text = 'WW'
+      span.characters.push({
+        ...span.characters[0],
+        source_start: 1,
+        source_end: 2
+      })
+    }],
+    ['an empty span font name', (result: any) => {
+      result.pdf_metadata.pages[0].spans[0].font_name = ''
+    }],
+    ['a non-positive span font size', (result: any) => {
+      result.pdf_metadata.pages[0].spans[0].font_size = 0
+    }],
+    ['table cell character reconstruction mismatch', (result: any) => {
+      result.pdf_metadata.pages[0].tables[0].rows[0][0].text = 'TT'
+    }],
+    ['table row shape mismatch', (result: any) => {
+      result.pdf_metadata.pages[0].tables[0].row_count = 2
+    }],
+    ['table column shape mismatch', (result: any) => {
+      result.pdf_metadata.pages[0].tables[0].column_count = 2
+    }],
+    ['table cell coordinate mismatch', (result: any) => {
+      result.pdf_metadata.pages[0].tables[0].rows[0][0].cell_index = 1
+    }],
+    ['out-of-page content coordinates', (result: any) => {
+      result.pdf_metadata.pages[0].images[0].bbox = [20, 90, 101, 190]
+    }],
+    ['invalid PDF page order', (result: any) => {
+      result.pdf_metadata.pages[0].page = 2
+    }],
+    ['an invalid normalized page origin', (result: any) => {
+      result.pdf_metadata.pages[0].page_bbox = [1, 0, 100, 200]
+    }],
+    ['negative page text density', (result: any) => {
+      result.pdf_metadata.pages[0].text_density = -0.1
+    }],
+    ['page image coverage over one', (result: any) => {
+      result.pdf_metadata.pages[0].image_coverage = 1.1
+    }],
+    ['a non-positive warning page', (result: any) => {
+      result.pdf_metadata.warnings[0].page = 0
+    }],
+    ['OCR pages inconsistent with page flags', (result: any) => {
+      result.pdf_metadata.pages[0].ocr_required = false
+    }],
+    ['a non-positive image xref', (result: any) => {
+      result.pdf_metadata.pages[0].images[0].xref = 0
+    }]
+  ])('rejects %s atomically', (_label, mutate) => {
+    const saved: any = structuredClone(buildSessionV2(buildPdfResult()))
+    mutate(saved.result)
+    const workspace = useVerificationWorkspace()
+
+    expect(workspace.restoreWorkspaceState(saved)).toBe(false)
+    expect(workspace.result.value).toBeNull()
+    expect(workspace.currentRevision.value).toBeNull()
+  })
+
+  it.each([
+    ['block style', (result: any) => {
+      result.blocks[0].style = { nested: Number.NaN }
+    }],
+    ['block source locator', (result: any) => {
+      result.blocks[0].source_locator = { nested: Number.POSITIVE_INFINITY }
+    }],
+    ['summary LLM review', (result: any) => {
+      result.summary.llm_review = {
+        nested: [Number.NEGATIVE_INFINITY]
+      }
+    }],
+    ['PDF metadata', (result: any) => {
+      result.pdf_metadata.pages[0].text_density = Number.NaN
+    }]
+  ])('rejects a non-finite JSON number in %s atomically', (_label, mutate) => {
+    const result: any = buildPdfResult()
+    mutate(result)
+    const workspace = useVerificationWorkspace()
+
+    expect(
+      workspace.restoreWorkspaceState(buildSessionV2(result))
+    ).toBe(false)
+    expect(workspace.result.value).toBeNull()
+    expect(workspace.currentRevision.value).toBeNull()
   })
 
   it('atomically restores and preserves a valid review draft identity', () => {

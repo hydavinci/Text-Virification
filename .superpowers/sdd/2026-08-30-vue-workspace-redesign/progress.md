@@ -752,3 +752,66 @@ when the display filename came from a prior upload. The old binary identity is
 never attached to the new run — this prevents stale original-format export;
 cost if wrong is text fallback export after recheck until Task 6 persists a
 new binary-backed revision.
+
+## Task 4 fix round 2 — 2026-09-03
+
+- Replaced per-code-point insensitive folding with whole original-substring
+  NFKD plus stable `und` uppercase/lowercase folding. Matches and replacements
+  expose only original code-point boundary ranges, advance left-to-right
+  without overlap, stop a candidate scan after its folded length exceeds the
+  query, and reject unusually large folded queries. This fixes canonical mark
+  reordering across original boundaries while preserving ligature, sharp-s,
+  composed/decomposed, half-expansion, astral, and non-overlap behavior.
+- Restored summaries now require exact issue-derived total, type, severity,
+  rule, and layer counts. Type, severity, and layer maps may use canonical keys
+  or the exact backend compatibility labels; rule keys remain canonical.
+  Missing, extra, mismatched, and zero bogus buckets are rejected.
+- The canonical result snapshot now mirrors the accepted backend OCR/PDF
+  invariants: positive nonempty ordered unique OCR pages; top-level and PDF
+  requirement parity following compatibility payload omission rules; finite
+  positive bboxes; nonzero directions; positive pages and xrefs; exact
+  character source ranges and mapping-state geometry/whitespace rules;
+  span/cell reconstruction and contiguous coverage; span group-ID uniqueness;
+  table shape and cell ownership; normalized page origin, nonnegative density,
+  bounded image coverage, page-contained content, ordered page numbers, and
+  OCR/page-flag agreement.
+- Nested JSON values remain freshly copied and reject non-finite numbers in
+  block style, source locators, LLM review data, and PDF metadata. Invalid
+  nested values fail the prepare phase, preserving atomic no-publication or
+  unchanged-existing-workspace behavior.
+
+### Task 4 fix round 2 TDD and validation evidence
+
+- Search RED:
+  `npm test -- --run tests/useSearchReplace.spec.ts --reporter=dot` failed 2
+  new canonical-equivalence tests with 10 existing tests passing.
+- Session RED:
+  `npm test -- --run tests/useVerificationWorkspace.spec.ts --reporter=dot`
+  failed 22 new parity tests with 91 tests passing.
+- Focused workflow GREEN:
+  `npm test -- --run tests/useSearchReplace.spec.ts tests/useVerificationWorkspace.spec.ts tests/WorkspaceView.spec.ts --reporter=dot`
+  passed 175 tests across 3 files. Node emitted the existing experimental
+  `localStorage` warning.
+- Full frontend GREEN: `npm test -- --run --reporter=dot` passed 281 tests
+  across 14 files with the same existing warning.
+- Production build GREEN: `npm run build` passed `vue-tsc -b` and Vite 6.4.3
+  with 50 modules transformed.
+- The representative PDF metadata fixture passed authoritative backend
+  `PdfDocumentMetadata.model_validate` and JSON round-trip equality.
+- `git diff --check` passed with no output.
+
+Ruling: Boundary-safe insensitive search folds each candidate original
+substring as a whole rather than composing independently folded code points.
+The folded query length bounds each candidate scan and a 4096-code-point guard
+prevents pathological interactive queries; cost if wrong is treating an
+extreme search query as no-match rather than blocking the UI.
+
+Ruling: Session result restoration treats the compatibility response as an
+untrusted canonical payload. Summary and PDF/OCR metadata must satisfy the
+same issue-derived and model-derived relationships as the backend before any
+state is committed; cost if wrong is dropping an old malformed local session
+instead of partially trusting it.
+
+Task 4: fix round 2/5 (2 addressed, 0 open — boundary-safe canonical search
+and backend-parity canonical session result validation; commit
+`fix: validate canonical session results`)

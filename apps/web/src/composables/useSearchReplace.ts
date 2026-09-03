@@ -21,14 +21,11 @@ interface UseSearchReplaceOptions {
   onReplace?: (text: string, replacement: SearchReplacement) => void
 }
 
-interface FoldedSearchBuffer {
-  characters: readonly string[]
-  originalBoundaryByFoldedOffset: ReadonlyMap<number, number>
-}
+const MAX_FOLDED_QUERY_LENGTH = 4096
 
-function foldCodePoint(character: string): string[] {
+function foldSearchValue(value: string): string[] {
   return Array.from(
-    character
+    value
       .normalize('NFKD')
       .toLocaleUpperCase('und')
       .toLocaleLowerCase('und')
@@ -36,36 +33,15 @@ function foldCodePoint(character: string): string[] {
   )
 }
 
-function foldSearchValue(value: string): FoldedSearchBuffer {
-  const characters: string[] = []
-  const originalBoundaryByFoldedOffset = new Map<number, number>()
-  const originalCharacters = Array.from(value)
-
-  for (let index = 0; index < originalCharacters.length; index += 1) {
-    originalBoundaryByFoldedOffset.set(characters.length, index)
-    characters.push(...foldCodePoint(originalCharacters[index]))
-  }
-  originalBoundaryByFoldedOffset.set(
-    characters.length,
-    originalCharacters.length
-  )
-
-  return {
-    characters,
-    originalBoundaryByFoldedOffset
-  }
-}
-
-function foldedMatchAt(
-  haystack: readonly string[],
-  needle: readonly string[],
-  start: number
+function foldedValuesEqual(
+  candidate: readonly string[],
+  query: readonly string[]
 ): boolean {
-  if (start + needle.length > haystack.length) {
+  if (candidate.length !== query.length) {
     return false
   }
-  for (let offset = 0; offset < needle.length; offset += 1) {
-    if (haystack[start + offset] !== needle[offset]) {
+  for (let offset = 0; offset < query.length; offset += 1) {
+    if (candidate[offset] !== query[offset]) {
       return false
     }
   }
@@ -108,38 +84,37 @@ export function useSearchReplace({
       return Object.freeze(found.map((match) => Object.freeze(match)))
     }
 
-    const foldedText = foldSearchValue(toValue(text))
-    const foldedQuery = foldSearchValue(query.value).characters
-    if (foldedQuery.length === 0) {
+    const foldedQuery = foldSearchValue(query.value)
+    if (
+      foldedQuery.length === 0 ||
+      foldedQuery.length > MAX_FOLDED_QUERY_LENGTH
+    ) {
       return Object.freeze([])
     }
-    let foldedStart = 0
-    while (
-      foldedStart + foldedQuery.length <=
-      foldedText.characters.length
-    ) {
-      if (
-        !foldedMatchAt(
-          foldedText.characters,
-          foldedQuery,
-          foldedStart
-        )
-      ) {
-        foldedStart += 1
-        continue
-      }
 
-      const foldedEnd = foldedStart + foldedQuery.length
-      const originalStart =
-        foldedText.originalBoundaryByFoldedOffset.get(foldedStart)
-      const originalEnd =
-        foldedText.originalBoundaryByFoldedOffset.get(foldedEnd)
-      if (originalStart === undefined || originalEnd === undefined) {
-        foldedStart += 1
-        continue
+    let originalStart = 0
+    while (originalStart < textCharacters.length) {
+      let originalEnd = originalStart + 1
+      let matchedEnd: number | null = null
+      while (originalEnd <= textCharacters.length) {
+        const foldedCandidate = foldSearchValue(
+          textCharacters.slice(originalStart, originalEnd).join('')
+        )
+        if (foldedCandidate.length > foldedQuery.length) {
+          break
+        }
+        if (foldedValuesEqual(foldedCandidate, foldedQuery)) {
+          matchedEnd = originalEnd
+          break
+        }
+        originalEnd += 1
       }
-      found.push({ start: originalStart, end: originalEnd })
-      foldedStart = foldedEnd
+      if (matchedEnd === null) {
+        originalStart += 1
+      } else {
+        found.push({ start: originalStart, end: matchedEnd })
+        originalStart = matchedEnd
+      }
     }
     return Object.freeze(found.map((match) => Object.freeze(match)))
   })

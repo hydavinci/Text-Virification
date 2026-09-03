@@ -6,6 +6,8 @@ Completed on 2026-09-03 from base
 `8bd4e6bfd61f526c23763380a2af85622234aacd`.
 Independent review findings were fixed on 2026-09-03 from Task 4 HEAD
 `b4964e9293bb1654d8ab30b41043784eab35de9b`.
+Fix round 2 was completed on 2026-09-03 from Task 4 fix-round-1 HEAD
+`e40192e3aff3541180cc7143deed6a2606fd49b5`.
 
 ## Files
 
@@ -110,3 +112,54 @@ were implemented.
   Task 4 independent-review section of `progress.md`.
 
 No Task 5 or Task 6 implementation was included in the fix wave.
+
+## Fix round 2
+
+- Replaced per-code-point insensitive folding with whole-candidate NFKD and
+  stable `und` uppercase/lowercase folding. Candidate scans start and end only
+  at original code-point boundaries, stop when the monotonically decomposed
+  candidate exceeds the folded query length, retain deterministic
+  left-to-right non-overlap, and cap unusually large folded queries. Reordered
+  combining marks now match in both directions and replacements use the exact
+  mapped original ranges; ligature, sharp-s, composed/decomposed,
+  half-expansion, astral, and non-overlap coverage remains green.
+- Made restored summaries issue-derived invariants. `total`, type, severity,
+  rule, and layer maps must match exact issue counts with no missing, extra, or
+  zero bogus buckets. Type, severity, and layer accept either canonical keys or
+  the backend compatibility labels; rules remain canonical.
+- Mirrored backend OCR/PDF validation at the atomic session boundary:
+  positive ordered unique OCR pages; compatibility-payload OCR/metadata
+  consistency; finite positive geometry; nonzero directions; exact character
+  source ranges and mapping-state rules; span/cell reconstruction and
+  contiguous ranges; span group-ID uniqueness; table shape and coordinate
+  ownership; positive page/xref values; page-origin, density, coverage, and
+  content-bound checks; ordered pages and OCR/page-flag agreement.
+- Nested JSON copying continues to reject non-finite values in block style,
+  source locators, LLM review metadata, and PDF metadata while constructing
+  fresh null-prototype records. Any invalid nested value aborts preparation
+  before workspace publication.
+
+### Fix round 2 TDD and validation evidence
+
+- Search RED:
+  `npm test -- --run tests/useSearchReplace.spec.ts --reporter=dot` failed the
+  2 new cross-boundary canonical-equivalence tests with 10 existing tests
+  passing.
+- Session RED:
+  `npm test -- --run tests/useVerificationWorkspace.spec.ts --reporter=dot`
+  failed 22 new summary/OCR/PDF parity tests with 91 tests passing.
+- Focused GREEN:
+  `npm test -- --run tests/useSearchReplace.spec.ts tests/useVerificationWorkspace.spec.ts tests/WorkspaceView.spec.ts --reporter=dot`
+  passed 175 tests across 3 files. Node emitted the existing experimental
+  `localStorage` warning.
+- Full frontend GREEN: `npm test -- --run --reporter=dot` passed 281 tests
+  across 14 files with the same existing Node warning.
+- Production build GREEN: `npm run build` passed `vue-tsc -b` and Vite 6.4.3
+  with 50 modules transformed.
+- Backend parity probe: the representative frontend PDF metadata fixture
+  passed authoritative `PdfDocumentMetadata.model_validate` and round-trip
+  JSON equality.
+- `git diff --check` passed with no output.
+
+No Task 5 result-loading work or Task 6 revision persistence work was included
+in fix round 2.

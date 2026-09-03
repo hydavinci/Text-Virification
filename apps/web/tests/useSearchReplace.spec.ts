@@ -87,6 +87,50 @@ describe('useSearchReplace', () => {
     ])
   })
 
+  it('matches canonical equivalents when combining marks reorder across original boundaries', () => {
+    const first = useSearchReplace({ text: () => 'a\u0315\u0300 à\u0315' })
+
+    first.query.value = 'à\u0315'
+    expect(first.matches.value).toEqual([
+      { start: 0, end: 3 },
+      { start: 4, end: 6 }
+    ])
+
+    first.query.value = 'a\u0315\u0300'
+    expect(first.matches.value).toEqual([
+      { start: 0, end: 3 },
+      { start: 4, end: 6 }
+    ])
+
+    const second = useSearchReplace({
+      text: () => 'q\u0307\u0323 q\u0323\u0307'
+    })
+    second.query.value = 'q\u0323\u0307'
+    expect(second.matches.value).toEqual([
+      { start: 0, end: 3 },
+      { start: 4, end: 7 }
+    ])
+  })
+
+  it('replaces whole original ranges after cross-boundary canonical reordering', () => {
+    const text = ref('😀a\u0315\u0300 q\u0307\u0323')
+    const onReplace = vi.fn((nextText: string) => {
+      text.value = nextText
+    })
+    const search = useSearchReplace({ text, onReplace })
+
+    search.query.value = 'à\u0315'
+    search.replacement.value = 'A'
+    expect(search.replaceCurrent()).toBe(true)
+    expect(text.value).toBe('😀A q\u0307\u0323')
+
+    search.query.value = 'q\u0323\u0307'
+    search.replacement.value = 'Q'
+    expect(search.replaceAll()).toBe(true)
+    expect(text.value).toBe('😀A Q')
+    expect(onReplace).toHaveBeenCalledTimes(2)
+  })
+
   it('rejects matches ending inside a folded expansion and keeps exact case-sensitive matching', () => {
     const search = useSearchReplace({ text: () => 'ﬃ ffi' })
 

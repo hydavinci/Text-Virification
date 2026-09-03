@@ -465,25 +465,27 @@ function copyBoundingBox(value: unknown): BoundingBox | null | undefined {
   return [value[0], value[1], value[2], value[3]]
 }
 
+function isTextBlockKind(value: unknown): value is TextBlock['kind'] {
+  return (
+    value === 'paragraph' ||
+    value === 'heading' ||
+    value === 'table_cell' ||
+    value === 'header' ||
+    value === 'footer' ||
+    value === 'image'
+  )
+}
+
 function copyTextBlock(value: unknown): TextBlock | null {
   if (!isRecord(value)) {
     return null
   }
-  const kinds = new Set([
-    'paragraph',
-    'heading',
-    'table_cell',
-    'header',
-    'footer',
-    'image'
-  ])
   const bbox = copyBoundingBox(value.bbox)
   const style = copyJsonRecord(value.style)
   const sourceLocator = copyJsonRecord(value.source_locator)
   if (
     typeof value.block_id !== 'string' ||
-    typeof value.kind !== 'string' ||
-    !kinds.has(value.kind) ||
+    !isTextBlockKind(value.kind) ||
     typeof value.text !== 'string' ||
     !isNonnegativeInteger(value.global_start) ||
     !isNonnegativeInteger(value.global_end) ||
@@ -503,7 +505,7 @@ function copyTextBlock(value: unknown): TextBlock | null {
   }
   return {
     block_id: value.block_id,
-    kind: value.kind as TextBlock['kind'],
+    kind: value.kind,
     text: value.text,
     global_start: value.global_start,
     global_end: value.global_end,
@@ -529,6 +531,18 @@ function copyVerificationIssue(value: unknown): VerificationIssue | null {
     value.alternatives === undefined || value.alternatives === null
       ? value.alternatives
       : copyStringArray(value.alternatives)
+  const review =
+    value.review === undefined || value.review === null
+      ? value.review
+      : typeof value.review === 'string'
+        ? value.review
+        : false
+  const reviewReason =
+    value.review_reason === undefined || value.review_reason === null
+      ? value.review_reason
+      : typeof value.review_reason === 'string'
+        ? value.review_reason
+        : false
   if (
     typeof value.issue_id !== 'string' ||
     !isUuid(value.issue_id) ||
@@ -563,12 +577,8 @@ function copyVerificationIssue(value: unknown): VerificationIssue | null {
     typeof value.context !== 'string' ||
     !isNonnegativeInteger(value.position) ||
     !isNonnegativeInteger(value.end_position) ||
-    (value.review !== undefined &&
-      value.review !== null &&
-      typeof value.review !== 'string') ||
-    (value.review_reason !== undefined &&
-      value.review_reason !== null &&
-      typeof value.review_reason !== 'string')
+    review === false ||
+    reviewReason === false
   ) {
     return null
   }
@@ -600,8 +610,8 @@ function copyVerificationIssue(value: unknown): VerificationIssue | null {
     context: value.context,
     position: value.position,
     end_position: value.end_position,
-    review: value.review as string | null | undefined,
-    review_reason: value.review_reason as string | null | undefined
+    review,
+    review_reason: reviewReason
   }
 }
 
@@ -662,48 +672,225 @@ function copyVerificationSummary(
   }
 }
 
+const LEGACY_TYPE_LABELS: Readonly<Record<string, string>> = Object.freeze({
+  typo: '错别字',
+  variant_char: '异形词',
+  width_mixed: '全半角混用',
+  missing_char: '漏字/缺字',
+  idiom_misuse: '成语误用',
+  expression: '语病/表达',
+  grammar: '语法',
+  logic: '逻辑',
+  punctuation: '标点符号',
+  spacing: '多余空格',
+  number_format: '数字/格式',
+  repetition: '重复词语',
+  style: '文风/格式',
+  colloquial: '口语化',
+  term_consistency: '术语不一致',
+  pii_id: '身份证号',
+  pii_phone: '手机号',
+  pii_email: '邮箱地址',
+  pii_bank: '银行卡号',
+  pii_key: '密钥/凭证'
+})
+
+const LEGACY_SEVERITY_LABELS: Readonly<Record<string, string>> = Object.freeze({
+  error: '错误',
+  warning: '警告',
+  info: '建议'
+})
+
+const LEGACY_LAYER_LABELS: Readonly<Record<string, string>> = Object.freeze({
+  character: '字符层',
+  vocabulary: '词汇层',
+  sentence: '句子层',
+  format: '标点/格式层',
+  discourse: '语篇/语体层',
+  security: '合规/安全层'
+})
+
+function countIssuesBy(
+  issues: readonly VerificationIssue[],
+  keyFor: (issue: VerificationIssue) => string
+): Record<string, number> {
+  const counts = nullRecord<number>()
+  for (const issue of issues) {
+    const key = keyFor(issue)
+    counts[key] = (counts[key] ?? 0) + 1
+  }
+  return counts
+}
+
+function localizedCounts(
+  counts: Readonly<Record<string, number>>,
+  labels: Readonly<Record<string, string>>
+): Record<string, number> {
+  const localized = nullRecord<number>()
+  for (const [key, count] of Object.entries(counts)) {
+    const localizedKey = labels[key] ?? key
+    localized[localizedKey] = (localized[localizedKey] ?? 0) + count
+  }
+  return localized
+}
+
+function countRecordsEqual(
+  left: Readonly<Record<string, number>>,
+  right: Readonly<Record<string, number>>
+): boolean {
+  const leftKeys = Object.keys(left)
+  const rightKeys = Object.keys(right)
+  return (
+    leftKeys.length === rightKeys.length &&
+    leftKeys.every(
+      (key) => hasOwn(right, key) && left[key] === right[key]
+    )
+  )
+}
+
+function hasIssueDerivedSummary(
+  summary: VerificationSummary,
+  issues: readonly VerificationIssue[]
+): boolean {
+  if (summary.total !== issues.length) {
+    return false
+  }
+  const byType = countIssuesBy(issues, (issue) => issue.type)
+  const bySeverity = countIssuesBy(issues, (issue) => issue.severity)
+  const byRule = countIssuesBy(issues, (issue) => issue.rule_id)
+  const byLayer = countIssuesBy(issues, (issue) => issue.layer)
+  return (
+    (countRecordsEqual(summary.by_type, byType) ||
+      countRecordsEqual(
+        summary.by_type,
+        localizedCounts(byType, LEGACY_TYPE_LABELS)
+      )) &&
+    (countRecordsEqual(summary.by_severity, bySeverity) ||
+      countRecordsEqual(
+        summary.by_severity,
+        localizedCounts(bySeverity, LEGACY_SEVERITY_LABELS)
+      )) &&
+    countRecordsEqual(summary.by_rule, byRule) &&
+    (countRecordsEqual(summary.by_layer, byLayer) ||
+      countRecordsEqual(
+        summary.by_layer,
+        localizedCounts(byLayer, LEGACY_LAYER_LABELS)
+      ))
+  )
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 1
+}
+
 function copyOcrRequirement(value: unknown): OcrRequirement | null {
   if (
     !isRecord(value) ||
     (value.mode !== 'required' && value.mode !== 'partial') ||
     !Array.isArray(value.pages) ||
-    !value.pages.every(isNonnegativeInteger)
+    value.pages.length === 0 ||
+    !value.pages.every(isPositiveInteger)
+  ) {
+    return null
+  }
+  const pages = [...value.pages]
+  if (
+    pages.some(
+      (page, index) => index > 0 && page <= (pages[index - 1] ?? 0)
+    )
   ) {
     return null
   }
   return {
     mode: value.mode,
-    pages: [...value.pages]
+    pages
   }
 }
 
 function copyDirection(value: unknown): [number, number] | null {
   return Array.isArray(value) &&
     value.length === 2 &&
-    value.every(isFiniteNumber)
+    value.every(isFiniteNumber) &&
+    (value[0] !== 0 || value[1] !== 0)
     ? [value[0], value[1]]
     : null
+}
+
+function copyPositiveBoundingBox(value: unknown): BoundingBox | null {
+  const bbox = copyBoundingBox(value)
+  return bbox !== null &&
+    bbox !== undefined &&
+    bbox[2] > bbox[0] &&
+    bbox[3] > bbox[1]
+    ? bbox
+    : null
+}
+
+function copyNullablePositiveBoundingBox(
+  value: unknown
+): BoundingBox | null | undefined {
+  if (value === null) {
+    return null
+  }
+  return copyPositiveBoundingBox(value) ?? undefined
+}
+
+function isPdfWhitespace(value: string): boolean {
+  return (
+    value.length > 0 &&
+    Array.from(value).every((character) => {
+      const codePoint = character.codePointAt(0) ?? -1
+      return (
+        /\p{White_Space}/u.test(character) ||
+        (codePoint >= 0x1c && codePoint <= 0x1f)
+      )
+    })
+  )
+}
+
+function isPdfMappingState(
+  value: unknown
+): value is PdfTextCharacter['mapping_state'] {
+  return (
+    value === 'glyph' ||
+    value === 'glyphless' ||
+    value === 'synthetic_space' ||
+    value === 'unmapped'
+  )
 }
 
 function copyPdfTextCharacter(value: unknown): PdfTextCharacter | null {
   if (!isRecord(value)) {
     return null
   }
-  const bbox = copyBoundingBox(value.bbox)
+  const bbox = copyNullablePositiveBoundingBox(value.bbox)
   const lineDirection = copyDirection(value.line_direction)
   if (
     typeof value.text !== 'string' ||
+    value.text.length === 0 ||
     bbox === undefined ||
     !isNonnegativeInteger(value.source_start) ||
-    !isNonnegativeInteger(value.source_end) ||
-    !['glyph', 'glyphless', 'synthetic_space', 'unmapped'].includes(
-      String(value.mapping_state)
-    ) ||
-    (value.group_id !== null && typeof value.group_id !== 'string') ||
+    !isPositiveInteger(value.source_end) ||
+    value.source_end !== value.source_start + codePointLength(value.text) ||
+    !isPdfMappingState(value.mapping_state) ||
+    (value.group_id !== null &&
+      (typeof value.group_id !== 'string' || value.group_id.length === 0)) ||
     lineDirection === null ||
     (value.writing_mode !== 0 && value.writing_mode !== 1) ||
     !isNonnegativeInteger(value.raw_line_index) ||
     (value.span_order !== null && !isNonnegativeInteger(value.span_order))
+  ) {
+    return null
+  }
+  const whitespace = isPdfWhitespace(value.text)
+  if (
+    (value.mapping_state === 'glyph' &&
+      (bbox === null || whitespace)) ||
+    (value.mapping_state === 'glyphless' &&
+      (bbox !== null || whitespace)) ||
+    (value.mapping_state === 'synthetic_space' &&
+      (bbox !== null || !whitespace)) ||
+    (value.mapping_state === 'unmapped' && bbox !== null)
   ) {
     return null
   }
@@ -712,8 +899,7 @@ function copyPdfTextCharacter(value: unknown): PdfTextCharacter | null {
     bbox,
     source_start: value.source_start,
     source_end: value.source_end,
-    mapping_state:
-      value.mapping_state as PdfTextCharacter['mapping_state'],
+    mapping_state: value.mapping_state,
     group_id: value.group_id,
     line_direction: lineDirection,
     writing_mode: value.writing_mode,
@@ -726,14 +912,17 @@ function copyPdfTextSpan(value: unknown): PdfTextSpan | null {
   if (!isRecord(value)) {
     return null
   }
-  const bbox = copyBoundingBox(value.bbox)
+  const bbox = copyPositiveBoundingBox(value.bbox)
   const lineDirection = copyDirection(value.line_direction)
   if (
     typeof value.text !== 'string' ||
+    value.text.length === 0 ||
     bbox === null ||
     bbox === undefined ||
     typeof value.font_name !== 'string' ||
+    value.font_name.length === 0 ||
     !isFiniteNumber(value.font_size) ||
+    value.font_size <= 0 ||
     !isNonnegativeInteger(value.font_flags) ||
     !isNonnegativeInteger(value.color) ||
     !isNonnegativeInteger(value.span_index) ||
@@ -745,9 +934,35 @@ function copyPdfTextSpan(value: unknown): PdfTextSpan | null {
   ) {
     return null
   }
-  const characters = value.characters.map(copyPdfTextCharacter)
-  if (characters.some((entry) => entry === null)) {
-    return null
+  const characters: PdfTextCharacter[] = []
+  for (const entry of value.characters) {
+    const character = copyPdfTextCharacter(entry)
+    if (character === null) {
+      return null
+    }
+    characters.push(character)
+  }
+  if (characters.length > 0) {
+    if (characters.map((character) => character.text).join('') !== value.text) {
+      return null
+    }
+    let expectedStart = 0
+    const groupIds = new Set<string>()
+    for (const character of characters) {
+      if (character.source_start !== expectedStart) {
+        return null
+      }
+      expectedStart = character.source_end
+      if (character.group_id !== null) {
+        if (groupIds.has(character.group_id)) {
+          return null
+        }
+        groupIds.add(character.group_id)
+      }
+    }
+    if (expectedStart !== codePointLength(value.text)) {
+      return null
+    }
   }
   return {
     text: value.text,
@@ -757,7 +972,7 @@ function copyPdfTextSpan(value: unknown): PdfTextSpan | null {
     font_flags: value.font_flags,
     color: value.color,
     span_index: value.span_index,
-    characters: characters as PdfTextCharacter[],
+    characters,
     line_direction: lineDirection,
     writing_mode: value.writing_mode,
     line_index: value.line_index,
@@ -769,7 +984,7 @@ function copyPdfTableCell(value: unknown): PdfTableCell | null {
   if (!isRecord(value)) {
     return null
   }
-  const bbox = copyBoundingBox(value.bbox)
+  const bbox = copyNullablePositiveBoundingBox(value.bbox)
   if (
     typeof value.text !== 'string' ||
     bbox === undefined ||
@@ -780,9 +995,28 @@ function copyPdfTableCell(value: unknown): PdfTableCell | null {
   ) {
     return null
   }
-  const characters = value.characters.map(copyPdfTextCharacter)
-  if (characters.some((entry) => entry === null)) {
-    return null
+  const characters: PdfTextCharacter[] = []
+  for (const entry of value.characters) {
+    const character = copyPdfTextCharacter(entry)
+    if (character === null) {
+      return null
+    }
+    characters.push(character)
+  }
+  if (characters.length > 0) {
+    if (characters.map((character) => character.text).join('') !== value.text) {
+      return null
+    }
+    let expectedStart = 0
+    for (const character of characters) {
+      if (character.source_start !== expectedStart) {
+        return null
+      }
+      expectedStart = character.source_end
+    }
+    if (expectedStart !== codePointLength(value.text)) {
+      return null
+    }
   }
   return {
     text: value.text,
@@ -790,7 +1024,7 @@ function copyPdfTableCell(value: unknown): PdfTableCell | null {
     table_index: value.table_index,
     row_index: value.row_index,
     cell_index: value.cell_index,
-    characters: characters as PdfTextCharacter[]
+    characters
   }
 }
 
@@ -798,13 +1032,13 @@ function copyPdfTable(value: unknown): PdfTable | null {
   if (!isRecord(value)) {
     return null
   }
-  const bbox = copyBoundingBox(value.bbox)
+  const bbox = copyPositiveBoundingBox(value.bbox)
   if (
     !isNonnegativeInteger(value.table_index) ||
     bbox === null ||
     bbox === undefined ||
-    !isNonnegativeInteger(value.row_count) ||
-    !isNonnegativeInteger(value.column_count) ||
+    !isPositiveInteger(value.row_count) ||
+    !isPositiveInteger(value.column_count) ||
     !Array.isArray(value.rows)
   ) {
     return null
@@ -814,11 +1048,35 @@ function copyPdfTable(value: unknown): PdfTable | null {
     if (!Array.isArray(row)) {
       return null
     }
-    const cells = row.map(copyPdfTableCell)
-    if (cells.some((entry) => entry === null)) {
-      return null
+    const cells: PdfTableCell[] = []
+    for (const entry of row) {
+      const cell = copyPdfTableCell(entry)
+      if (cell === null) {
+        return null
+      }
+      cells.push(cell)
     }
-    rows.push(cells as PdfTableCell[])
+    rows.push(cells)
+  }
+  if (
+    rows.length !== value.row_count ||
+    rows.some((row) => row.length !== value.column_count)
+  ) {
+    return null
+  }
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+    const row = rows[rowIndex] ?? []
+    for (let cellIndex = 0; cellIndex < row.length; cellIndex += 1) {
+      const cell = row[cellIndex]
+      if (
+        cell === undefined ||
+        cell.table_index !== value.table_index ||
+        cell.row_index !== rowIndex ||
+        cell.cell_index !== cellIndex
+      ) {
+        return null
+      }
+    }
   }
   return {
     table_index: value.table_index,
@@ -833,10 +1091,10 @@ function copyPdfImage(value: unknown): PdfImage | null {
   if (!isRecord(value)) {
     return null
   }
-  const bbox = copyBoundingBox(value.bbox)
+  const bbox = copyPositiveBoundingBox(value.bbox)
   if (
     !isNonnegativeInteger(value.image_index) ||
-    !isNonnegativeInteger(value.xref) ||
+    !isPositiveInteger(value.xref) ||
     bbox === null ||
     bbox === undefined
   ) {
@@ -853,15 +1111,22 @@ function copyPdfPageMetadata(value: unknown): PdfPageMetadata | null {
   if (!isRecord(value)) {
     return null
   }
-  const pageBbox = copyBoundingBox(value.page_bbox)
+  const pageBbox = copyPositiveBoundingBox(value.page_bbox)
   if (
-    !isNonnegativeInteger(value.page) ||
-    !['text', 'scanned', 'mixed'].includes(String(value.kind)) ||
+    !isPositiveInteger(value.page) ||
+    (value.kind !== 'text' &&
+      value.kind !== 'scanned' &&
+      value.kind !== 'mixed') ||
     pageBbox === null ||
     pageBbox === undefined ||
+    pageBbox[0] !== 0 ||
+    pageBbox[1] !== 0 ||
     !isNonnegativeInteger(value.text_length) ||
     !isFiniteNumber(value.text_density) ||
+    value.text_density < 0 ||
     !isFiniteNumber(value.image_coverage) ||
+    value.image_coverage < 0 ||
+    value.image_coverage > 1 ||
     typeof value.ocr_required !== 'boolean' ||
     !Array.isArray(value.spans) ||
     !Array.isArray(value.tables) ||
@@ -869,48 +1134,92 @@ function copyPdfPageMetadata(value: unknown): PdfPageMetadata | null {
   ) {
     return null
   }
-  const spans = value.spans.map(copyPdfTextSpan)
-  const tables = value.tables.map(copyPdfTable)
-  const images = value.images.map(copyPdfImage)
+  const spans: PdfTextSpan[] = []
+  for (const entry of value.spans) {
+    const span = copyPdfTextSpan(entry)
+    if (span === null) {
+      return null
+    }
+    spans.push(span)
+  }
+  const tables: PdfTable[] = []
+  for (const entry of value.tables) {
+    const table = copyPdfTable(entry)
+    if (table === null) {
+      return null
+    }
+    tables.push(table)
+  }
+  const images: PdfImage[] = []
+  for (const entry of value.images) {
+    const image = copyPdfImage(entry)
+    if (image === null) {
+      return null
+    }
+    images.push(image)
+  }
+  const contentBoxes = [
+    ...spans.map((span) => span.bbox),
+    ...spans.flatMap((span) =>
+      span.characters.flatMap((character) =>
+        character.bbox === null ? [] : [character.bbox]
+      )
+    ),
+    ...tables.flatMap((table) =>
+      table.rows.flatMap((row) =>
+        row.flatMap((cell) => [
+          ...(cell.bbox === null ? [] : [cell.bbox]),
+          ...cell.characters.flatMap((character) =>
+            character.bbox === null ? [] : [character.bbox]
+          )
+        ])
+      )
+    ),
+    ...images.map((image) => image.bbox)
+  ]
   if (
-    spans.some((entry) => entry === null) ||
-    tables.some((entry) => entry === null) ||
-    images.some((entry) => entry === null)
+    contentBoxes.some(
+      (bbox) =>
+        pageBbox[0] > bbox[0] ||
+        bbox[2] > pageBbox[2] ||
+        pageBbox[1] > bbox[1] ||
+        bbox[3] > pageBbox[3]
+    )
   ) {
     return null
   }
   return {
     page: value.page,
-    kind: value.kind as PdfPageMetadata['kind'],
+    kind: value.kind,
     page_bbox: pageBbox,
     text_length: value.text_length,
     text_density: value.text_density,
     image_coverage: value.image_coverage,
     ocr_required: value.ocr_required,
-    spans: spans as PdfTextSpan[],
-    tables: tables as PdfTable[],
-    images: images as PdfImage[]
+    spans,
+    tables,
+    images
   }
 }
 
 function copyPdfWarning(value: unknown): PdfExtractionWarning | null {
   if (
     !isRecord(value) ||
-    !isNonnegativeInteger(value.page) ||
-    !['table', 'image', 'ocr'].includes(String(value.stage)) ||
-    ![
-      'pdf_table_extraction_failed',
-      'pdf_image_extraction_failed',
-      'pdf_ocr_no_text'
-    ].includes(String(value.code)) ||
+    !isPositiveInteger(value.page) ||
+    (value.stage !== 'table' &&
+      value.stage !== 'image' &&
+      value.stage !== 'ocr') ||
+    (value.code !== 'pdf_table_extraction_failed' &&
+      value.code !== 'pdf_image_extraction_failed' &&
+      value.code !== 'pdf_ocr_no_text') ||
     typeof value.message !== 'string'
   ) {
     return null
   }
   return {
     page: value.page,
-    stage: value.stage as PdfExtractionWarning['stage'],
-    code: value.code as PdfExtractionWarning['code'],
+    stage: value.stage,
+    code: value.code,
     message: value.message
   }
 }
@@ -923,39 +1232,88 @@ function copyPdfMetadata(value: unknown): PdfDocumentMetadata | null {
   ) {
     return null
   }
-  const pages = value.pages.map(copyPdfPageMetadata)
-  const warnings = value.warnings.map(copyPdfWarning)
+  const pages: PdfPageMetadata[] = []
+  for (const entry of value.pages) {
+    const page = copyPdfPageMetadata(entry)
+    if (page === null) {
+      return null
+    }
+    pages.push(page)
+  }
+  const warnings: PdfExtractionWarning[] = []
+  for (const entry of value.warnings) {
+    const warning = copyPdfWarning(entry)
+    if (warning === null) {
+      return null
+    }
+    warnings.push(warning)
+  }
   const requirement =
     value.ocr_requirement === null
       ? null
       : copyOcrRequirement(value.ocr_requirement)
-  if (
-    pages.some((entry) => entry === null) ||
-    warnings.some((entry) => entry === null) ||
-    (value.ocr_requirement !== null && requirement === null)
-  ) {
+  if (value.ocr_requirement !== null && requirement === null) {
     return null
   }
+  if (pages.some((page, index) => page.page !== index + 1)) {
+    return null
+  }
+  if (requirement !== null) {
+    const requiredPages = pages
+      .filter((page) => page.ocr_required)
+      .map((page) => page.page)
+    if (
+      requirement.pages.length !== requiredPages.length ||
+      requirement.pages.some((page, index) => page !== requiredPages[index])
+    ) {
+      return null
+    }
+  }
   return {
-    pages: pages as PdfPageMetadata[],
-    warnings: warnings as PdfExtractionWarning[],
+    pages,
+    warnings,
     ocr_requirement: requirement
   }
+}
+
+function ocrRequirementsEqual(
+  left: OcrRequirement,
+  right: OcrRequirement
+): boolean {
+  return (
+    left.mode === right.mode &&
+    left.pages.length === right.pages.length &&
+    left.pages.every((page, index) => page === right.pages[index])
+  )
+}
+
+function isFileType(value: unknown): value is VerificationResult['file_type'] {
+  return (
+    value === 'docx' ||
+    value === 'doc' ||
+    value === 'pdf' ||
+    value === 'txt' ||
+    value === 'rtf' ||
+    value === 'md' ||
+    value === 'csv'
+  )
+}
+
+function isScenario(value: unknown): value is VerificationResult['scenario'] {
+  return (
+    value === 'general' ||
+    value === 'academic' ||
+    value === 'business' ||
+    value === 'legal' ||
+    value === 'news' ||
+    value === 'technical'
+  )
 }
 
 function canonicalResultSnapshot(value: unknown): VerificationResult | null {
   if (!isRecord(value)) {
     return null
   }
-  const fileTypes = new Set(['docx', 'doc', 'pdf', 'txt', 'rtf', 'md', 'csv'])
-  const scenarios = new Set([
-    'general',
-    'academic',
-    'business',
-    'legal',
-    'news',
-    'technical'
-  ])
   const stats = copyVerificationStats(value.stats)
   const summary = copyVerificationSummary(value.summary)
   const dictionaryVersions = copyStringRecord(value.dictionary_versions)
@@ -967,8 +1325,7 @@ function canonicalResultSnapshot(value: unknown): VerificationResult | null {
     value.success !== true ||
     typeof value.filename !== 'string' ||
     typeof value.source_name !== 'string' ||
-    typeof value.file_type !== 'string' ||
-    !fileTypes.has(value.file_type) ||
+    !isFileType(value.file_type) ||
     typeof value.text !== 'string' ||
     !Array.isArray(value.blocks) ||
     typeof value.parser_name !== 'string' ||
@@ -992,50 +1349,70 @@ function canonicalResultSnapshot(value: unknown): VerificationResult | null {
     !isRecord(value.degradation) ||
     typeof value.degradation.is_degraded !== 'boolean' ||
     reasons === null ||
-    typeof value.scenario !== 'string' ||
-    !scenarios.has(value.scenario)
+    !isScenario(value.scenario)
   ) {
     return null
   }
 
-  const blocks = value.blocks.map(copyTextBlock)
-  const issues = value.issues.map(copyVerificationIssue)
-  if (
-    blocks.some((entry) => entry === null) ||
-    issues.some((entry) => entry === null)
-  ) {
+  const blocks: TextBlock[] = []
+  for (const entry of value.blocks) {
+    const block = copyTextBlock(entry)
+    if (block === null) {
+      return null
+    }
+    blocks.push(block)
+  }
+  const issues: VerificationIssue[] = []
+  for (const entry of value.issues) {
+    const issue = copyVerificationIssue(entry)
+    if (issue === null) {
+      return null
+    }
+    issues.push(issue)
+  }
+  const hasPdfMetadata = hasOwn(value, 'pdf_metadata')
+  const hasOcrRequirement = hasOwn(value, 'ocr_requirement')
+  const pdfMetadata = hasPdfMetadata
+    ? copyPdfMetadata(value.pdf_metadata)
+    : undefined
+  const ocrRequirement = hasOcrRequirement
+    ? copyOcrRequirement(value.ocr_requirement)
+    : undefined
+  if (pdfMetadata === null || ocrRequirement === null) {
     return null
   }
-  const pdfMetadata =
-    value.pdf_metadata === undefined
-      ? undefined
-      : copyPdfMetadata(value.pdf_metadata)
-  const ocrRequirement =
-    value.ocr_requirement === undefined
-      ? undefined
-      : value.ocr_requirement === null
-        ? null
-        : copyOcrRequirement(value.ocr_requirement)
-  if (
-    (value.pdf_metadata !== undefined && pdfMetadata === null) ||
-    (value.ocr_requirement !== undefined &&
-      value.ocr_requirement !== null &&
-      ocrRequirement === null)
-  ) {
-    return null
+  if (pdfMetadata === undefined) {
+    if (hasOcrRequirement) {
+      return null
+    }
+  } else {
+    if (value.file_type !== 'pdf') {
+      return null
+    }
+    const metadataRequirement = pdfMetadata.ocr_requirement
+    if (metadataRequirement === null) {
+      if (hasOcrRequirement) {
+        return null
+      }
+    } else if (
+      ocrRequirement === undefined ||
+      !ocrRequirementsEqual(ocrRequirement, metadataRequirement)
+    ) {
+      return null
+    }
   }
 
   const result: VerificationResult = {
     success: true,
     filename: value.filename,
     source_name: value.source_name,
-    file_type: value.file_type as VerificationResult['file_type'],
+    file_type: value.file_type,
     text: value.text,
-    blocks: blocks as TextBlock[],
+    blocks,
     parser_name: value.parser_name,
     parser_version: value.parser_version,
     stats,
-    issues: issues as VerificationIssue[],
+    issues,
     summary,
     file_id: value.file_id,
     file_ext: value.file_ext,
@@ -1049,9 +1426,9 @@ function canonicalResultSnapshot(value: unknown): VerificationResult | null {
       is_degraded: value.degradation.is_degraded,
       reasons
     },
-    scenario: value.scenario as VerificationResult['scenario']
+    scenario: value.scenario
   }
-  if (pdfMetadata !== undefined && pdfMetadata !== null) {
+  if (pdfMetadata !== undefined) {
     result.pdf_metadata = pdfMetadata
   }
   if (ocrRequirement !== undefined) {
@@ -1060,6 +1437,7 @@ function canonicalResultSnapshot(value: unknown): VerificationResult | null {
   if (
     !hasCanonicalBlocks(result) ||
     canonicalIssues(result).length !== result.issues.length ||
+    !hasIssueDerivedSummary(result.summary, result.issues) ||
     result.issues.some(
       (issue) =>
         issue.document_id !== result.document_id ||
