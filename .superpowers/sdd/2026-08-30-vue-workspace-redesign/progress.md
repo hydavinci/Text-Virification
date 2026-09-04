@@ -1533,3 +1533,26 @@ is not claimed clean.
 
 Task 6: review fix round 5 implemented; awaiting final scoped re-review. Review
 is not claimed clean.
+
+## Task 6 breaker adjudication — 2026-09-04
+
+Ruling: After the five-round breaker, the materialization accounting bypass,
+streamed-key identity bug, and post-recheck export dead end are load-bearing
+and receive one controlled breaker fix wave — parking them would leave
+exploitable memory exhaustion or a broken core workflow; cost if wrong is one
+extra review cycle beyond the nominal cap.
+
+- Added nonzero allocation accounting plus event/entry ceilings to incremental
+  JSON readers.
+- Bound report root fields to exact root map keys and reject duplicate keys in
+  every streamed object, including ignored block metadata.
+- Block grant-backed export after review changes the exact rechecked text while
+  retaining the original job authority needed to perform another secure
+  recheck.
+- RED reproduced 9 backend parser failures and the recheck-accept-export grant
+  mismatch. GREEN focused suites passed 80 backend and 78 frontend tests.
+- Final validation: backend 1063 passed/81 gated skips; frontend 488 passed;
+  build passed; Playwright 4 passed/1 live skip; Ruff, mypy, Alembic offline
+  SQL, Compose config, and `git diff --check` passed.
+
+Task 6: controlled breaker fix implemented; awaiting scoped breaker review.

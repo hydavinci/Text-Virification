@@ -733,6 +733,67 @@ provenance column and object-shape constraint. The downgrade removes both.
 - Independent final scoped review is still required. Review cleanliness is not
   claimed.
 
+## Breaker adjudication and controlled fix wave — 2026-09-04
+
+Ruling: After the five-round breaker, the materialization accounting bypass,
+streamed-key identity bug, and post-recheck export dead end are load-bearing
+and receive one controlled breaker fix wave — parking them would leave
+exploitable memory exhaustion or a broken core workflow; cost if wrong is one
+extra review cycle beyond the nominal cap.
+
+### Breaker fixes
+
+- Incremental JSON materialization now charges a fixed allocation overhead for
+  every scalar, key, and container event, in addition to encoded value bytes.
+  Explicit event and container-entry ceilings are enforced before value
+  builders append entries. Callers that specify a materialized budget receive
+  this stronger bound; raw-only small request limits retain exact inclusive
+  byte semantics.
+- The streamed compatibility report reader applies the same retained/event/
+  entry accounting. It tracks the exact root `map_key` rather than deriving
+  identity from dotted ijson prefixes, rejects unknown root fields, and keeps a
+  unique-key set for every object, including skipped block metadata subtrees.
+- Rechecked file authority remains available as the source for another
+  job-bound recheck, but modified export is blocked whenever the current review
+  revision text differs from the exact text covered by the grant. Accepting an
+  issue therefore requires another recheck; rejection/no-op review that leaves
+  text unchanged does not. Returning exactly to the grant-bound result text is
+  safe because the result identity and opaque grant remain unchanged.
+
+### Breaker TDD evidence
+
+- RED: 9 backend failures reproduced 10,000 empty array entries passing a
+  16-byte materialized budget, wide/nested empty structures passing retained
+  limits, dotted root-key filename spoofing, and duplicate nested block keys.
+- GREEN: body-reader regressions passed 6/6; focused report-reader regressions
+  passed 7/7.
+- RED: the recheck → accept issue → export regression called
+  `persistRevision` with the old exact-text grant.
+- GREEN: the workspace blocks that export with an explicit recheck message,
+  performs a second job-bound recheck, then persists/exports once with the new
+  grant.
+- A full run exposed one inclusive raw-byte regression for the small job export
+  body. Materialized accounting is now enabled only when the caller explicitly
+  supplies that separate budget; the focused inclusive/chunked regression
+  passed.
+
+### Final breaker validation
+
+- Focused backend parser/compatibility/revision collection: 80 passed.
+- Focused frontend Task 6/workspace/session collection: 78 passed.
+- Full backend: 1063 passed, 81 established environment/optional-runtime
+  skips.
+- Full frontend: 488 passed across 21 files.
+- Production build passed with 70 modules transformed.
+- Playwright Chromium: 4 deterministic tests passed; 1 live-backend test
+  skipped because `LIVE_API_URL` was unset.
+- Full Ruff passed; full mypy passed on 77 source files.
+- Alembic head/offline upgrade SQL and Compose configuration passed.
+- `git diff --check` passed.
+
+Independent breaker scoped review is still required. Review cleanliness is not
+claimed.
+
 ## Review fix round 4 — 2026-09-03
 
 Implementation commit:
