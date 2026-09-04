@@ -1,9 +1,11 @@
 import { mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { jobsApiKey } from '../src/api/jobs'
 import PrivacyDialog from '../src/components/workspace/PrivacyDialog.vue'
 import WorkspaceHeader from '../src/components/workspace/WorkspaceHeader.vue'
+import WorkspaceView from '../src/views/WorkspaceView.vue'
 import appSource from '../src/App.vue?raw'
 
 afterEach(() => {
@@ -58,6 +60,41 @@ describe('workspace accessibility surfaces', () => {
     await wrapper.setProps({ open: false })
     await nextTick()
     expect(document.activeElement).toBe(opener)
+  })
+
+  it('gives the help dialog the same focus lifecycle as privacy', async () => {
+    window.sessionStorage.clear()
+    const wrapper = mount(WorkspaceView, {
+      attachTo: document.body,
+      global: {
+        provide: {
+          [jobsApiKey as symbol]: {
+            createJob: vi.fn(),
+            getResult: vi.fn(),
+            subscribe: vi.fn()
+          }
+        }
+      }
+    })
+    const opener = wrapper.get<HTMLButtonElement>('[data-open-help]')
+    opener.element.focus()
+
+    await opener.trigger('click')
+    await nextTick()
+
+    const dialog = wrapper.get('[role="dialog"]')
+    const close = wrapper.get<HTMLButtonElement>('[data-close-help]')
+    expect(dialog.attributes('aria-modal')).toBe('true')
+    expect(document.activeElement).toBe(close.element)
+
+    await dialog.trigger('keydown', { key: 'Tab' })
+    expect(document.activeElement).toBe(close.element)
+
+    await dialog.trigger('keydown', { key: 'Escape' })
+    await nextTick()
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    expect(document.activeElement).toBe(opener.element)
+    wrapper.unmount()
   })
 
   it('globally near-disables animations and transitions for reduced motion', () => {

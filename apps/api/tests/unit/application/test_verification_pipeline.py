@@ -18,6 +18,7 @@ from text_verification.application.verification_pipeline import (
 from text_verification.checkers.registry import CheckerRegistry
 from text_verification.compatibility import llm_review
 from text_verification.config import Settings
+from text_verification.domain import issues as issue_domain
 from text_verification.domain.documents import DocumentModel, FileType, TextBlock
 from text_verification.domain.issues import Issue, IssueSeverity
 from text_verification.domain.ports import CheckContext, CheckResult
@@ -355,6 +356,28 @@ def test_pipeline_leaves_checker_programming_type_errors_visible() -> None:
 
     with pytest.raises(TypeError, match="programming defect"):
         pipeline.run(_direct_command())
+
+
+def test_pipeline_maps_issue_limit_exhaustion_to_a_typed_checking_error() -> None:
+    issue_limit_error = getattr(
+        issue_domain,
+        "IssueLimitExceededError",
+        ValueError,
+    )
+    pipeline = VerificationPipeline(
+        parsers=ParserRegistry(),
+        checkers=CheckerRegistry(
+            [FailingChecker(issue_limit_error("too many issues"))]
+        ),
+        reviewer=None,
+    )
+
+    with pytest.raises(VerificationError) as raised:
+        pipeline.run(_direct_command())
+
+    assert raised.value.code == "issue_limit_exceeded"
+    assert raised.value.stage == "checking"
+    assert raised.value.retryable is False
 
 
 def test_successful_canonical_llm_review_preserves_issue_ownership(

@@ -7,6 +7,7 @@ import {
   type VerificationApi
 } from '../src/api/verification'
 import EditPreview from '../src/components/workspace/EditPreview.vue'
+import SourceInputPanel from '../src/components/workspace/SourceInputPanel.vue'
 import { useWorkspaceSession } from '../src/composables/useWorkspaceSession'
 import {
   createVerificationResultSnapshot,
@@ -161,6 +162,60 @@ function verificationApi(
     persistRevision: vi.fn(),
     exportJob: vi.fn(),
     ...overrides
+  }
+}
+
+function createDeferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
+
+function directResult(
+  text: string,
+  identity: {
+    documentId: string
+    runId: string
+    sourceVersion: string
+  }
+): VerificationResult {
+  const length = Array.from(text).length
+  return {
+    ...result,
+    filename: 'direct.txt',
+    source_name: 'direct.txt',
+    file_type: 'txt',
+    file_id: null,
+    file_ext: null,
+    text,
+    blocks: result.blocks.map((block) => ({
+      ...block,
+      text,
+      global_end: length,
+      block_end: length
+    })),
+    document_id: identity.documentId,
+    verification_run_id: identity.runId,
+    source_version: identity.sourceVersion,
+    execution_mode: 'synchronous',
+    issues: [],
+    summary: {
+      total: 0,
+      by_type: {},
+      by_severity: {},
+      by_rule: {},
+      by_layer: {}
+    },
+    stats: {
+      ...result.stats,
+      char_count: length,
+      char_count_no_space: length,
+      primary_count: length
+    }
   }
 }
 
@@ -616,6 +671,158 @@ describe('WorkspaceView Task 6 integration', () => {
       expect.objectContaining({ grant: 'second-server-grant' })
     )
     expect(exportJob).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not restore prior recheck authority after reset invalidates a deferred response', async () => {
+    const firstChecked = directResult('帐号测试', {
+      documentId: '77777777-7777-4777-8777-777777777777',
+      runId: '88888888-8888-4888-8888-888888888888',
+      sourceVersion:
+        'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+    })
+    const secondChecked = directResult('帐号测试', {
+      documentId: '99999999-9999-4999-8999-999999999999',
+      runId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      sourceVersion:
+        'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
+    })
+    const deferred = createDeferred<{
+      result: VerificationResult
+      grant: string
+    }>()
+    const recheckJob = vi.fn()
+      .mockResolvedValueOnce({
+        result: firstChecked,
+        grant: 'first-server-grant'
+      })
+      .mockReturnValueOnce(deferred.promise)
+    seedSession(result)
+    const wrapper = mountWorkspace(verificationApi({ recheckJob }))
+    await flushPromises()
+    await wrapper.get('[data-action="recheck"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-action="recheck"]').trigger('click')
+    await flushPromises()
+
+    await wrapper.get('[data-reset-workspace]').trigger('click')
+    deferred.resolve({
+      result: secondChecked,
+      grant: 'second-server-grant'
+    })
+    await flushPromises()
+
+    const setupState = (wrapper.vm as any).$?.setupState
+    expect(setupState.fileExportAuthority).toBeNull()
+    expect(setupState.verificationWorkspace.result.value).toBeNull()
+  })
+
+  it('does not restore prior authority into a replacement request', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const firstChecked = directResult('帐号测试', {
+      documentId: '77777777-7777-4777-8777-777777777777',
+      runId: '88888888-8888-4888-8888-888888888888',
+      sourceVersion:
+        'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+    })
+    const staleChecked = directResult('帐号测试', {
+      documentId: '99999999-9999-4999-8999-999999999999',
+      runId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      sourceVersion:
+        'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
+    })
+    const replacement = directResult('新请求', {
+      documentId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      runId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      sourceVersion:
+        'sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'
+    })
+    const stale = createDeferred<{
+      result: VerificationResult
+      grant: string
+    }>()
+    const next = createDeferred<VerificationResult>()
+    const recheckJob = vi.fn()
+      .mockResolvedValueOnce({
+        result: firstChecked,
+        grant: 'first-server-grant'
+      })
+      .mockReturnValueOnce(stale.promise)
+    seedSession(result)
+    const wrapper = mountWorkspace(
+      verificationApi({
+        recheckJob,
+        analyzeText: vi.fn().mockReturnValue(next.promise)
+      })
+    )
+    await flushPromises()
+    await wrapper.get('[data-action="recheck"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-action="recheck"]').trigger('click')
+    await flushPromises()
+
+    await wrapper.get('[data-reset-workspace]').trigger('click')
+    wrapper.getComponent(SourceInputPanel).vm.$emit(
+      'submit-text',
+      '新请求'
+    )
+    await flushPromises()
+    stale.resolve({
+      result: staleChecked,
+      grant: 'stale-server-grant'
+    })
+    await flushPromises()
+    next.resolve(replacement)
+    await flushPromises()
+
+    const setupState = (wrapper.vm as any).$?.setupState
+    expect(setupState.fileExportAuthority).toBeNull()
+    expect(setupState.verificationWorkspace.result.value?.document_id).toBe(
+      replacement.document_id
+    )
+  })
+
+  it('does not rewrite session authority after unmount invalidates a deferred recheck', async () => {
+    const firstChecked = directResult('帐号测试', {
+      documentId: '77777777-7777-4777-8777-777777777777',
+      runId: '88888888-8888-4888-8888-888888888888',
+      sourceVersion:
+        'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+    })
+    const staleChecked = directResult('帐号测试', {
+      documentId: '99999999-9999-4999-8999-999999999999',
+      runId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      sourceVersion:
+        'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
+    })
+    const deferred = createDeferred<{
+      result: VerificationResult
+      grant: string
+    }>()
+    const recheckJob = vi.fn()
+      .mockResolvedValueOnce({
+        result: firstChecked,
+        grant: 'first-server-grant'
+      })
+      .mockReturnValueOnce(deferred.promise)
+    seedSession(result)
+    const wrapper = mountWorkspace(verificationApi({ recheckJob }))
+    await flushPromises()
+    await wrapper.get('[data-action="recheck"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-action="recheck"]').trigger('click')
+    await flushPromises()
+
+    wrapper.unmount()
+    window.sessionStorage.clear()
+    deferred.resolve({
+      result: staleChecked,
+      grant: 'stale-server-grant'
+    })
+    await flushPromises()
+
+    expect(
+      window.sessionStorage.getItem('text-verification-session')
+    ).toBeNull()
   })
 
   it('rejects an unrelated synchronous result instead of binding retained job authority', async () => {

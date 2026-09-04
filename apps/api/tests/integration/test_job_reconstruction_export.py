@@ -7,7 +7,8 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
-from threading import Event, RLock
+from threading import Event, Lock, RLock
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
@@ -26,6 +27,7 @@ from text_verification.application.reconstruction_export import (
     ReconstructionExportService,
     _document_with_revision_text,
 )
+from text_verification.compatibility import exporters as compatibility_exporters_module
 from text_verification.document_processing.ocr_provider import OcrTextBox
 from text_verification.domain.artifacts import ArtifactFinalizationRejection
 from text_verification.domain.documents import (
@@ -55,6 +57,7 @@ from text_verification.infrastructure.artifact_storage import (
 from text_verification.infrastructure.storage import (
     JobOwnedSourcePathResolver,
     JobStorage,
+    build_artifact_storage_key,
 )
 from text_verification.infrastructure.verification_repository import (
     JobResultSnapshot,
@@ -99,7 +102,11 @@ class _RepositoryState:
         if not self.authorize_missing_revisions:
             return
         for revision_id, revision in tuple(self.revisions.items()):
-            if revision.verified_provenance is not None:
+            if (
+                revision.verified_provenance is not None
+                or getattr(revision, "provenance_state", None)
+                == "legacy_unavailable"
+            ):
                 continue
             matched = next(
                 (
@@ -156,7 +163,10 @@ class _InMemoryExportRepository:
         job_id: UUID,
         verification_run_id: UUID,
         review_revision_id: UUID | None,
+        *,
+        allow_unavailable_provenance: bool = False,
     ) -> PersistedDocumentRevision | None:
+        del allow_unavailable_provenance
         result = self._state.result_by_job[job_id]
         if result.verification_run_id != verification_run_id:
             raise LookupError("verification run was superseded")
@@ -465,6 +475,74 @@ def _service(
         max_revision_bytes=max_revision_bytes,
         **kwargs,
     )
+
+
+def _docx_original_export_state(
+    storage: JobStorage,
+) -> tuple[
+    JobRead,
+    VerificationResult,
+    UUID,
+    _RepositoryState,
+]:
+    job_id = uuid4()
+    job_directory = storage.job_directory(job_id)
+    job_directory.mkdir(parents=True)
+    source_path = job_directory / "source.docx"
+    source = Document()
+    source.add_paragraph("帐号测试")
+    source.save(source_path)
+    source_bytes = source_path.read_bytes()
+    now = datetime(2026, 9, 4, 3, 0, tzinfo=UTC)
+    document = DocumentModel(
+        document_id=job_id,
+        source_version=f"sha256:{sha256(source_bytes).hexdigest()}",
+        file_type=FileType.DOCX,
+        source_name="sample.docx",
+        text="帐号测试",
+        blocks=[
+            _projection_block(
+                "text",
+                "paragraph",
+                "帐号测试",
+                0,
+                len("帐号测试"),
+            )
+        ],
+        parser_name="compatibility-docx",
+        parser_version="1",
+        metadata=DocumentMetadata(),
+    )
+    result = _result(document)
+    job = JobRead(
+        job_id=job_id,
+        source_name=document.source_name,
+        file_type=FileType.DOCX,
+        size_bytes=len(source_bytes),
+        status=JobStatus.COMPLETED,
+        progress=100,
+        created_at=now,
+        expires_at=now + timedelta(hours=24),
+    )
+    revision_id = uuid4()
+    state = _RepositoryState(
+        {job_id: result},
+        revisions={
+            revision_id: PersistedDocumentRevision(
+                revision_id=revision_id,
+                document_id=job_id,
+                verification_run_id=result.verification_run_id,
+                source_version=result.source_version,
+                revision_number=1,
+                created_at=now + timedelta(minutes=1),
+                parent_revision_id=None,
+                persistence_state="persisted",
+                kind=DocumentRevisionKind.REVIEW,
+                text="账号测试",
+            )
+        },
+    )
+    return job, result, revision_id, state
 
 
 def _projection_document(
@@ -1744,6 +1822,381 @@ def test_job_owned_original_format_export_uses_the_persisted_revision(
         assert download.handle.read_bytes() == b"edited text"
     assert artifact.file_type is FileType.TXT
     assert artifact.file_name.endswith(".txt")
+
+
+@pytest.mark.parametrize("file_type", list(FileType))
+def test_job_owned_original_export_uses_a_verified_snapshot_for_every_format(
+    tmp_path: Path,
+    file_type: FileType,
+) -> None:
+    storage = JobStorage(tmp_path / "jobs", max_upload_bytes=1024 * 1024)
+    job_id = uuid4()
+    original_bytes = f"original-{file_type.value}".encode()
+    job_directory = storage.job_directory(job_id)
+    job_directory.mkdir(parents=True)
+    source_path = job_directory / f"source.{file_type.value}"
+    source_path.write_bytes(original_bytes)
+    now = datetime(2026, 9, 4, 2, 0, tzinfo=UTC)
+    document = DocumentModel(
+        document_id=job_id,
+        source_version=f"sha256:{sha256(original_bytes).hexdigest()}",
+        file_type=file_type,
+        source_name=f"sample.{file_type.value}",
+        text="source",
+        blocks=[
+            _projection_block(
+                "text",
+                "paragraph",
+                "source",
+                0,
+                len("source"),
+            )
+        ],
+        parser_name="test",
+        parser_version="1",
+        metadata=DocumentMetadata(),
+    )
+    result = _result(document)
+    job = JobRead(
+        job_id=job_id,
+        source_name=document.source_name,
+        file_type=file_type,
+        size_bytes=len(original_bytes),
+        status=JobStatus.COMPLETED,
+        progress=100,
+        created_at=now,
+        expires_at=now + timedelta(hours=24),
+    )
+    state = _RepositoryState({job_id: result})
+    observed: list[bytes] = []
+
+    @dataclass(frozen=True)
+    class SnapshotExporter:
+        file_type: FileType
+        resolver: Any
+
+        def export(
+            self,
+            exported_document: DocumentModel,
+            _issues: list[object],
+            target: Path,
+            **_kwargs: object,
+        ) -> Path:
+            resolved = self.resolver.resolve(exported_document)
+            observed.append(resolved.read_bytes())
+            target.write_bytes(observed[-1])
+            return target
+
+    def registry_factory(resolver):
+        source_path.write_bytes(b"tampered after snapshot")
+        return ExporterRegistry([SnapshotExporter(file_type, resolver)])
+
+    service = ReconstructionExportService(
+        storage,
+        _repository_factory(state),
+        exporter_registry_factory=registry_factory,
+    )
+    artifact = service.export(job, ExportFormat.ORIGINAL_FORMAT)
+    download = service.download(job_id, artifact.export_artifact_id)
+
+    with download.handle:
+        assert download.handle.read_bytes() == original_bytes
+    assert observed == [original_bytes]
+
+
+def test_job_owned_original_export_rejects_tampered_source_without_artifact(
+    tmp_path: Path,
+) -> None:
+    storage = JobStorage(tmp_path / "jobs", max_upload_bytes=1024 * 1024)
+    job_id = uuid4()
+    source_bytes = b"original"
+    job_directory = storage.job_directory(job_id)
+    job_directory.mkdir(parents=True)
+    source_path = job_directory / "source.txt"
+    source_path.write_bytes(b"tampered")
+    now = datetime(2026, 9, 4, 2, 0, tzinfo=UTC)
+    document = DocumentModel(
+        document_id=job_id,
+        source_version=f"sha256:{sha256(source_bytes).hexdigest()}",
+        file_type=FileType.TXT,
+        source_name="sample.txt",
+        text="source",
+        blocks=[
+            _projection_block("text", "paragraph", "source", 0, len("source"))
+        ],
+        parser_name="test",
+        parser_version="1",
+        metadata=DocumentMetadata(),
+    )
+    result = _result(document)
+    job = JobRead(
+        job_id=job_id,
+        source_name=document.source_name,
+        file_type=FileType.TXT,
+        size_bytes=len(source_bytes),
+        status=JobStatus.COMPLETED,
+        progress=100,
+        created_at=now,
+        expires_at=now + timedelta(hours=24),
+    )
+    state = _RepositoryState({job_id: result})
+    registry_calls = 0
+
+    @dataclass(frozen=True)
+    class PassthroughExporter:
+        file_type: FileType = FileType.TXT
+
+        def export(
+            self,
+            _document: DocumentModel,
+            _issues: list[object],
+            target: Path,
+            **_kwargs: object,
+        ) -> Path:
+            target.write_bytes(b"unexpected")
+            return target
+
+    def registry_factory(_resolver):
+        nonlocal registry_calls
+        registry_calls += 1
+        return ExporterRegistry([PassthroughExporter()])
+    service = ReconstructionExportService(
+        storage,
+        _repository_factory(state),
+        exporter_registry_factory=registry_factory,
+    )
+
+    with pytest.raises(VerificationError) as raised:
+        service.export(job, ExportFormat.ORIGINAL_FORMAT)
+
+    assert raised.value.code == "original_format_export_failed"
+    assert registry_calls == 0
+    assert state.artifacts == {}
+    assert not list((storage._root / "artifacts").rglob("*"))
+
+
+def test_ready_legacy_revision_artifact_is_download_only_without_regeneration(
+    tmp_path: Path,
+) -> None:
+    storage = JobStorage(tmp_path / "jobs", max_upload_bytes=1024 * 1024)
+    job_id = uuid4()
+    source = storage.save_bytes(job_id, "sample.txt", b"source")
+    now = datetime(2026, 9, 4, 2, 0, tzinfo=UTC)
+    document = DocumentModel(
+        document_id=job_id,
+        source_version=f"sha256:{sha256(b'source').hexdigest()}",
+        file_type=FileType.TXT,
+        source_name="sample.txt",
+        text="source",
+        blocks=[
+            _projection_block("text", "paragraph", "source", 0, len("source"))
+        ],
+        parser_name="test",
+        parser_version="1",
+        metadata=DocumentMetadata(),
+    )
+    result = _result(document)
+    job = JobRead(
+        job_id=job_id,
+        source_name=document.source_name,
+        file_type=FileType.TXT,
+        size_bytes=source.size_bytes,
+        status=JobStatus.COMPLETED,
+        progress=100,
+        created_at=now,
+        expires_at=now + timedelta(hours=24),
+    )
+    revision_id = uuid4()
+    artifact_id = uuid4()
+    artifact_data = b"legacy ready artifact"
+    storage_key = build_artifact_storage_key(
+        job_id,
+        artifact_id,
+        FileType.TXT,
+    )
+    with storage.publish_verified_artifact(
+        job_id,
+        artifact_id,
+        storage_key,
+        FileType.TXT,
+        artifact_data,
+    ):
+        pass
+    state = _RepositoryState(
+        {job_id: result},
+        revisions={
+            revision_id: PersistedDocumentRevision(
+                revision_id=revision_id,
+                document_id=job_id,
+                verification_run_id=result.verification_run_id,
+                source_version=result.source_version,
+                revision_number=1,
+                created_at=now,
+                parent_revision_id=None,
+                persistence_state="persisted",
+                kind=DocumentRevisionKind.MANUAL,
+                text="legacy manual",
+                provenance_state="legacy_unavailable",
+            )
+        },
+        artifacts={
+            artifact_id: ArtifactSnapshot(
+                export_artifact_id=artifact_id,
+                job_id=job_id,
+                verification_run_id=result.verification_run_id,
+                review_revision_id=revision_id,
+                source_version=result.source_version,
+                file_type=FileType.TXT,
+                file_name="sample-modified.txt",
+                media_type="text/plain",
+                storage_key=storage_key,
+                size_bytes=len(artifact_data),
+                content_sha256=sha256(artifact_data).hexdigest(),
+                status=ArtifactLifecycleStatus.READY,
+                reserved_at=now,
+                ready_at=now,
+                created_at=now,
+            )
+        },
+        authorize_missing_revisions=False,
+    )
+    service = _service(storage, state)
+
+    download = service.download(job_id, artifact_id)
+    with download.handle:
+        assert download.handle.read_bytes() == artifact_data
+
+    (storage._root / storage_key).unlink()
+    with pytest.raises(VerificationError) as raised:
+        service.export(
+            job,
+            ExportFormat.ORIGINAL_FORMAT,
+            review_revision_id=revision_id,
+        )
+
+    assert raised.value.code == "revision_provenance_invalid"
+    assert state.artifacts[artifact_id].status is ArtifactLifecycleStatus.READY
+
+
+def test_tracked_docx_delayed_repair_reuses_the_original_digest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = JobStorage(tmp_path / "jobs", max_upload_bytes=5 * 1024 * 1024)
+    job, _result_value, revision_id, state = _docx_original_export_state(storage)
+    clock_values = iter(
+        [
+            datetime(2026, 9, 4, 4, 0, tzinfo=UTC),
+            datetime(2026, 9, 4, 5, 0, tzinfo=UTC),
+        ]
+    )
+
+    class ChangingDateTime:
+        @classmethod
+        def now(cls, tz=None):
+            del cls, tz
+            return next(clock_values)
+
+    monkeypatch.setattr(
+        compatibility_exporters_module,
+        "datetime",
+        ChangingDateTime,
+        raising=False,
+    )
+    service = _service(storage, state)
+    first = service.export(
+        job,
+        ExportFormat.ORIGINAL_FORMAT,
+        review_revision_id=revision_id,
+        track_changes=True,
+    )
+    snapshot = state.artifacts[first.export_artifact_id]
+    (storage._root / snapshot.storage_key).write_bytes(b"corrupt")
+
+    repaired = service.export(
+        job,
+        ExportFormat.ORIGINAL_FORMAT,
+        review_revision_id=revision_id,
+        track_changes=True,
+    )
+
+    assert repaired == first
+    download = service.download(job.job_id, first.export_artifact_id)
+    with download.handle:
+        assert sha256(download.handle.read_bytes()).hexdigest() == first.content_sha256
+
+
+def test_concurrent_tracked_docx_repairs_converge_on_one_digest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = JobStorage(tmp_path / "jobs", max_upload_bytes=5 * 1024 * 1024)
+    job, _result_value, revision_id, state = _docx_original_export_state(storage)
+    clock_lock = Lock()
+    clock_calls = 0
+
+    class ChangingDateTime:
+        @classmethod
+        def now(cls, tz=None):
+            nonlocal clock_calls
+            del cls, tz
+            with clock_lock:
+                current = datetime(2026, 9, 4, 6, 0, tzinfo=UTC) + timedelta(
+                    seconds=clock_calls
+                )
+                clock_calls += 1
+                return current
+
+    monkeypatch.setattr(
+        compatibility_exporters_module,
+        "datetime",
+        ChangingDateTime,
+        raising=False,
+    )
+    service = _service(storage, state)
+    first = service.export(
+        job,
+        ExportFormat.ORIGINAL_FORMAT,
+        review_revision_id=revision_id,
+        track_changes=True,
+    )
+    snapshot = state.artifacts[first.export_artifact_id]
+    (storage._root / snapshot.storage_key).write_bytes(b"corrupt")
+
+    def repair():
+        try:
+            return service.export(
+                job,
+                ExportFormat.ORIGINAL_FORMAT,
+                review_revision_id=revision_id,
+                track_changes=True,
+            )
+        except VerificationError as error:
+            return error
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(lambda _: repair(), range(2)))
+
+    references = [
+        outcome
+        for outcome in outcomes
+        if not isinstance(outcome, VerificationError)
+    ]
+    errors = [
+        outcome
+        for outcome in outcomes
+        if isinstance(outcome, VerificationError)
+    ]
+    assert references
+    assert all(reference == first for reference in references)
+    assert all(
+        error.code == "export_artifact_repair_pending"
+        and error.retryable is True
+        for error in errors
+    )
+    download = service.download(job.job_id, first.export_artifact_id)
+    with download.handle:
+        assert sha256(download.handle.read_bytes()).hexdigest() == first.content_sha256
 
 
 @pytest.mark.parametrize(

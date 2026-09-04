@@ -17,6 +17,7 @@ import type {
 const documentId = '11111111-1111-1111-8111-111111111111'
 const runId = '22222222-2222-2222-8222-222222222222'
 const sourceVersion = 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+const MAX_VERIFICATION_ISSUES = 100_000
 const uuidPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
@@ -3021,6 +3022,118 @@ describe('useVerificationWorkspace', () => {
     workspace.loadResult(buildResult([issue]))
     expect(workspace.issueStates.value).toEqual({})
     expect(workspace.selectedSuggestions.value).toEqual({})
+  })
+
+  it.each([
+    ['null', null],
+    ['omitted', undefined]
+  ])('normalizes %s issue alternatives to one frozen canonical array', (_label, alternatives) => {
+    const issue = buildIssue()
+    ;(issue as unknown as { alternatives?: string[] | null }).alternatives =
+      alternatives
+    const raw = buildResult([issue])
+    const snapshot = createVerificationResultSnapshot(raw)
+
+    expect(snapshot?.issues[0]?.alternatives).toEqual([])
+    expect(Object.isFrozen(snapshot?.issues[0]?.alternatives)).toBe(true)
+  })
+
+  it('rejects an over-limit issue array before reading issue entries', () => {
+    const result = buildResult([])
+    const issues = new Proxy(
+      new Array(MAX_VERIFICATION_ISSUES + 1),
+      {
+        get(target, property, receiver) {
+          if (property === Symbol.iterator) {
+            throw new Error('issue entries must not be read')
+          }
+          return Reflect.get(target, property, receiver)
+        }
+      }
+    )
+
+    expect(
+      createVerificationResultSnapshot({
+        ...result,
+        issues,
+        summary: {
+          total: MAX_VERIFICATION_ISSUES + 1,
+          by_type: {},
+          by_severity: {},
+          by_rule: {},
+          by_layer: {}
+        }
+      })
+    ).toBeNull()
+  })
+
+  it('precomputes document code-point offsets once for many issue validations', () => {
+    const issueCount = 500
+    const text = '错对'.repeat(issueCount)
+    const issues = Array.from({ length: issueCount }, (_, index) => {
+      const start = index * 2
+      return buildIssue({
+        issue_id: `33333333-3333-4333-8333-${String(index).padStart(12, '0')}`,
+        start,
+        end: start + 1,
+        block_start: start,
+        block_end: start + 1,
+        original: '错'
+      })
+    })
+    const raw = buildResult(issues, { text })
+    const originalIterator = String.prototype[Symbol.iterator]
+    let documentCharacterReads = 0
+    const iterator = vi
+      .spyOn(String.prototype, Symbol.iterator)
+      .mockImplementation(function* (
+        this: string
+      ): Generator<string, undefined, unknown> {
+        const value = String(this)
+        for (const character of originalIterator.call(value)) {
+          if (value === text) {
+            documentCharacterReads += 1
+          }
+          yield character
+        }
+        return undefined
+      })
+
+    try {
+      expect(createVerificationResultSnapshot(raw)).not.toBeNull()
+    } finally {
+      iterator.mockRestore()
+    }
+
+    expect(documentCharacterReads).toBeLessThan(20_000)
+  })
+
+  it('keeps exact unmatched-quote acceptance anchored without mutating a prefix', () => {
+    const text = '前😀缀「未闭'
+    const quote = buildIssue({
+      start: 3,
+      end: 4,
+      block_start: 3,
+      block_end: 4,
+      original: '「',
+      suggestion: null,
+      alternatives: [],
+      type: 'punctuation',
+      layer: 'format',
+      message: '引号未配对',
+      description: '引号未配对',
+      rule_id: 'unmatched_quote',
+      auto_fixable: false,
+      context: text
+    })
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(buildResult([quote], { text }))
+
+    workspace.acceptIssue(quote.issue_id)
+
+    expect(workspace.modifiedText.value).toBe(text)
+    expect(workspace.currentRevision.value?.text).toBe(text)
+    expect(workspace.issueStates.value[quote.issue_id]).toBe('accepted')
   })
 
   it('defines persisted revisions separately with positive server revision numbers', () => {

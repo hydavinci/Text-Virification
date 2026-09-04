@@ -36,6 +36,7 @@ from text_verification.domain.verification import (
     PersistedDocumentRevision,
     ReviewRevisionDraft,
     RevisionProvenanceKind,
+    RevisionProvenanceState,
     Scenario,
     StaleReviewRevisionError,
     VerificationAnalysisMode,
@@ -267,6 +268,11 @@ class VerificationRepository:
                 if verified_provenance is None
                 else verified_provenance.model_dump(mode="json")
             ),
+            (
+                RevisionProvenanceState.LEGACY_UNAVAILABLE.value
+                if verified_provenance is None
+                else RevisionProvenanceState.VERIFIED.value
+            ),
             created_at,
         )
         if existing is not None:
@@ -277,6 +283,7 @@ class VerificationRepository:
                 existing.revision_number,
                 existing.text,
                 existing.verified_provenance,
+                existing.provenance_state,
                 existing.created_at,
             )
             if persisted != values:
@@ -314,6 +321,11 @@ class VerificationRepository:
                             None
                             if verified_provenance is None
                             else verified_provenance.model_dump(mode="json")
+                        ),
+                        provenance_state=(
+                            RevisionProvenanceState.LEGACY_UNAVAILABLE.value
+                            if verified_provenance is None
+                            else RevisionProvenanceState.VERIFIED.value
                         ),
                         created_at=created_at,
                     )
@@ -366,6 +378,8 @@ class VerificationRepository:
             if (
                 _revision_draft_identity(persisted) != draft
                 or persisted.verified_provenance != verified_provenance
+                or persisted.provenance_state
+                is not RevisionProvenanceState.VERIFIED
             ):
                 raise ValueError(
                     f"Review revision {draft.revision_id} is already persisted "
@@ -421,6 +435,7 @@ class VerificationRepository:
             kind=draft.kind.value,
             text=draft.text,
             verified_provenance=verified_provenance.model_dump(mode="json"),
+            provenance_state=RevisionProvenanceState.VERIFIED.value,
             created_at=created_at,
         )
         try:
@@ -445,6 +460,8 @@ class VerificationRepository:
         job_id: UUID,
         verification_run_id: UUID,
         review_revision_id: UUID | None,
+        *,
+        allow_unavailable_provenance: bool = False,
     ) -> PersistedDocumentRevision | None:
         run = self._lock_run(verification_run_id)
         job = self._lock_job(run.job_id)
@@ -457,7 +474,15 @@ class VerificationRepository:
             review_revision_id,
         )
         if revision is not None:
-            _assert_stored_revision_provenance(job_id, run, revision)
+            provenance_state = RevisionProvenanceState(
+                revision.provenance_state
+            )
+            if provenance_state is RevisionProvenanceState.VERIFIED:
+                _assert_stored_revision_provenance(job_id, run, revision)
+            elif not allow_unavailable_provenance:
+                raise InvalidRevisionProvenanceError(
+                    "Review revision provenance is unavailable."
+                )
         latest = self._latest_review_revision(verification_run_id)
         if (revision is None) != (latest is None) or (
             revision is not None
@@ -1194,6 +1219,7 @@ def _persisted_revision_from_row(
         kind=DocumentRevisionKind(row.kind),
         text=row.text,
         verified_provenance=verified_provenance,
+        provenance_state=RevisionProvenanceState(row.provenance_state),
     )
 
 
@@ -1261,6 +1287,13 @@ def _assert_stored_revision_provenance(
     run: VerificationRunRow,
     revision: ReviewRevisionRow,
 ) -> None:
+    if (
+        RevisionProvenanceState(revision.provenance_state)
+        is not RevisionProvenanceState.VERIFIED
+    ):
+        raise InvalidRevisionProvenanceError(
+            "Review revision provenance is unavailable."
+        )
     if revision.verified_provenance is None:
         raise InvalidRevisionProvenanceError(
             "Review revision has no verified provenance."

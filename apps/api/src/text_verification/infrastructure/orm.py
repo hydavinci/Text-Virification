@@ -410,9 +410,15 @@ class ReviewRevisionRow(Base):
             name="ck_review_revisions_kind",
         ),
         CheckConstraint(
-            "verified_provenance IS NULL "
-            "OR jsonb_typeof(verified_provenance) = 'object'",
-            name="ck_review_revisions_verified_provenance_object",
+            "("
+            "provenance_state = 'verified' "
+            "AND verified_provenance IS NOT NULL "
+            "AND jsonb_typeof(verified_provenance) = 'object'"
+            ") OR ("
+            "provenance_state = 'legacy_unavailable' "
+            "AND verified_provenance IS NULL"
+            ")",
+            name="ck_review_revisions_provenance_state",
         ),
     )
 
@@ -434,6 +440,7 @@ class ReviewRevisionRow(Base):
         JSONB,
         nullable=True,
     )
+    provenance_state: Mapped[str] = mapped_column(String(32), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     run: Mapped[VerificationRunRow] = relationship(back_populates="review_revisions")
 

@@ -6,11 +6,9 @@ import math
 import os
 import stat
 import struct
-import zipfile
 import zlib
 from collections.abc import Mapping
 from dataclasses import dataclass, fields
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
@@ -38,13 +36,14 @@ from text_verification.domain.ports import (
     AnchoredSourcePathResolver,
     ResolvedSourcePath,
 )
+from text_verification.exporters.docx_determinism import (
+    save_deterministic_docx,
+)
 
 DOCX_RECONSTRUCTION = ExportFormat.DOCX_RECONSTRUCTION
 _DEFAULT_PAGE_WIDTH_POINTS = 612.0
 _DEFAULT_PAGE_HEIGHT_POINTS = 792.0
 _DEFAULT_MARGIN_POINTS = 54.0
-_FIXED_CORE_PROPERTY_TIME = datetime(2000, 1, 1, tzinfo=UTC)
-_FIXED_ZIP_TIME = (2000, 1, 1, 0, 0, 0)
 _XML_REPLACEMENT_CHARACTER = "\ufffd"
 _TABLE_GEOMETRY_TOLERANCE_POINTS = 0.5
 _TABLE_MIN_HORIZONTAL_OVERLAP_RATIO = 0.1
@@ -120,18 +119,6 @@ class _Table:
 type _RenderUnit = TextBlock | _Table
 
 
-class _BoundedBytesIO(io.BytesIO):
-    def __init__(self, max_bytes: int) -> None:
-        super().__init__()
-        self._max_bytes = max_bytes
-
-    def write(self, data: Any) -> int:
-        size = len(data)
-        if max(len(self.getbuffer()), self.tell() + size) > self._max_bytes:
-            raise ExportError("Reconstructed DOCX exceeds the configured output size limit.")
-        return super().write(data)
-
-
 @dataclass(frozen=True)
 class DocxReconstructionExporter:
     limits: DocxReconstructionLimits = DocxReconstructionLimits()
@@ -158,36 +145,15 @@ class DocxReconstructionExporter:
         )
 
         output = Document()
-        _set_core_properties(output, document)
         _render_paginated_units(output, document, units, images)
-
-        stream = _BoundedBytesIO(self.limits.max_output_bytes)
-        output.save(stream)
-        content = _canonical_docx_archive(
-            stream.getvalue(),
+        content = save_deterministic_docx(
+            output,
             max_bytes=self.limits.max_output_bytes,
+            title=_xml_safe_text(Path(document.source_name).stem),
+            error_factory=ExportError,
         )
         _publish_atomic(target, content)
         return target
-
-
-def _canonical_docx_archive(content: bytes, *, max_bytes: int) -> bytes:
-    output = _BoundedBytesIO(max_bytes)
-    with zipfile.ZipFile(io.BytesIO(content)) as source:
-        with zipfile.ZipFile(
-            output,
-            mode="w",
-            compression=zipfile.ZIP_DEFLATED,
-            compresslevel=9,
-        ) as target:
-            for source_info in sorted(source.infolist(), key=lambda info: info.filename):
-                canonical_info = zipfile.ZipInfo(source_info.filename, _FIXED_ZIP_TIME)
-                canonical_info.compress_type = zipfile.ZIP_DEFLATED
-                canonical_info.create_system = 3
-                canonical_info.external_attr = source_info.external_attr
-                canonical_info.flag_bits = source_info.flag_bits & 0x800
-                target.writestr(canonical_info, source.read(source_info))
-    return output.getvalue()
 
 
 def _render_paginated_units(
@@ -1317,12 +1283,6 @@ def _jpeg_dimensions(content: bytes) -> tuple[int, int]:
             return width, height
         offset += segment_length
     raise ExportError("JPEG image dimensions are missing.")
-
-
-def _set_core_properties(output: Any, document: DocumentModel) -> None:
-    output.core_properties.title = _xml_safe_text(Path(document.source_name).stem)
-    output.core_properties.created = _FIXED_CORE_PROPERTY_TIME
-    output.core_properties.modified = _FIXED_CORE_PROPERTY_TIME
 
 
 def _xml_safe_text(value: str) -> str:

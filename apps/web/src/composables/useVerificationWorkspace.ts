@@ -21,6 +21,7 @@ import type {
   VerificationSummary,
   WorkspaceReviewSummary
 } from '../types/verification'
+import { isVerificationIssueCountAllowed } from '../validation/verificationLimits'
 
 interface BatchStateSnapshot {
   documentId: string
@@ -409,7 +410,9 @@ function isAncestor(
 function isCanonicalIssue(
   issue: VerificationIssue,
   result: VerificationResult,
-  blocksById: ReadonlyMap<string, VerificationResult['blocks'][number]>
+  blocksById: ReadonlyMap<string, VerificationResult['blocks'][number]>,
+  documentOffsets: readonly number[],
+  blockOffsetsById: ReadonlyMap<string, readonly number[]>
 ): boolean {
   if (
     !issue.issue_id ||
@@ -419,8 +422,14 @@ function isCanonicalIssue(
     !Number.isInteger(issue.end) ||
     issue.start < 0 ||
     issue.end <= issue.start ||
-    issue.end - issue.start !== codePointLength(issue.original) ||
-    sliceCodePointRange(result.text, issue.start, issue.end) !== issue.original
+    issue.end - issue.start !==
+      utf16OffsetsByCodePoint(issue.original).length - 1 ||
+    sliceCodePointRangeWithOffsets(
+      result.text,
+      documentOffsets,
+      issue.start,
+      issue.end
+    ) !== issue.original
   ) {
     return false
   }
@@ -430,8 +439,10 @@ function isCanonicalIssue(
   }
 
   const block = blocksById.get(issue.block_id)
+  const blockOffsets = blockOffsetsById.get(issue.block_id)
   if (
     block === undefined ||
+    blockOffsets === undefined ||
     !isInteger(issue.block_start) ||
     !isInteger(issue.block_end) ||
     issue.block_end <= issue.block_start ||
@@ -449,7 +460,12 @@ function isCanonicalIssue(
   return (
     issue.block_start === expectedBlockStart &&
     issue.block_end === expectedBlockEnd &&
-    sliceCodePointRange(block.text, localStart, localEnd) === issue.original
+    sliceCodePointRangeWithOffsets(
+      block.text,
+      blockOffsets,
+      localStart,
+      localEnd
+    ) === issue.original
   )
 }
 
@@ -460,8 +476,23 @@ function canonicalIssues(
     return null
   }
   const blocksById = new Map(result.blocks.map((block) => [block.block_id, block]))
+  const documentOffsets = utf16OffsetsByCodePoint(result.text)
+  const blockOffsetsById = new Map(
+    result.blocks.map((block) => [
+      block.block_id,
+      utf16OffsetsByCodePoint(block.text)
+    ])
+  )
   const candidates = result.issues
-    .filter((issue) => isCanonicalIssue(issue, result, blocksById))
+    .filter((issue) =>
+      isCanonicalIssue(
+        issue,
+        result,
+        blocksById,
+        documentOffsets,
+        blockOffsetsById
+      )
+    )
     .sort((left, right) =>
       left.start - right.start ||
       left.end - right.end ||
@@ -652,7 +683,7 @@ function copyVerificationIssue(value: unknown): VerificationIssue | null {
   }
   const alternatives =
     value.alternatives === undefined || value.alternatives === null
-      ? value.alternatives
+      ? []
       : copyStringArray(value.alternatives)
   const review =
     value.review === undefined || value.review === null
@@ -687,9 +718,7 @@ function copyVerificationIssue(value: unknown): VerificationIssue | null {
       value.severity !== 'info') ||
     typeof value.original !== 'string' ||
     (value.suggestion !== null && typeof value.suggestion !== 'string') ||
-    (alternatives !== undefined &&
-      alternatives !== null &&
-      !Array.isArray(alternatives)) ||
+    !Array.isArray(alternatives) ||
     typeof value.layer !== 'string' ||
     typeof value.message !== 'string' ||
     typeof value.description !== 'string' ||
@@ -723,8 +752,7 @@ function copyVerificationIssue(value: unknown): VerificationIssue | null {
     severity: value.severity,
     original: value.original,
     suggestion: value.suggestion,
-    alternatives:
-      alternatives === undefined ? undefined : alternatives,
+    alternatives,
     layer: value.layer,
     message: value.message,
     description: value.description,
@@ -1470,6 +1498,7 @@ export function createVerificationResultSnapshot(
     typeof value.parser_version !== 'string' ||
     stats === null ||
     !Array.isArray(value.issues) ||
+    !isVerificationIssueCountAllowed(value.issues.length) ||
     summary === null ||
     typeof value.document_id !== 'string' ||
     !isUuid(value.document_id) ||

@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
+import stat
+import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -431,3 +436,147 @@ class JobOwnedSourcePathResolver:
         if source_path is not None:
             raise ValueError("Job-owned source paths cannot be overridden.")
         return self.resolve_anchored(document).path
+
+    @contextmanager
+    def open_verified_copy(
+        self,
+        document: DocumentModel,
+    ) -> Iterator[Path]:
+        resolved = self.resolve_anchored(document)
+        content = _read_verified_source(
+            resolved,
+            max_bytes=self.storage.max_document_bytes,
+            expected_source_version=document.source_version,
+        )
+        with tempfile.TemporaryDirectory(
+            prefix="text-verification-source-",
+        ) as directory:
+            snapshot = Path(directory) / f"source.{self.file_type.value}"
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            file_fd = os.open(snapshot, flags, 0o400)
+            try:
+                _write_all(file_fd, content)
+                os.fsync(file_fd)
+                os.fchmod(file_fd, 0o400)
+            finally:
+                os.close(file_fd)
+            yield snapshot
+
+
+def _read_verified_source(
+    resolved: ResolvedSourcePath,
+    *,
+    max_bytes: int,
+    expected_source_version: str,
+) -> bytes:
+    if not _supports_secure_source_access():
+        raise InvalidUpload("Secure source access is unavailable on this platform.")
+    root_fd = _open_absolute_directory(resolved.root)
+    directory_fd = root_fd
+    opened_directories: list[int] = []
+    file_fd = -1
+    try:
+        for part in resolved.relative_path.parts[:-1]:
+            next_fd = os.open(
+                part,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=directory_fd,
+            )
+            opened_directories.append(next_fd)
+            directory_fd = next_fd
+        file_fd = os.open(
+            resolved.relative_path.name,
+            os.O_RDONLY | os.O_NOFOLLOW,
+            dir_fd=directory_fd,
+        )
+        before = os.fstat(file_fd)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_size <= 0
+            or before.st_size > max_bytes
+        ):
+            raise InvalidUpload("Stored source is unsafe or exceeds its size limit.")
+        content = _read_bounded(file_fd, max_bytes)
+        after = os.fstat(file_fd)
+        if (
+            (before.st_dev, before.st_ino, before.st_size)
+            != (after.st_dev, after.st_ino, after.st_size)
+            or before.st_mtime_ns != after.st_mtime_ns
+            or before.st_ctime_ns != after.st_ctime_ns
+        ):
+            raise InvalidUpload("Stored source changed while it was being verified.")
+    except InvalidUpload:
+        raise
+    except OSError as error:
+        raise InvalidUpload("Stored source is unsafe or unavailable.") from error
+    finally:
+        if file_fd >= 0:
+            os.close(file_fd)
+        for opened_fd in reversed(opened_directories):
+            os.close(opened_fd)
+        os.close(root_fd)
+    actual_source_version = f"sha256:{hashlib.sha256(content).hexdigest()}"
+    if actual_source_version != expected_source_version:
+        raise InvalidUpload(
+            "Stored source does not match the canonical source version."
+        )
+    return content
+
+
+def _open_absolute_directory(path: Path) -> int:
+    if not path.is_absolute() or ".." in path.parts:
+        raise InvalidUpload("Stored source root is unsafe or unavailable.")
+    current_fd = -1
+    try:
+        current_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+        for part in path.parts[1:]:
+            next_fd = os.open(
+                part,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=current_fd,
+            )
+            os.close(current_fd)
+            current_fd = next_fd
+        return current_fd
+    except OSError as error:
+        if current_fd >= 0:
+            os.close(current_fd)
+        raise InvalidUpload(
+            "Stored source root is unsafe or unavailable."
+        ) from error
+
+
+def _read_bounded(file_fd: int, max_bytes: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = max_bytes + 1
+    while remaining > 0:
+        chunk = os.read(file_fd, min(1024 * 1024, remaining))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    content = b"".join(chunks)
+    if len(content) > max_bytes:
+        raise InvalidUpload("Stored source exceeds its size limit.")
+    return content
+
+
+def _supports_secure_source_access() -> bool:
+    supports_dir_fd = getattr(os, "supports_dir_fd", ())
+    return (
+        hasattr(os, "O_DIRECTORY")
+        and hasattr(os, "O_NOFOLLOW")
+        and os.open in supports_dir_fd
+    )
+
+
+def _write_all(file_fd: int, content: bytes) -> None:
+    view = memoryview(content)
+    written = 0
+    while written < len(view):
+        count = os.write(file_fd, view[written:])
+        if count <= 0:
+            raise OSError("short write")
+        written += count

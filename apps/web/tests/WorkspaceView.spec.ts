@@ -343,14 +343,14 @@ describe('WorkspaceView', () => {
 
     const input = wrapper.getComponent(SourceInputPanel)
     await input.get('[data-mode="text"]').trigger('click')
-    await input.get('textarea').setValue('检查文本')
+    await input.get('textarea').setValue(' \ufeff检查文本 \n')
     await input.get('textarea').trigger('keydown', {
       key: 'Enter',
       ctrlKey: true
     })
     await flushPromises()
 
-    expect(analyzeText).toHaveBeenCalledWith('检查文本', {
+    expect(analyzeText).toHaveBeenCalledWith(' \ufeff检查文本 \n', {
       scenario: 'academic',
       enableSecurity: false,
       enableSensitive: false,
@@ -868,7 +868,7 @@ describe('WorkspaceView', () => {
           type: 'banned_word',
           severity: 'error',
           suggestion: null,
-          alternatives: null,
+          alternatives: [],
           layer: 'discourse',
           message: '禁用词',
           description: '请人工处理',
@@ -1752,7 +1752,7 @@ describe('WorkspaceView', () => {
           block_end: 5,
           original: '错',
           suggestion: '正',
-          alternatives: null,
+          alternatives: [],
           context: '😀甲错乙错'
         })
       ],

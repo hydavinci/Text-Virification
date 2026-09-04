@@ -6,6 +6,7 @@ import type {
   VerificationIssue,
   VerificationResult
 } from '../../types/verification'
+import { MAX_VERIFICATION_ISSUES } from '../../validation/verificationLimits'
 
 type DocumentViewMode = 'sentence' | 'continuous'
 
@@ -29,6 +30,17 @@ interface SourceLine {
   segments: readonly SourceSegment[]
 }
 
+interface IndexedText {
+  characters: readonly string[]
+  utf16Offsets: readonly number[]
+}
+
+interface PreparedIssue {
+  issue: VerificationIssue
+  start: number
+  end: number
+}
+
 const props = withDefaults(
   defineProps<{
     result: VerificationResult
@@ -50,72 +62,118 @@ const emit = defineEmits<{
 
 const root = ref<HTMLElement | null>(null)
 
-function compareIssues(
-  left: VerificationIssue,
-  right: VerificationIssue
+function comparePreparedIssues(
+  left: PreparedIssue,
+  right: PreparedIssue
 ): number {
   return (
     left.start - right.start ||
     left.end - right.end ||
-    left.issue_id.localeCompare(right.issue_id)
+    left.issue.issue_id.localeCompare(right.issue.issue_id)
   )
 }
 
-function validatedIssues(
-  textCharacters: readonly string[]
-): readonly VerificationIssue[] {
-  return [...(props.issues ?? props.result.issues)]
-    .filter(
-      (issue) =>
-        Number.isInteger(issue.start) &&
-        Number.isInteger(issue.end) &&
-        issue.start >= 0 &&
-        issue.end > issue.start &&
-        issue.end <= textCharacters.length &&
-        textCharacters.slice(issue.start, issue.end).join('') ===
-          issue.original
+function indexText(text: string): IndexedText {
+  const characters: string[] = []
+  const utf16Offsets = [0]
+  for (const character of text) {
+    characters.push(character)
+    utf16Offsets.push(
+      (utf16Offsets[utf16Offsets.length - 1] ?? 0) + character.length
     )
-    .sort(compareIssues)
+  }
+  return { characters, utf16Offsets }
+}
+
+function validatedIssues(
+  text: string,
+  indexedText: IndexedText
+): readonly PreparedIssue[] {
+  const sourceIssues = props.issues ?? props.result.issues
+  if (sourceIssues.length > MAX_VERIFICATION_ISSUES) {
+    return []
+  }
+  const prepared: PreparedIssue[] = []
+  for (const issue of sourceIssues) {
+    const start = issue.start
+    const end = issue.end
+    const utf16Start = indexedText.utf16Offsets[start]
+    const utf16End = indexedText.utf16Offsets[end]
+    if (
+      !Number.isInteger(start) ||
+      !Number.isInteger(end) ||
+      start < 0 ||
+      end <= start ||
+      end > indexedText.characters.length ||
+      utf16Start === undefined ||
+      utf16End === undefined ||
+      text.slice(utf16Start, utf16End) !== issue.original
+    ) {
+      continue
+    }
+    prepared.push({ issue, start, end })
+  }
+  return prepared.sort(comparePreparedIssues)
 }
 
 const segments = computed<readonly SourceSegment[]>(() => {
-  const characters = Array.from(props.result.text)
-  const issues = validatedIssues(characters)
-  const boundaries = new Set<number>([0, characters.length])
-  for (let index = 0; index < characters.length; index += 1) {
-    if (characters[index] === '\n') {
+  const indexedText = indexText(props.result.text)
+  const issues = validatedIssues(props.result.text, indexedText)
+  const boundaries = new Set<number>([
+    0,
+    indexedText.characters.length
+  ])
+  const startingAt = new Map<number, PreparedIssue[]>()
+  const endingAt = new Map<number, PreparedIssue[]>()
+  for (let index = 0; index < indexedText.characters.length; index += 1) {
+    if (indexedText.characters[index] === '\n') {
       boundaries.add(index)
       boundaries.add(index + 1)
     }
   }
-  for (const issue of issues) {
-    boundaries.add(issue.start)
-    boundaries.add(issue.end)
+  for (const prepared of issues) {
+    boundaries.add(prepared.start)
+    boundaries.add(prepared.end)
+    const starts = startingAt.get(prepared.start) ?? []
+    starts.push(prepared)
+    startingAt.set(prepared.start, starts)
+    const ends = endingAt.get(prepared.end) ?? []
+    ends.push(prepared)
+    endingAt.set(prepared.end, ends)
   }
 
   const orderedBoundaries = [...boundaries].sort((left, right) => left - right)
-  return orderedBoundaries.slice(0, -1).map((start, index) => {
+  const active = new Map<string, PreparedIssue>()
+  const collected: SourceSegment[] = []
+  for (let index = 0; index < orderedBoundaries.length - 1; index += 1) {
+    const start = orderedBoundaries[index]
     const end = orderedBoundaries[index + 1]
-    const coveringIssues = issues.filter(
-      (issue) => issue.start < end && start < issue.end
-    )
-    return {
+    for (const prepared of endingAt.get(start) ?? []) {
+      active.delete(prepared.issue.issue_id)
+    }
+    for (const prepared of startingAt.get(start) ?? []) {
+      active.set(prepared.issue.issue_id, prepared)
+    }
+    const coveringIssues = [...active.values()]
+    collected.push({
       start,
-      text: characters.slice(start, end).join(''),
-      coveringIssueIds: coveringIssues.map((issue) => issue.issue_id),
-      coveringStates: coveringIssues.map(
-        (issue) => props.issueStates[issue.issue_id] ?? 'pending'
+      text: indexedText.characters.slice(start, end).join(''),
+      coveringIssueIds: coveringIssues.map(
+        ({ issue }) => issue.issue_id
       ),
-      markers: issues
-        .filter((issue) => issue.start === start)
-        .map((issue) => ({
+      coveringStates: coveringIssues.map(
+        ({ issue }) => props.issueStates[issue.issue_id] ?? 'pending'
+      ),
+      markers: (startingAt.get(start) ?? [])
+        .map(({ issue }) => ({
           issueId: issue.issue_id,
           label: `${issue.message}：${issue.original}`,
           severity: issue.severity,
           state: props.issueStates[issue.issue_id] ?? 'pending'
         }))
-    }
-  })
+    })
+  }
+  return collected
 })
 
 const lines = computed<readonly SourceLine[]>(() => {

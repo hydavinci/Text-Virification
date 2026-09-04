@@ -2,9 +2,11 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   MAX_WORKSPACE_RESULT_BLOCKS,
+  MAX_WORKSPACE_RESULT_ISSUES,
   MAX_WORKSPACE_REVISION_CODE_POINTS,
   WORKSPACE_SESSION_VERSION,
   bindWorkspaceExportAuthority,
+  hasBoundedWorkspaceResult,
   isWorkspaceSessionRawSizeAllowed,
   type WorkspaceExportAuthoritySource,
   useWorkspaceSession
@@ -185,6 +187,38 @@ describe('useWorkspaceSession', () => {
     expect(restoredWorkspace.revisionChain.value).toEqual(
       original.revisionChain.value
     )
+  })
+
+  it('round-trips a real direct-analysis payload with null alternatives', () => {
+    const storage = new MemoryStorage()
+    const directPayload = structuredClone(result) as unknown as Record<
+      string,
+      any
+    >
+    directPayload.file_type = 'txt'
+    directPayload.filename = '直接输入文本'
+    directPayload.source_name = '直接输入文本'
+    directPayload.execution_mode = 'synchronous'
+    directPayload.file_id = null
+    directPayload.file_ext = null
+    directPayload.issues[0].alternatives = null
+    const original = useVerificationWorkspace()
+    original.loadResult(directPayload as VerificationResult)
+    const session = useWorkspaceSession(storage, original)
+    const state = {
+      ...uiState(),
+      jobId: null
+    }
+
+    expect(session.save(state), session.warning.value ?? '').toBe(true)
+    const restoredWorkspace = useVerificationWorkspace()
+    const restored = useWorkspaceSession(
+      storage,
+      restoredWorkspace
+    ).restore()
+
+    expect(restored).toEqual(state)
+    expect(restoredWorkspace.result.value?.issues[0]?.alternatives).toEqual([])
   })
 
   it('round-trips validated file export authority for a rechecked synchronous result', () => {
@@ -756,6 +790,18 @@ describe('useWorkspaceSession', () => {
     ).toBeNull()
     expect(parse).not.toHaveBeenCalled()
     parse.mockRestore()
+  })
+
+  it('accepts the exact nested issue boundary and rejects one over', () => {
+    const exact = structuredClone(result)
+    exact.issues = new Array(MAX_WORKSPACE_RESULT_ISSUES).fill(issue)
+    const over = {
+      ...exact,
+      issues: new Array(MAX_WORKSPACE_RESULT_ISSUES + 1).fill(issue)
+    }
+
+    expect(hasBoundedWorkspaceResult(exact)).toBe(true)
+    expect(hasBoundedWorkspaceResult(over)).toBe(false)
   })
 
   it('rejects oversized nested block arrays before workspace cloning', () => {

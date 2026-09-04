@@ -4,7 +4,7 @@ import hashlib
 import hmac
 from bisect import bisect_right
 from collections.abc import Callable
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from heapq import heappop, heappush
@@ -41,7 +41,10 @@ from text_verification.domain.documents import (
     preflight_document_payload,
 )
 from text_verification.domain.jobs import JobProgressStage, JobRead
-from text_verification.domain.ports import AnchoredSourcePathResolver
+from text_verification.domain.ports import (
+    AnchoredSourcePathResolver,
+    ResolvedSourcePath,
+)
 from text_verification.domain.text_edits import (
     MAX_REVISION_TEXT_CODEPOINTS,
     MAX_REVISION_TEXT_UTF8_BYTES,
@@ -55,6 +58,7 @@ from text_verification.domain.verification import (
     InvalidRevisionProvenanceError,
     PersistedDocumentRevision,
     RevisionProvenanceKind,
+    RevisionProvenanceState,
     StaleReviewRevisionError,
     VerificationResult,
     VerifiedRevisionProvenance,
@@ -114,6 +118,8 @@ class ReconstructionRepository(ArtifactRepository, Protocol):
         job_id: UUID,
         verification_run_id: UUID,
         review_revision_id: UUID | None,
+        *,
+        allow_unavailable_provenance: bool = False,
     ) -> PersistedDocumentRevision | None: ...
 
     def read_export_artifact(
@@ -143,6 +149,39 @@ class ArtifactDownload:
 class _PreparedRepair:
     reservation: ArtifactReservation
     quarantine: ArtifactRepairQuarantine | None
+
+
+@dataclass(frozen=True)
+class _VerifiedSourceCopyResolver:
+    document_id: UUID
+    source_version: str
+    file_type: FileType
+    path: Path
+
+    def resolve_anchored(self, document: DocumentModel) -> ResolvedSourcePath:
+        self._validate_document(document)
+        return ResolvedSourcePath.from_path(self.path)
+
+    def resolve(
+        self,
+        document: DocumentModel,
+        *,
+        source_path: Path | None = None,
+    ) -> Path:
+        if source_path is not None:
+            raise ValueError("Verified source copies cannot be overridden.")
+        self._validate_document(document)
+        return self.path
+
+    def _validate_document(self, document: DocumentModel) -> None:
+        if (
+            document.document_id != self.document_id
+            or document.source_version != self.source_version
+            or document.file_type is not self.file_type
+        ):
+            raise ValueError(
+                "Verified source copy does not belong to the canonical document."
+            )
 
 
 class ReconstructionExportService:
@@ -272,12 +311,6 @@ class ReconstructionExportService:
             job.job_id,
             document.file_type,
         )
-        registry = self._exporter_registry_factory(resolver)
-        exporter = registry.get(
-            ExportFormat.DOCX_RECONSTRUCTION
-            if export_format is ExportFormat.DOCX_RECONSTRUCTION
-            else document.file_type
-        )
         work_path = (
             self._storage.job_directory(job.job_id)
             / (
@@ -288,22 +321,44 @@ class ReconstructionExportService:
         )
         try:
             try:
-                if export_format is ExportFormat.DOCX_RECONSTRUCTION:
-                    cast(DocxReconstructionExporter, exporter).export(
-                        document,
-                        work_path,
+                source_copy = (
+                    resolver.open_verified_copy(document)
+                    if export_format is ExportFormat.ORIGINAL_FORMAT
+                    else nullcontext(None)
+                )
+                with source_copy as verified_source:
+                    active_resolver: AnchoredSourcePathResolver = resolver
+                    if verified_source is not None:
+                        active_resolver = _VerifiedSourceCopyResolver(
+                            document_id=document.document_id,
+                            source_version=document.source_version,
+                            file_type=document.file_type,
+                            path=verified_source,
+                        )
+                    registry = self._exporter_registry_factory(active_resolver)
+                    exporter = registry.get(
+                        ExportFormat.DOCX_RECONSTRUCTION
+                        if export_format is ExportFormat.DOCX_RECONSTRUCTION
+                        else document.file_type
                     )
-                else:
-                    cast(CompatibilityExporter, exporter).export(
-                        document,
-                        [],
-                        work_path,
-                        track_changes=track_changes,
-                        modified_text=(
-                            revision.text if revision is not None else document.text
-                        ),
-                    )
-                data = work_path.read_bytes()
+                    if export_format is ExportFormat.DOCX_RECONSTRUCTION:
+                        cast(DocxReconstructionExporter, exporter).export(
+                            document,
+                            work_path,
+                        )
+                    else:
+                        cast(CompatibilityExporter, exporter).export(
+                            document,
+                            [],
+                            work_path,
+                            track_changes=track_changes,
+                            modified_text=(
+                                revision.text
+                                if revision is not None
+                                else document.text
+                            ),
+                        )
+                    data = work_path.read_bytes()
             except (ExportError, OSError, ValueError) as error:
                 raise VerificationError(
                     (
@@ -462,6 +517,7 @@ class ReconstructionExportService:
                         job_id,
                         artifact.verification_run_id,
                         artifact.review_revision_id,
+                        allow_unavailable_provenance=True,
                     )
                 except StaleReviewRevisionError as error:
                     raise VerificationError(
@@ -482,7 +538,20 @@ class ReconstructionExportService:
                 result_snapshot = repository.read_result_snapshot(job_id)
                 result = self._download_result(result_snapshot)
                 if revision is not None:
-                    _validate_revision_provenance(job_id, revision, result)
+                    if (
+                        revision.provenance_state
+                        is RevisionProvenanceState.VERIFIED
+                    ):
+                        _validate_revision_provenance(
+                            job_id,
+                            revision,
+                            result,
+                        )
+                    elif (
+                        artifact.status is not ArtifactLifecycleStatus.READY
+                        or artifact.content_sha256 is None
+                    ):
+                        raise _invalid_revision_provenance()
                 if artifact is None or not _artifact_belongs_to_result(
                     artifact,
                     job_id,
@@ -827,6 +896,11 @@ def _validate_revision_provenance(
     revision: PersistedDocumentRevision,
     result: VerificationResult,
 ) -> None:
+    if (
+        revision.provenance_state
+        is not RevisionProvenanceState.VERIFIED
+    ):
+        raise _invalid_revision_provenance()
     try:
         provenance = VerifiedRevisionProvenance.model_validate(
             revision.verified_provenance

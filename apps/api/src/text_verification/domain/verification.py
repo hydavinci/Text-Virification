@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from collections.abc import Mapping
 from datetime import datetime
 from enum import StrEnum
 from math import isfinite
@@ -18,7 +19,11 @@ from text_verification.domain.documents import (
     TextBlock,
     preflight_document_payload,
 )
-from text_verification.domain.issues import Issue
+from text_verification.domain.issues import (
+    MAX_VERIFICATION_ISSUES,
+    Issue,
+    validate_issue_count,
+)
 from text_verification.domain.text_edits import (
     MAX_REVISION_TEXT_CODEPOINTS,
     validate_revision_text,
@@ -196,6 +201,11 @@ class RevisionProvenanceKind(StrEnum):
     RECHECK_RESULT = "recheck_result"
 
 
+class RevisionProvenanceState(StrEnum):
+    VERIFIED = "verified"
+    LEGACY_UNAVAILABLE = "legacy_unavailable"
+
+
 class StaleReviewRevisionError(ValueError):
     pass
 
@@ -277,6 +287,11 @@ class PersistedDocumentRevision(ReviewRevisionDraft):
         exclude=True,
         repr=False,
     )
+    provenance_state: RevisionProvenanceState = Field(
+        default=RevisionProvenanceState.VERIFIED,
+        exclude=True,
+        repr=False,
+    )
 
 
 class VerificationDegradation(BaseModel):
@@ -302,7 +317,7 @@ class VerificationResult(BaseModel):
     metadata: DocumentMetadata = Field(default_factory=DocumentMetadata)
     ocr_requirement: OcrRequirement | None = None
     stats: VerificationStatistics
-    issues: tuple[Issue, ...]
+    issues: tuple[Issue, ...] = Field(max_length=MAX_VERIFICATION_ISSUES)
     summary: VerificationSummary
     execution_mode: VerificationExecutionMode
     analysis_mode: VerificationAnalysisMode
@@ -313,6 +328,10 @@ class VerificationResult(BaseModel):
     @classmethod
     def preflight_result_payload(cls, value: object) -> object:
         preflight_document_payload(value)
+        if isinstance(value, Mapping):
+            issues = value.get("issues")
+            if isinstance(issues, list | tuple):
+                validate_issue_count(issues)
         return value
 
     @model_validator(mode="after")

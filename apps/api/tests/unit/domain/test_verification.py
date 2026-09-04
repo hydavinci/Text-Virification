@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 from text_verification.config import Settings
 from text_verification.domain.documents import FileType, TextBlock
@@ -19,6 +19,8 @@ from text_verification.domain.verification import (
     VerificationStatistics,
     VerificationSummary,
 )
+
+MAX_VERIFICATION_ISSUES = 100_000
 
 
 def test_verification_options_keep_ad_extreme_disabled_by_default() -> None:
@@ -257,6 +259,22 @@ def test_verification_result_rejects_issue_from_another_document() -> None:
         _verification_result(_canonical_issue(), document_id=uuid4())
 
 
+def test_verification_result_rejects_an_over_limit_issue_array_before_iteration() -> None:
+    valid = _verification_result(_canonical_issue()).model_dump(mode="python")
+
+    class OversizedIssueList(list[object]):
+        def __len__(self) -> int:
+            return MAX_VERIFICATION_ISSUES + 1
+
+        def __iter__(self):
+            raise AssertionError("over-limit issue entries must not be iterated")
+
+    valid["issues"] = OversizedIssueList()
+
+    with pytest.raises(ValidationError, match="issue count"):
+        VerificationResult.model_validate(valid)
+
+
 def test_verification_result_rejects_issue_from_another_run() -> None:
     with pytest.raises(ValidationError, match="run ownership"):
         _verification_result(_canonical_issue(), verification_run_id=uuid4())
@@ -484,7 +502,8 @@ def test_settings_expose_typed_llm_fields_from_environment(monkeypatch: pytest.M
 
     settings = Settings()
 
-    assert settings.llm_api_key == "secret-key"
+    assert isinstance(settings.llm_api_key, SecretStr)
+    assert settings.llm_api_key.get_secret_value() == "secret-key"
     assert settings.llm_api_base == "https://example.test/v1"
     assert settings.llm_model == "gpt-4.1-mini"
     assert settings.llm_max_review == 41
@@ -496,3 +515,15 @@ def test_settings_expose_typed_llm_fields_from_environment(monkeypatch: pytest.M
 def test_settings_reject_non_positive_llm_limits() -> None:
     with pytest.raises(ValidationError, match="llm_max_review"):
         Settings(llm_max_review=0)
+
+
+def test_settings_hide_llm_api_keys_in_representations_and_validation_errors() -> None:
+    settings = Settings(llm_api_key="provider-secret-value")
+
+    assert "provider-secret-value" not in repr(settings)
+    assert "**********" in repr(settings)
+
+    with pytest.raises(ValidationError) as raised:
+        Settings(llm_api_key=["provider-secret-value"])
+
+    assert "provider-secret-value" not in str(raised.value)

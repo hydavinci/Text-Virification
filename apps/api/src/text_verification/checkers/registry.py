@@ -3,7 +3,11 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from text_verification.domain.documents import DocumentModel
-from text_verification.domain.issues import Issue
+from text_verification.domain.issues import (
+    MAX_VERIFICATION_ISSUES,
+    Issue,
+    IssueLimitExceededError,
+)
 from text_verification.domain.ports import (
     CheckContext,
     Checker,
@@ -23,9 +27,21 @@ _LAYER_ORDER = {
 
 
 class CheckerRegistry:
-    def __init__(self, checkers: Iterable[Checker] = ()) -> None:
+    def __init__(
+        self,
+        checkers: Iterable[Checker] = (),
+        *,
+        max_issues: int = MAX_VERIFICATION_ISSUES,
+    ) -> None:
+        if (
+            isinstance(max_issues, bool)
+            or not isinstance(max_issues, int)
+            or max_issues < 0
+        ):
+            raise ValueError("max_issues must be a nonnegative integer")
         self._checkers: list[Checker] = []
         self._names: set[str] = set()
+        self._max_issues = max_issues
         for checker in checkers:
             self.register(checker)
 
@@ -58,6 +74,10 @@ class CheckerRegistry:
                 )
             dictionary_versions.update(result.dictionary_versions)
             for issue_index, issue in enumerate(result.issues):
+                if len(issues_with_order) >= self._max_issues:
+                    raise IssueLimitExceededError(
+                        "Checker aggregation exceeded the canonical issue limit."
+                    )
                 issues_with_order.append(
                     (
                         _LAYER_ORDER.get(issue.layer, len(_LAYER_ORDER)),

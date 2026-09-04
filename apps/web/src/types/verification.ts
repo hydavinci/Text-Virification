@@ -27,7 +27,7 @@ export interface VerificationIssue {
   severity: IssueSeverity
   original: string
   suggestion: string | null
-  alternatives?: string[] | null
+  alternatives: string[]
   layer: string
   message: string
   description: string

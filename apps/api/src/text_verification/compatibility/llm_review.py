@@ -58,7 +58,7 @@ class InvalidReviewResponseError(ValueError):
 
 def is_llm_review_configured(settings: Settings) -> bool:
     """是否配置了云端复核。SDK/供应商故障由安全降级路径处理。"""
-    return bool(settings.llm_api_key.strip())
+    return bool(settings.llm_api_key)
 
 
 def _excerpt(text: str, start: int, end: int, radius: int | None = None) -> str:
@@ -228,7 +228,7 @@ def review_issues(settings: Settings, text: str, issues: List[Any]) -> Tuple[Lis
         })
 
     client = OpenAI(
-        api_key=settings.llm_api_key.strip(),
+        api_key=settings.llm_api_key.get_secret_value().strip(),
         base_url=settings.llm_api_base.strip(),
         timeout=settings.llm_timeout,
     )
@@ -247,10 +247,21 @@ def review_issues(settings: Settings, text: str, issues: List[Any]) -> Tuple[Lis
     try:
         resp = client.chat.completions.create(**create_kwargs)
     except PROVIDER_ERRORS as error:
-        logger.exception("llm_review_provider_failed")
+        retryable = _is_retryable_provider_failure(error)
+        status_code = getattr(error, "status_code", None)
+        logger.error(
+            "llm_review_provider_failed",
+            extra={
+                "provider_error_type": type(error).__name__,
+                "provider_status": (
+                    status_code if isinstance(status_code, int) else None
+                ),
+                "retryable": retryable,
+            },
+        )
         stats['failed'] = True
         stats['failure_code'] = 'llm_provider_error'
-        stats['retryable'] = _is_retryable_provider_failure(error)
+        stats['retryable'] = retryable
         stats['reason'] = '大模型调用失败，已回退纯规则结果'
         return issues, stats
     except APIResponseValidationError:

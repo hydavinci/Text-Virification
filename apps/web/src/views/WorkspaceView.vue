@@ -7,6 +7,7 @@ import JobProgress from '../components/JobProgress.vue'
 import DocumentViewer from '../components/workspace/DocumentViewer.vue'
 import EditPreview from '../components/workspace/EditPreview.vue'
 import ExportPanel from '../components/workspace/ExportPanel.vue'
+import HelpDialog from '../components/workspace/HelpDialog.vue'
 import IssueList from '../components/workspace/IssueList.vue'
 import PrivacyDialog from '../components/workspace/PrivacyDialog.vue'
 import ReviewActions from '../components/workspace/ReviewActions.vue'
@@ -29,6 +30,7 @@ import {
   persistWorkspaceTheme
 } from '../composables/useWorkspaceTheme'
 import { useVerificationWorkspace } from '../composables/useVerificationWorkspace'
+import { validateDirectText } from '../validation/verificationLimits'
 import type {
   AnalyzeOptions,
   DocumentRevision,
@@ -157,6 +159,7 @@ let analysisTimer: ReturnType<typeof setInterval> | null = null
 let loadedExecutionResult: VerificationResult | null = null
 let toastTimer: ReturnType<typeof setTimeout> | null = null
 let exportGeneration = 0
+let recheckGeneration = 0
 let disposed = false
 
 const currentOptions = computed<AnalyzeOptions>(() => ({
@@ -239,6 +242,7 @@ async function handleUpload(file: File) {
   if (execution.isActive.value) {
     return
   }
+  invalidateRecheckOperation()
   fileExportAuthority.value = null
   fileSource.value = file
   if (verificationApi && !confirmOptionalSettings()) {
@@ -251,18 +255,25 @@ async function runTextAnalysis(submittedText: string) {
   if (execution.isActive.value) {
     return
   }
-  const text = submittedText.trim()
-  if (!text) {
-    notify('请先输入需要检查的文本')
+  const validation = validateDirectText(submittedText)
+  if (validation !== null) {
+    notify(
+      validation === 'empty'
+        ? '请先输入需要检查的文本'
+        : validation === 'too_many_code_points'
+          ? '文本不能超过 5,000,000 个 Unicode 字符'
+          : '文本的 UTF-8 大小不能超过 25 MiB'
+    )
     return
   }
   if (!verificationApi || !confirmOptionalSettings()) {
     return
   }
+  invalidateRecheckOperation()
   fileExportAuthority.value = null
-  textInput.value = text
+  textInput.value = submittedText
   fileSource.value = null
-  await execution.analyzeText(text, currentOptions.value)
+  await execution.analyzeText(submittedText, currentOptions.value)
 }
 
 function confirmOptionalSettings() {
@@ -373,10 +384,14 @@ async function recheck() {
   }
   const priorAuthority = fileExportAuthority.value
   const submittedText = modifiedText.value
+  const operation = beginRecheckOperation(source, submittedText)
   let boundAuthority: WorkspaceExportAuthority | null = null
   textInput.value = submittedText
   fileSource.value = null
   const transform = (checked: VerificationResult, grant?: string) => {
+      if (!isCurrentRecheckSource(operation)) {
+        throw new Error('重新检查请求已被新的工作区状态取代')
+      }
       const transformed = {
         ...checked,
         filename: source.filename,
@@ -397,6 +412,8 @@ async function recheck() {
           throw new Error('重新检查结果与提交文本或保留任务身份不匹配')
         }
       }
+      operation.completedResultIdentity =
+        verificationResultIdentity(transformed)
       return transformed
   }
   if (exportAuthoritySource === null) {
@@ -413,12 +430,87 @@ async function recheck() {
       transform
     )
   }
+  if (!isCurrentRecheckCompletion(operation)) {
+    return
+  }
   fileExportAuthority.value = exportAuthoritySource === null
     ? null
     : execution.state.value === 'completed'
       ? boundAuthority
       : priorAuthority
   saveSession()
+}
+
+interface RecheckOperation {
+  generation: number
+  sourceResult: VerificationResult
+  sourceRevision: DocumentRevision | null
+  submittedText: string
+  completedResultIdentity: string | null
+}
+
+function beginRecheckOperation(
+  sourceResult: VerificationResult,
+  submittedText: string
+): RecheckOperation {
+  recheckGeneration += 1
+  return {
+    generation: recheckGeneration,
+    sourceResult,
+    sourceRevision: verificationWorkspace.currentRevision.value,
+    submittedText,
+    completedResultIdentity: null
+  }
+}
+
+function invalidateRecheckOperation(): void {
+  recheckGeneration += 1
+}
+
+function isCurrentRecheckSource(operation: RecheckOperation): boolean {
+  return (
+    !disposed &&
+    operation.generation === recheckGeneration &&
+    result.value === operation.sourceResult &&
+    verificationWorkspace.currentRevision.value ===
+      operation.sourceRevision &&
+    modifiedText.value === operation.submittedText
+  )
+}
+
+function isCurrentRecheckCompletion(operation: RecheckOperation): boolean {
+  if (disposed || operation.generation !== recheckGeneration) {
+    return false
+  }
+  const currentResult = result.value
+  if (currentResult === null) {
+    return false
+  }
+  if (operation.completedResultIdentity !== null) {
+    return (
+      verificationResultIdentity(currentResult) ===
+        operation.completedResultIdentity ||
+      (
+        execution.result.value !== null &&
+        verificationResultIdentity(execution.result.value) ===
+          operation.completedResultIdentity
+      )
+    )
+  }
+  return (
+    currentResult === operation.sourceResult &&
+    verificationWorkspace.currentRevision.value === operation.sourceRevision
+  )
+}
+
+function verificationResultIdentity(value: VerificationResult): string {
+  return [
+    value.document_id,
+    value.verification_run_id,
+    value.source_version,
+    value.execution_mode,
+    value.text
+  ].join('\u0000')
 }
 
 async function exportReport() {
@@ -982,6 +1074,7 @@ function downloadText(text: string, filename: string) {
 }
 
 function resetWorkspace() {
+  invalidateRecheckOperation()
   invalidateExportOperation()
   exportError.value = null
   fileExportAuthority.value = null
@@ -1175,6 +1268,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  invalidateRecheckOperation()
   disposed = true
   invalidateExportOperation()
   execution.dispose()
@@ -1487,14 +1581,7 @@ onBeforeUnmount(() => {
 
     <div v-if="toast" class="toast" role="status" aria-live="polite">{{ toast }}</div>
     <PrivacyDialog :open="showPrivacy" @close="showPrivacy = false" />
-    <div v-if="showHelp" class="modal-backdrop" @click.self="showHelp = false">
-      <section class="modal" role="dialog" aria-modal="true" aria-labelledby="help-title">
-        <button class="modal-close" type="button" aria-label="关闭使用帮助" @click="showHelp = false">×</button>
-        <h2 id="help-title">使用帮助</h2>
-        <p>选择文档场景和检查开关，可选配置术语表及禁用词，然后上传文件或粘贴文本。</p>
-        <p>检查完成后可逐条接受、忽略或撤销建议，并通过查找替换和原文编辑完成最终校订。</p>
-      </section>
-    </div>
+    <HelpDialog :open="showHelp" @close="showHelp = false" />
   </div>
 </template>
 

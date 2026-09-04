@@ -6,6 +6,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from text_verification.domain import verification as domain_verification
+from text_verification.domain.issues import MAX_VERIFICATION_ISSUES
 from text_verification.domain.text_edits import MAX_REVISION_TEXT_CODEPOINTS
 
 Scenario = domain_verification.Scenario
@@ -55,4 +56,7 @@ class ReportRequest(BaseModel):
     filename: str = Field(default="未知", max_length=500)
     stats: dict[str, Any] = Field(default_factory=dict)
     summary: dict[str, Any] = Field(default_factory=dict)
-    issues: list[dict[str, Any]] = Field(default_factory=list, max_length=100_000)
+    issues: list[dict[str, Any]] = Field(
+        default_factory=list,
+        max_length=MAX_VERIFICATION_ISSUES,
+    )

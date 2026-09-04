@@ -7,16 +7,44 @@ describe('SourceInputPanel', () => {
   it.each([
     { modifier: 'ctrlKey', label: 'Ctrl+Enter' },
     { modifier: 'metaKey', label: 'Meta+Enter' }
-  ])('submits trimmed text with $label', async ({ modifier }) => {
+  ])('submits untouched text with $label', async ({ modifier }) => {
     const wrapper = mount(SourceInputPanel)
     await wrapper.get('[data-mode="text"]').trigger('click')
-    await wrapper.get('textarea').setValue('  检查文本  ')
+    await wrapper.get('textarea').setValue('  \ufeff检查文本  \n')
     await wrapper.get('textarea').trigger('keydown', {
       key: 'Enter',
       [modifier]: true
     })
 
-    expect(wrapper.emitted('submit-text')?.[0]).toEqual(['检查文本'])
+    expect(wrapper.emitted('submit-text')?.[0]).toEqual([
+      '  \ufeff检查文本  \n'
+    ])
+  })
+
+  it('uses Python-equivalent emptiness and preserves FEFF-only input', async () => {
+    const wrapper = mount(SourceInputPanel)
+    await wrapper.get('[data-mode="text"]').trigger('click')
+    await wrapper
+      .get('textarea')
+      .setValue(' \t\r\n\u001c\u001d\u001e\u001f\u0085')
+    await wrapper.get('button.btn.primary').trigger('click')
+
+    expect(wrapper.emitted('submit-text')).toBeUndefined()
+    expect(wrapper.get('[role="alert"]').text()).toContain('请先输入')
+
+    await wrapper.get('textarea').setValue('\ufeff')
+    await wrapper.get('button.btn.primary').trigger('click')
+
+    expect(wrapper.emitted('submit-text')?.[0]).toEqual(['\ufeff'])
+  })
+
+  it('removes the UTF-16 maxlength and reports Unicode code points', async () => {
+    const wrapper = mount(SourceInputPanel)
+    await wrapper.get('[data-mode="text"]').trigger('click')
+    await wrapper.get('textarea').setValue('😀a')
+
+    expect(wrapper.get('textarea').attributes('maxlength')).toBeUndefined()
+    expect(wrapper.get('.text-footer').text()).toContain('2 字符')
   })
 
   it('preserves the text draft while switching input modes', async () => {

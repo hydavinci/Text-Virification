@@ -265,6 +265,58 @@ describe('DocumentViewer', () => {
     expect(wrapper.get('[data-source-text]').text()).toBe(text)
   })
 
+  it('segments many non-overlapping issues with a bounded interval sweep', () => {
+    const issueCount = 1_000
+    const text = '错对'.repeat(issueCount)
+    let rangeReads = 0
+    const issues = Array.from({ length: issueCount }, (_, index) => {
+      const start = index * 2
+      const end = start + 1
+      const candidate = buildIssue({
+        issue_id: `33333333-3333-4333-8333-${String(index).padStart(12, '0')}`,
+        start,
+        end,
+        block_start: start,
+        block_end: end,
+        original: '错'
+      })
+      Object.defineProperties(candidate, {
+        start: {
+          configurable: true,
+          enumerable: true,
+          get() {
+            rangeReads += 1
+            return start
+          }
+        },
+        end: {
+          configurable: true,
+          enumerable: true,
+          get() {
+            rangeReads += 1
+            return end
+          }
+        }
+      })
+      return candidate
+    })
+    const result = buildResult(text, issues)
+    const wrapper = mount(DocumentViewer, {
+      props: {
+        result,
+        issues,
+        selectedIssueId: null,
+        mode: 'continuous'
+      }
+    })
+
+    expect(wrapper.get('[data-source-text]').text()).toBe(text)
+    expect(wrapper.findAll('[data-issue-role="source"]')).toHaveLength(
+      issueCount
+    )
+    expect(rangeReads).toBeLessThan(100_000)
+  })
+
   it('renders an empty source exactly once without source markers', () => {
     const result = buildResult('', [])
     const wrapper = mount(DocumentViewer, {

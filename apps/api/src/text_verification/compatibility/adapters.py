@@ -8,7 +8,12 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 from text_verification.compatibility.analyzer import Issue as LegacyIssue
 from text_verification.domain.documents import DocumentModel, FileType, TextBlock
-from text_verification.domain.issues import Issue, IssueSeverity
+from text_verification.domain.issues import (
+    MAX_VERIFICATION_ISSUES,
+    Issue,
+    IssueLimitExceededError,
+    IssueSeverity,
+)
 from text_verification.domain.verification import LEGACY_SUMMARY_LABELS, VerificationResult
 
 _LEGACY_SOURCE = "compatibility.analyzer"
@@ -94,16 +99,29 @@ def legacy_issue_to_domain(
     legacy_issue: LegacyIssue,
     document: DocumentModel,
     run_id: UUID,
-) -> Issue:
+) -> Issue | None:
     severity = IssueSeverity(legacy_issue.severity)
     start = legacy_issue.position
-    end = max(legacy_issue.end_position, start + len(legacy_issue.original))
+    if start < 0 or start > len(document.text):
+        return None
+    end = legacy_issue.end_position
+    if end <= start:
+        inferred_end = start + len(legacy_issue.original)
+        if (
+            not legacy_issue.original
+            or inferred_end > len(document.text)
+            or document.text[start:inferred_end] != legacy_issue.original
+        ):
+            return None
+        end = inferred_end
+    if end <= start or end > len(document.text):
+        return None
     block = _find_block(document, start, end)
     issue_id = uuid5(
         NAMESPACE_URL,
         (
-            f"{document.source_version}:{legacy_issue.rule_id}:{legacy_issue.position}:"
-            f"{legacy_issue.end_position}:{legacy_issue.original}"
+            f"{document.source_version}:{legacy_issue.rule_id}:{start}:"
+            f"{end}:{legacy_issue.original}"
         ),
     )
 
@@ -142,7 +160,16 @@ def legacy_issues_to_domain(
     document: DocumentModel,
     run_id: UUID,
 ) -> tuple[Issue, ...]:
-    return tuple(legacy_issue_to_domain(issue, document, run_id) for issue in legacy_issues)
+    adapted: list[Issue] = []
+    for index, legacy_issue in enumerate(legacy_issues):
+        if index >= MAX_VERIFICATION_ISSUES:
+            raise IssueLimitExceededError(
+                "Compatibility analysis exceeded the canonical issue limit."
+            )
+        issue = legacy_issue_to_domain(legacy_issue, document, run_id)
+        if issue is not None:
+            adapted.append(issue)
+    return tuple(adapted)
 
 
 def verification_result_to_legacy_response(result: VerificationResult) -> dict[str, object]:

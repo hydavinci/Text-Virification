@@ -2,11 +2,9 @@
 from __future__ import annotations
 
 import copy
-import io
 import shutil
 import subprocess
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from math import isfinite
 from pathlib import Path
 from uuid import uuid4
@@ -21,6 +19,10 @@ from text_verification.domain.text_edits import (
     TextDiffLimitError,
     build_bounded_text_edits,
     validate_revision_text,
+)
+from text_verification.exporters.docx_determinism import (
+    DETERMINISTIC_DOCX_REVISION_DATE,
+    save_deterministic_docx,
 )
 from text_verification.parsers.pdf_parser import PdfParser
 
@@ -381,9 +383,7 @@ def _export_docx_edits(source_path: Path, edits: list[TextEdit], track_changes: 
     else:
         for paragraph, local_edits in groups:
             _apply_docx_edits(paragraph, local_edits)
-    output = io.BytesIO()
-    document.save(output)
-    return output.getvalue()
+    return save_deterministic_docx(document)
 
 
 def _apply_docx_edits(paragraph: object, edits: list[TextEdit]) -> None:
@@ -429,7 +429,7 @@ def _apply_docx_tracked_edits(paragraph: object, edits: list[TextEdit]) -> None:
 
     spans = _run_spans(paragraph)
     author = "啄木鸟·中英文字智能检查"
-    date_string = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    date_string = DETERMINISTIC_DOCX_REVISION_DATE
     xml_space = "{http://www.w3.org/XML/1998/namespace}space"
     revision_id = 1000
     insertion_runs: dict[int, int] = {}
@@ -566,9 +566,7 @@ def _export_docx_inplace(
                 for run in paragraph.runs[1:]:
                     run.text = ""
 
-    output = io.BytesIO()
-    document.save(output)
-    return output.getvalue()
+    return save_deterministic_docx(document)
 
 
 def _export_docx_track_changes(
@@ -581,7 +579,7 @@ def _export_docx_track_changes(
 
     document = Document(source_path)
     author = "啄木鸟·中英文字智能检查"
-    date_string = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    date_string = DETERMINISTIC_DOCX_REVISION_DATE
     revision_id = 1000
     xml_space = "{http://www.w3.org/XML/1998/namespace}space"
 
@@ -674,9 +672,7 @@ def _export_docx_track_changes(
         for paragraph in paragraphs:
             process_paragraph(paragraph)
 
-    output = io.BytesIO()
-    document.save(output)
-    return output.getvalue()
+    return save_deterministic_docx(document)
 
 
 def _non_overlapping_matches(

@@ -19,6 +19,10 @@ from text_verification.domain.ports import (
     VerificationProgressObserver,
     VerificationProgressStage,
 )
+from text_verification.domain.issues import (
+    MAX_VERIFICATION_ISSUES,
+    IssueLimitExceededError,
+)
 from text_verification.domain.verification import (
     LEGACY_LAYER_LABELS,
     LEGACY_SEVERITY_LABELS,
@@ -47,6 +51,33 @@ class Issue:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+@dataclass
+class _IssueBudget:
+    max_issues: int
+    count: int = 0
+
+    def consume(self) -> None:
+        if self.count >= self.max_issues:
+            raise IssueLimitExceededError(
+                "Compatibility analysis exceeded the canonical issue limit."
+            )
+        self.count += 1
+
+
+class _BoundedIssueList(list[Issue]):
+    def __init__(self, budget: _IssueBudget) -> None:
+        super().__init__()
+        self._budget = budget
+
+    def append(self, issue: Issue) -> None:
+        self._budget.consume()
+        super().append(issue)
+
+    def extend(self, issues) -> None:
+        for issue in issues:
+            self.append(issue)
 
 
 # ============================================================
@@ -868,10 +899,23 @@ COLLOQUIAL_EXPRESSIONS = [
 class TextAnalyzer:
     """文本分析器主类"""
 
-    def __init__(self, dictionary_loader: DictionaryLoader | None = None):
+    def __init__(
+        self,
+        dictionary_loader: DictionaryLoader | None = None,
+        *,
+        max_issues: int = MAX_VERIFICATION_ISSUES,
+    ):
+        if (
+            isinstance(max_issues, bool)
+            or not isinstance(max_issues, int)
+            or max_issues < 0
+        ):
+            raise ValueError("max_issues must be a nonnegative integer")
         self._build_typo_patterns()
         self._dictionary_loader = dictionary_loader or DictionaryLoader()
         self._dictionary_versions: dict[str, str] = {}
+        self._max_issues = max_issues
+        self._issue_budget: _IssueBudget | None = None
 
     @property
     def dictionary_versions(self) -> dict[str, str]:
@@ -904,6 +948,29 @@ class TextAnalyzer:
                 enable_sensitive: bool = True,
                 enable_ad_extreme: bool = False,
                 progress_observer: VerificationProgressObserver | None = None) -> List[Issue]:
+        previous_budget = self._issue_budget
+        self._issue_budget = _IssueBudget(self._max_issues)
+        try:
+            return self._analyze(
+                text,
+                scenario=scenario,
+                custom_glossary=custom_glossary,
+                banned_words=banned_words,
+                enable_security=enable_security,
+                enable_sensitive=enable_sensitive,
+                enable_ad_extreme=enable_ad_extreme,
+                progress_observer=progress_observer,
+            )
+        finally:
+            self._issue_budget = previous_budget
+
+    def _analyze(self, text: str, scenario: str = 'general',
+                 custom_glossary: List[Dict] = None,
+                 banned_words: List[str] = None,
+                 enable_security: bool = True,
+                 enable_sensitive: bool = True,
+                 enable_ad_extreme: bool = False,
+                 progress_observer: VerificationProgressObserver | None = None) -> List[Issue]:
         """分析文本，返回所有检测到的问题。
         scenario 控制不同文档类型的检查侧重。
         custom_glossary 为自定义术语表，每项 {'original': str, 'standard': str}。
@@ -1034,6 +1101,11 @@ class TextAnalyzer:
         deduped.sort(key=lambda x: (x.position, x.end_position))
         return deduped
 
+    def _issue_list(self) -> list[Issue]:
+        if self._issue_budget is None:
+            return []
+        return _BoundedIssueList(self._issue_budget)
+
     def _get_context(self, text: str, start: int, end: int, radius: int = 15) -> str:
         """获取问题文本的上下文"""
         ctx_start = max(0, start - radius)
@@ -1048,7 +1120,7 @@ class TextAnalyzer:
 
     def _check_chinese_typos(self, text: str) -> List[Issue]:
         """中文常见错别字检测"""
-        issues = []
+        issues = self._issue_list()
         for match in self._cn_typo_pattern.finditer(text):
             word = match.group()
             if word in self._cn_typo_map:
@@ -1068,7 +1140,7 @@ class TextAnalyzer:
 
     def _check_english_spelling(self, text: str) -> List[Issue]:
         """英文拼写错误检测"""
-        issues = []
+        issues = self._issue_list()
         for match in self._en_typo_pattern.finditer(text):
             word = match.group()
             correct = self._en_typo_map.get(word.lower())
@@ -1091,7 +1163,7 @@ class TextAnalyzer:
 
     def _check_punctuation(self, text: str) -> List[Issue]:
         """标点符号问题检测"""
-        issues = []
+        issues = self._issue_list()
         tech = self._build_technical_skip_mask(text)
 
         # 1. 连续重复标点
@@ -1213,7 +1285,7 @@ class TextAnalyzer:
 
     def _check_spacing(self, text: str) -> List[Issue]:
         """空格和格式问题检测"""
-        issues = []
+        issues = self._issue_list()
         skip = self._build_delim_skip_mask(text)
 
         # 1. 中英文之间缺少空格
@@ -1322,7 +1394,7 @@ class TextAnalyzer:
 
     def _check_repeated_words(self, text: str) -> List[Issue]:
         """重复词语检测"""
-        issues = []
+        issues = self._issue_list()
 
         # 1. 中文连续重复词（2字及以上）
         repeat_cn = re.compile(r'([\u4e00-\u9fa5]{2,4})\1')
@@ -1381,7 +1453,7 @@ class TextAnalyzer:
 
     def _check_long_sentences(self, text: str) -> List[Issue]:
         """长句检测"""
-        issues = []
+        issues = self._issue_list()
 
         # 按中文句末标点分句
         sentence_pattern = re.compile(r'[^。！？\n]+[。！？]')
@@ -1424,7 +1496,7 @@ class TextAnalyzer:
 
     def _check_brackets_quotes(self, text: str) -> List[Issue]:
         """括号和引号配对检测（按段落/行局部检查，降低误报）"""
-        issues = []
+        issues = self._issue_list()
 
         # 开括号到闭括号的映射（区分半角/全角）
         half_open_to_close = {'(': ')', '[': ']', '<': '>'}
@@ -1510,19 +1582,43 @@ class TextAnalyzer:
             issues.extend(check_scope(line, offset))
             offset += len(line) + 1
 
-        # 中文引号配对：按行统计，数量不匹配才提示（不报具体位置）
+        # 引号配对：每个未配对字符都保留精确的 Unicode 位置。
         for open_q, close_q in [('"', '"'), ('「', '」'), ('『', '』')]:
             total_open = text.count(open_q)
             total_close = text.count(close_q)
-            if total_open != total_close:
+            unmatched: List[Tuple[int, str]] = []
+            if open_q == close_q:
+                pending: int | None = None
+                for position, character in enumerate(text):
+                    if character != open_q:
+                        continue
+                    if pending is None:
+                        pending = position
+                    else:
+                        pending = None
+                if pending is not None:
+                    unmatched.append((pending, open_q))
+            else:
+                openings: List[int] = []
+                for position, character in enumerate(text):
+                    if character == open_q:
+                        openings.append(position)
+                    elif character == close_q:
+                        if openings:
+                            openings.pop()
+                        else:
+                            unmatched.append((position, close_q))
+                unmatched.extend((position, open_q) for position in openings)
+
+            for position, character in sorted(unmatched):
                 issues.append(Issue(
                     type='punctuation',
                     severity='warning',
-                    original=open_q + close_q,
-                    suggestion=open_q + close_q,
-                    position=0,
-                    end_position=0,
-                    context='',
+                    original=character,
+                    suggestion=None,
+                    position=position,
+                    end_position=position + 1,
+                    context=self._get_context(text, position, position + 1),
                     description=f'引号「{open_q}{close_q}」数量不匹配（左{total_open}个，右{total_close}个），请检查是否遗漏',
                     rule_id='unmatched_quote'
                 ))
@@ -1531,7 +1627,7 @@ class TextAnalyzer:
 
     def _check_extra_spaces(self, text: str) -> List[Issue]:
         """多余空格检测"""
-        issues = []
+        issues = self._issue_list()
         skip = self._build_delim_skip_mask(text)
         tech = self._build_technical_skip_mask(text)
 
@@ -1679,7 +1775,7 @@ class TextAnalyzer:
 
     def _check_missing_chars(self, text: str) -> List[Issue]:
         """漏字检测"""
-        issues = []
+        issues = self._issue_list()
 
         # 1. 常见固定搭配缺字（如"迫不及"缺少"待"）
         incomplete_items = [(k, v) for k, v in INCOMPLETE_PHRASES.items() if v is not None]
@@ -1799,7 +1895,7 @@ class TextAnalyzer:
 
     def _check_expression_issues(self, text: str) -> List[Issue]:
         """语病和表达问题检测"""
-        issues = []
+        issues = self._issue_list()
 
         # ============================================================
         # 1. 句式杂糅：两种句式混合在一起
@@ -2031,7 +2127,7 @@ class TextAnalyzer:
         密集堆砌且可安全精简）时才报告，且 original/suggestion 精确到冗余片段，
         而不是整句重写——这样前端只需高亮被改动的那几个字。
         """
-        issues = []
+        issues = self._issue_list()
 
         # "的"字冗余检测
         sentence_pattern = re.compile(r'[^。！？\n]+[。！？]')
@@ -2073,7 +2169,7 @@ class TextAnalyzer:
 
     def _check_variant_chars(self, text: str) -> List[Issue]:
         """异形词检测：推荐使用规范词形"""
-        issues = []
+        issues = self._issue_list()
         # 构建 非推荐词 -> (推荐词, 说明) 的映射
         variant_map = {}
         for recommended, (non_recommended, desc) in VARIANT_WORDS.items():
@@ -2122,7 +2218,7 @@ class TextAnalyzer:
 
     def _check_half_full_width(self, text: str) -> List[Issue]:
         """全角/半角标点混用检测"""
-        issues = []
+        issues = self._issue_list()
 
         # 1. 中文字符之间使用了半角标点（应使用全角）
         cn_context_half = re.compile(r'([\u4e00-\u9fa5])([,;:!?])')
@@ -2184,7 +2280,7 @@ class TextAnalyzer:
 
     def _check_idiom_misuse(self, text: str) -> List[Issue]:
         """成语误用检测：常见被误解或误用的成语"""
-        issues = []
+        issues = self._issue_list()
         for pattern_str, replacements, misuse_desc, correct_tip in IDIOM_MISUSE:
             for match in re.finditer(pattern_str, text):
                 # 过滤 None 占位候选
@@ -2206,7 +2302,7 @@ class TextAnalyzer:
 
     def _check_colloquial(self, text: str) -> List[Issue]:
         """口语化表达检测：正式文档中不宜使用的口语化词语"""
-        issues = []
+        issues = self._issue_list()
         for pattern_str, replacements, desc in COLLOQUIAL_EXPRESSIONS:
             for match in re.finditer(pattern_str, text):
                 # 过滤掉 None 占位候选，确保至少保留有效候选
@@ -2231,7 +2327,7 @@ class TextAnalyzer:
     def _check_custom_glossary(self, text: str, glossary: List[Dict]) -> List[Issue]:
         """自定义术语表检查：用户定义的「非规范写法 → 规范写法」对，
         在文本中检测非规范写法并提示替换为规范写法。"""
-        issues = []
+        issues = self._issue_list()
         for item in glossary:
             original = item.get('original', '').strip()
             standard = item.get('standard', '').strip()
@@ -2258,7 +2354,7 @@ class TextAnalyzer:
 
     def _check_banned_words(self, text: str, banned_words: List[str]) -> List[Issue]:
         """禁用词库检查：用户定义的禁用词，在文本中出现时标记为错误。"""
-        issues = []
+        issues = self._issue_list()
         for word in banned_words:
             word = word.strip()
             if not word:
@@ -2287,7 +2383,7 @@ class TextAnalyzer:
         领土规范表述（territory_standard）：非标准 -> 标准，warning + 建议替换。
         rules 来自打包词典 sensitive_rules.json。
         """
-        issues = []
+        issues = self._issue_list()
 
         # --- 红线词：涉政 / 民族宗教（出现即 error，不自动改写） ---
         hard_categories = [
@@ -2351,7 +2447,7 @@ class TextAnalyzer:
         命中即 error（违反《广告法》第九条关于绝对化用语的禁止性规定），不自动改写，
         须人工复核并替换为合规表述。词条来自打包词典 ad_extreme_words.json。
         """
-        issues = []
+        issues = self._issue_list()
         for word in dictionary.extreme_words:
             word = word.strip()
             if not word:
@@ -2376,7 +2472,7 @@ class TextAnalyzer:
 
     def _check_number_format(self, text: str) -> List[Issue]:
         """数字格式检测"""
-        issues = []
+        issues = self._issue_list()
 
         # 1. 中文数字与阿拉伯数字"真冗余"检测
         # 设计原则：中文数字与阿拉伯数字混用在大量场景是合法且常见的
@@ -2480,7 +2576,7 @@ class TextAnalyzer:
         (B) 同文异写（仅大小写/空格/连字符差异，且为缩写/代号类）：如 iPhone/iphone、
             COVID-19/covid19、V2/v2，归一化后相同但表面写法不一致，提示统一。
         """
-        issues = []
+        issues = self._issue_list()
 
         # ---------- (A) 内置等价词表 ----------
         for group in TERM_EQUIVALENCES:
@@ -2634,7 +2730,7 @@ class TextAnalyzer:
         - severity 统一为 error，天然不进入 LLM 语义复核（仅 warning/info 参与），
           保证合规问题不被误判为「误报」而剔除。
         """
-        issues: List[Issue] = []
+        issues: List[Issue] = self._issue_list()
         used: List[Tuple[int, int]] = []  # 已被占用的区间，避免重复标
 
         def _overlap(s: int, e: int) -> bool:

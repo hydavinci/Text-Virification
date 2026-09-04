@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 
+import {
+  unicodeCodePointLength,
+  validateDirectText
+} from '../../validation/verificationLimits'
+
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 const ACCEPTED_EXTENSIONS = ['docx', 'doc', 'pdf', 'txt', 'rtf', 'md', 'csv']
 
@@ -29,6 +34,7 @@ const fileInput = ref<HTMLInputElement | null>(null)
 const visibleError = computed(
   () => validationError.value ?? props.serverError ?? null
 )
+const draftCodePoints = computed(() => unicodeCodePointLength(draft.value))
 
 watch(
   () => props.text,
@@ -50,13 +56,18 @@ function submitText(): void {
   if (props.busy) {
     return
   }
-  const text = draft.value.trim()
-  if (!text) {
-    validationError.value = '请先输入需要检查的文本。'
+  const validation = validateDirectText(draft.value)
+  if (validation !== null) {
+    validationError.value =
+      validation === 'empty'
+        ? '请先输入需要检查的文本。'
+        : validation === 'too_many_code_points'
+          ? '文本不能超过 5,000,000 个 Unicode 字符。'
+          : '文本的 UTF-8 大小不能超过 25 MiB。'
     return
   }
   validationError.value = null
-  emit('submit-text', text)
+  emit('submit-text', draft.value)
 }
 
 function handleTextKeydown(event: KeyboardEvent): void {
@@ -175,13 +186,12 @@ function handleDropzoneKeydown(event: KeyboardEvent): void {
       <textarea
         id="source-text"
         :value="draft"
-        maxlength="500000"
         placeholder="在此粘贴需要检查的文本内容…"
         @input="updateDraft"
         @keydown="handleTextKeydown"
       />
       <div class="text-footer">
-        <span>{{ draft.length.toLocaleString() }} 字符</span>
+        <span>{{ draftCodePoints.toLocaleString() }} 字符</span>
         <span>Ctrl/⌘ + Enter 快速提交</span>
         <button
           class="btn primary"

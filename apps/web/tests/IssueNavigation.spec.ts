@@ -178,7 +178,7 @@ describe('IssueDetails', () => {
       props: {
         issue: buildIssue('manual', 0, 1, {
           suggestion: null,
-          alternatives: null
+          alternatives: []
         })
       }
     })

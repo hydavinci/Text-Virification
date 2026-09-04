@@ -12,12 +12,13 @@ import {
   type PreparedWorkspaceRestore,
   type useVerificationWorkspace
 } from './useVerificationWorkspace'
+import { MAX_VERIFICATION_ISSUES } from '../validation/verificationLimits'
 
 export const WORKSPACE_SESSION_VERSION = 6
 export const WORKSPACE_SESSION_KEY = 'text-verification-session'
 export const MAX_WORKSPACE_SESSION_RAW_BYTES = 32 * 1024 * 1024
 export const MAX_WORKSPACE_RESULT_BLOCKS = 20_000
-export const MAX_WORKSPACE_RESULT_ISSUES = 100_000
+export const MAX_WORKSPACE_RESULT_ISSUES = MAX_VERIFICATION_ISSUES
 export const MAX_WORKSPACE_REVISION_CHAIN = 10_000
 export const MAX_WORKSPACE_REVISION_CODE_POINTS = 5_000_000
 const MAX_WORKSPACE_ISSUE_ALTERNATIVES = 100
@@ -338,7 +339,7 @@ function hasBoundedSessionPayload(value: unknown): boolean {
     !Object.hasOwn(value, 'currentRevision')
   ) {
     return (
-      hasBoundedResult(value.result) &&
+      hasBoundedWorkspaceResult(value.result) &&
       isBoundedText(
         value.workingText,
         MAX_WORKSPACE_REVISION_CODE_POINTS
@@ -352,7 +353,7 @@ function hasBoundedSessionPayload(value: unknown): boolean {
   }
   const workspace = isRecord(value.workspace) ? value.workspace : value
   return (
-    hasBoundedResult(workspace.result) &&
+    hasBoundedWorkspaceResult(workspace.result) &&
     hasBoundedRevision(workspace.currentRevision) &&
     Array.isArray(workspace.revisionChain) &&
     workspace.revisionChain.length <= MAX_WORKSPACE_REVISION_CHAIN &&
@@ -369,7 +370,7 @@ function hasBoundedSessionPayload(value: unknown): boolean {
   )
 }
 
-function hasBoundedResult(value: unknown): boolean {
+export function hasBoundedWorkspaceResult(value: unknown): boolean {
   if (
     !isRecord(value) ||
     !isBoundedText(value.text, MAX_WORKSPACE_REVISION_CODE_POINTS) ||
@@ -401,10 +402,20 @@ function hasBoundedRevision(value: unknown): boolean {
 }
 
 function hasBoundedIssue(value: unknown): boolean {
+  const alternatives = isRecord(value)
+    ? value.alternatives
+    : undefined
   if (
     !isRecord(value) ||
-    !Array.isArray(value.alternatives) ||
-    value.alternatives.length > MAX_WORKSPACE_ISSUE_ALTERNATIVES
+    (
+      alternatives !== undefined &&
+      alternatives !== null &&
+      !Array.isArray(alternatives)
+    ) ||
+    (
+      Array.isArray(alternatives) &&
+      alternatives.length > MAX_WORKSPACE_ISSUE_ALTERNATIVES
+    )
   ) {
     return false
   }
@@ -425,7 +436,7 @@ function hasBoundedIssue(value: unknown): boolean {
       return false
     }
   }
-  return value.alternatives.every((alternative) =>
+  return (alternatives ?? []).every((alternative) =>
     isBoundedText(alternative, MAX_WORKSPACE_ISSUE_TEXT_CODE_POINTS)
   )
 }

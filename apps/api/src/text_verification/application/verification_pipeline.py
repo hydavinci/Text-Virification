@@ -17,7 +17,11 @@ from text_verification.document_processing.errors import (
     OcrUnavailableError,
 )
 from text_verification.domain.documents import DocumentModel, FileType
-from text_verification.domain.issues import Issue
+from text_verification.domain.issues import (
+    Issue,
+    IssueLimitExceededError,
+    validate_issue_count,
+)
 from text_verification.domain.ports import (
     CheckContext,
     CheckResult,
@@ -294,6 +298,13 @@ class VerificationPipeline:
                 "A verification dictionary could not be loaded.",
                 False,
             ) from error
+        except IssueLimitExceededError as error:
+            raise VerificationError(
+                "issue_limit_exceeded",
+                "checking",
+                "Verification produced too many issues.",
+                False,
+            ) from error
 
     def _review(
         self,
@@ -303,9 +314,18 @@ class VerificationPipeline:
         if self._reviewer is None:
             return issues, None
         try:
-            return self._reviewer.review(document, issues)
+            reviewed, metadata = self._reviewer.review(document, issues)
+            validate_issue_count(reviewed)
+            return reviewed, metadata
         except ReviewerError as error:
             return issues, _failed_review_metadata(error)
+        except IssueLimitExceededError as error:
+            raise VerificationError(
+                "issue_limit_exceeded",
+                "reviewing",
+                "Verification review produced too many issues.",
+                False,
+            ) from error
 
 
 def _failed_review_metadata(error: ReviewerError) -> ReviewMetadata:

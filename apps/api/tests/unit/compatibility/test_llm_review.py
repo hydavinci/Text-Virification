@@ -58,8 +58,15 @@ def test_provider_exception_is_logged_but_not_exposed_in_review_metadata(
     assert stats["retryable"] is False
     assert stats["reason"] == "大模型调用失败，已回退纯规则结果"
     assert "provider secret" not in repr(stats)
-    assert caplog.records[-1].getMessage() == "llm_review_provider_failed"
-    assert caplog.records[-1].exc_info is not None
+    record = caplog.records[-1]
+    assert record.getMessage() == "llm_review_provider_failed"
+    assert record.exc_info is None
+    assert record.provider_error_type == "AuthenticationError"
+    assert record.provider_status == 401
+    assert record.retryable is False
+    assert "provider secret endpoint detail" not in caplog.text
+    assert "invalid credentials" not in caplog.text
+    assert "Traceback" not in caplog.text
 
 
 def test_transient_provider_failure_is_classified_retryable(

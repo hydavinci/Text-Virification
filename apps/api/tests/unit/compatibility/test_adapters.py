@@ -1,11 +1,19 @@
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
+import pytest
+
 from text_verification.compatibility.adapters import (
     legacy_issue_to_domain,
+    legacy_issues_to_domain,
     parsed_file_to_document_model,
     verification_result_to_legacy_response,
 )
-from text_verification.compatibility.analyzer import Issue as LegacyIssue
+from text_verification.compatibility.analyzer import (
+    Issue as LegacyIssue,
+)
+from text_verification.compatibility.analyzer import (
+    TextAnalyzer,
+)
 from text_verification.compatibility.models import Scenario as CompatibilityScenario
 from text_verification.domain.documents import DocumentModel, FileType, TextBlock
 from text_verification.domain.issues import Issue, IssueSeverity
@@ -103,9 +111,60 @@ def test_issue_adapter_uses_original_width_when_legacy_range_is_empty() -> None:
 
     adapted = legacy_issue_to_domain(legacy_issue, document, uuid4())
 
+    assert adapted is not None
     assert adapted.start == 0
     assert adapted.end == 2
     assert adapted.original == '""'
+
+
+def test_issue_adapter_rejects_a_locationless_issue_without_an_exact_source_match() -> None:
+    document = _document(text='prefix "unterminated')
+    legacy_issue = LegacyIssue(
+        type="punctuation",
+        severity="warning",
+        original='""',
+        suggestion='""',
+        position=0,
+        end_position=0,
+        context="",
+        description="引号数量不匹配",
+        rule_id="unmatched_quote",
+        alternatives=None,
+        layer="format",
+    )
+
+    run_id = uuid4()
+
+    assert legacy_issue_to_domain(legacy_issue, document, run_id) is None
+    assert legacy_issues_to_domain([legacy_issue], document, run_id) == ()
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_original", "expected_start"),
+    [
+        ('前😀缀"未闭', '"', 3),
+        ("前😀缀「未闭", "「", 3),
+        ("前😀缀未闭」", "」", 5),
+        ("前😀缀『未闭", "『", 3),
+    ],
+)
+def test_unmatched_quotes_report_the_exact_code_point_range(
+    text: str,
+    expected_original: str,
+    expected_start: int,
+) -> None:
+    issues = TextAnalyzer()._check_brackets_quotes(text)
+    unmatched = [issue for issue in issues if issue.rule_id == "unmatched_quote"]
+
+    assert [
+        (
+            issue.original,
+            issue.position,
+            issue.end_position,
+            issue.suggestion,
+        )
+        for issue in unmatched
+    ] == [(expected_original, expected_start, expected_start + 1, None)]
 
 
 def test_uploaded_docx_page_map_becomes_structured_paragraph_blocks() -> None:

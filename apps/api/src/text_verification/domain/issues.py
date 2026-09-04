@@ -1,7 +1,27 @@
+from collections.abc import Sized
 from enum import StrEnum
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+MAX_VERIFICATION_ISSUES = 100_000
+
+
+class IssueLimitExceededError(ValueError):
+    pass
+
+
+def validate_issue_count(
+    issues: Sized,
+    *,
+    max_issues: int = MAX_VERIFICATION_ISSUES,
+) -> None:
+    if isinstance(max_issues, bool) or not isinstance(max_issues, int) or max_issues < 0:
+        raise ValueError("max_issues must be a nonnegative integer")
+    if len(issues) > max_issues:
+        raise IssueLimitExceededError(
+            f"Verification issue count exceeds the configured limit of {max_issues}."
+        )
 
 
 class IssueSeverity(StrEnum):
