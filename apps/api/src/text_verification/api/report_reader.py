@@ -7,6 +7,9 @@ from fastapi import Request
 from pydantic import ValidationError
 
 from text_verification.api.body_readers import (
+    JSON_MATERIALIZED_EVENT_OVERHEAD_BYTES,
+    MAX_JSON_CONTAINER_ENTRIES,
+    MAX_JSON_EVENTS,
     invalid_request_body,
     iter_bounded_json_events,
     request_body_too_large,
@@ -31,6 +34,7 @@ _SELECTED_REPORT_FIELDS = frozenset(
         "summary",
     }
 )
+_REPORT_FIELDS = _SELECTED_REPORT_FIELDS | {"blocks", "text"}
 _SCALAR_EVENTS = frozenset(
     {
         "boolean",
@@ -147,6 +151,10 @@ async def read_bounded_report_request(
     top_level_keys: set[str] = set()
     selected_builders: dict[str, _JsonValueBuilder] = {}
     retained_bytes = 0
+    event_count = 0
+    container_entry_count = 0
+    container_keys: list[set[str] | None] = []
+    current_root_key: str | None = None
     text_seen = False
     blocks_seen = False
     blocks_complete = False
@@ -159,20 +167,13 @@ async def read_bounded_report_request(
 
     def charge_retained(event: str, value: object) -> None:
         nonlocal retained_bytes
+        retained_bytes += JSON_MATERIALIZED_EVENT_OVERHEAD_BYTES
         if isinstance(value, str):
             retained_bytes += len(value.encode("utf-8"))
         elif isinstance(value, bool | int | float | Decimal):
             retained_bytes += len(str(value))
         elif value is None:
             retained_bytes += 4
-        if event in {
-            "end_array",
-            "end_map",
-            "map_key",
-            "start_array",
-            "start_map",
-        }:
-            retained_bytes += 1
         if retained_bytes > max_retained_bytes:
             raise request_body_too_large()
 
@@ -197,6 +198,46 @@ async def read_bounded_report_request(
                 max_retained_bytes,
             ),
         ):
+            event_count += 1
+            if event_count > MAX_JSON_EVENTS:
+                raise request_body_too_large()
+            if event in _SCALAR_EVENTS or event in {"start_array", "start_map"}:
+                container_entry_count += 1
+                if container_entry_count > MAX_JSON_CONTAINER_ENTRIES:
+                    raise request_body_too_large()
+
+            if event == "start_map":
+                container_keys.append(set())
+            elif event == "start_array":
+                container_keys.append(None)
+            elif event == "map_key":
+                if (
+                    not container_keys
+                    or container_keys[-1] is None
+                    or not isinstance(value, str)
+                    or value in container_keys[-1]
+                ):
+                    raise DocumentPayloadShapeError(
+                        "Report JSON object keys must be unique strings."
+                    )
+                container_keys[-1].add(value)
+                if len(container_keys) == 1:
+                    if value not in _REPORT_FIELDS:
+                        raise DocumentPayloadShapeError(
+                            "Report request contains an unknown field."
+                        )
+                    current_root_key = value
+            elif event in {"end_map", "end_array"}:
+                expected_map = event == "end_map"
+                if (
+                    not container_keys
+                    or (container_keys[-1] is not None) != expected_map
+                ):
+                    raise DocumentPayloadShapeError(
+                        "Report JSON container structure is invalid."
+                    )
+                container_keys.pop()
+
             if prefix == "":
                 if event == "start_map":
                     if root_started:
@@ -207,6 +248,7 @@ async def read_bounded_report_request(
                     continue
                 if event == "end_map":
                     root_complete = True
+                    current_root_key = None
                     continue
                 if event == "map_key":
                     if not isinstance(value, str) or value in top_level_keys:
@@ -219,7 +261,11 @@ async def read_bounded_report_request(
                     "Report request must contain one JSON object."
                 )
 
-            top_level = prefix.split(".", 1)[0]
+            top_level = current_root_key
+            if top_level is None:
+                raise DocumentPayloadShapeError(
+                    "Report JSON value is missing its root field."
+                )
             if top_level in _SELECTED_REPORT_FIELDS:
                 charge_retained(event, value)
                 builder = selected_builders.setdefault(

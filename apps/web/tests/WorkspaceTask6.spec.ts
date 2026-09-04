@@ -526,6 +526,98 @@ describe('WorkspaceView Task 6 integration', () => {
     }
   )
 
+  it('requires another job-bound recheck after accepting an issue from a recheck result', async () => {
+    const firstCheckedIssue: VerificationIssue = {
+      ...issue,
+      document_id: '77777777-7777-4777-8777-777777777777',
+      verification_run_id: '88888888-8888-4888-8888-888888888888'
+    }
+    const firstChecked: VerificationResult = {
+      ...result,
+      filename: 'direct.txt',
+      source_name: 'direct.txt',
+      file_type: 'txt',
+      file_id: null,
+      file_ext: null,
+      document_id: firstCheckedIssue.document_id,
+      verification_run_id: firstCheckedIssue.verification_run_id,
+      source_version:
+        'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      execution_mode: 'synchronous',
+      issues: [firstCheckedIssue]
+    }
+    const secondChecked: VerificationResult = {
+      ...firstChecked,
+      text: '账号测试',
+      blocks: firstChecked.blocks.map((block) => ({
+        ...block,
+        text: '账号测试'
+      })),
+      issues: [],
+      summary: {
+        total: 0,
+        by_type: {},
+        by_severity: {},
+        by_rule: {},
+        by_layer: {}
+      },
+      document_id: '99999999-9999-4999-8999-999999999999',
+      verification_run_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      source_version:
+        'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
+    }
+    seedSession(result)
+    const persistRevision = vi.fn(async (_jobId, draft) => ({
+      ...draft,
+      revision_number: 1,
+      created_at: '2026-09-04T00:00:00.000Z',
+      persistence_state: 'persisted' as const
+    }))
+    const exportJob = vi.fn()
+    const recheckJob = vi.fn()
+      .mockResolvedValueOnce({
+        result: firstChecked,
+        grant: 'first-server-grant'
+      })
+      .mockResolvedValueOnce({
+        result: secondChecked,
+        grant: 'second-server-grant'
+      })
+    const wrapper = mountWorkspace(
+      verificationApi({ recheckJob, persistRevision, exportJob })
+    )
+    await flushPromises()
+
+    await wrapper.get('[data-action="recheck"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-action="accept-batch"]').trigger('click')
+    await wrapper.get('[data-action="export-modified"]').trigger('click')
+    await flushPromises()
+
+    expect(persistRevision).not.toHaveBeenCalled()
+    expect(exportJob).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('需要再次检查后再导出')
+
+    await wrapper.get('[data-action="recheck"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-action="export-modified"]').trigger('click')
+    await flushPromises()
+
+    expect(recheckJob).toHaveBeenCalledTimes(2)
+    expect(persistRevision).toHaveBeenCalledWith(
+      result.document_id,
+      expect.objectContaining({ text: '账号测试' }),
+      expect.objectContaining({
+        document_id: secondChecked.document_id,
+        verification_run_id: secondChecked.verification_run_id,
+        source_version: secondChecked.source_version,
+        text: secondChecked.text
+      }),
+      expect.objectContaining({ grant: 'second-server-grant' })
+    )
+    expect(exportJob).toHaveBeenCalledTimes(1)
+  })
+
   it('rejects an unrelated synchronous result instead of binding retained job authority', async () => {
     const origin: VerificationResult = {
       ...result,

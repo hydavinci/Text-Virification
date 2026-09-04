@@ -814,6 +814,130 @@ def test_export_report_reader_does_not_buffer_the_complete_raw_body(
     assert calls == 0
 
 
+def test_export_report_retained_budget_rejects_chunked_empty_array_entries(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from text_verification.api.routes import compatibility as compatibility_routes
+
+    body = json.dumps(
+        {
+            "filename": "report.txt",
+            "stats": {"values": [""] * 10_000},
+            "summary": {},
+            "issues": [],
+        },
+        separators=(",", ":"),
+    ).encode()
+    monkeypatch.setattr(
+        compatibility_routes,
+        "MAX_COMPATIBILITY_EXPORT_REQUEST_BYTES",
+        100,
+    )
+
+    response = client.post(
+        "/api/v1/export",
+        content=iter((body[:17], body[17:103], body[103:])),
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 413
+
+
+@pytest.mark.parametrize(
+    "stats",
+    [
+        {chr(0x100 + index): "" for index in range(24)},
+        {"nested": [[[]]]},
+    ],
+)
+def test_export_report_retained_budget_accounts_for_wide_empty_structures(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    stats: dict[str, object],
+) -> None:
+    from text_verification.api.routes import compatibility as compatibility_routes
+
+    monkeypatch.setattr(
+        compatibility_routes,
+        "MAX_COMPATIBILITY_EXPORT_REQUEST_BYTES",
+        100,
+    )
+
+    response = client.post(
+        "/api/v1/export",
+        json={"stats": stats},
+    )
+
+    assert response.status_code == 413
+
+
+def test_export_report_rejects_dotted_root_key_without_filename_spoof(
+    client: TestClient,
+) -> None:
+    response = client.post(
+        "/api/v1/export",
+        content=(
+            b'{"filename.x":"spoofed.txt","stats":{},'
+            b'"summary":{},"issues":[]}'
+        ),
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 422
+    assert "spoofed.txt" not in response.text
+
+
+@pytest.mark.parametrize(
+    "raw_block",
+    [
+        (
+            b'{"block_id":"a","text":"safe","style":'
+            b'{"marker":"nested-secret","marker":"replacement"}}'
+        ),
+        (
+            b'{"block_id":"a","text":"safe","source_locator":'
+            b'{"path":"nested-secret","path":"replacement"}}'
+        ),
+    ],
+)
+def test_export_report_rejects_duplicate_keys_in_skipped_block_subtrees(
+    client: TestClient,
+    caplog: pytest.LogCaptureFixture,
+    raw_block: bytes,
+) -> None:
+    response = client.post(
+        "/api/v1/export",
+        content=(
+            b'{"filename":"report.txt","stats":{},"summary":{},'
+            b'"issues":[],"text":"safe","blocks":['
+            + raw_block
+            + b"]}"
+        ),
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 422
+    assert "nested-secret" not in response.text
+    assert "nested-secret" not in caplog.text
+
+
+def test_export_report_accepts_dotted_string_values(
+    client: TestClient,
+) -> None:
+    response = client.post(
+        "/api/v1/export",
+        json={
+            "filename": "report.v1.txt",
+            "stats": {"label": "section.one"},
+            "summary": {},
+            "issues": [],
+        },
+    )
+
+    assert response.status_code == 200
+
+
 def test_export_report_malformed_json_never_reflects_request_secrets(
     client: TestClient,
     caplog: pytest.LogCaptureFixture,

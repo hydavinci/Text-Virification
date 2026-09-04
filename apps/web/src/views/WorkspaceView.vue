@@ -179,6 +179,15 @@ const currentRevisionText = computed(
     verificationWorkspace.result.value?.text ??
     ''
 )
+const recheckedAuthorityRequiresRecheck = computed(() => {
+  const currentResult = result.value
+  return (
+    fileExportAuthority.value !== null &&
+    currentResult !== null &&
+    currentResult.execution_mode === 'synchronous' &&
+    currentRevisionText.value !== currentResult.text
+  )
+})
 const selectedIssueState = computed<IssueState | null>(() => {
   const issueId = selectedIssueId.value
   return issueId === null
@@ -198,6 +207,9 @@ const exportBlockedReason = computed(() => {
   }
   if (verificationWorkspace.requiresReverification.value) {
     return '当前文本已修改，请重新检查后再导出'
+  }
+  if (recheckedAuthorityRequiresRecheck.value) {
+    return '重新检查后的审阅修改需要再次检查后再导出'
   }
   return null
 })
@@ -442,6 +454,10 @@ async function exportModified() {
   }
   if (verificationWorkspace.requiresReverification.value) {
     notify('当前文本已修改，请重新检查后再导出')
+    return
+  }
+  if (recheckedAuthorityRequiresRecheck.value) {
+    notify('重新检查后的审阅修改需要再次检查后再导出')
     return
   }
   if (
@@ -707,9 +723,12 @@ function beginRecheckedExportOperation(): RecheckedExportOperation | null {
     currentResult === null ||
     currentRevision === null ||
     authority === null ||
+    recheckedAuthorityRequiresRecheck.value ||
     !isWorkspaceExportAuthorityBoundToResult(authority, currentResult)
   ) {
-    exportError.value = '异步文档缺少可验证的任务身份，无法导出'
+    exportError.value = recheckedAuthorityRequiresRecheck.value
+      ? '重新检查后的审阅修改需要再次检查后再导出'
+      : '异步文档缺少可验证的任务身份，无法导出'
     return null
   }
   exportGeneration += 1

@@ -14,8 +14,23 @@ MAX_JSON_STRING_ESCAPE_FACTOR = 6
 MAX_JSON_BODY_OVERHEAD_BYTES = 64 * 1024
 MAX_JSON_NESTING_DEPTH = 128
 MAX_JSON_PARSE_CHUNK_BYTES = 64 * 1024
+MAX_JSON_EVENTS = 1_000_000
+MAX_JSON_CONTAINER_ENTRIES = 250_000
+JSON_MATERIALIZED_EVENT_OVERHEAD_BYTES = 16
 MAX_FORM_BODY_OVERHEAD_BYTES = 64 * 1024
 MAX_FORM_FIELDS = 16
+_VALUE_EVENTS = frozenset(
+    {
+        "boolean",
+        "double",
+        "integer",
+        "null",
+        "number",
+        "start_array",
+        "start_map",
+        "string",
+    }
+)
 
 
 type JsonContainer = dict[str, object] | list[object]
@@ -217,6 +232,8 @@ async def read_bounded_json_model[ModelT: BaseModel](
     current_key: str | None = None
     builders: dict[str, JsonValueBuilder] = {}
     materialized_bytes = 0
+    event_count = 0
+    container_entry_count = 0
     try:
         async for prefix, event, value in iter_bounded_json_events(
             request,
@@ -227,6 +244,13 @@ async def read_bounded_json_model[ModelT: BaseModel](
                 else max_string_utf8_bytes
             ),
         ):
+            event_count += 1
+            if event_count > MAX_JSON_EVENTS:
+                raise request_body_too_large()
+            if event in _VALUE_EVENTS:
+                container_entry_count += 1
+                if container_entry_count > MAX_JSON_CONTAINER_ENTRIES:
+                    raise request_body_too_large()
             if prefix == "":
                 if event == "start_map" and not root_started:
                     root_started = True
@@ -251,13 +275,10 @@ async def read_bounded_json_model[ModelT: BaseModel](
                 top_level,
                 JsonValueBuilder(),
             )
-            materialized_bytes += _json_event_size(event, value)
-            if materialized_bytes > (
-                max_bytes
-                if max_materialized_bytes is None
-                else max_materialized_bytes
-            ):
-                raise request_body_too_large()
+            if max_materialized_bytes is not None:
+                materialized_bytes += _json_event_size(event, value)
+                if materialized_bytes > max_materialized_bytes:
+                    raise request_body_too_large()
             builder.feed(event, value)
             if builder.complete and current_key == top_level:
                 current_key = None
@@ -326,22 +347,13 @@ async def iter_bounded_json_events(
 
 
 def _json_event_size(event: str, value: object) -> int:
+    size = JSON_MATERIALIZED_EVENT_OVERHEAD_BYTES
     if isinstance(value, str):
-        size = len(value.encode("utf-8"))
+        size += len(value.encode("utf-8"))
     elif isinstance(value, bool | int | float | Decimal):
-        size = len(str(value))
+        size += len(str(value))
     elif value is None:
-        size = 4
-    else:
-        size = 0
-    if event in {
-        "end_array",
-        "end_map",
-        "map_key",
-        "start_array",
-        "start_map",
-    }:
-        size += 1
+        size += 4
     return size
 
 
