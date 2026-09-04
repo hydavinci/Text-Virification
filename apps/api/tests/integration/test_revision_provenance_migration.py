@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from io import StringIO
+from pathlib import Path
 from uuid import UUID
 
+from alembic.config import Config
 from sqlalchemy import inspect, text
 from sqlalchemy.orm import Session
 
@@ -22,6 +25,9 @@ from text_verification.infrastructure.repositories import JobRepository
 from text_verification.infrastructure.verification_repository import (
     VerificationRepository,
 )
+
+BACKEND_ROOT = Path(__file__).resolve().parents[2]
+DERIVATION_ISSUE_INDEX = "ix_verification_issues_run_start_end_issue_index"
 
 
 def test_upgrade_from_pre_0012_backfills_only_provable_revision_provenance(
@@ -187,6 +193,148 @@ def test_upgrade_from_pre_0012_backfills_only_provable_revision_provenance(
                     "RESTART IDENTITY CASCADE"
                 )
             )
+
+
+def test_postgres_0012_derivation_support_index_serves_ordered_issue_queries(
+    db_engine,
+    alembic_config,
+) -> None:
+    created_at = datetime(2026, 9, 4, 3, 0, tzinfo=UTC)
+    job_id = UUID("10000000-0000-4000-8000-000000000201")
+    run_id = UUID("30000000-0000-4000-8000-000000000201")
+    issue_id = UUID("40000000-0000-4000-8000-000000000201")
+    second_issue_id = UUID("40000000-0000-4000-8000-000000000202")
+    revision_id = UUID("50000000-0000-4000-8000-000000000201")
+
+    try:
+        command.downgrade(
+            alembic_config,
+            "0011_add_artifact_reservation_version",
+        )
+        session = Session(db_engine)
+        try:
+            _create_job_and_result(session, job_id, run_id, issue_id, created_at)
+            session.commit()
+        finally:
+            session.close()
+
+        with db_engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO verification_issues ("
+                    "verification_run_id, document_id, issue_id, issue_index, "
+                    "block_id, page, start, \"end\", block_start, block_end, "
+                    "original, suggestion, alternatives, type, severity, layer, "
+                    "message, description, rule_id, rule_version, source, "
+                    "source_version, confidence, auto_fixable, context, review, "
+                    "review_reason"
+                    ") VALUES ("
+                    ":run_id, :job_id, :issue_id, 1, 'p-0', NULL, 2, 4, 2, 4, "
+                    "'测试', '测验', '[\"测试\"]'::jsonb, 'typo', 'warning', "
+                    "'character', '疑似错别字', '疑似错别字', 'cn_typo_2', '1', "
+                    "'legacy', '1', 0.8, true, '帐号测试', NULL, NULL"
+                    ")"
+                ),
+                {
+                    "run_id": run_id,
+                    "job_id": job_id,
+                    "issue_id": second_issue_id,
+                },
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO review_revisions ("
+                    "review_revision_id, verification_run_id, document_id, "
+                    "source_version, revision_number, parent_revision_id, "
+                    "kind, text, created_at"
+                    ") VALUES ("
+                    ":revision_id, :run_id, :job_id, 'sha256:source', 1, "
+                    "NULL, 'review', '账号测试', :created_at"
+                    ")"
+                ),
+                {
+                    "revision_id": revision_id,
+                    "run_id": run_id,
+                    "job_id": job_id,
+                    "created_at": created_at,
+                },
+            )
+            connection.execute(text(_offline_upgrade_support_index_ddl()))
+            connection.execute(text("SET LOCAL enable_seqscan = off"))
+            ordered_plan = "\n".join(
+                row[0]
+                for row in connection.execute(
+                    text(
+                        'EXPLAIN (COSTS OFF) SELECT "end", suggestion, alternatives '
+                        "FROM verification_issues "
+                        "WHERE verification_run_id = :run_id AND start = 0 "
+                        'ORDER BY "end", issue_index'
+                    ),
+                    {"run_id": run_id},
+                )
+            )
+            next_start_plan = "\n".join(
+                row[0]
+                for row in connection.execute(
+                    text(
+                        "EXPLAIN (COSTS OFF) "
+                        "SELECT COALESCE(min(start), 4) "
+                        "FROM verification_issues "
+                        "WHERE verification_run_id = :run_id AND start > 0"
+                    ),
+                    {"run_id": run_id},
+                )
+            )
+            connection.execute(text(f"DROP INDEX {DERIVATION_ISSUE_INDEX}"))
+
+        assert DERIVATION_ISSUE_INDEX in ordered_plan
+        assert DERIVATION_ISSUE_INDEX in next_start_plan
+
+        command.upgrade(alembic_config, "head")
+
+        with db_engine.connect() as connection:
+            provenance_row = connection.execute(
+                text(
+                    "SELECT provenance_state, verified_provenance "
+                    "FROM review_revisions "
+                    "WHERE review_revision_id = :revision_id"
+                ),
+                {"revision_id": revision_id},
+            ).mappings().one()
+
+        assert provenance_row.provenance_state == "verified"
+        assert provenance_row.verified_provenance["kind"] == "original_result"
+        assert DERIVATION_ISSUE_INDEX not in {
+            index["name"]
+            for index in inspect(db_engine).get_indexes("verification_issues")
+        }
+    finally:
+        command.upgrade(alembic_config, "head")
+        with db_engine.begin() as connection:
+            connection.execute(
+                text(
+                    "TRUNCATE TABLE "
+                    "export_artifacts, review_revisions, verification_issues, "
+                    "verification_runs, document_blocks, documents, job_events, jobs "
+                    "RESTART IDENTITY CASCADE"
+                )
+            )
+
+
+def _offline_upgrade_support_index_ddl() -> str:
+    output = StringIO()
+    config = Config(str(BACKEND_ROOT / "alembic.ini"), output_buffer=output)
+    config.set_main_option("script_location", str(BACKEND_ROOT / "alembic"))
+    config.attributes["database_url"] = "postgresql://example/example"
+    command.upgrade(
+        config,
+        "0011_add_artifact_reservation_version:0012_add_revision_provenance",
+        sql=True,
+    )
+    for statement in output.getvalue().splitlines():
+        if statement.startswith(f"CREATE INDEX {DERIVATION_ISSUE_INDEX} "):
+            return statement
+    raise AssertionError(f"Missing {DERIVATION_ISSUE_INDEX} DDL")
 
 
 def _create_job_and_result(

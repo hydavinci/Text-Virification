@@ -29,6 +29,7 @@ MAX_REVIEW_DERIVATION_STATES = 100_000
 MAX_REVIEW_DERIVATION_WORK = 25_000_000
 VERIFIED_PROVENANCE_STATE = "verified"
 LEGACY_UNAVAILABLE_PROVENANCE_STATE = "legacy_unavailable"
+DERIVATION_ISSUE_INDEX = "ix_verification_issues_run_start_end_issue_index"
 
 
 def upgrade() -> None:
@@ -61,7 +62,13 @@ def upgrade() -> None:
         "AND verified_provenance IS NULL"
         ")",
     )
+    op.create_index(
+        DERIVATION_ISSUE_INDEX,
+        "verification_issues",
+        ["verification_run_id", "start", "end", "issue_index"],
+    )
     _backfill_original_result_provenance()
+    op.drop_index(DERIVATION_ISSUE_INDEX, table_name="verification_issues")
     op.alter_column(
         "review_revisions",
         "provenance_state",
