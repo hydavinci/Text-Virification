@@ -220,6 +220,7 @@ async def read_bounded_report_request(
                     raise DocumentPayloadShapeError(
                         "Report JSON object keys must be unique strings."
                     )
+                charge_retained(event, value)
                 container_keys[-1].add(value)
                 if len(container_keys) == 1:
                     if value not in _REPORT_FIELDS:
@@ -267,7 +268,8 @@ async def read_bounded_report_request(
                     "Report JSON value is missing its root field."
                 )
             if top_level in _SELECTED_REPORT_FIELDS:
-                charge_retained(event, value)
+                if event != "map_key":
+                    charge_retained(event, value)
                 builder = selected_builders.setdefault(
                     top_level,
                     _JsonValueBuilder(),

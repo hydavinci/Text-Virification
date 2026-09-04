@@ -922,6 +922,40 @@ def test_export_report_rejects_duplicate_keys_in_skipped_block_subtrees(
     assert "nested-secret" not in caplog.text
 
 
+def test_export_report_charges_large_unique_keys_in_skipped_block_metadata(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from text_verification.api.routes import compatibility as compatibility_routes
+
+    monkeypatch.setattr(
+        compatibility_routes,
+        "MAX_COMPATIBILITY_EXPORT_REQUEST_BYTES",
+        300,
+    )
+    large_key = "k" * 500
+
+    response = client.post(
+        "/api/v1/export",
+        json={
+            "filename": "report.txt",
+            "stats": {},
+            "summary": {},
+            "issues": [],
+            "text": "safe",
+            "blocks": [
+                {
+                    "block_id": "a",
+                    "text": "safe",
+                    "style": {large_key: ""}
+                }
+            ]
+        },
+    )
+
+    assert response.status_code == 413
+
+
 def test_export_report_accepts_dotted_string_values(
     client: TestClient,
 ) -> None:
