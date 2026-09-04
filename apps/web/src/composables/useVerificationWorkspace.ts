@@ -52,6 +52,11 @@ type PriorIssueState =
   | { hadValue: false }
   | { hadValue: true; value: IssueState }
 
+interface AcceptedReplacementPlan {
+  readonly conflictIssueIds: readonly string[]
+  readonly text: string
+}
+
 export interface WorkspaceReadonlyValue<T> {
   readonly __v_isRef: true
   readonly value: T
@@ -170,19 +175,6 @@ function sliceCodePointRange(
 ): string | null {
   const range = utf16RangeForCodePointOffsets(value, start, end)
   return range === null ? null : value.slice(range.start, range.end)
-}
-
-function replaceCodePointRange(
-  value: string,
-  start: number,
-  end: number,
-  replacement: string
-): string | null {
-  const range = utf16RangeForCodePointOffsets(value, start, end)
-  if (range === null) {
-    return null
-  }
-  return `${value.slice(0, range.start)}${replacement}${value.slice(range.end)}`
 }
 
 export function hasCanonicalBlocks(result: VerificationResult): boolean {
@@ -1781,52 +1773,60 @@ function restoredSuggestion(
     : issue.suggestion
 }
 
-function restoredReplacementConflicts(
+function planAcceptedEffectiveReplacements(
+  resultText: string,
   issues: readonly VerificationIssue[],
-  states: Readonly<Record<string, IssueState>>,
-  suggestions: Readonly<Record<string, string | null>>
-): boolean {
-  const accepted = issues
-    .filter((issue) => states[issue.issue_id] === 'accepted')
-    .filter((issue) => restoredSuggestion(issue, suggestions) !== null)
-  return accepted.some((left, index) =>
-    accepted
-      .slice(index + 1)
-      .some((right) => left.start < right.end && right.start < left.end)
-  )
-}
-
-function restoredReviewText(
-  result: VerificationResult,
-  issues: readonly VerificationIssue[],
-  states: Readonly<Record<string, IssueState>>,
-  suggestions: Readonly<Record<string, string | null>>
-): string {
-  let text = result.text
-  const accepted = issues
-    .filter((issue) => states[issue.issue_id] === 'accepted')
-    .filter((issue) => restoredSuggestion(issue, suggestions) !== null)
-    .sort((left, right) =>
-      right.start - left.start ||
-      right.end - left.end ||
-      right.issue_id.localeCompare(left.issue_id)
-    )
-  for (const issue of accepted) {
-    const suggestion = restoredSuggestion(issue, suggestions)
-    if (suggestion === null) {
+  stateForIssue: (issue: VerificationIssue) => IssueState | undefined,
+  suggestionForIssue: (issue: VerificationIssue) => string | null
+): AcceptedReplacementPlan {
+  const accepted: { issue: VerificationIssue; suggestion: string }[] = []
+  for (const issue of issues) {
+    if (stateForIssue(issue) !== 'accepted') {
       continue
     }
-    const replaced = replaceCodePointRange(
-      text,
-      issue.start,
-      issue.end,
-      suggestion
-    )
-    if (replaced !== null) {
-      text = replaced
+    const suggestion = suggestionForIssue(issue)
+    if (suggestion !== null) {
+      accepted.push({ issue, suggestion })
     }
   }
-  return text
+
+  const conflictingIds = new Set<string>()
+  let maxEnd = -1
+  let maxEndIssue: VerificationIssue | null = null
+  for (const { issue } of accepted) {
+    if (maxEndIssue !== null && maxEnd > issue.start) {
+      conflictingIds.add(maxEndIssue.issue_id)
+      conflictingIds.add(issue.issue_id)
+    }
+    if (issue.end > maxEnd) {
+      maxEnd = issue.end
+      maxEndIssue = issue
+    }
+  }
+
+  const conflictIssueIds = Object.freeze(
+    accepted
+      .filter(({ issue }) => conflictingIds.has(issue.issue_id))
+      .map(({ issue }) => issue.issue_id)
+  )
+  if (conflictIssueIds.length > 0 || accepted.length === 0) {
+    return { conflictIssueIds, text: resultText }
+  }
+
+  const offsets = utf16OffsetsByCodePoint(resultText)
+  const parts: string[] = []
+  let utf16Cursor = 0
+  for (const { issue, suggestion } of accepted) {
+    const utf16Start = offsets[issue.start]
+    const utf16End = offsets[issue.end]
+    parts.push(resultText.slice(utf16Cursor, utf16Start), suggestion)
+    utf16Cursor = utf16End
+  }
+  parts.push(resultText.slice(utf16Cursor))
+  return {
+    conflictIssueIds,
+    text: parts.join('')
+  }
 }
 
 function legacyReviewRevision(
@@ -1965,20 +1965,15 @@ export function prepareWorkspaceRestore(
         requiresReverification: true
       }
     }
-    const conflicts = restoredReplacementConflicts(
+    const replacementPlan = planAcceptedEffectiveReplacements(
+      result.text,
       safeIssues,
-      issueStates,
-      selectedSuggestions
+      (issue) => issueStates[issue.issue_id],
+      (issue) => restoredSuggestion(issue, selectedSuggestions)
     )
-    const text = restoredReviewText(
-      result,
-      safeIssues,
-      issueStates,
-      selectedSuggestions
-    )
-    const currentRevision = conflicts
+    const currentRevision = replacementPlan.conflictIssueIds.length > 0
       ? sourceRevision(result)
-      : legacyReviewRevision(result, text)
+      : legacyReviewRevision(result, replacementPlan.text)
     return {
       result,
       safeIssues,
@@ -2030,17 +2025,14 @@ export function prepareWorkspaceRestore(
   if (currentRevision.kind === 'manual') {
     return null
   }
-  const conflicts = restoredReplacementConflicts(
+  const replacementPlan = planAcceptedEffectiveReplacements(
+    result.text,
     safeIssues,
-    issueStates,
-    selectedSuggestions
+    (issue) => issueStates[issue.issue_id],
+    (issue) => restoredSuggestion(issue, selectedSuggestions)
   )
-  const expectedText = restoredReviewText(
-    result,
-    safeIssues,
-    issueStates,
-    selectedSuggestions
-  )
+  const conflicts = replacementPlan.conflictIssueIds.length > 0
+  const expectedText = replacementPlan.text
   if (
     (!conflicts && currentRevision.text !== expectedText) ||
     (!conflicts &&
@@ -2080,73 +2072,31 @@ export function useVerificationWorkspace() {
     return new Set(safeIssues.value.map((issue) => issue.issue_id))
   }
 
-  function applyAcceptedReplacements(): string {
-    const currentResult = result.value
-    if (currentResult === null) {
-      return ''
-    }
-
-    let text = currentResult.text
-    const acceptedIssues = safeIssues.value
-      .filter((issue) => issueStates.value[issue.issue_id] === 'accepted')
-      .filter((issue) => effectiveSuggestion(issue) !== null)
-      .sort((left, right) =>
-        right.start - left.start ||
-        right.end - left.end ||
-        right.issue_id.localeCompare(left.issue_id)
-      )
-
-    for (const issue of acceptedIssues) {
-      const suggestion = effectiveSuggestion(issue)
-      if (suggestion === null) {
-        continue
-      }
-      const replaced = replaceCodePointRange(
-        text,
-        issue.start,
-        issue.end,
-        suggestion
-      )
-      if (replaced !== null) {
-        text = replaced
-      }
-    }
-    return text
-  }
-
   function effectiveSuggestion(issue: VerificationIssue): string | null {
     return hasOwn(selectedSuggestions.value, issue.issue_id)
       ? selectedSuggestions.value[issue.issue_id]
       : issue.suggestion
   }
 
-  const replacementConflictIssueIds = computed(() => {
-    const acceptedIssues = safeIssues.value
-      .filter((issue) => issueStates.value[issue.issue_id] === 'accepted')
-      .filter((issue) => effectiveSuggestion(issue) !== null)
-    const conflictingIds = new Set<string>()
-
-    for (let leftIndex = 0; leftIndex < acceptedIssues.length; leftIndex += 1) {
-      const left = acceptedIssues[leftIndex]
-      for (
-        let rightIndex = leftIndex + 1;
-        rightIndex < acceptedIssues.length;
-        rightIndex += 1
-      ) {
-        const right = acceptedIssues[rightIndex]
-        if (left.start < right.end && right.start < left.end) {
-          conflictingIds.add(left.issue_id)
-          conflictingIds.add(right.issue_id)
-        }
+  const acceptedReplacementPlan = computed<AcceptedReplacementPlan>(() => {
+    const currentResult = result.value
+    if (currentResult === null) {
+      return {
+        conflictIssueIds: Object.freeze([]),
+        text: ''
       }
     }
-
-    return Object.freeze(
-      acceptedIssues
-        .filter((issue) => conflictingIds.has(issue.issue_id))
-        .map((issue) => issue.issue_id)
+    return planAcceptedEffectiveReplacements(
+      currentResult.text,
+      safeIssues.value,
+      (issue) => issueStates.value[issue.issue_id],
+      effectiveSuggestion
     )
   })
+
+  const replacementConflictIssueIds = computed(
+    () => acceptedReplacementPlan.value.conflictIssueIds
+  )
 
   const hasReplacementConflicts = computed(
     () => replacementConflictIssueIds.value.length > 0
@@ -2159,7 +2109,7 @@ export function useVerificationWorkspace() {
     ) {
       return currentRevision.value.text
     }
-    return applyAcceptedReplacements()
+    return acceptedReplacementPlan.value.text
   })
 
   const summary = computed<WorkspaceReviewSummary>(() => {
@@ -2185,7 +2135,7 @@ export function useVerificationWorkspace() {
     ) {
       return
     }
-    const text = applyAcceptedReplacements()
+    const text = acceptedReplacementPlan.value.text
     const priorRevision = currentRevision.value
     if (
       priorRevision !== null &&

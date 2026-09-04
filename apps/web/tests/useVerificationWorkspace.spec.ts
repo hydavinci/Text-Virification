@@ -177,6 +177,71 @@ function buildSessionV2(
   }
 }
 
+function issueIdForIndex(index: number): string {
+  return `40000000-0000-4000-8000-${index.toString().padStart(12, '0')}`
+}
+
+function buildLargeReplacementScenario(issueCount = MAX_VERIFICATION_ISSUES) {
+  const text = 'a'.repeat(issueCount)
+  const issues = Array.from({ length: issueCount }, (_, index) =>
+    buildIssue({
+      issue_id: issueIdForIndex(index),
+      start: index,
+      end: index + 1,
+      block_start: index,
+      block_end: index + 1,
+      original: 'a',
+      suggestion: 'b',
+      context: text,
+      position: index,
+      end_position: index + 1
+    })
+  )
+  return {
+    text,
+    issues,
+    issueIds: issues.map((issue) => issue.issue_id),
+    expectedText: 'b'.repeat(issueCount)
+  }
+}
+
+function mutableSnapshotFor(result: VerificationResult): VerificationResult {
+  const freeze = vi.spyOn(Object, 'freeze').mockImplementation(
+    <T>(value: T): Readonly<T> => value
+  )
+  try {
+    const snapshot = createVerificationResultSnapshot(result)
+    expect(snapshot).not.toBeNull()
+    return snapshot!
+  } finally {
+    freeze.mockRestore()
+  }
+}
+
+function countIssueRangeReads(
+  issues: readonly VerificationIssue[],
+  budget: number
+) {
+  let rangeReads = 0
+  for (const issue of issues) {
+    for (const key of ['start', 'end'] as const) {
+      const value = issue[key]
+      Object.defineProperty(issue, key, {
+        configurable: true,
+        enumerable: true,
+        get() {
+          rangeReads += 1
+          if (rangeReads > budget) {
+            throw new Error(`accepted replacement range read budget exceeded: ${rangeReads}`)
+          }
+          return value
+        }
+      })
+    }
+  }
+  return () => rangeReads
+}
+
 function buildPdfMetadata(): PdfDocumentMetadata {
   return {
     pages: [
@@ -492,6 +557,94 @@ describe('useVerificationWorkspace', () => {
 
     expect(workspace.issueStates.value[issue.issue_id]).toBe('accepted')
     expect(workspace.modifiedText.value).toBe('甲乙丙丁')
+  })
+
+  it('plans live accepted replacement work structurally for 100000 accepted replacements', () => {
+    const scenario = buildLargeReplacementScenario()
+    const snapshot = mutableSnapshotFor(
+      buildResult(scenario.issues, { text: scenario.text })
+    )
+    const rangeReads = countIssueRangeReads(snapshot.issues, 10_000_000)
+    const workspace = useVerificationWorkspace()
+
+    workspace.loadResult(snapshot)
+    expect(() => workspace.acceptIssues(scenario.issueIds)).not.toThrow()
+
+    expect(workspace.hasReplacementConflicts.value).toBe(false)
+    expect(workspace.modifiedText.value).toBe(scenario.expectedText)
+    expect(rangeReads()).toBeLessThan(10_000_000)
+  })
+
+  it('plans restored accepted replacement work structurally for 100000 accepted replacements', () => {
+    const scenario = buildLargeReplacementScenario()
+    const snapshot = mutableSnapshotFor(
+      buildResult(scenario.issues, { text: scenario.text })
+    )
+    const rangeReads = countIssueRangeReads(snapshot.issues, 10_000_000)
+    const workspace = useVerificationWorkspace()
+
+    expect(workspace.restoreWorkspaceState(buildSessionV2(snapshot, {
+      issueStates: Object.fromEntries(
+        scenario.issueIds.map((issueId) => [issueId, 'accepted'])
+      ),
+      currentRevision: {
+        revision_id: '55555555-5555-4555-8555-555555555555',
+        document_id: documentId,
+        verification_run_id: runId,
+        source_version: sourceVersion,
+        revision_number: null,
+        created_at: '2026-09-03T02:00:00.000Z',
+        parent_revision_id: null,
+        persistence_state: 'draft',
+        kind: 'review',
+        text: scenario.expectedText
+      }
+    }))).toBe(true)
+
+    expect(workspace.hasReplacementConflicts.value).toBe(false)
+    expect(workspace.modifiedText.value).toBe(scenario.expectedText)
+    expect(rangeReads()).toBeLessThan(10_000_000)
+  })
+
+  it('avoids repeated code-point rescans for accepted replacements in a 100000-code-point source', () => {
+    const scenario = buildLargeReplacementScenario()
+    const snapshot = mutableSnapshotFor(
+      buildResult(scenario.issues, { text: scenario.text })
+    )
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(snapshot)
+    let codePointIterations = 0
+    const budget = 250_000
+    const originalIterator = String.prototype[Symbol.iterator]
+    const iterator = vi.spyOn(String.prototype, Symbol.iterator).mockImplementation(
+      function (this: string): IterableIterator<string> {
+        const source = originalIterator.call(this)
+        return {
+          next(): IteratorResult<string> {
+            const next = source.next()
+            if (!next.done) {
+              codePointIterations += 1
+              if (codePointIterations > budget) {
+                throw new Error(`code-point iteration budget exceeded: ${codePointIterations}`)
+              }
+            }
+            return next
+          },
+          [Symbol.iterator](): IterableIterator<string> {
+            return this
+          }
+        }
+      }
+    )
+
+    try {
+      const acceptedIds = scenario.issueIds.slice(-3)
+      expect(() => workspace.acceptIssues(acceptedIds)).not.toThrow()
+      expect(workspace.modifiedText.value.endsWith('bbb')).toBe(true)
+      expect(codePointIterations).toBeLessThan(budget)
+    } finally {
+      iterator.mockRestore()
+    }
   })
 
   it('uses updated backend defaults for untouched suggestions on same-result reload', () => {
