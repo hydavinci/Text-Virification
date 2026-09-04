@@ -1735,3 +1735,212 @@ covered by their existing and new focus tests.
 Whole-plan final fix wave: implementation complete at
 `23fe7af42d586ce584bdb58a74ec20131854092f`; controller scoped re-review and
 residual adjudication remain pending.
+
+## Whole-plan residual blocker re-review — 2026-09-04
+
+- Re-review base:
+  `55606703238e024913eb68741f564ebefba08fa0`.
+- Five isolated read-only reviews traced the adjudicated residual findings
+  before any implementation edit.
+- All five Important findings remain load-bearing and enter strict TDD repair.
+  Review cleanliness is not claimed; a controller-owned narrow blocker
+  confirmation remains required after this wave.
+
+### Residual preflight dependency matrix
+
+| Scope | Produces / consumes | Re-review result |
+|---|---|---|
+| Analyzer budget task | Compatibility bracket/quote findings feed the shared canonical 100,000-issue collector | Internally inconsistent today: bracket and quote helpers stage plain lists before the collector can stop production. Incremental emission must preserve current order, ranges, suggestions, and summary. |
+| Conflict task: live ↔ restore | Live review mutations and session restore consume the same accepted effective replacement semantics | The paths duplicate quadratic overlap scans and repeated source-prefix code-point scans. One shared canonical-order planner must preserve both paths' conflict IDs and revision behavior. |
+| Conflict task ↔ viewer task | Both consume the canonical issue ordering and 100,000-issue ceiling | No contract conflict. Conflict planning may reuse canonical order, while viewer structural indexing must remain independent of reactive review state. |
+| Viewer task | Structural source segmentation produces markers consumed by reactive selection/review rendering | Internally inconsistent today: one reactive computed rebuilds structural indexing and copies every active issue ID/state into every segment, yielding quadratic retained payload under nested overlap. |
+| Migration task | Migration 0012 derives revision provenance from ordered issues; runtime ORM consumes the post-migration schema | The conservative provenance contract is consistent, but the PL/pgSQL search lacks a supporting per-run start-order access path and can repeatedly scan a whole run. Offline DDL must create support before backfill and drop or retain it deliberately. |
+| Export sanitization task | Compatibility export maps unexpected failures to HTTP; upload cleanup maps deletion failures to logs | Existing safe LLM/storage logging establishes the required pattern. The compatibility route still reflects exception text and emits cleanup traceback/message data. |
+| Cross-task ordering | Backend issue production precedes frontend conflict/viewer consumption; migration and error handling are independent | No implementation ordering dependency beyond preserving the canonical issue ceiling and ordering. Each RED/GREEN cycle can be reviewed and committed independently. |
+
+### Residual blocker root causes
+
+1. Compatibility bracket and quote checks retain unbounded temporary lists
+   before findings reach `_BoundedIssueList`.
+2. Accepted replacement planning is duplicated across live and restore paths;
+   both paths use quadratic conflict detection and per-replacement code-point
+   rescans.
+3. `DocumentViewer` couples immutable source segmentation to reactive issue
+   state and stores active issue arrays on every boundary segment.
+4. Migration 0012's per-revision derivation repeatedly searches
+   `verification_issues` without a supporting
+   `(verification_run_id, start, "end", issue_index)` access path or equivalent
+   one-time materialization.
+5. Compatibility export reflects unexpected exception text, and failed upload
+   cleanup logs exception message and traceback through `exc_info=True`.
+
+Ruling: Repeated direct-input counting remains bounded by 5,000,000 Unicode
+code points and 25 MiB UTF-8 and is accepted as a UX optimization follow-up;
+the cost is extra main-thread scans on a very large paste, without
+correctness or security impact — cost if wrong is avoidable input latency near
+the accepted browser limit.
+
+Whole-plan residual blocker wave: preflight complete; implementation not yet
+started.
+
+### Residual Task 1 — analyzer bracket/quote staging
+
+- RED: the structural probe measured helper-local bracket/quote staging beyond
+  the remaining two-issue budget.
+- Initial GREEN commit:
+  `0fd8ebff31816b18de1c0ecbe97112b57c1ac857`.
+- Task review found the first implementation still retained every excess
+  bracket in a `bytearray`, while the test only inspected `list` locals.
+- Fix round 1 RED: the container-agnostic probe failed against `0fd8ebf`
+  with 1 failed and 1 passed test.
+- Fix round 1 GREEN commit:
+  `d6d38d9041e8795301187c90f05e04bf13c11c4c`.
+  Focused coverage passed 10 tests with 27 deselected; full backend passed
+  1,098 tests with 82 established gated skips.
+- Scoped re-review verdict: the unbounded overflow container and weak
+  structural probe are both addressed; no new Critical or Important breakage
+  was found in the fix diff.
+
+Residual Task 1: complete (commits `0fd8ebf`, `d6d38d9`; scoped blocker
+findings addressed).
+
+### Residual Task 2 — accepted replacement planning
+
+- RED: three structural regressions failed on the prior implementation for
+  100,000 live accepted replacements, 100,000 restored accepted replacements,
+  and repeated code-point iteration.
+- GREEN commit:
+  `ae9b7973ce1c013211a0d8ff58401d4bc32ac5ac`.
+- The live and restore/session-validation paths now share one canonical-order
+  accepted replacement planner, linear overlap sweep, one source offset map,
+  and one left-to-right text rebuild.
+- Focused `useVerificationWorkspace.spec.ts`: 156 passed.
+- Full frontend: 509 passed.
+- Production frontend build passed.
+- Task-scoped review approved the exact participation, deletion, half-open
+  boundary, deterministic conflict-ID, zero-length rejection, duplicate-ID,
+  and legacy/version-2 restore semantics with no Critical, Important, or Minor
+  findings.
+
+Residual Task 2: complete (commit `ae9b797`; task-scoped requirements
+approved).
+
+### Residual Task 3 — DocumentViewer segmentation
+
+- RED: focused viewer coverage failed 2 of 19 tests. Deeply nested issue/state
+  reads measured 92,099 against a 6,000 structural ceiling, and a state-only
+  change rebuilt the source index twice instead of retaining one structural
+  build.
+- GREEN commit:
+  `b48f88de61628345e447546276840bc23683bf5c`.
+- Immutable indexed text, prepared intervals, boundary segmentation, overlap
+  counts, and issue-start markers are now separate from reactive accepted,
+  rejected, and selected counters. Segments no longer copy the active issue ID
+  or state set.
+- Focused `DocumentViewer.spec.ts`: 19 passed.
+- Full frontend: 511 passed.
+- Production frontend build passed.
+- Task-scoped review approved the structural/reactive separation, bounded
+  payload, no-rebuild regression, Vue text safety, marker activation, styling,
+  modes, and accessibility with no findings.
+
+Residual Task 3: complete (commit `b48f88d`; task-scoped requirements
+approved).
+
+### Residual Task 4 — migration 0012 issue access path
+
+- RED: focused migration coverage failed 2 tests because offline SQL lacked the
+  ordered per-run support path and the PostgreSQL query-plan probe had no
+  migration-created index to select.
+- Initial GREEN commit:
+  `98817bd1c63220259e6556d91c46a1aa99264eea`.
+- Migration 0012 now creates the temporary composite index
+  `(verification_run_id, start, "end", issue_index)` before the derivability
+  function/backfill and drops it afterward. Conservative provenance derivation
+  is unchanged.
+- The initial full backend run exposed order-dependent logger pollution from
+  the new unit offline SQL helper. RED reproduced 2 storage logging failures
+  after the schema test while the storage file passed 63 tests alone.
+- Hermeticity GREEN commit:
+  `44c297f027e5879771ad2a4fff6415757ecb2ad2`.
+  Filename-free Alembic configuration preserved logger state; the ordered
+  schema plus storage run passed 69 tests and full backend passed 1,101 tests
+  with 83 established skips.
+- Task review approved the migration and identified one directly coupled Minor:
+  the PostgreSQL-gated integration DDL helper still loaded `alembic.ini`.
+- Follow-up RED/GREEN commit:
+  `ce9112d91e17166f9c22e760a9c82dbe8ecdc11d`.
+  A non-gated logger-state regression failed before the change; afterward both
+  migration files passed 7 tests with 2 PostgreSQL-gated skips, full backend
+  passed 1,102 tests with 83 established skips, and Ruff passed.
+- Scoped re-review marked the gated-helper finding addressed with no new
+  Critical or Important breakage.
+- Offline upgrade SQL preserves create-index → derivation function/backfill →
+  drop-index ordering. Offline 0012-to-0011 downgrade SQL generation passed.
+
+Residual Task 4: complete (commits `98817bd`, `44c297f`, `ce9112d`;
+task-scoped requirements approved after follow-up).
+
+### Residual Task 5 — compatibility export and cleanup sanitization
+
+- RED: two secret-bearing regressions failed because unexpected export errors
+  reflected exception text and failed upload cleanup retained exception /
+  traceback data.
+- Initial GREEN commit:
+  `5c79d37be9f263b86e141596c1e6bb807e12aea7`.
+- Unexpected compatibility original-export failures now return the exact stable
+  body
+  `{"detail":"Export failed due to an internal server error."}` with status
+  500; existing typed/domain 400 and 413 mappings remain unchanged.
+- Cleanup warnings now log only
+  `compatibility_upload_cleanup_failed`, server-generated `file_id`, and
+  `error_type`, with no exception string, path, traceback, `exc_info`, or
+  `exc_text`.
+- Initial GREEN: 2 focused regressions and 4 related guards passed; full
+  backend passed 1,104 tests with 83 established skips; Ruff and mypy passed.
+- Task review found one Important test-contract gap: the export regression did
+  not inspect captured logs.
+- Fix round 1 used a temporary uncommitted secret-bearing log mutation to prove
+  the new caplog guard fails, then removed the mutation. Final test-only commit:
+  `accfdc2317e23c25c8d650758962636df7985bf4`.
+- Final focused logging coverage passed 5 tests; full backend remained 1,104
+  passed with 83 established skips; Ruff passed.
+- Scoped re-review marked the export log-coverage finding addressed with no new
+  Critical or Important breakage.
+
+Residual Task 5: complete (commits `5c79d37`, `accfdc2`; scoped blocker
+findings addressed).
+
+Whole-plan residual blocker wave: all five implementation tasks complete;
+full repository validation and final ledger commit remain.
+
+## Whole-plan residual blocker validation — 2026-09-04
+
+- Consolidated focused backend:
+  107 passed, 2 PostgreSQL-gated skips.
+- Full backend:
+  1,104 passed, 83 established PostgreSQL/live/OCR skips.
+- Consolidated focused frontend:
+  175 passed across `useVerificationWorkspace.spec.ts` and
+  `DocumentViewer.spec.ts`.
+- Full frontend:
+  511 passed across 22 files. Node emitted the existing experimental
+  `localStorage` warning.
+- Production frontend build:
+  `vue-tsc -b` and Vite 6.4.3 passed with 75 modules transformed.
+- Playwright Chromium:
+  4 deterministic tests passed; 1 live-backend test skipped because
+  `LIVE_API_URL` is unset.
+- Full Ruff passed.
+- Full mypy passed on 78 source files.
+- Alembic offline upgrade-to-head and
+  `0012_add_revision_provenance:0011_add_artifact_reservation_version`
+  downgrade SQL generation passed; head remains
+  `0012_add_revision_provenance`.
+- Docker Compose configuration passed using `.env.example`, a temporary local
+  `.env`, and an explicit 32-byte `RECHECK_GRANT_SECRET`; the temporary `.env`
+  was removed by the validation command.
+
+Whole-plan residual blocker wave: implementation and validation complete;
+final diff check and ledger commit remain. Review cleanliness is not claimed;
+the controller will perform the requested narrow blocker confirmation.
