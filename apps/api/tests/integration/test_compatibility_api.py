@@ -931,29 +931,34 @@ def test_export_report_charges_large_unique_keys_in_skipped_block_metadata(
     monkeypatch.setattr(
         compatibility_routes,
         "MAX_COMPATIBILITY_EXPORT_REQUEST_BYTES",
-        300,
+        400,
     )
     large_key = "k" * 500
 
-    response = client.post(
-        "/api/v1/export",
-        json={
-            "filename": "report.txt",
-            "stats": {},
-            "summary": {},
-            "issues": [],
-            "text": "safe",
-            "blocks": [
-                {
-                    "block_id": "a",
-                    "text": "safe",
-                    "style": {large_key: ""}
-                }
-            ]
-        },
-    )
+    def export_with_style_key(style_key: str):
+        return client.post(
+            "/api/v1/export",
+            json={
+                "filename": "report.txt",
+                "stats": {},
+                "summary": {},
+                "issues": [],
+                "text": "safe",
+                "blocks": [
+                    {
+                        "block_id": "a",
+                        "text": "safe",
+                        "style": {style_key: ""}
+                    }
+                ]
+            },
+        )
 
-    assert response.status_code == 413
+    accepted = export_with_style_key("k")
+    rejected = export_with_style_key(large_key)
+
+    assert accepted.status_code == 200
+    assert rejected.status_code == 413
 
 
 def test_export_report_accepts_dotted_string_values(
