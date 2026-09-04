@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from io import BytesIO
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -298,6 +299,55 @@ def test_upload_and_export_txt_from_uuid_scoped_storage(
     assert exported.headers["content-disposition"].endswith(".txt")
 
 
+def test_export_original_unexpected_failure_returns_stable_sanitized_500(
+    app: FastAPI,
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from text_verification.api.routes import compatibility as compatibility_routes
+
+    override_storage(app, tmp_path)
+    secret = "export-original-secret-never-reflect"
+
+    def fail_export(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise RuntimeError(f"unexpected exporter leak {secret}")
+
+    monkeypatch.setattr(compatibility_routes, "export_original", fail_export)
+
+    analysis = client.post(
+        "/api/v1/analyze",
+        files={"file": ("source.txt", "帐号测试".encode(), "text/plain")},
+    )
+    assert analysis.status_code == 200
+
+    response = client.post(
+        "/api/v1/export-original",
+        json={
+            "file_id": analysis.json()["file_id"],
+            "filename": "source.txt",
+            "replacements": [
+                {
+                    "original": "帐号",
+                    "suggestion": "账号",
+                    "position": 0,
+                    "end_position": 2,
+                }
+            ],
+            "modified_text": "账号测试",
+            "track_changes": False,
+        },
+    )
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "detail": "Export failed due to an internal server error."
+    }
+    assert secret not in response.text
+    assert "RuntimeError" not in response.text
+
+
 def test_export_original_rejects_modified_text_above_configured_upload_limit(
     app: FastAPI,
     client: TestClient,
@@ -469,6 +519,53 @@ def test_uploaded_file_is_deleted_when_dictionary_encoding_is_invalid(
     assert response.status_code == 500
     assert response.json() == {"detail": "Verification dictionaries are unavailable."}
     assert not compatibility_root.exists() or list(compatibility_root.iterdir()) == []
+
+
+def test_failed_upload_cleanup_warning_omits_secret_and_traceback(
+    app: FastAPI,
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    override_storage(app, tmp_path)
+    app.dependency_overrides[get_verification_pipeline] = lambda: FailingPipeline(
+        _dictionary_load_failure("dictionary missing at /secret/dictionaries/sensitive_rules.json")
+    )
+    secret = "cleanup-secret-never-reflect"
+
+    def fail_delete(self: CompatibilityStorage, file_id: UUID) -> None:
+        del file_id
+        raise PermissionError(f"locked cleanup path {secret}")
+
+    monkeypatch.setattr(CompatibilityStorage, "delete", fail_delete)
+
+    with caplog.at_level(logging.WARNING, logger="text_verification.api.routes.compatibility"):
+        response = client.post(
+            "/api/v1/analyze",
+            files={"file": ("source.txt", "帐号测试".encode(), "text/plain")},
+        )
+
+    compatibility_root = tmp_path / "compatibility"
+    [stored_upload] = list(compatibility_root.iterdir())
+    record = caplog.records[0]
+    standard_fields = set(logging.makeLogRecord({}).__dict__) | {"message"}
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Verification dictionaries are unavailable."}
+    assert set(record.__dict__) - standard_fields == {"file_id", "error_type"}
+    assert [captured.getMessage() for captured in caplog.records] == [
+        "compatibility_upload_cleanup_failed"
+    ]
+    assert record.file_id == stored_upload.name
+    assert record.error_type == "PermissionError"
+    assert record.exc_info is None
+    assert record.exc_text is None
+    for value in record.__dict__.values():
+        assert secret not in str(value)
+    assert secret not in response.text
+    assert secret not in caplog.text
+    assert "Traceback" not in caplog.text
 
 
 def test_uploaded_value_error_preserves_legacy_400_detail_and_cleans_up(

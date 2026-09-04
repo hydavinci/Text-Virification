@@ -68,6 +68,7 @@ router = APIRouter(tags=["compatibility"])
 
 logger = logging.getLogger(__name__)
 _DICTIONARY_UNAVAILABLE_DETAIL = "Verification dictionaries are unavailable."
+_EXPORT_FAILED_DETAIL = "Export failed due to an internal server error."
 MAX_COMPATIBILITY_EXPORT_REQUEST_BYTES = 32 * 1024 * 1024
 MAX_COMPATIBILITY_REPORT_REQUEST_BYTES = (
     MAX_JSON_STRING_ESCAPE_FACTOR
@@ -244,11 +245,11 @@ async def export_modified_original(
         raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, detail=str(error)) from error
     except (CompatibilityUploadError, ExportError, ValueError) as error:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
-    except Exception as error:
+    except Exception:
         raise HTTPException(
             status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Export failed: {error}",
-        ) from error
+            detail=_EXPORT_FAILED_DETAIL,
+        ) from None
 
     base_name = _safe_download_name(payload.filename)
     if "." in base_name:
@@ -315,11 +316,13 @@ def _content_disposition(filename: str) -> str:
 def _delete_failed_upload(storage: CompatibilityStorage, file_id: UUID) -> None:
     try:
         storage.delete(file_id)
-    except Exception:
+    except Exception as error:
         logger.warning(
             "compatibility_upload_cleanup_failed",
-            extra={"file_id": str(file_id)},
-            exc_info=True,
+            extra={
+                "file_id": str(file_id),
+                "error_type": type(error).__name__,
+            },
         )
 
 
