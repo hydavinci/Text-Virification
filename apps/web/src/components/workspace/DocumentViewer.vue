@@ -17,11 +17,19 @@ interface SourceMarker {
   state: IssueState
 }
 
-interface SourceSegment {
+type StructuralSourceMarker = Omit<SourceMarker, 'state'>
+
+interface StructuralSourceSegment {
   start: number
   text: string
-  coveringIssueIds: readonly string[]
-  coveringStates: readonly IssueState[]
+  issueCount: number
+  markers: readonly StructuralSourceMarker[]
+}
+
+interface SourceSegment extends StructuralSourceSegment {
+  hasAccepted: boolean
+  allRejected: boolean
+  selected: boolean
   markers: readonly SourceMarker[]
 }
 
@@ -37,8 +45,19 @@ interface IndexedText {
 
 interface PreparedIssue {
   issue: VerificationIssue
+  issueId: string
   start: number
   end: number
+}
+
+interface SourceStructure {
+  issues: readonly PreparedIssue[]
+  segments: readonly StructuralSourceSegment[]
+}
+
+interface IssueStateEvent {
+  state: IssueState
+  selected: boolean
 }
 
 const props = withDefaults(
@@ -69,7 +88,7 @@ function comparePreparedIssues(
   return (
     left.start - right.start ||
     left.end - right.end ||
-    left.issue.issue_id.localeCompare(right.issue.issue_id)
+    left.issueId.localeCompare(right.issueId)
   )
 }
 
@@ -87,9 +106,9 @@ function indexText(text: string): IndexedText {
 
 function validatedIssues(
   text: string,
-  indexedText: IndexedText
+  indexedText: IndexedText,
+  sourceIssues: readonly VerificationIssue[]
 ): readonly PreparedIssue[] {
-  const sourceIssues = props.issues ?? props.result.issues
   if (sourceIssues.length > MAX_VERIFICATION_ISSUES) {
     return []
   }
@@ -111,14 +130,18 @@ function validatedIssues(
     ) {
       continue
     }
-    prepared.push({ issue, start, end })
+    prepared.push({ issue, issueId: issue.issue_id, start, end })
   }
   return prepared.sort(comparePreparedIssues)
 }
 
-const segments = computed<readonly SourceSegment[]>(() => {
+const sourceStructure = computed<SourceStructure>(() => {
   const indexedText = indexText(props.result.text)
-  const issues = validatedIssues(props.result.text, indexedText)
+  const issues = validatedIssues(
+    props.result.text,
+    indexedText,
+    props.issues ?? props.result.issues
+  )
   const boundaries = new Set<number>([
     0,
     indexedText.characters.length
@@ -143,37 +166,87 @@ const segments = computed<readonly SourceSegment[]>(() => {
   }
 
   const orderedBoundaries = [...boundaries].sort((left, right) => left - right)
-  const active = new Map<string, PreparedIssue>()
-  const collected: SourceSegment[] = []
+  let activeCount = 0
+  const collected: StructuralSourceSegment[] = []
   for (let index = 0; index < orderedBoundaries.length - 1; index += 1) {
     const start = orderedBoundaries[index]
     const end = orderedBoundaries[index + 1]
-    for (const prepared of endingAt.get(start) ?? []) {
-      active.delete(prepared.issue.issue_id)
-    }
-    for (const prepared of startingAt.get(start) ?? []) {
-      active.set(prepared.issue.issue_id, prepared)
-    }
-    const coveringIssues = [...active.values()]
+    activeCount -= endingAt.get(start)?.length ?? 0
+    const startingIssues = startingAt.get(start) ?? []
+    activeCount += startingIssues.length
     collected.push({
       start,
       text: indexedText.characters.slice(start, end).join(''),
-      coveringIssueIds: coveringIssues.map(
-        ({ issue }) => issue.issue_id
-      ),
-      coveringStates: coveringIssues.map(
-        ({ issue }) => props.issueStates[issue.issue_id] ?? 'pending'
-      ),
-      markers: (startingAt.get(start) ?? [])
-        .map(({ issue }) => ({
-          issueId: issue.issue_id,
+      issueCount: activeCount,
+      markers: startingIssues
+        .map(({ issue, issueId }) => ({
+          issueId,
           label: `${issue.message}：${issue.original}`,
-          severity: issue.severity,
-          state: props.issueStates[issue.issue_id] ?? 'pending'
+          severity: issue.severity
         }))
     })
   }
-  return collected
+  return { issues, segments: collected }
+})
+
+function pushStateEvent(
+  events: Map<number, IssueStateEvent[]>,
+  position: number,
+  event: IssueStateEvent
+): void {
+  const bucket = events.get(position) ?? []
+  bucket.push(event)
+  events.set(position, bucket)
+}
+
+function applyStateEvent(
+  event: IssueStateEvent,
+  delta: 1 | -1,
+  counts: { accepted: number; rejected: number; selected: number }
+): void {
+  if (event.state === 'accepted') {
+    counts.accepted += delta
+  } else if (event.state === 'rejected') {
+    counts.rejected += delta
+  }
+  if (event.selected) {
+    counts.selected += delta
+  }
+}
+
+const segments = computed<readonly SourceSegment[]>(() => {
+  const structure = sourceStructure.value
+  const startingAt = new Map<number, IssueStateEvent[]>()
+  const endingAt = new Map<number, IssueStateEvent[]>()
+  for (const issue of structure.issues) {
+    const event = {
+      state: props.issueStates[issue.issueId] ?? 'pending',
+      selected: props.selectedIssueId === issue.issueId
+    }
+    pushStateEvent(startingAt, issue.start, event)
+    pushStateEvent(endingAt, issue.end, event)
+  }
+
+  const active = { accepted: 0, rejected: 0, selected: 0 }
+  return structure.segments.map((segment) => {
+    for (const event of endingAt.get(segment.start) ?? []) {
+      applyStateEvent(event, -1, active)
+    }
+    for (const event of startingAt.get(segment.start) ?? []) {
+      applyStateEvent(event, 1, active)
+    }
+    return {
+      ...segment,
+      hasAccepted: active.accepted > 0,
+      allRejected:
+        segment.issueCount > 0 && active.rejected === segment.issueCount,
+      selected: active.selected > 0,
+      markers: segment.markers.map((marker) => ({
+        ...marker,
+        state: props.issueStates[marker.issueId] ?? 'pending'
+      }))
+    }
+  })
 })
 
 const lines = computed<readonly SourceLine[]>(() => {
@@ -278,20 +351,14 @@ watch(
               :class="[
                 'source-segment',
                 {
-                  highlighted: segment.coveringIssueIds.length > 0,
-                  overlapping: segment.coveringIssueIds.length > 1,
-                  accepted: segment.coveringStates.includes('accepted'),
-                  rejected:
-                    segment.coveringStates.length > 0 &&
-                    segment.coveringStates.every(
-                      (state) => state === 'rejected'
-                    ),
-                  selected: segment.coveringIssueIds.includes(
-                    selectedIssueId ?? ''
-                  )
+                  highlighted: segment.issueCount > 0,
+                  overlapping: segment.issueCount > 1,
+                  accepted: segment.hasAccepted,
+                  rejected: segment.allRejected,
+                  selected: segment.selected
                 }
               ]"
-              :data-issue-count="segment.coveringIssueIds.length || undefined"
+              :data-issue-count="segment.issueCount || undefined"
             >{{ segment.text }}</span>
           </template>
         </div>
@@ -322,16 +389,14 @@ watch(
       :class="[
         'source-segment',
         {
-          highlighted: segment.coveringIssueIds.length > 0,
-          overlapping: segment.coveringIssueIds.length > 1,
-          accepted: segment.coveringStates.includes('accepted'),
-          rejected:
-            segment.coveringStates.length > 0 &&
-            segment.coveringStates.every((state) => state === 'rejected'),
-          selected: segment.coveringIssueIds.includes(selectedIssueId ?? '')
+          highlighted: segment.issueCount > 0,
+          overlapping: segment.issueCount > 1,
+          accepted: segment.hasAccepted,
+          rejected: segment.allRejected,
+          selected: segment.selected
         }
       ]"
-      :data-issue-count="segment.coveringIssueIds.length || undefined"
+      :data-issue-count="segment.issueCount || undefined"
     >{{ segment.text }}</span></template></pre>
   </div>
 </template>

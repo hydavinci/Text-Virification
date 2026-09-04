@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import DocumentViewer from '../src/components/workspace/DocumentViewer.vue'
 import type {
+  IssueState,
   TextBlock,
   VerificationIssue,
   VerificationResult
@@ -263,6 +264,101 @@ describe('DocumentViewer', () => {
     expect(wrapper.findAll(`[data-issue-id="${first.issue_id}"]`)).toHaveLength(1)
     expect(wrapper.findAll(`[data-issue-id="${second.issue_id}"]`)).toHaveLength(1)
     expect(wrapper.get('[data-source-text]').text()).toBe(text)
+  })
+
+  it('keeps deeply nested interval payload reads linear', () => {
+    const issueCount = 300
+    const text = '错'.repeat(issueCount)
+    let issueIdReads = 0
+    let stateReads = 0
+    const issues = Array.from({ length: issueCount }, (_, index) => {
+      const issueId = `33333333-3333-4333-8333-${String(index).padStart(12, '0')}`
+      const end = index + 1
+      const issue = buildIssue({
+        issue_id: issueId,
+        start: 0,
+        end,
+        block_start: 0,
+        block_end: end,
+        original: text.slice(0, end)
+      })
+      Object.defineProperty(issue, 'issue_id', {
+        configurable: true,
+        enumerable: true,
+        get() {
+          issueIdReads += 1
+          return issueId
+        }
+      })
+      return issue
+    })
+    const issueStates = new Proxy<Record<string, IssueState>>(
+      {},
+      {
+        get(target, property: string) {
+          stateReads += 1
+          return target[property]
+        }
+      }
+    )
+    const result = buildResult(text, issues)
+    const wrapper = mount(DocumentViewer, {
+      props: {
+        result,
+        issues,
+        issueStates,
+        selectedIssueId: null,
+        mode: 'continuous'
+      }
+    })
+
+    expect(wrapper.get('[data-source-text]').text()).toBe(text)
+    expect(wrapper.findAll('[data-issue-role="source"]')).toHaveLength(
+      issueCount
+    )
+    expect(issueIdReads).toBeLessThan(issueCount * 20)
+    expect(stateReads).toBeLessThan(issueCount * 20)
+  })
+
+  it('does not rebuild source segmentation for state or selection changes', async () => {
+    const issue = buildIssue()
+    const result = buildResult('甲乙丙丁', [issue])
+    const originalText = result.text
+    let indexBuilds = 0
+    const trackedText = new String(originalText) as unknown as string
+    Object.defineProperty(trackedText, Symbol.iterator, {
+      configurable: true,
+      value: function* () {
+        indexBuilds += 1
+        yield* originalText
+      }
+    })
+    result.text = trackedText
+    const wrapper = mount(DocumentViewer, {
+      props: {
+        result,
+        issues: result.issues,
+        selectedIssueId: null,
+        mode: 'continuous'
+      }
+    })
+    const buildsAfterMount = indexBuilds
+
+    await wrapper.setProps({
+      issueStates: { [issue.issue_id]: 'accepted' }
+    })
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.get(`[data-issue-id="${issue.issue_id}"]`).classes())
+      .toContain('accepted')
+    expect(indexBuilds).toBe(buildsAfterMount)
+
+    await wrapper.setProps({ selectedIssueId: issue.issue_id })
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.get(`[data-issue-id="${issue.issue_id}"]`).classes())
+      .toContain('selected')
+    expect(indexBuilds).toBe(buildsAfterMount)
   })
 
   it('segments many non-overlapping issues with a bounded interval sweep', () => {
