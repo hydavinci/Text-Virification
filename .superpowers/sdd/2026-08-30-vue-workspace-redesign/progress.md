@@ -1568,3 +1568,14 @@ Task 6: controlled breaker fix implemented; awaiting scoped breaker review.
   1064/1064 runnable tests with 81 established gated skips.
 
 Task 6: breaker follow-up implemented; awaiting final blocker confirmation.
+
+## Task 6 final completion — 2026-09-04
+
+- Final blocker review approved the streamed metadata-key bound.
+- The reviewer-requested discriminating regression now proves a small key
+  remains accepted at the same 400-byte budget where a 500-byte ignored key is
+  rejected. Independent confirmation returned Approved with no blockers.
+
+Task 6: complete (commits
+`965510c984946db6b9cfa1e78bb3619728fccbe8..25a46b957fc8ba0b23aa44b039b61b6835e383f6`,
+review approved after breaker adjudication).

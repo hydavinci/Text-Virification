@@ -810,6 +810,19 @@ claimed.
 
 Task 6 breaker follow-up implemented; awaiting final blocker confirmation.
 
+### Final blocker confirmation — 2026-09-04
+
+- The production streamed-key accounting fix had no remaining blocker.
+- The reviewer requested one test-quality correction: the large-key regression
+  now uses a 400-byte budget with an otherwise-identical one-byte key control
+  returning 200 and a 500-byte key returning 413. Removing production key
+  charging makes both return 200, so the test fails for the intended reason.
+- Independent confirmation approved the corrected regression with no blockers.
+
+Task 6: complete (commits
+`965510c984946db6b9cfa1e78bb3619728fccbe8..25a46b957fc8ba0b23aa44b039b61b6835e383f6`,
+review approved after breaker adjudication).
+
 ## Review fix round 4 — 2026-09-03
 
 Implementation commit:
