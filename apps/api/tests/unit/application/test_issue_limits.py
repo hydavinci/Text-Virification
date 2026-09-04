@@ -85,18 +85,18 @@ def test_legacy_repeated_typo_production_stops_at_limit_plus_one() -> None:
 
 
 @pytest.mark.parametrize(
-    ("text", "tracked_lists"),
+    "text",
     [
-        ("(" * 10_000, ("scope_issues", "stack")),
-        ("「" * 10_000, ("unmatched", "openings")),
+        "(" * 10_000,
+        "「" * 10_000,
     ],
+    ids=["brackets", "quotes"],
 )
 def test_bracket_quote_staging_never_exceeds_remaining_issue_budget(
     text: str,
-    tracked_lists: tuple[str, ...],
 ) -> None:
     analyzer = TextAnalyzer(max_issues=2)
-    max_lengths = {name: 0 for name in tracked_lists}
+    max_lengths: dict[str, int] = {}
     previous_trace = sys.gettrace()
 
     def trace(frame: FrameType, event: str, arg):
@@ -108,10 +108,14 @@ def test_bracket_quote_staging_never_exceeds_remaining_issue_budget(
         if frame.f_code.co_name not in {"_check_brackets_quotes", "check_scope"}:
             return trace
         if event in {"line", "return"}:
-            for name in tracked_lists:
-                value = frame.f_locals.get(name)
-                if isinstance(value, list):
-                    max_lengths[name] = max(max_lengths[name], len(value))
+            for name, value in frame.f_locals.items():
+                if not hasattr(value, "append") or not hasattr(value, "pop"):
+                    continue
+                try:
+                    current_length = len(value)
+                except TypeError:
+                    continue
+                max_lengths[name] = max(max_lengths.get(name, 0), current_length)
         return trace
 
     try:
@@ -125,6 +129,7 @@ def test_bracket_quote_staging_never_exceeds_remaining_issue_budget(
     finally:
         sys.settrace(previous_trace)
 
+    assert max_lengths
     assert all(length <= 2 for length in max_lengths.values())
 
 

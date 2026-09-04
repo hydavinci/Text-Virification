@@ -1546,18 +1546,16 @@ class TextAnalyzer:
             # 2. 使用栈检测未配对括号
             stack_limit = self._remaining_issue_capacity()
             stack = []  # 元素: (normalized_open_char, absolute_position, original_char)
-            overflow_stack = bytearray()
             for i, ch in enumerate(scope_text):
                 norm = normalize.get(ch, ch)
                 if norm in open_chars:
-                    if stack_limit is None or len(stack) < stack_limit:
-                        stack.append((norm, base_offset + i, ch))
-                    else:
-                        overflow_stack.append(ord(norm))
+                    if stack_limit is not None and len(stack) >= stack_limit:
+                        raise IssueLimitExceededError(
+                            "Compatibility analysis exceeded the canonical issue limit."
+                        )
+                    stack.append((norm, base_offset + i, ch))
                 elif norm in close_chars:
-                    if overflow_stack and norm_open_to_close.get(chr(overflow_stack[-1])) == norm:
-                        overflow_stack.pop()
-                    elif stack and norm_open_to_close.get(stack[-1][0]) == norm:
+                    if stack and norm_open_to_close.get(stack[-1][0]) == norm:
                         stack.pop()
                     else:
                         # 闭括号没有对应开括号（可能是跨行/跨段合法，这里先不报错，由后面兜底）
@@ -1578,11 +1576,6 @@ class TextAnalyzer:
                     description=f'「{orig}」在当前段落中缺少对应的闭括号「{correct_close}」，请检查是否遗漏',
                     rule_id='unmatched_bracket'
                 ))
-            if overflow_stack:
-                raise IssueLimitExceededError(
-                    "Compatibility analysis exceeded the canonical issue limit."
-                )
-
         # 按行/段落切分作用域
         lines = text.split('\n')
         offset = 0
@@ -1625,18 +1618,16 @@ class TextAnalyzer:
                     ))
             else:
                 openings: List[int] = []
-                overflow_openings = 0
                 for position, character in enumerate(text):
                     if character == open_q:
                         opening_limit = self._remaining_issue_capacity()
-                        if opening_limit is None or len(openings) < opening_limit:
-                            openings.append(position)
-                        else:
-                            overflow_openings += 1
+                        if opening_limit is not None and len(openings) >= opening_limit:
+                            raise IssueLimitExceededError(
+                                "Compatibility analysis exceeded the canonical issue limit."
+                            )
+                        openings.append(position)
                     elif character == close_q:
-                        if overflow_openings:
-                            overflow_openings -= 1
-                        elif openings:
+                        if openings:
                             openings.pop()
                         else:
                             issues.append(Issue(
@@ -1662,10 +1653,6 @@ class TextAnalyzer:
                         description=f'引号「{open_q}{close_q}」数量不匹配（左{total_open}个，右{total_close}个），请检查是否遗漏',
                         rule_id='unmatched_quote'
                     ))
-                if overflow_openings:
-                    raise IssueLimitExceededError(
-                        "Compatibility analysis exceeded the canonical issue limit."
-                    )
 
         return issues
 
