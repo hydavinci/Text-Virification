@@ -304,6 +304,7 @@ def test_export_original_unexpected_failure_returns_stable_sanitized_500(
     client: TestClient,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     from text_verification.api.routes import compatibility as compatibility_routes
 
@@ -316,29 +317,30 @@ def test_export_original_unexpected_failure_returns_stable_sanitized_500(
 
     monkeypatch.setattr(compatibility_routes, "export_original", fail_export)
 
-    analysis = client.post(
-        "/api/v1/analyze",
-        files={"file": ("source.txt", "帐号测试".encode(), "text/plain")},
-    )
-    assert analysis.status_code == 200
+    with caplog.at_level(logging.WARNING, logger="text_verification.api.routes.compatibility"):
+        analysis = client.post(
+            "/api/v1/analyze",
+            files={"file": ("source.txt", "帐号测试".encode(), "text/plain")},
+        )
+        assert analysis.status_code == 200
 
-    response = client.post(
-        "/api/v1/export-original",
-        json={
-            "file_id": analysis.json()["file_id"],
-            "filename": "source.txt",
-            "replacements": [
-                {
-                    "original": "帐号",
-                    "suggestion": "账号",
-                    "position": 0,
-                    "end_position": 2,
-                }
-            ],
-            "modified_text": "账号测试",
-            "track_changes": False,
-        },
-    )
+        response = client.post(
+            "/api/v1/export-original",
+            json={
+                "file_id": analysis.json()["file_id"],
+                "filename": "source.txt",
+                "replacements": [
+                    {
+                        "original": "帐号",
+                        "suggestion": "账号",
+                        "position": 0,
+                        "end_position": 2,
+                    }
+                ],
+                "modified_text": "账号测试",
+                "track_changes": False,
+            },
+        )
 
     assert response.status_code == 500
     assert response.json() == {
@@ -346,6 +348,22 @@ def test_export_original_unexpected_failure_returns_stable_sanitized_500(
     }
     assert secret not in response.text
     assert "RuntimeError" not in response.text
+    export_records = [
+        record
+        for record in caplog.records
+        if record.name == "text_verification.api.routes.compatibility"
+    ]
+    assert export_records == []
+    for record in export_records:
+        assert record.exc_info is None
+        assert record.exc_text is None
+        assert secret not in record.getMessage()
+        assert "Traceback" not in record.getMessage()
+        for value in record.__dict__.values():
+            assert secret not in str(value)
+            assert "Traceback" not in str(value)
+    assert secret not in caplog.text
+    assert "Traceback" not in caplog.text
 
 
 def test_export_original_rejects_modified_text_above_configured_upload_limit(
