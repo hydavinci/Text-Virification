@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 from io import StringIO
 from pathlib import Path
@@ -321,9 +322,21 @@ def test_postgres_0012_derivation_support_index_serves_ordered_issue_queries(
             )
 
 
+def test_offline_upgrade_support_index_ddl_preserves_storage_logger_state() -> None:
+    logger = logging.getLogger("text_verification.infrastructure.storage")
+    original_disabled = logger.disabled
+    logger.disabled = False
+
+    try:
+        _offline_upgrade_support_index_ddl()
+        assert logger.disabled is False
+    finally:
+        logger.disabled = original_disabled
+
+
 def _offline_upgrade_support_index_ddl() -> str:
     output = StringIO()
-    config = Config(str(BACKEND_ROOT / "alembic.ini"), output_buffer=output)
+    config = Config(output_buffer=output)
     config.set_main_option("script_location", str(BACKEND_ROOT / "alembic"))
     config.attributes["database_url"] = "postgresql://example/example"
     command.upgrade(
