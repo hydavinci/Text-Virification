@@ -1556,3 +1556,15 @@ extra review cycle beyond the nominal cap.
   SQL, Compose config, and `git diff --check` passed.
 
 Task 6: controlled breaker fix implemented; awaiting scoped breaker review.
+
+## Task 6 breaker review follow-up — 2026-09-04
+
+- The scoped breaker review identified one remaining High retained-memory gap:
+  ignored block metadata keys were allocated for duplicate detection without
+  charging their encoded bytes.
+- RED: a 500-byte ignored `style` key passed a 300-byte retained budget.
+- GREEN: all streamed object keys are charged before duplicate-key storage;
+  focused compatibility tests passed 61/61 and the full backend passed
+  1064/1064 runnable tests with 81 established gated skips.
+
+Task 6: breaker follow-up implemented; awaiting final blocker confirmation.

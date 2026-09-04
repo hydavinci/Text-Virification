@@ -794,6 +794,22 @@ extra review cycle beyond the nominal cap.
 Independent breaker scoped review is still required. Review cleanliness is not
 claimed.
 
+### Breaker review follow-up — 2026-09-04
+
+- The scoped breaker review found one remaining High issue: ignored block
+  metadata keys were stored for duplicate detection without charging their
+  encoded size to the retained-memory budget.
+- RED: a 500-byte unique `style` key with an empty value passed a 300-byte
+  retained budget and returned HTTP 200.
+- GREEN: every streamed `map_key`, including keys in ignored subtrees, is
+  charged before insertion into the active duplicate-key set. Selected-field
+  builders avoid double-charging the same key. The regression now returns 413,
+  and the full compatibility API suite passes 61 tests.
+- Final backend suite: 1064 passed, 81 established gated skips. Ruff and mypy
+  remained clean.
+
+Task 6 breaker follow-up implemented; awaiting final blocker confirmation.
+
 ## Review fix round 4 — 2026-09-03
 
 Implementation commit:
