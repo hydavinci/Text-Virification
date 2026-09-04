@@ -58,6 +58,10 @@ class _IssueBudget:
     max_issues: int
     count: int = 0
 
+    @property
+    def remaining(self) -> int:
+        return self.max_issues - self.count
+
     def consume(self) -> None:
         if self.count >= self.max_issues:
             raise IssueLimitExceededError(
@@ -1106,6 +1110,11 @@ class TextAnalyzer:
             return []
         return _BoundedIssueList(self._issue_budget)
 
+    def _remaining_issue_capacity(self) -> int | None:
+        if self._issue_budget is None:
+            return None
+        return self._issue_budget.remaining
+
     def _get_context(self, text: str, start: int, end: int, radius: int = 15) -> str:
         """获取问题文本的上下文"""
         ctx_start = max(0, start - radius)
@@ -1514,8 +1523,6 @@ class TextAnalyzer:
 
         def check_scope(scope_text: str, base_offset: int):
             """检查一个作用域（段落/行）内的括号匹配"""
-            scope_issues = []
-
             # 1. 检测混用括号（如 (内容） 或 （内容)）
             # 扫描每个开括号，看是否被不同宽度的闭括号关闭
             mixed_pattern = re.compile(r'[(（]([^()（）【】\[\]<>《》]*?)[)）]')
@@ -1524,7 +1531,7 @@ class TextAnalyzer:
                 close_ch = m.group(0)[-1]
                 if (open_ch in '([<' and close_ch not in ')]>') or \
                    (open_ch in '（【《' and close_ch not in '）】》'):
-                    scope_issues.append(Issue(
+                    issues.append(Issue(
                         type='punctuation',
                         severity='warning',
                         original=m.group(0),
@@ -1537,13 +1544,20 @@ class TextAnalyzer:
                     ))
 
             # 2. 使用栈检测未配对括号
+            stack_limit = self._remaining_issue_capacity()
             stack = []  # 元素: (normalized_open_char, absolute_position, original_char)
+            overflow_stack = bytearray()
             for i, ch in enumerate(scope_text):
                 norm = normalize.get(ch, ch)
                 if norm in open_chars:
-                    stack.append((norm, base_offset + i, ch))
+                    if stack_limit is None or len(stack) < stack_limit:
+                        stack.append((norm, base_offset + i, ch))
+                    else:
+                        overflow_stack.append(ord(norm))
                 elif norm in close_chars:
-                    if stack and norm_open_to_close.get(stack[-1][0]) == norm:
+                    if overflow_stack and norm_open_to_close.get(chr(overflow_stack[-1])) == norm:
+                        overflow_stack.pop()
+                    elif stack and norm_open_to_close.get(stack[-1][0]) == norm:
                         stack.pop()
                     else:
                         # 闭括号没有对应开括号（可能是跨行/跨段合法，这里先不报错，由后面兜底）
@@ -1553,7 +1567,7 @@ class TextAnalyzer:
             for _, pos, orig in stack:
                 norm = normalize.get(orig, orig)
                 correct_close = norm_open_to_close.get(norm, '')
-                scope_issues.append(Issue(
+                issues.append(Issue(
                     type='punctuation',
                     severity='warning',
                     original=orig,
@@ -1564,8 +1578,10 @@ class TextAnalyzer:
                     description=f'「{orig}」在当前段落中缺少对应的闭括号「{correct_close}」，请检查是否遗漏',
                     rule_id='unmatched_bracket'
                 ))
-
-            return scope_issues
+            if overflow_stack:
+                raise IssueLimitExceededError(
+                    "Compatibility analysis exceeded the canonical issue limit."
+                )
 
         # 按行/段落切分作用域
         lines = text.split('\n')
@@ -1579,14 +1595,13 @@ class TextAnalyzer:
             if numbering_pattern.match(stripped) and len(stripped) <= 8:
                 offset += len(line) + 1
                 continue
-            issues.extend(check_scope(line, offset))
+            check_scope(line, offset)
             offset += len(line) + 1
 
         # 引号配对：每个未配对字符都保留精确的 Unicode 位置。
         for open_q, close_q in [('"', '"'), ('「', '」'), ('『', '』')]:
             total_open = text.count(open_q)
             total_close = text.count(close_q)
-            unmatched: List[Tuple[int, str]] = []
             if open_q == close_q:
                 pending: int | None = None
                 for position, character in enumerate(text):
@@ -1597,31 +1612,60 @@ class TextAnalyzer:
                     else:
                         pending = None
                 if pending is not None:
-                    unmatched.append((pending, open_q))
+                    issues.append(Issue(
+                        type='punctuation',
+                        severity='warning',
+                        original=open_q,
+                        suggestion=None,
+                        position=pending,
+                        end_position=pending + 1,
+                        context=self._get_context(text, pending, pending + 1),
+                        description=f'引号「{open_q}{close_q}」数量不匹配（左{total_open}个，右{total_close}个），请检查是否遗漏',
+                        rule_id='unmatched_quote'
+                    ))
             else:
                 openings: List[int] = []
+                overflow_openings = 0
                 for position, character in enumerate(text):
                     if character == open_q:
-                        openings.append(position)
+                        opening_limit = self._remaining_issue_capacity()
+                        if opening_limit is None or len(openings) < opening_limit:
+                            openings.append(position)
+                        else:
+                            overflow_openings += 1
                     elif character == close_q:
-                        if openings:
+                        if overflow_openings:
+                            overflow_openings -= 1
+                        elif openings:
                             openings.pop()
                         else:
-                            unmatched.append((position, close_q))
-                unmatched.extend((position, open_q) for position in openings)
-
-            for position, character in sorted(unmatched):
-                issues.append(Issue(
-                    type='punctuation',
-                    severity='warning',
-                    original=character,
-                    suggestion=None,
-                    position=position,
-                    end_position=position + 1,
-                    context=self._get_context(text, position, position + 1),
-                    description=f'引号「{open_q}{close_q}」数量不匹配（左{total_open}个，右{total_close}个），请检查是否遗漏',
-                    rule_id='unmatched_quote'
-                ))
+                            issues.append(Issue(
+                                type='punctuation',
+                                severity='warning',
+                                original=close_q,
+                                suggestion=None,
+                                position=position,
+                                end_position=position + 1,
+                                context=self._get_context(text, position, position + 1),
+                                description=f'引号「{open_q}{close_q}」数量不匹配（左{total_open}个，右{total_close}个），请检查是否遗漏',
+                                rule_id='unmatched_quote'
+                            ))
+                for position in openings:
+                    issues.append(Issue(
+                        type='punctuation',
+                        severity='warning',
+                        original=open_q,
+                        suggestion=None,
+                        position=position,
+                        end_position=position + 1,
+                        context=self._get_context(text, position, position + 1),
+                        description=f'引号「{open_q}{close_q}」数量不匹配（左{total_open}个，右{total_close}个），请检查是否遗漏',
+                        rule_id='unmatched_quote'
+                    ))
+                if overflow_openings:
+                    raise IssueLimitExceededError(
+                        "Compatibility analysis exceeded the canonical issue limit."
+                    )
 
         return issues
 

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass, field
-from types import SimpleNamespace
+from types import FrameType, SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -81,6 +82,50 @@ def test_legacy_repeated_typo_production_stops_at_limit_plus_one() -> None:
             enable_security=False,
             enable_sensitive=False,
         )
+
+
+@pytest.mark.parametrize(
+    ("text", "tracked_lists"),
+    [
+        ("(" * 10_000, ("scope_issues", "stack")),
+        ("「" * 10_000, ("unmatched", "openings")),
+    ],
+)
+def test_bracket_quote_staging_never_exceeds_remaining_issue_budget(
+    text: str,
+    tracked_lists: tuple[str, ...],
+) -> None:
+    analyzer = TextAnalyzer(max_issues=2)
+    max_lengths = {name: 0 for name in tracked_lists}
+    previous_trace = sys.gettrace()
+
+    def trace(frame: FrameType, event: str, arg):
+        del arg
+        if event == "call":
+            if frame.f_code.co_name in {"_check_brackets_quotes", "check_scope"}:
+                return trace
+            return None
+        if frame.f_code.co_name not in {"_check_brackets_quotes", "check_scope"}:
+            return trace
+        if event in {"line", "return"}:
+            for name in tracked_lists:
+                value = frame.f_locals.get(name)
+                if isinstance(value, list):
+                    max_lengths[name] = max(max_lengths[name], len(value))
+        return trace
+
+    try:
+        sys.settrace(trace)
+        with pytest.raises(IssueLimitExceededError):
+            analyzer.analyze(
+                text,
+                enable_security=False,
+                enable_sensitive=False,
+            )
+    finally:
+        sys.settrace(previous_trace)
+
+    assert all(length <= 2 for length in max_lengths.values())
 
 
 def test_canonical_issue_count_helper_accepts_exact_limit_and_rejects_one_over() -> None:
