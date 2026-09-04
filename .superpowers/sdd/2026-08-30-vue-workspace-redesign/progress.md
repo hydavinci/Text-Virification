@@ -1944,3 +1944,18 @@ full repository validation and final ledger commit remain.
 Whole-plan residual blocker wave: implementation and validation complete;
 final diff check and ledger commit remain. Review cleanliness is not claimed;
 the controller will perform the requested narrow blocker confirmation.
+
+## Whole-plan final approval — 2026-09-04
+
+- Narrow residual confirmation approved all five load-bearing fixes with no
+  actionable Critical, High, or Medium blockers.
+- The direct-input repeated-counting Minor remains parked by the recorded
+  ruling because it is bounded by the canonical 5,000,000-code-point and
+  25 MiB limits and has no correctness or security impact.
+- Final validated state: backend 1,104 passed/83 established gated skips;
+  frontend 511 passed; production build passed; Playwright 4 passed/1 live
+  skip; Ruff, mypy, Alembic offline upgrade/downgrade SQL, Compose config, and
+  `git diff --check` passed.
+
+Vue workspace redesign: final review clean after residual adjudication
+(`0fbe3d4203e2327f3f567c4d9a9abd0de8126661..71e1a6f4e4bda7f82e1f7adac176475606d6c119`).
