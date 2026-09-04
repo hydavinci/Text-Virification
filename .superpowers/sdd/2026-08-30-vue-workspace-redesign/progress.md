@@ -1579,3 +1579,159 @@ Task 6: breaker follow-up implemented; awaiting final blocker confirmation.
 Task 6: complete (commits
 `965510c984946db6b9cfa1e78bb3619728fccbe8..25a46b957fc8ba0b23aa44b039b61b6835e383f6`,
 review approved after breaker adjudication).
+
+## Whole-plan final fix wave — 2026-09-04
+
+- Base: `e4c3a7e5385551db224748b255e6e0099709041d`.
+- Implementation commit:
+  `23fe7af42d586ce584bdb58a74ec20131854092f`
+  (`fix: address final verification review findings`).
+- This was the single allowed whole-plan implementation wave after the broad
+  final review. Review cleanliness is not claimed; one controller-owned scoped
+  re-review remains pending.
+
+### Final review finding dispositions
+
+| # | Disposition | Implemented contract |
+|---|---|---|
+| 1 | Accepted, with contract refinement | The canonical workspace already rejected zero-width issues; the defect was the compatibility analyzer/adapter manufacturing a source range before that boundary. ASCII and Chinese unmatched quotes now emit the exact unmatched code point with `suggestion = null`. Legacy empty ranges are inferred only when `original` exactly matches the source at the declared position; otherwise the finding is dropped. |
+| 2 | Accepted | Direct text uses the existing Python-equivalent whitespace definition, preserves FEFF and all submitted leading/trailing content, and is submitted unchanged. One shared frontend boundary enforces 5,000,000 Unicode code points and 25 MiB UTF-8; the UTF-16 `maxlength` was removed and displayed counts use code points. |
+| 3 | Accepted | Compatibility `null` or omitted alternatives normalize at the canonical frontend snapshot to one frozen `[]`. The canonical TypeScript type now requires an array, and direct-analysis session save/reload uses that representation. |
+| 4 | Accepted | Recheck ownership now carries a component generation plus captured result, revision, submitted text, and completed-result identity. Reset, replacement input/request, and unmount invalidate the operation; stale outer continuations cannot restore or persist prior file authority. |
+| 5 | Accepted | The canonical issue limit is 100,000. It is enforced in legacy issue production, compatibility adaptation, checker aggregation, review output, canonical backend models/report requests, frontend result snapshots, and sessions. Canonical code-point maps are precomputed once, and `DocumentViewer` uses sorted boundary events with an active-interval sweep instead of filtering every issue for every segment. |
+| 6 | Accepted | Every job-owned original-format export now opens the source through descriptor-relative no-follow access, bounds and hashes the bytes against canonical `source_version`, and gives all seven exporters a private immutable verified copy. Tamper, symlink, and check/read races fail before artifact reservation or serialization; run → job → artifact lock order is unchanged. |
+| 7 | Accepted | Compatibility and reconstruction DOCX output share fixed core-property timestamps, fixed tracked-revision dates, sorted ZIP entries, and fixed ZIP member timestamps. Delayed and concurrent tracked-DOCX repair regenerates the original digest. |
+| 8 | Accepted | Migration 0012 now assigns explicit `verified` or `legacy_unavailable` provenance state. A bounded PostgreSQL derivation proves safe original-result review revisions and backfills SHA-256 provenance; unprovable legacy revisions remain unavailable for new export, repair, or regeneration. Existing READY artifacts may be downloaded only after current-result/latest-revision checks and verified artifact size/digest checks. |
+| 9 | Accepted | `llm_api_key` is `SecretStr`, input values are hidden from settings validation errors, and plaintext is unwrapped only for OpenAI client construction. Provider failures log only error type, numeric status when present, and retryability, with no exception message, body, traceback, or `exc_info`. |
+| 10 | Accepted | Privacy and help dialogs now share one accessible modal implementation with initial focus, Tab/Shift+Tab trapping, Escape/backdrop close, and opener restoration. |
+
+### Rulings
+
+Ruling: The canonical issue ceiling is 100,000 because that value was already
+the strict compatibility-report and workspace-session boundary; consolidating
+on it removes contradictory limits without reducing an established accepted
+payload — cost if wrong is allowing a larger review result than a lower
+product-specific UI cap would have chosen.
+
+Ruling: Locationless legacy findings are discarded unless their nonempty
+`original` exactly matches the source at the declared position; only that
+legacy match permits range inference — this preserves valid old adapters
+without allowing synthetic prefixes to become editable source — cost if wrong
+is dropping a legacy diagnostic whose producer omitted a range and used a
+display-only `original`.
+
+Ruling: Unmatched quote diagnostics are manual-only single-character issues,
+including symmetric ASCII quotes paired left-to-right — inventing a closing
+quote is not a safe automatic edit — cost if wrong is requiring manual review
+for a quote that a more context-aware parser could repair automatically.
+
+Ruling: Direct-text emptiness reuses the existing Python-whitespace helper and
+does not treat U+FEFF as whitespace; the untouched browser string is the only
+submitted value — this matches the backend contract and preserves meaningful
+formatting — cost if wrong is accepting a FEFF-only request that a future
+product rule might prefer to reject explicitly.
+
+Ruling: Canonical issue alternatives are always a frozen array after the
+frontend snapshot boundary; nullable compatibility transport values do not
+propagate into workspace or session state — cost if wrong is losing the
+distinction between “not supplied” and “supplied empty,” which the approved
+canonical schema does not assign meaning.
+
+Ruling: Recheck authority commits only while both the component generation and
+captured source lifetime remain current; request-state success alone is
+insufficient — this prevents an outer continuation from reviving stale file
+authority — cost if wrong is discarding a valid late recheck after another
+operation intentionally replaced its source.
+
+Ruling: Original-format exporters consume a private verified source copy rather
+than the mutable job path — one SHA-256 check before exporter access covers
+multi-open exporters and external converters uniformly — cost if wrong is one
+additional source-sized read and temporary copy per original-format export.
+
+Ruling: DOCX deterministic metadata uses the established fixed 2000-01-01
+timestamp rather than wall-clock request time — semantic request/revision
+identity already lives in persistence metadata, while byte stability is
+required for repair — cost if wrong is exported package metadata no longer
+showing the actual regeneration time.
+
+Ruling: Migration 0012 conservatively backfills only bounded review text proven
+derivable from the persisted original result and issue suggestions; manual,
+recheck, malformed, or over-budget legacy rows become
+`legacy_unavailable` — false negatives preserve security, while false positives
+would authorize untrusted regeneration — cost if wrong is making some
+legitimate legacy revisions unavailable for new export.
+
+Ruling: A `legacy_unavailable` revision can authorize only an already-READY
+artifact download whose current result, latest revision, artifact ownership,
+size, and digest all verify; it cannot authorize reservation, repair, or
+regeneration — this preserves existing bytes without manufacturing provenance
+retroactively — cost if wrong is a previously downloadable corrupt or missing
+artifact becoming permanently unavailable.
+
+Ruling: Help and privacy share one modal primitive instead of duplicating focus
+logic — accessibility behavior remains consistent across both dialogs — cost
+if wrong is a broader shared-component regression affecting both surfaces,
+covered by their existing and new focus tests.
+
+### TDD RED evidence
+
+- Direct text/limits: the new shared-limit suite failed import before the
+  boundary existed. `SourceInputPanel.spec.ts` and `WorkspaceView.spec.ts`
+  then failed 5 assertions: both keyboard paths trimmed content, Python-only
+  whitespace was submitted, FEFF semantics were wrong, `maxlength="500000"`
+  remained, and the view trimmed a second time.
+- Canonical alternatives/issue boundaries/rendering:
+  `useVerificationWorkspace.spec.ts`, `WorkspaceSession.spec.ts`, and
+  `DocumentViewer.spec.ts` failed 5 assertions. Null/omitted alternatives
+  remained nullable, a real direct payload could not save, the over-limit
+  issue array was iterated, and 1,000 non-overlapping issues caused 5,016,998
+  range reads. The added canonical snapshot counter separately measured
+  1,003,000 document-character reads before code-point maps were reused.
+- Recheck/accessibility: `WorkspaceTask6.spec.ts` and
+  `WorkspaceAccessibility.spec.ts` failed 4 assertions. Reset and replacement
+  requests restored the prior authority, unmount rewrote session storage, and
+  help lacked the shared focus lifecycle.
+- Quote mapping: the focused adapter/analyzer run failed 5 assertions,
+  reproducing the locationless synthetic prefix plus missing/zero-width ASCII,
+  `「」`, and `『』` locations after an astral prefix.
+- Issue limits: the focused backend run failed 4 assertions because the
+  analyzer and registry accepted no limit injection, no canonical count helper
+  existed, and pipeline exhaustion was not mapped to a typed checking error.
+- LLM secrecy/logging: 3 focused failures reproduced plaintext `Settings`
+  representation, a plain-string key, and provider traceback/message leakage.
+- Source/export determinism: seven format race cases exported tampered bytes;
+  the tamper preflight did not reject; nine source-copy tests failed because no
+  verified-copy boundary existed; tracked DOCX bytes differed across controlled
+  wall clocks; delayed repair conflicted and concurrent repairs produced no
+  successful reference.
+- Migration policy: the non-gated schema/helper run failed because neither
+  provenance state nor bounded derivation existed. The real pre-0012 upgrade
+  test collected and skipped because `TEST_DATABASE_URL` was unset; no SQLite
+  substitute was used.
+
+### GREEN and final validation
+
+- Focused backend final command: 169 passed, 1 PostgreSQL-gated skip.
+- Focused frontend final command: 271 passed across 8 files.
+- Full backend: 1,096 passed, 82 established skips in 27.50 seconds.
+  Skips remain the configured real-PostgreSQL, live API/OCR, and optional OCR
+  runtime gates.
+- Full frontend: 506 passed across 22 files. Node emitted the existing
+  experimental `localStorage` warning.
+- Frontend production build: `vue-tsc -b` and Vite 6.4.3 passed with 75
+  modules transformed.
+- Playwright Chromium: 4 deterministic tests passed; 1 live-backend test
+  skipped because `LIVE_API_URL` was unset.
+- Full Ruff passed.
+- Full mypy passed on 78 source files.
+- Alembic head is `0012_add_revision_provenance`; offline upgrade-to-head and
+  `0012_add_revision_provenance:0011_add_artifact_reservation_version`
+  downgrade SQL generation passed.
+- Docker Compose config passed using `.env.example`, a temporary local `.env`,
+  and an explicit 32-byte `RECHECK_GRANT_SECRET`; the temporary `.env` was
+  removed in the same command.
+- `git diff --check` passed.
+
+Whole-plan final fix wave: implementation complete at
+`23fe7af42d586ce584bdb58a74ec20131854092f`; controller scoped re-review and
+residual adjudication remain pending.
