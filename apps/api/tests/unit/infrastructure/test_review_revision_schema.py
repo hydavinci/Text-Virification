@@ -1,3 +1,4 @@
+import logging
 from importlib.util import module_from_spec, spec_from_file_location
 from io import StringIO
 from pathlib import Path
@@ -151,9 +152,21 @@ def test_review_revision_provenance_derivation_queries_stay_indexable() -> None:
     ) in sql
 
 
+def test_offline_upgrade_sql_preserves_existing_storage_logger_state() -> None:
+    logger = logging.getLogger("text_verification.infrastructure.storage")
+    original_disabled = logger.disabled
+    logger.disabled = False
+
+    try:
+        _offline_upgrade_sql()
+        assert logger.disabled is False
+    finally:
+        logger.disabled = original_disabled
+
+
 def _offline_upgrade_sql() -> str:
     output = StringIO()
-    config = Config(str(BACKEND_ROOT / "alembic.ini"), output_buffer=output)
+    config = Config(output_buffer=output)
     config.set_main_option("script_location", str(BACKEND_ROOT / "alembic"))
     config.attributes["database_url"] = "postgresql://example/example"
     command.upgrade(
