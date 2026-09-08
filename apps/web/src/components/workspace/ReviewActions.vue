@@ -53,7 +53,9 @@ function setVisibleState(state: IssueState): void {
       {{ conflictIssueIds.length }} 个已接受问题存在替换冲突
     </p>
 
-    <div class="action-groups">
+    <details class="review-disclosure">
+      <summary>审阅操作</summary>
+      <div class="action-groups">
       <div class="selected-actions" aria-label="当前问题操作">
         <button
           class="btn accept small"
@@ -126,14 +128,18 @@ function setVisibleState(state: IssueState): void {
           撤销批量操作
         </button>
       </div>
-    </div>
+      </div>
+    </details>
   </div>
 </template>
 
 <style scoped>
 .review-actions {
-  display: grid;
-  gap: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 12px;
 }
 
 .review-counts,
@@ -156,8 +162,13 @@ function setVisibleState(state: IssueState): void {
 }
 
 .action-groups {
-  justify-content: flex-end;
+  flex-direction: column;
+  align-items: stretch;
 }
+.review-disclosure { position: relative; }
+.review-disclosure summary { cursor: pointer; padding: 8px 12px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); font-size: 12px; }
+.review-disclosure .action-groups { position: absolute; right: 0; top: calc(100% + 6px); z-index: 25; width: min(320px, calc(100vw - 32px)); padding: 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); box-shadow: var(--shadow); }
+.batch-actions { padding-top: 10px; border-top: 1px solid var(--border); }
 
 button {
   padding: 7px 11px;

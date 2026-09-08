@@ -21,6 +21,8 @@ function verificationOptionsBytes(options: AnalyzeOptions): number {
       enable_security: options.enableSecurity,
       enable_sensitive: options.enableSensitive,
       enable_ad_extreme: options.enableAdExtreme,
+      ocr_language: options.ocrLanguage ?? 'zh',
+      enable_extended_rules: options.enableExtendedRules ?? false,
       custom_glossary: options.glossary.map(({ original, standard }) => ({
         original,
         standard

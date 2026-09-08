@@ -1,9 +1,10 @@
 import { mount } from '@vue/test-utils'
 import { nextTick, ref } from 'vue'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest'
 
 import IssueDetails from '../src/components/workspace/IssueDetails.vue'
 import IssueList from '../src/components/workspace/IssueList.vue'
+import * as paneNavigation from '../src/utils/revealWithinPane'
 import { useIssueNavigation } from '../src/composables/useIssueNavigation'
 import type { IssueState, VerificationIssue } from '../src/types/verification'
 
@@ -173,6 +174,29 @@ describe('IssueDetails', () => {
     expect(wrapper.get('[data-recommended]').text()).toBe('备选一')
   })
 
+  describe('compact issue cards', () => {
+    it('expands only the selected issue while retaining summaries and stable navigation', async () => {
+      const first = buildIssue('compact-first', 0, 1, { message: '第一项问题' })
+      const second = buildIssue('compact-second', 1, 2, { message: '第二项问题' })
+      const wrapper = mount(IssueList, {
+        props: {
+          issues: [first, second],
+          selectedIssueId: first.issue_id,
+          issueStates: {},
+          selectedSuggestions: {}
+        }
+      })
+      expect(wrapper.findAllComponents(IssueDetails)).toHaveLength(1)
+      expect(wrapper.text()).toContain('第一项问题')
+      expect(wrapper.text()).toContain('第二项问题')
+      expect(wrapper.get(`[data-issue-id="${first.issue_id}"]`).attributes('aria-expanded')).toBe('true')
+      await wrapper.setProps({ selectedIssueId: second.issue_id })
+      expect(wrapper.getComponent(IssueDetails).props('issue').issue_id).toBe(second.issue_id)
+      expect(wrapper.get(`[data-issue-id="${first.issue_id}"]`).attributes('aria-expanded')).toBe('false')
+      wrapper.unmount()
+    })
+  })
+
   it('distinguishes no suggestion from deletion and removes duplicate alternatives', () => {
     const noSuggestion = mount(IssueDetails, {
       props: {
@@ -215,14 +239,10 @@ describe('IssueDetails', () => {
 
 describe('IssueList', () => {
   const issueStates: Readonly<Record<string, IssueState>> = Object.freeze({})
-  let scrollIntoView: ReturnType<typeof vi.fn>
+  let reveal: MockInstance<typeof paneNavigation.revealWithinPane>
 
   beforeEach(() => {
-    scrollIntoView = vi.fn()
-    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
-      configurable: true,
-      value: scrollIntoView
-    })
+    reveal = vi.spyOn(paneNavigation, 'revealWithinPane')
   })
 
   afterEach(() => {
@@ -283,11 +303,15 @@ describe('IssueList', () => {
 
     await nextTick()
 
-    expect(scrollIntoView).toHaveBeenCalledTimes(1)
+    expect(reveal).toHaveBeenCalledTimes(1)
+    expect(reveal).toHaveBeenCalledWith(
+      wrapper.get(`[data-issue-id="${issue.issue_id}"]`).element,
+      wrapper.get('.issue-list').element
+    )
     wrapper.unmount()
   })
 
-  it('uses non-smooth list scrolling when reduced motion is preferred', async () => {
+  it('keeps pane-local list navigation available with reduced motion', async () => {
     vi.stubGlobal(
       'matchMedia',
       vi.fn(() => ({ matches: true }))
@@ -304,11 +328,10 @@ describe('IssueList', () => {
 
     await nextTick()
 
-    expect(scrollIntoView).toHaveBeenCalledWith({
-      behavior: 'auto',
-      block: 'center',
-      inline: 'nearest'
-    })
+    expect(reveal).toHaveBeenCalledWith(
+      wrapper.get(`[data-issue-id="${issue.issue_id}"]`).element,
+      wrapper.get('.issue-list').element
+    )
     wrapper.unmount()
   })
 
@@ -327,7 +350,7 @@ describe('IssueList', () => {
 
     await nextTick()
 
-    expect(scrollIntoView).toHaveBeenCalledTimes(2)
+    expect(reveal).toHaveBeenCalledTimes(2)
     second.unmount()
   })
 
@@ -342,18 +365,6 @@ describe('IssueList', () => {
         selectedSuggestions: Object.freeze({})
       }
     })
-    const firstScroll = vi.fn()
-    const secondScroll = vi.fn()
-    Object.defineProperty(
-      wrapper.get(`[data-issue-id="${firstIssue.issue_id}"]`).element,
-      'scrollIntoView',
-      { configurable: true, value: firstScroll }
-    )
-    Object.defineProperty(
-      wrapper.get(`[data-issue-id="${secondIssue.issue_id}"]`).element,
-      'scrollIntoView',
-      { configurable: true, value: secondScroll }
-    )
 
     const firstUpdate = wrapper.setProps({
       selectedIssueId: firstIssue.issue_id
@@ -364,8 +375,10 @@ describe('IssueList', () => {
     await Promise.all([firstUpdate, secondUpdate])
     await nextTick()
 
-    expect(firstScroll).not.toHaveBeenCalled()
-    expect(secondScroll).toHaveBeenCalledTimes(1)
+    expect(reveal).toHaveBeenCalledTimes(1)
+    expect(reveal.mock.calls[0]?.[0]).toBe(
+      wrapper.get(`[data-issue-id="${secondIssue.issue_id}"]`).element
+    )
     wrapper.unmount()
   })
 
@@ -379,24 +392,14 @@ describe('IssueList', () => {
     }
     const first = mount(IssueList, { props, attachTo: document.body })
     const second = mount(IssueList, { props, attachTo: document.body })
-    const firstScroll = vi.fn()
-    const secondScroll = vi.fn()
-    Object.defineProperty(
-      first.get(`[data-issue-id="${issue.issue_id}"]`).element,
-      'scrollIntoView',
-      { configurable: true, value: firstScroll }
-    )
-    Object.defineProperty(
-      second.get(`[data-issue-id="${issue.issue_id}"]`).element,
-      'scrollIntoView',
-      { configurable: true, value: secondScroll }
-    )
 
     await first.setProps({ selectedIssueId: issue.issue_id })
     await nextTick()
 
-    expect(firstScroll).toHaveBeenCalledTimes(1)
-    expect(secondScroll).not.toHaveBeenCalled()
+    expect(reveal).toHaveBeenCalledTimes(1)
+    expect(reveal.mock.calls[0]?.[0]).toBe(
+      first.get(`[data-issue-id="${issue.issue_id}"]`).element
+    )
     first.unmount()
     second.unmount()
   })

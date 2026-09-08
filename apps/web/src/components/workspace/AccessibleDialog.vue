@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 
 const props = defineProps<{
   open: boolean
   labelledBy: string
   closeLabel: string
   closeDataAttribute: string
+  drawer?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -17,6 +18,19 @@ const closeAttributes = computed(() => ({
   [props.closeDataAttribute]: ''
 }))
 let opener: HTMLElement | null = null
+let observer: MutationObserver | null = null
+
+function containFocus(): void {
+  if (props.open && dialog.value && !dialog.value.contains(document.activeElement)) {
+    focusableElements()[0]?.focus()
+  }
+}
+
+function stopFocusGuard(): void {
+  observer?.disconnect()
+  observer = null
+  document.removeEventListener('focusin', containFocus)
+}
 
 watch(
   () => props.open,
@@ -27,14 +41,25 @@ watch(
           ? document.activeElement
           : null
       await nextTick()
+      if (!props.open || !dialog.value) return
       focusableElements()[0]?.focus()
+      document.addEventListener('focusin', containFocus)
+      observer = new MutationObserver(containFocus)
+      observer.observe(dialog.value, { childList: true, subtree: true })
       return
     }
+    stopFocusGuard()
     await nextTick()
+    if (props.open) return
     opener?.focus()
     opener = null
   }
 )
+
+onBeforeUnmount(() => {
+  stopFocusGuard()
+  if (props.open) opener?.focus()
+})
 
 function close(): void {
   emit('close')
@@ -76,7 +101,7 @@ function focusableElements(): HTMLElement[] {
 </script>
 
 <template>
-  <div v-if="open" class="modal-backdrop" @click.self="close">
+  <div v-if="open" class="modal-backdrop" :class="{ drawer }" @click.self="close">
     <section
       ref="dialog"
       class="modal"
@@ -135,4 +160,6 @@ function focusableElements(): HTMLElement[] {
   font-size: 24px;
   cursor: pointer;
 }
+.drawer { padding: 0; place-items: stretch end; background: rgba(15, 23, 42, .25); }
+.drawer .modal { width: min(440px, 100vw); height: 100dvh; max-height: 100dvh; border-radius: 0; border-left: 1px solid var(--border); padding: 32px 20px; }
 </style>

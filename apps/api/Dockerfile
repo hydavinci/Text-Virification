@@ -1,4 +1,5 @@
-FROM python:3.12-slim AS builder
+ARG PYTHON_IMAGE=python:3.12-slim
+FROM ${PYTHON_IMAGE} AS builder
 
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1
@@ -10,7 +11,7 @@ COPY src ./src
 
 RUN python -m pip wheel --wheel-dir /wheels ".[dev,ocr]"
 
-FROM python:3.12-slim AS runtime
+FROM ${PYTHON_IMAGE} AS runtime
 
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \

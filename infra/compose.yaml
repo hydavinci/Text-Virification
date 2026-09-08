@@ -1,11 +1,19 @@
 name: text-verification
 
+x-backend-environment: &backend-environment
+  DATABASE_URL: postgresql+psycopg://text_verification:text_verification@postgres:5432/text_verification
+  REDIS_URL: redis://redis:6379/0
+  STORAGE_ROOT: /var/lib/text-verification/jobs
+
 x-backend-service: &backend-service
   build:
     context: ../apps/api
+    args:
+      PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.12-slim}
   image: text-verification-backend:development
   env_file:
     - ../.env
+  environment: *backend-environment
   # APP_ENV 为 production/staging/deployed 时，.env 必须提供至少 32 字节的
   # RECHECK_GRANT_SECRET；API 与 Worker 会在启动时 fail closed。
 
@@ -47,6 +55,7 @@ services:
     command: ["uvicorn", "text_verification.main:app", "--host", "0.0.0.0", "--port", "8000"]
     restart: unless-stopped
     environment:
+      <<: *backend-environment
       TEST_DATABASE_URL: postgresql+psycopg://text_verification:text_verification@postgres:5432/text_verification
     depends_on:
       postgres:
@@ -74,6 +83,7 @@ services:
     command: ["text-verification-worker"]
     restart: unless-stopped
     environment:
+      <<: *backend-environment
       TEXT_VERIFICATION_WORKER_ROLE: verification
       TEXT_VERIFICATION_WORKER_QUEUES: celery,verification-v2
       TEXT_VERIFICATION_WORKER_CONCURRENCY: "2"
@@ -92,6 +102,7 @@ services:
     command: ["text-verification-worker"]
     restart: unless-stopped
     environment:
+      <<: *backend-environment
       TEXT_VERIFICATION_WORKER_ROLE: maintenance
       TEXT_VERIFICATION_WORKER_QUEUES: maintenance-v2
       TEXT_VERIFICATION_WORKER_CONCURRENCY: "1"
@@ -130,6 +141,9 @@ services:
   web:
     build:
       context: ../apps/web
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-node:22-slim}
+        NGINX_IMAGE: ${NGINX_IMAGE:-nginx:1.27-alpine}
     image: text-verification-web:development
     restart: unless-stopped
     depends_on:

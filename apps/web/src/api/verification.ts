@@ -81,7 +81,8 @@ export function createVerificationApi(fetchImpl: typeof fetch = fetch): Verifica
     analyzeFile: (file, options) => analyze({ file }, options),
     analyzeText: (text, options) => analyze({ text }, options),
     recheckJob: async (jobId, text, options) => {
-      const body = new FormData()
+      // Multipart string fields normalize newlines and break exact-text provenance.
+      const body = new URLSearchParams()
       body.append('text', text)
       appendAnalyzeOptions(body, createAnalyzeOptionsSnapshot(options))
       const response = await fetchImpl(
@@ -273,7 +274,7 @@ function exportArtifactResponse(
     value.job_id !== jobId ||
     !isUuid(value.verification_run_id) ||
     value.format !== format ||
-    !['docx', 'doc', 'pdf', 'txt', 'rtf', 'md', 'csv'].includes(
+    !['docx', 'doc', 'pdf', 'txt', 'rtf', 'md', 'csv', 'png', 'jpg'].includes(
       String(value.file_type)
     ) ||
     (format === 'docx_reconstruction' && value.file_type !== 'docx') ||

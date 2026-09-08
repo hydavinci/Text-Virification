@@ -99,6 +99,8 @@ def test_document_model_supports_all_source_formats() -> None:
         "rtf",
         "md",
         "csv",
+        "png",
+        "jpg",
     }
 
 

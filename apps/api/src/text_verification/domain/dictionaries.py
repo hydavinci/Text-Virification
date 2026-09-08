@@ -7,6 +7,8 @@ from pydantic import BaseModel, ConfigDict, StringConstraints
 DictionaryName = Literal["sensitive_rules", "ad_extreme_words"]
 _DictionaryVersion = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 _DictionaryText = Annotated[str, StringConstraints(strict=True, min_length=1)]
+_MetadataVersion = Annotated[str, StringConstraints(strict=True, max_length=200)]
+_MetadataDescription = Annotated[str, StringConstraints(strict=True, max_length=10_000)]
 
 
 class TerritoryStandardEntry(BaseModel):
@@ -20,6 +22,8 @@ class TerritoryStandardEntry(BaseModel):
 class SensitiveRulesEntries(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
+    version: _MetadataVersion | None = None
+    description: _MetadataDescription | None = None
     politics: tuple[_DictionaryText, ...]
     ethnic_religion: tuple[_DictionaryText, ...]
     territory_standard: tuple[TerritoryStandardEntry, ...]
@@ -28,6 +32,8 @@ class SensitiveRulesEntries(BaseModel):
 class AdExtremeWordsEntries(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
+    version: _MetadataVersion | None = None
+    description: _MetadataDescription | None = None
     extreme_words: tuple[_DictionaryText, ...]
 
 

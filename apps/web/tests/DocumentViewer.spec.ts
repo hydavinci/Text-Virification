@@ -1,7 +1,8 @@
 import { mount } from '@vue/test-utils'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest'
 
 import DocumentViewer from '../src/components/workspace/DocumentViewer.vue'
+import * as paneNavigation from '../src/utils/revealWithinPane'
 import type {
   IssueState,
   TextBlock,
@@ -116,14 +117,10 @@ function buildResult(
 }
 
 describe('DocumentViewer', () => {
-  let scrollIntoView: ReturnType<typeof vi.fn>
+  let reveal: MockInstance<typeof paneNavigation.revealWithinPane>
 
   beforeEach(() => {
-    scrollIntoView = vi.fn()
-    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
-      configurable: true,
-      value: scrollIntoView
-    })
+    reveal = vi.spyOn(paneNavigation, 'revealWithinPane')
   })
 
   afterEach(() => {
@@ -131,16 +128,124 @@ describe('DocumentViewer', () => {
     vi.unstubAllGlobals()
   })
 
-  it('selects an issue by stable id when its source control is activated', async () => {
+  it.each(['sentence', 'continuous'] as const)(
+    'highlights Unicode search ranges across issue and newline boundaries in %s mode',
+    async (mode) => {
+      const text = '😀乙丙\n丁 乙丙\n丁'
+      const result = buildResult(text, [buildIssue()])
+      const wrapper = mount(DocumentViewer, {
+        attachTo: document.body,
+        props: {
+          result,
+          selectedIssueId: null,
+          mode,
+          searchMatches: [{ start: 1, end: 5 }, { start: 6, end: 10 }],
+          activeSearchMatchIndex: 0
+        }
+      })
+      await wrapper.vm.$nextTick()
+      expect(wrapper.get('[data-source-text]').element.textContent).toBe(text)
+      expect(wrapper.findAll('.active-search-match').map((node) => node.element.textContent).join(''))
+        .toBe('乙丙\n丁')
+      expect(reveal.mock.calls.at(-1)?.[0])
+        .toBe(wrapper.get('[data-search-match="0"]').element)
+      await wrapper.setProps({ activeSearchMatchIndex: 1 })
+      await wrapper.vm.$nextTick()
+      expect(reveal.mock.calls.at(-1)?.[0])
+        .toBe(wrapper.get('[data-search-match="1"]').element)
+      await wrapper.setProps({ searchMatches: [], activeSearchMatchIndex: -1 })
+      expect(wrapper.find('[data-search-match]').exists()).toBe(false)
+      wrapper.unmount()
+    }
+  )
+
+  it.each(['sentence', 'continuous'] as const)(
+    'retains a navigable marker for deleted text at the document end in %s mode',
+    (mode) => {
+      const issue = buildIssue({ start: 1, end: 1, original: '' })
+      const wrapper = mount(DocumentViewer, {
+        props: {
+          result: buildResult('甲乙丙丁', []),
+          text: '甲',
+          issues: [issue],
+          selectedIssueId: issue.issue_id,
+          issueStates: { [issue.issue_id]: 'accepted' },
+          mode
+        }
+      })
+      expect(wrapper.get('[data-source-text]').element.textContent).toBe('甲')
+      expect(wrapper.get('[data-issue-role="source"]').classes()).toContain('accepted')
+      wrapper.unmount()
+    }
+  )
+
+  it('selects an issue by clicking its highlighted text without inline marker buttons', async () => {
     const issue = buildIssue()
     const result = buildResult('甲乙丙丁', [issue])
     const wrapper = mount(DocumentViewer, {
       props: { result, issues: result.issues, selectedIssueId: null }
     })
 
-    await wrapper.get(`[data-issue-id="${issue.issue_id}"]`).trigger('click')
+    await wrapper.get('.source-segment.highlighted').trigger('click')
 
     expect(wrapper.emitted('select-issue')?.[0]).toEqual([issue.issue_id])
+    expect(wrapper.find('.issue-marker').exists()).toBe(false)
+    expect(wrapper.findAll('[data-source-text] button')).toHaveLength(0)
+  })
+
+  it.each(['sentence', 'continuous'] as const)(
+    'cycles overlapping issues from highlighted text in %s mode',
+    async (mode) => {
+      const first = buildIssue()
+      const second = buildIssue({
+        issue_id: '44444444-4444-4444-4444-444444444444'
+      })
+      const wrapper = mount(DocumentViewer, {
+        props: {
+          result: buildResult('甲乙丙丁', [first, second]),
+          selectedIssueId: null,
+          mode
+        }
+      })
+      const text = wrapper.get('.source-segment.highlighted')
+      expect(text.attributes('role')).toBe('button')
+      expect(text.attributes('tabindex')).toBe('0')
+      await text.trigger('click')
+      expect(wrapper.emitted('select-issue')?.at(-1)).toEqual([first.issue_id])
+      await wrapper.setProps({ selectedIssueId: first.issue_id })
+      await text.trigger('keydown', { key: 'Enter' })
+      expect(wrapper.emitted('select-issue')?.at(-1)).toEqual([second.issue_id])
+      await wrapper.setProps({ selectedIssueId: second.issue_id })
+      await text.trigger('keydown', { key: ' ' })
+      expect(wrapper.emitted('select-issue')?.at(-1)).toEqual([first.issue_id])
+      expect(wrapper.get('[data-source-text]').element.textContent).toBe('甲乙丙丁')
+      expect(wrapper.find('.issue-marker').exists()).toBe(false)
+      wrapper.unmount()
+    }
+  )
+
+  it('does not navigate when the user selects highlighted text for copying', async () => {
+    const issue = buildIssue()
+    const wrapper = mount(DocumentViewer, {
+      attachTo: document.body,
+      props: { result: buildResult('甲乙丙丁', [issue]), selectedIssueId: null }
+    })
+    const highlight = wrapper.get('.source-segment.highlighted')
+    const range = document.createRange()
+    range.selectNodeContents(highlight.element)
+    const selection = window.getSelection()!
+    selection.removeAllRanges()
+    selection.addRange(range)
+    try {
+      await highlight.trigger('click')
+      expect(selection.toString()).toBe('乙丙')
+      expect(wrapper.emitted('select-issue')).toBeUndefined()
+      await highlight.trigger('keydown', { key: 'Enter' })
+      expect(wrapper.emitted('select-issue')?.[0]).toEqual([issue.issue_id])
+    } finally {
+      selection.removeAllRanges()
+      wrapper.unmount()
+    }
   })
 
   it('renders source characters as text without interpreting markup', () => {
@@ -154,22 +259,22 @@ describe('DocumentViewer', () => {
     expect(wrapper.find('img').exists()).toBe(false)
   })
 
-  it('preserves exact text and line numbers in sentence mode', () => {
+  it('renders paragraphs without line numbers while preserving whitespace and empty paragraphs', () => {
     const text = '第一行  \n\n第三行\n'
     const result = buildResult(text, [])
     const wrapper = mount(DocumentViewer, {
-      props: { result, issues: [], selectedIssueId: null, mode: 'sentence' }
+      props: { result, issues: [], selectedIssueId: null }
     })
 
     expect(
       wrapper
-        .findAll('[data-source-line]')
+        .findAll('[data-source-paragraph]')
         .map((line) => line.element.textContent ?? '')
         .join('')
     ).toBe(text)
-    expect(
-      wrapper.findAll('[data-line-number]').map((line) => line.text())
-    ).toEqual(['1', '2', '3', '4'])
+    expect(wrapper.findAll('[data-source-paragraph]')).toHaveLength(4)
+    expect(wrapper.findAll('[data-line-number]')).toHaveLength(0)
+    expect(wrapper.get('[data-source-text]').element.textContent).toBe(text)
   })
 
   it('uses code-point offsets after astral characters', () => {
@@ -426,7 +531,8 @@ describe('DocumentViewer', () => {
 
     expect(wrapper.get('[data-source-text]').text()).toBe('')
     expect(wrapper.findAll('[data-issue-role="source"]')).toHaveLength(0)
-    expect(wrapper.findAll('[data-line-number]')).toHaveLength(1)
+    expect(wrapper.findAll('[data-source-paragraph]')).toHaveLength(1)
+    expect(wrapper.findAll('[data-line-number]')).toHaveLength(0)
   })
 
   it('supports keyboard activation and exposes the current source selection', async () => {
@@ -435,7 +541,7 @@ describe('DocumentViewer', () => {
     const wrapper = mount(DocumentViewer, {
       props: { result, issues: result.issues, selectedIssueId: issue.issue_id }
     })
-    const control = wrapper.get(`[data-issue-id="${issue.issue_id}"]`)
+    const control = wrapper.get('.source-segment.highlighted')
 
     await control.trigger('keydown', { key: 'Enter' })
 
@@ -474,26 +580,29 @@ describe('DocumentViewer', () => {
     ).toContain('rejected')
   })
 
-  it('scrolls the newly selected source control after render when supported', async () => {
+  it('reveals the newly selected source control within its document pane', async () => {
     const issue = buildIssue()
     const result = buildResult('甲乙丙丁', [issue])
+    const pane = document.createElement('div')
+    pane.className = 'document-content'
+    document.body.append(pane)
     const wrapper = mount(DocumentViewer, {
-      attachTo: document.body,
+      attachTo: pane,
       props: { result, issues: result.issues, selectedIssueId: null }
     })
 
     await wrapper.setProps({ selectedIssueId: issue.issue_id })
     await wrapper.vm.$nextTick()
 
-    expect(scrollIntoView).toHaveBeenCalledWith({
-      behavior: 'smooth',
-      block: 'center',
-      inline: 'nearest'
-    })
+    expect(reveal).toHaveBeenCalledWith(
+      wrapper.get(`[data-issue-id="${issue.issue_id}"]`).element,
+      pane
+    )
     wrapper.unmount()
+    pane.remove()
   })
 
-  it('uses non-smooth source scrolling when reduced motion is preferred', async () => {
+  it('keeps source navigation available when reduced motion is preferred', async () => {
     vi.stubGlobal(
       'matchMedia',
       vi.fn(() => ({ matches: true }))
@@ -507,11 +616,10 @@ describe('DocumentViewer', () => {
     await wrapper.setProps({ selectedIssueId: issue.issue_id })
     await wrapper.vm.$nextTick()
 
-    expect(scrollIntoView).toHaveBeenCalledWith({
-      behavior: 'auto',
-      block: 'center',
-      inline: 'nearest'
-    })
+    expect(reveal).toHaveBeenCalledWith(
+      wrapper.get(`[data-issue-id="${issue.issue_id}"]`).element,
+      null
+    )
   })
 
   it('scrolls a preselected source control when mounted', async () => {
@@ -527,7 +635,7 @@ describe('DocumentViewer', () => {
 
     await wrapper.vm.$nextTick()
 
-    expect(scrollIntoView).toHaveBeenCalledTimes(1)
+    expect(reveal).toHaveBeenCalledTimes(1)
     wrapper.unmount()
   })
 
@@ -546,7 +654,7 @@ describe('DocumentViewer', () => {
 
     await second.vm.$nextTick()
 
-    expect(scrollIntoView).toHaveBeenCalledTimes(2)
+    expect(reveal).toHaveBeenCalledTimes(2)
     second.unmount()
   })
 
@@ -575,18 +683,6 @@ describe('DocumentViewer', () => {
         selectedIssueId: null
       }
     })
-    const firstScroll = vi.fn()
-    const secondScroll = vi.fn()
-    Object.defineProperty(
-      wrapper.get(`[data-issue-id="${firstIssue.issue_id}"]`).element,
-      'scrollIntoView',
-      { configurable: true, value: firstScroll }
-    )
-    Object.defineProperty(
-      wrapper.get(`[data-issue-id="${secondIssue.issue_id}"]`).element,
-      'scrollIntoView',
-      { configurable: true, value: secondScroll }
-    )
 
     const firstUpdate = wrapper.setProps({
       selectedIssueId: firstIssue.issue_id
@@ -597,8 +693,10 @@ describe('DocumentViewer', () => {
     await Promise.all([firstUpdate, secondUpdate])
     await wrapper.vm.$nextTick()
 
-    expect(firstScroll).not.toHaveBeenCalled()
-    expect(secondScroll).toHaveBeenCalledTimes(1)
+    expect(reveal).toHaveBeenCalledTimes(1)
+    expect(reveal.mock.calls[0]?.[0]).toBe(
+      wrapper.get(`[data-issue-id="${secondIssue.issue_id}"]`).element
+    )
     wrapper.unmount()
   })
 
@@ -612,24 +710,14 @@ describe('DocumentViewer', () => {
     }
     const first = mount(DocumentViewer, { props, attachTo: document.body })
     const second = mount(DocumentViewer, { props, attachTo: document.body })
-    const firstScroll = vi.fn()
-    const secondScroll = vi.fn()
-    Object.defineProperty(
-      first.get(`[data-issue-id="${issue.issue_id}"]`).element,
-      'scrollIntoView',
-      { configurable: true, value: firstScroll }
-    )
-    Object.defineProperty(
-      second.get(`[data-issue-id="${issue.issue_id}"]`).element,
-      'scrollIntoView',
-      { configurable: true, value: secondScroll }
-    )
 
     await first.setProps({ selectedIssueId: issue.issue_id })
     await first.vm.$nextTick()
 
-    expect(firstScroll).toHaveBeenCalledTimes(1)
-    expect(secondScroll).not.toHaveBeenCalled()
+    expect(reveal).toHaveBeenCalledTimes(1)
+    expect(reveal.mock.calls[0]?.[0]).toBe(
+      first.get(`[data-issue-id="${issue.issue_id}"]`).element
+    )
     first.unmount()
     second.unmount()
   })

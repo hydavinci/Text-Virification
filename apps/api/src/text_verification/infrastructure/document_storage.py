@@ -12,6 +12,10 @@ from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 from uuid import UUID
 
+from text_verification.document_processing.image_validation import (
+    ImageValidationError,
+    validate_image_file,
+)
 from text_verification.domain.capabilities import (
     CapabilityProfile,
     default_capability_manifest,
@@ -325,7 +329,8 @@ class DocumentStorage:
         if not suffix:
             raise UnsupportedFileType("Upload file name must include a supported extension.")
         try:
-            file_type = FileType(suffix.removeprefix("."))
+            extension = suffix.removeprefix(".")
+            file_type = FileType.JPG if extension == "jpeg" else FileType(extension)
         except ValueError as exc:
             raise UnsupportedFileType(f"Unsupported upload extension: {suffix}") from exc
         if file_type not in self._supported_file_types:
@@ -333,6 +338,16 @@ class DocumentStorage:
         return file_type
 
     def _validate_content(self, path: Path, file_type: FileType) -> None:
+        if file_type in {FileType.PNG, FileType.JPG}:
+            try:
+                validate_image_file(
+                    path,
+                    file_type,
+                    max_file_bytes=self._max_upload_bytes,
+                )
+            except ImageValidationError as error:
+                raise InvalidUpload(str(error)) from error
+            return
         if file_type == FileType.PDF:
             self._validate_pdf(path)
             return

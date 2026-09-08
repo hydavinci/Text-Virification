@@ -98,6 +98,8 @@ class VerificationOptions(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     scenario: Scenario = Scenario.GENERAL
+    ocr_language: Literal["zh", "en", "ja"] = "zh"
+    enable_extended_rules: bool = False
     enable_security: bool = True
     enable_sensitive: bool = True
     enable_ad_extreme: bool = False
@@ -130,7 +132,7 @@ class VerificationOptions(BaseModel):
     @model_validator(mode="after")
     def validate_serialized_size(self) -> VerificationOptions:
         encoded = json.dumps(
-            self.model_dump(mode="json"),
+            self.model_dump(mode="json", exclude_unset=True),
             ensure_ascii=False,
             separators=(",", ":"),
         ).encode()
@@ -142,7 +144,7 @@ class VerificationOptions(BaseModel):
 def encode_verification_options(
     options: VerificationOptions,
 ) -> dict[str, JsonValue]:
-    return options.model_dump(mode="json")
+    return options.model_dump(mode="json", exclude_unset=True)
 
 
 def decode_verification_options(payload: object) -> VerificationOptions:

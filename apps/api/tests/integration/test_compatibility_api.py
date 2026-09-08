@@ -210,7 +210,14 @@ def test_analyze_route_uses_injected_pipeline(
     pipeline = RecordingPipeline(_verification_result())
     app.dependency_overrides[get_verification_pipeline] = lambda: pipeline
 
-    response = client.post("/api/v1/analyze", data={"text": "检查文本"})
+    response = client.post(
+        "/api/v1/analyze",
+        data={
+            "text": "检查文本",
+            "ocr_language": "ja",
+            "enable_extended_rules": "true",
+        },
+    )
 
     assert response.status_code == 200
     assert len(pipeline.commands) == 1
@@ -218,7 +225,11 @@ def test_analyze_route_uses_injected_pipeline(
     assert pipeline.commands[0].source_path is None
     assert pipeline.commands[0].source_name == "直接输入文本"
     assert pipeline.commands[0].file_type is FileType.TXT
-    assert pipeline.commands[0].options == VerificationOptions()
+    assert pipeline.commands[0].options.ocr_language == "ja"
+    assert pipeline.commands[0].options == VerificationOptions(
+        ocr_language="ja",
+        enable_extended_rules=True,
+    )
     assert pipeline.commands[0].execution_mode is VerificationExecutionMode.SYNCHRONOUS
 
 

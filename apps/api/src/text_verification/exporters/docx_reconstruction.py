@@ -98,6 +98,12 @@ class _PdfImageRequest:
 
 
 @dataclass(frozen=True)
+class _SourceImageRegionRequest:
+    block_id: str
+    crop_bbox: tuple[int, int, int, int]
+
+
+@dataclass(frozen=True)
 class _Table:
     page: int | None
     table_index: int
@@ -252,32 +258,39 @@ def _resolve_images(
     ]
     if not image_blocks:
         return {}
-    requests = [
-        _canonical_pdf_image_request(document, block)
-        for block in image_blocks
-    ]
     if anchored_source_resolver is None:
-        raise ExportError("Canonical PDF images require an injected source resolver.")
+        raise ExportError("Canonical images require an injected source resolver.")
     try:
         resolved_source = anchored_source_resolver.resolve_anchored(document)
     except (OSError, ValueError) as error:
-        raise ExportError("Canonical PDF source could not be resolved.") from error
+        raise ExportError("Canonical image source could not be resolved.") from error
     if not isinstance(resolved_source, ResolvedSourcePath):
-        raise ExportError("Canonical PDF source resolver must return an anchored source.")
+        raise ExportError("Canonical image source resolver must return an anchored source.")
     source = _read_resolved_source(
         document,
         resolved_source,
         limits.max_pdf_source_bytes,
     )
+    if document.file_type in {FileType.PNG, FileType.JPG}:
+        source_requests = [
+            _canonical_source_image_request(document, block)
+            for block in image_blocks
+        ]
+        return _extract_source_image_regions(source, source_requests, limits)
+
+    pdf_requests = [
+        _canonical_pdf_image_request(document, block)
+        for block in image_blocks
+    ]
     try:
         pdf: Any = _PYMUPDF.open(stream=source, filetype="pdf")
     except (RuntimeError, ValueError) as error:
         raise ExportError("Resolved PDF image source is invalid.") from error
     try:
-        _preflight_pdf_image_streams(pdf, requests, limits)
+        _preflight_pdf_image_streams(pdf, pdf_requests, limits)
         extracted: list[tuple[bytes, SupportedImageMime]] = []
         total_bytes = 0
-        for request in requests:
+        for request in pdf_requests:
             content, mime_type = _extract_pdf_image_content(pdf, request.xref)
             total_bytes += len(content)
             if total_bytes > limits.max_total_image_bytes:
@@ -289,11 +302,84 @@ def _resolve_images(
         pdf.close()
 
     images: dict[str, _Image] = {}
-    for request, (content, mime_type) in zip(requests, extracted, strict=True):
+    for request, (content, mime_type) in zip(pdf_requests, extracted, strict=True):
         image = _validated_image(content, limits)
         if image.mime_type != mime_type:
             raise ExportError("PDF image MIME type does not match its signature.")
         images[request.block_id] = image
+    return images
+
+
+def _canonical_source_image_request(
+    document: DocumentModel,
+    block: TextBlock,
+) -> _SourceImageRegionRequest:
+    if "image_payload" in block.source_locator:
+        raise ExportError("Image block contains a non-canonical image reference.")
+    crop_bbox = block.source_locator.get("crop_bbox")
+    if (
+        document.file_type not in {FileType.PNG, FileType.JPG}
+        or block.page != 1
+        or block.source_locator.get("locator_kind") != "source_image_region"
+        or block.source_locator.get("source") != "source_image"
+        or not isinstance(crop_bbox, list)
+        or len(crop_bbox) != 4
+        or any(isinstance(value, bool) or not isinstance(value, int) for value in crop_bbox)
+    ):
+        raise ExportError("Image block does not contain a valid source crop reference.")
+    coordinates = tuple(crop_bbox)
+    if tuple(float(value) for value in coordinates) != block.bbox:
+        raise ExportError("Image crop reference conflicts with its canonical block.")
+    return _SourceImageRegionRequest(
+        block_id=block.block_id,
+        crop_bbox=coordinates,
+    )
+
+
+def _extract_source_image_regions(
+    source: bytes,
+    requests: list[_SourceImageRegionRequest],
+    limits: DocxReconstructionLimits,
+) -> dict[str, _Image]:
+    source_image = _validated_image(source, limits)
+    try:
+        pixmap: Any = _PYMUPDF.Pixmap(source)
+    except (RuntimeError, ValueError) as error:
+        raise ExportError("Resolved image source is invalid.") from error
+    images: dict[str, _Image] = {}
+    total_bytes = 0
+    try:
+        for request in requests:
+            x0, y0, x1, y1 = request.crop_bbox
+            if (
+                x0 < 0
+                or y0 < 0
+                or x1 <= x0
+                or y1 <= y0
+                or x1 > source_image.width
+                or y1 > source_image.height
+            ):
+                raise ExportError("Image crop reference exceeds the source bounds.")
+            crop_rect = _PYMUPDF.IRect(x0, y0, x1, y1)
+            crop: Any = _PYMUPDF.Pixmap(
+                pixmap.colorspace,
+                crop_rect,
+                pixmap.alpha,
+            )
+            try:
+                crop.copy(pixmap, crop_rect)
+                crop.set_origin(0, 0)
+                content = crop.tobytes("png")
+            finally:
+                del crop
+            total_bytes += len(content)
+            if total_bytes > limits.max_total_image_bytes:
+                raise ExportError(
+                    "Document exceeds the configured aggregate image media limit."
+                )
+            images[request.block_id] = _validated_image(content, limits)
+    finally:
+        del pixmap
     return images
 
 

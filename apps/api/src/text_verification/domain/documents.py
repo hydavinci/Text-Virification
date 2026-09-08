@@ -34,6 +34,8 @@ class FileType(StrEnum):
     RTF = "rtf"
     MARKDOWN = "md"
     CSV = "csv"
+    PNG = "png"
+    JPG = "jpg"
 
 
 class ExportFormat(StrEnum):

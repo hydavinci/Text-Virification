@@ -910,6 +910,79 @@ describe('useVerificationExecution', () => {
     expect(Object.isFrozen(asyncSnapshot)).toBe(true)
   })
 
+  it.each(['loaded', 'restored'] as const)(
+    'retains %s job identity through a failed recheck until a successful retry',
+    async (context) => {
+      const pending = createDeferred<Awaited<ReturnType<VerificationApi['recheckJob']>>>()
+      const checked = buildResult()
+      const verificationApi: VerificationApi = {
+        analyzeText: vi.fn(),
+        analyzeFile: vi.fn(),
+        recheckJob: vi.fn()
+          .mockReturnValueOnce(pending.promise)
+          .mockResolvedValueOnce({ result: checked, grant: 'server-grant' }),
+        exportReport: vi.fn(),
+        exportOriginal: vi.fn(),
+        persistRevision: vi.fn(),
+        exportJob: vi.fn()
+      }
+      const original = buildResult({ execution_mode: 'asynchronous' })
+      const harness = createHarness({
+        verificationApi,
+        fileExecutionMode: 'jobs',
+        job: buildJob({ job_id: original.document_id }),
+        result: original
+      })
+      if (context === 'loaded') {
+        await harness.execution.analyzeFile(new File(['pdf'], 'sample.pdf'), options)
+        harness.emit(buildEvent('completed', { stage: 'completed' }))
+        await flushPromises()
+      } else {
+        expect(harness.execution.restoreJobContext(original.document_id, original)).toBe(true)
+      }
+
+      const recheck = harness.execution.recheckJob(original.document_id, original.text, options)
+      expect(harness.execution.jobId.value).toBe(original.document_id)
+      pending.reject(new Error('Secure recheck provenance is not configured.'))
+      await recheck
+
+      expect(harness.execution.state.value).toBe('failed')
+      expect(harness.execution.error.value?.message).toContain('not configured')
+      expect(harness.execution.jobId.value).toBe(original.document_id)
+
+      await harness.execution.recheckJob(original.document_id, original.text, options)
+      expect(harness.execution.state.value).toBe('completed')
+      expect(harness.execution.result.value?.text).toBe(checked.text)
+      expect(harness.execution.jobId.value).toBeNull()
+      expect(harness.execution.error.value).toBeNull()
+    }
+  )
+
+  it('does not revive retained job identity when a recheck fails after reset', async () => {
+    const pending = createDeferred<Awaited<ReturnType<VerificationApi['recheckJob']>>>()
+    const harness = createHarness({
+      verificationApi: {
+        analyzeText: vi.fn(),
+        analyzeFile: vi.fn(),
+        recheckJob: vi.fn().mockReturnValue(pending.promise),
+        exportReport: vi.fn(),
+        exportOriginal: vi.fn(),
+        persistRevision: vi.fn(),
+        exportJob: vi.fn()
+      }
+    })
+    const original = buildResult({ execution_mode: 'asynchronous' })
+    harness.execution.restoreJobContext(original.document_id, original)
+    const recheck = harness.execution.recheckJob(original.document_id, original.text, options)
+    harness.execution.reset()
+    pending.reject(new Error('late recheck failure'))
+    await recheck
+
+    expect(harness.execution.state.value).toBe('idle')
+    expect(harness.execution.jobId.value).toBeNull()
+    expect(harness.execution.error.value).toBeNull()
+  })
+
   it('restores validated async job context without inventing a completed job', () => {
     const harness = createHarness()
     const result = buildResult({ execution_mode: 'asynchronous' })

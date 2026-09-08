@@ -4,7 +4,7 @@ import logging
 import ntpath
 import posixpath
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 from urllib.parse import quote
 from uuid import UUID, uuid4
 
@@ -94,6 +94,8 @@ def analyze_content(
     text: Annotated[str | None, Form()] = None,
     file: Annotated[UploadFile | None, File()] = None,
     scenario: Annotated[Scenario, Form()] = Scenario.GENERAL,
+    ocr_language: Annotated[Literal["zh", "en", "ja"], Form()] = "zh",
+    enable_extended_rules: Annotated[bool, Form()] = False,
     enable_security: Annotated[bool, Form()] = True,
     enable_sensitive: Annotated[bool, Form()] = True,
     enable_ad_extreme: Annotated[bool, Form()] = False,
@@ -105,6 +107,8 @@ def analyze_content(
         banned = parse_banned_words(banned_words)
         options = build_verification_options(
             scenario=scenario,
+            ocr_language=ocr_language,
+            enable_extended_rules=enable_extended_rules,
             custom_glossary=glossary,
             banned_words=banned,
             enable_security=enable_security,

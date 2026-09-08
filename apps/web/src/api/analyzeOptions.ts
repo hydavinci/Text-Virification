@@ -26,7 +26,8 @@ export class AnalyzeOptionsError extends Error {
 }
 
 export function createAnalyzeOptionsSnapshot(
-  options: AnalyzeOptions
+  options: AnalyzeOptions,
+  budget: 'request' | 'persisted' = 'request'
 ): AnalyzeOptions {
   if (
     typeof options !== 'object' ||
@@ -35,6 +36,10 @@ export function createAnalyzeOptionsSnapshot(
     typeof options.enableSecurity !== 'boolean' ||
     typeof options.enableSensitive !== 'boolean' ||
     typeof options.enableAdExtreme !== 'boolean' ||
+    (options.ocrLanguage !== undefined &&
+      !['zh', 'en', 'ja'].includes(options.ocrLanguage)) ||
+    (options.enableExtendedRules !== undefined &&
+      typeof options.enableExtendedRules !== 'boolean') ||
     !Array.isArray(options.glossary) ||
     !Array.isArray(options.bannedWords)
   ) {
@@ -77,23 +82,29 @@ export function createAnalyzeOptionsSnapshot(
     enableSecurity: options.enableSecurity,
     enableSensitive: options.enableSensitive,
     enableAdExtreme: options.enableAdExtreme,
+    ...(options.ocrLanguage === undefined ? {} : { ocrLanguage: options.ocrLanguage }),
+    ...(options.enableExtendedRules === undefined ? {} : {
+      enableExtendedRules: options.enableExtendedRules
+    }),
     glossary,
     bannedWords
   })
-  if (serializedBackendBytes(snapshot) > MAX_OPTIONS_JSON_BYTES) {
+  if (serializedBackendBytes(snapshot, budget) > MAX_OPTIONS_JSON_BYTES) {
     throw invalidOptions()
   }
   return snapshot
 }
 
 export function appendAnalyzeOptions(
-  body: FormData,
+  body: FormData | URLSearchParams,
   options: AnalyzeOptions
 ): void {
   body.append('scenario', options.scenario)
   body.append('enable_security', String(options.enableSecurity))
   body.append('enable_sensitive', String(options.enableSensitive))
   body.append('enable_ad_extreme', String(options.enableAdExtreme))
+  body.append('ocr_language', options.ocrLanguage ?? 'zh')
+  body.append('enable_extended_rules', String(options.enableExtendedRules ?? false))
   body.append('custom_glossary', JSON.stringify(options.glossary))
   body.append('banned_words', JSON.stringify(options.bannedWords))
 }
@@ -126,13 +137,20 @@ function codePointLength(value: string): number {
   return Array.from(value).length
 }
 
-function serializedBackendBytes(options: AnalyzeOptions): number {
+function serializedBackendBytes(
+  options: AnalyzeOptions,
+  budget: 'request' | 'persisted'
+): number {
   return new TextEncoder().encode(
     JSON.stringify({
       scenario: options.scenario,
       enable_security: options.enableSecurity,
       enable_sensitive: options.enableSensitive,
       enable_ad_extreme: options.enableAdExtreme,
+      ...(budget === 'request' || options.ocrLanguage !== undefined
+        ? { ocr_language: options.ocrLanguage ?? 'zh' } : {}),
+      ...(budget === 'request' || options.enableExtendedRules !== undefined
+        ? { enable_extended_rules: options.enableExtendedRules ?? false } : {}),
       custom_glossary: options.glossary,
       banned_words: options.bannedWords
     })

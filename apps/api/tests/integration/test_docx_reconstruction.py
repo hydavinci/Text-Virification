@@ -5,9 +5,12 @@ import struct
 import time
 import zlib
 from collections.abc import Iterable
+from io import BytesIO
 from pathlib import Path, PurePosixPath
 from uuid import uuid4
+from zipfile import ZipFile
 
+import pymupdf
 import pytest
 from docx import Document
 from docx.enum.section import WD_ORIENT
@@ -36,6 +39,7 @@ from text_verification.exporters.docx_reconstruction import (
     DocxReconstructionLimits,
 )
 from text_verification.exporters.registry import ExporterRegistry
+from text_verification.parsers.image_parser import ImageParser
 from text_verification.parsers.pdf_parser import PdfParser
 
 
@@ -681,6 +685,49 @@ def test_rejects_embedded_image_payloads_in_canonical_metadata(
             document,
             tmp_path / "embedded-image.docx",
         )
+
+
+def test_image_parser_reconstructs_detected_non_text_region_from_verified_source(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "mixed.png"
+    pixmap = pymupdf.Pixmap(
+        pymupdf.csRGB,
+        pymupdf.IRect(0, 0, 240, 180),
+        False,
+    )
+    pixmap.clear_with(0xFFFFFF)
+    pixmap.set_rect(pymupdf.IRect(130, 70, 220, 160), (40, 120, 220))
+    source.write_bytes(pixmap.tobytes("png"))
+    parsed = ImageParser(
+        file_type=FileType.PNG,
+        ocr=_FakeOcr([_ocr_box("Heading", (10, 10, 100, 35))]),
+        ocr_language="en",
+    ).parse(source)
+
+    image_block = next(block for block in parsed.blocks if block.kind == "image")
+    assert image_block.source_locator == {
+        "locator_kind": "source_image_region",
+        "source": "source_image",
+        "page": 1,
+        "image_index": 0,
+        "crop_bbox": [130, 70, 220, 160],
+    }
+    assert "image_payload" not in image_block.source_locator
+
+    target = DocxReconstructionExporter(
+        anchored_source_resolver=_StaticAnchoredSourcePathResolver(source)
+    ).export(parsed, tmp_path / "mixed.docx")
+
+    rebuilt = Document(target)
+    assert len(rebuilt.inline_shapes) == 1
+    with ZipFile(target) as archive:
+        media_names = [
+            name for name in archive.namelist() if name.startswith("word/media/")
+        ]
+        assert len(media_names) == 1
+        crop = pymupdf.Pixmap(BytesIO(archive.read(media_names[0])).read())
+    assert (crop.width, crop.height) == (90, 90)
 
 
 def test_exports_horizontally_disjoint_side_note_between_table_rows(

@@ -4,7 +4,7 @@ import sys
 from logging.config import fileConfig
 from pathlib import Path
 
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import engine_from_config, pool, text
 
 from alembic import context
 
@@ -47,6 +47,31 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
+        connection.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS alembic_version ("
+                "version_num VARCHAR(128) NOT NULL, "
+                "CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num)"
+                ")"
+            )
+        )
+        version_num_length = connection.execute(
+            text(
+                "SELECT character_maximum_length "
+                "FROM information_schema.columns "
+                "WHERE table_schema = current_schema() "
+                "AND table_name = 'alembic_version' "
+                "AND column_name = 'version_num'"
+            )
+        ).scalar_one()
+        if version_num_length is not None and version_num_length < 128:
+            connection.execute(
+                text(
+                    "ALTER TABLE alembic_version "
+                    "ALTER COLUMN version_num TYPE VARCHAR(128)"
+                )
+            )
+        connection.commit()
         context.configure(connection=connection, target_metadata=target_metadata)
 
         with context.begin_transaction():

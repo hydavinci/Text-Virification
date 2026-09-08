@@ -214,7 +214,8 @@ def max_revision_request_body_bytes(max_text_bytes: int) -> int:
 
 
 def max_recheck_request_body_bytes(max_text_bytes: int) -> int:
-    return 3 * max_text_bytes + MAX_FORM_BODY_OVERHEAD_BYTES
+    # Percent encoding expands both the text and terminology option fields.
+    return 3 * (max_text_bytes + MAX_FORM_BODY_OVERHEAD_BYTES)
 
 
 async def read_bounded_json_model[ModelT: BaseModel](
@@ -376,11 +377,13 @@ async def read_bounded_form_model[ModelT: BaseModel](
                 max_part_size=max_part_bytes,
             ).parse()
         elif content_type.startswith("application/x-www-form-urlencoded"):
+            max_name_bytes = max(len(name.encode("utf-8")) for name in model.model_fields)
+            # FormParser counts encoded names and values; check decoded values below.
             form = await FormParser(
                 request.headers,
-                stream,
+                _terminated_form_stream(stream),
                 max_fields=MAX_FORM_FIELDS,
-                max_part_size=max_part_bytes,
+                max_part_size=3 * (max_part_bytes + max_name_bytes),
             ).parse()
         else:
             raise HTTPException(
@@ -392,10 +395,21 @@ async def read_bounded_form_model[ModelT: BaseModel](
             raise request_body_too_large() from error
         raise invalid_request_body() from error
     values = _unique_text_fields(form)
+    if any(len(value.encode("utf-8")) > max_part_bytes for value in values.values()):
+        raise request_body_too_large()
     try:
         return model.model_validate(values)
     except ValidationError as error:
         raise invalid_request_body() from error
+
+
+async def _terminated_form_stream(
+    stream: AsyncGenerator[bytes, None],
+) -> AsyncGenerator[bytes, None]:
+    async for chunk in stream:
+        yield chunk
+    # FormParser needs an empty chunk to finalize the last URL-encoded field.
+    yield b""
 
 
 async def read_bounded_body(

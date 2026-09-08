@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 
+import { AnalyzeOptionsError, createAnalyzeOptionsSnapshot } from '../src/api/analyzeOptions'
 import {
   MAX_WORKSPACE_RESULT_BLOCKS,
   MAX_WORKSPACE_RESULT_ISSUES,
@@ -163,6 +164,160 @@ function uiState() {
 }
 
 describe('useWorkspaceSession', () => {
+  it('restores and resaves exact-limit legacy options without losing edits or undo', () => {
+    const legacy: AnalyzeOptions = {
+      ...options,
+      glossary: Array.from({ length: 400 }, (_, index) => ({
+        original: `term-${index}`, standard: ''
+      }))
+    }
+    const legacyBytes = () => new TextEncoder().encode(JSON.stringify({
+      scenario: legacy.scenario,
+      enable_security: legacy.enableSecurity,
+      enable_sensitive: legacy.enableSensitive,
+      enable_ad_extreme: legacy.enableAdExtreme,
+      custom_glossary: legacy.glossary,
+      banned_words: legacy.bannedWords
+    })).byteLength
+    let remaining = 65_536 - legacyBytes()
+    for (const term of legacy.glossary) {
+      const length = Math.min(200, remaining)
+      term.standard = 'x'.repeat(length)
+      remaining -= length
+    }
+    expect(legacyBytes()).toBe(65_536)
+    const storage = new MemoryStorage()
+    const original = useVerificationWorkspace()
+    original.loadResult(result)
+    original.acceptIssue(issue.issue_id)
+    original.saveManualEdit('保留人工校订')
+    const state = { ...uiState(), ui: { ...uiState().ui, selectedIssueId: null } }
+    expect(useWorkspaceSession(storage, original).save(state)).toBe(true)
+    const saved = JSON.parse(storage.getItem('text-verification-session')!)
+    saved.options = legacy
+    storage.setItem('text-verification-session', JSON.stringify(saved))
+
+    const reloaded = useVerificationWorkspace()
+    const session = useWorkspaceSession(storage, reloaded)
+    const restored = session.restore()
+    expect(restored).not.toBeNull()
+    expect(restored?.options).toEqual(legacy)
+    expect(reloaded.modifiedText.value).toBe('保留人工校订')
+    expect(session.save({ ...state, options: legacy })).toBe(true)
+    expect(reloaded.undoTextEdit()?.text).toBe('账号测试')
+    expect(() => createAnalyzeOptionsSnapshot(legacy)).toThrow(AnalyzeOptionsError)
+    expect(() => createAnalyzeOptionsSnapshot(
+      { ...legacy, ocrLanguage: 'zh' }, 'persisted'
+    )).toThrow(AnalyzeOptionsError)
+  })
+
+  it('restores image reviews and the selected OCR language', () => {
+    const storage = new MemoryStorage()
+    const original = useVerificationWorkspace()
+    original.loadResult({
+      ...result, file_type: 'png', filename: 'scan.png', source_name: 'scan.png'
+    })
+    original.acceptIssue(issue.issue_id)
+    const session = useWorkspaceSession(storage, original)
+    expect(session.save({
+      ...uiState(), options: { ...options, ocrLanguage: 'ja', enableExtendedRules: true }
+    })).toBe(true)
+    const reloaded = useVerificationWorkspace()
+    const restored = useWorkspaceSession(storage, reloaded).restore()
+    expect(restored?.options.ocrLanguage).toBe('ja')
+    expect(restored?.options.enableExtendedRules).toBe(true)
+    expect(reloaded.result.value?.file_type).toBe('png')
+    expect(reloaded.issueStates.value[issue.issue_id]).toBe('accepted')
+  })
+
+  it('persists remaining text undo after a partial undo without reviving undone edits', () => {
+    const storage = new MemoryStorage()
+    const original = useVerificationWorkspace()
+    original.loadResult(result)
+    original.acceptIssue(issue.issue_id)
+    original.saveManualEdit('第一次替换')
+    original.saveManualEdit('第二次替换')
+    original.undoTextEdit()
+    const state = { ...uiState(), ui: { ...uiState().ui, selectedIssueId: null } }
+    expect(useWorkspaceSession(storage, original).save(state)).toBe(true)
+
+    const restored = useVerificationWorkspace()
+    const session = useWorkspaceSession(storage, restored)
+    expect(session.restore()).not.toBeNull()
+    expect(restored.undoTextEdit()?.text).toBe('账号测试')
+    expect(restored.issueStates.value).toEqual({ [issue.issue_id]: 'accepted' })
+    expect(restored.requiresReverification.value).toBe(false)
+    expect(restored.canUndoTextEdit.value).toBe(false)
+    expect(session.save(state)).toBe(true)
+    const reloaded = useVerificationWorkspace()
+    expect(useWorkspaceSession(storage, reloaded).restore()).not.toBeNull()
+    expect(reloaded.canUndoTextEdit.value).toBe(false)
+  })
+
+  it('migrates version 6 text history without inventing prior review decisions', () => {
+    const storage = new MemoryStorage()
+    const original = useVerificationWorkspace()
+    original.loadResult(result)
+    original.acceptIssue(issue.issue_id)
+    original.saveManualEdit('替换后的正文')
+    const state = { ...uiState(), ui: { ...uiState().ui, selectedIssueId: null } }
+    expect(useWorkspaceSession(storage, original).save(state)).toBe(true)
+    const saved = JSON.parse(storage.getItem('text-verification-session')!)
+    saved.version = 6
+    delete saved.workspace.textUndoHistory
+    storage.setItem('text-verification-session', JSON.stringify(saved))
+
+    const restored = useVerificationWorkspace()
+    const session = useWorkspaceSession(storage, restored)
+    expect(session.restore()).not.toBeNull()
+    expect(restored.canUndoTextEdit.value).toBe(true)
+    expect(restored.undoTextEdit()?.text).toBe('账号测试')
+    expect(restored.requiresReverification.value).toBe(true)
+    expect(restored.issueStates.value).toEqual({})
+    expect(restored.visibleIssues.value).toEqual([])
+    expect(restored.canUndoTextEdit.value).toBe(false)
+    expect(session.save(state)).toBe(true)
+    const reloaded = useVerificationWorkspace()
+    expect(useWorkspaceSession(storage, reloaded).restore()).not.toBeNull()
+    expect(reloaded.canUndoTextEdit.value).toBe(false)
+    expect(reloaded.modifiedText.value).toBe('账号测试')
+  })
+
+  it('rejects malformed undo targets and review snapshots without changing current state', () => {
+    const storage = new MemoryStorage()
+    const original = useVerificationWorkspace()
+    original.loadResult(result)
+    original.acceptIssue(issue.issue_id)
+    original.saveManualEdit('修改后的正文')
+    const state = { ...uiState(), ui: { ...uiState().ui, selectedIssueId: null } }
+    expect(useWorkspaceSession(storage, original).save(state)).toBe(true)
+    const valid = JSON.parse(storage.getItem('text-verification-session')!)
+    const entry = valid.workspace.textUndoHistory[0]
+    const invalidHistories: unknown[] = [
+      null,
+      [{ ...entry, revisionId: '55555555-5555-4555-8555-555555555555' }],
+      [{ ...entry, revisionId: valid.workspace.currentRevision.revision_id }],
+      [entry, entry],
+      [{ ...entry, reviewState: { issueStates: {}, selectedSuggestions: {} } }],
+      [{ ...entry, reviewState: {
+        issueStates: { unknown: 'accepted' }, selectedSuggestions: {}
+      } }]
+    ]
+    for (const history of invalidHistories) {
+      const invalid = structuredClone(valid)
+      invalid.workspace.textUndoHistory = history
+      storage.setItem('text-verification-session', JSON.stringify(invalid))
+      const candidate = useVerificationWorkspace()
+      candidate.loadResult(result)
+      const before = candidate.currentRevision.value
+      const session = useWorkspaceSession(storage, candidate)
+      expect(session.restore()).toBeNull()
+      expect(session.warning.value).not.toBeNull()
+      expect(candidate.currentRevision.value).toBe(before)
+      expect(candidate.canUndoTextEdit.value).toBe(false)
+    }
+  })
+
   it('round-trips the complete versioned workspace and UI state', () => {
     const storage = new MemoryStorage()
     const original = useVerificationWorkspace()
@@ -335,7 +490,7 @@ describe('useWorkspaceSession', () => {
     const saved = JSON.parse(
       storage.getItem('text-verification-session') ?? '{}'
     )
-    expect(saved.version).toBe(6)
+    expect(saved.version).toBe(WORKSPACE_SESSION_VERSION)
     expect(saved.exportAuthority.recheckGrant).toBe(
       'server-issued-opaque-grant'
     )
@@ -529,6 +684,7 @@ describe('useWorkspaceSession', () => {
       storage.getItem('text-verification-session') ?? '{}'
     )
     saved.version = 4
+    delete saved.workspace.textUndoHistory
     delete saved.exportAuthority.recheckGrant
     storage.setItem('text-verification-session', JSON.stringify(saved))
 
@@ -592,6 +748,7 @@ describe('useWorkspaceSession', () => {
       storage.getItem('text-verification-session') ?? '{}'
     )
     saved.version = 5
+    delete saved.workspace.textUndoHistory
     delete saved.exportAuthority.recheckGrant
     saved.exportAuthority.provenance = {
       resultDocumentId: rechecked.document_id,
@@ -622,6 +779,7 @@ describe('useWorkspaceSession', () => {
       storage.getItem('text-verification-session') ?? '{}'
     )
     saved.version = 3
+    delete saved.workspace.textUndoHistory
     delete saved.exportAuthority
     storage.setItem('text-verification-session', JSON.stringify(saved))
 

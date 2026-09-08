@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, inject, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import { jobsApiKey } from '../api/jobs'
 import { verificationApiKey } from '../api/verification'
@@ -12,11 +12,12 @@ import IssueList from '../components/workspace/IssueList.vue'
 import PrivacyDialog from '../components/workspace/PrivacyDialog.vue'
 import ReviewActions from '../components/workspace/ReviewActions.vue'
 import SearchReplacePanel from '../components/workspace/SearchReplacePanel.vue'
-import SourceInputPanel from '../components/workspace/SourceInputPanel.vue'
-import TerminologyEditor from '../components/workspace/TerminologyEditor.vue'
-import VerificationSettings from '../components/workspace/VerificationSettings.vue'
 import WorkspaceHeader from '../components/workspace/WorkspaceHeader.vue'
+import WorkspaceSetup from '../components/workspace/WorkspaceSetup.vue'
 import { useIssueNavigation } from '../composables/useIssueNavigation'
+import type { DocumentSearchState } from '../composables/useSearchReplace'
+import { projectDocumentIssues } from '../utils/documentPresentation'
+import { revealWithinPane } from '../utils/revealWithinPane'
 import { useVerificationExecution } from '../composables/useVerificationExecution'
 import {
   bindWorkspaceExportAuthority,
@@ -36,6 +37,7 @@ import type {
   DocumentRevision,
   DraftDocumentRevision,
   IssueState,
+  OcrLanguage,
   VerificationIssue,
   VerificationResult
 } from '../types/verification'
@@ -90,9 +92,12 @@ const selectedScenario = ref<AnalyzeOptions['scenario']>('general')
 const enableSecurity = ref(true)
 const enableSensitive = ref(true)
 const enableAdExtreme = ref(false)
+const ocrLanguage = ref<OcrLanguage | undefined>(undefined)
+const enableExtendedRules = ref<boolean | undefined>(undefined)
 const trackChanges = ref(true)
 const settingsTab = ref<'settings' | 'terms' | 'banned'>('settings')
 const resultTab = ref<'issues' | 'summary'>('issues')
+const reviewPane = ref<'document' | 'issues'>('document')
 const textInput = ref('')
 const fileSource = ref<File | null>(null)
 const verificationWorkspace = useVerificationWorkspace()
@@ -125,13 +130,12 @@ const visibleIssues = issueNavigation.visibleIssues
 const glossary = ref<AnalyzeOptions['glossary']>([])
 const bannedWords = ref<string[]>([])
 const isAnalyzing = execution.isActive
-const analysisStep = ref(0)
 const errorMessage = computed(() => execution.error.value?.message ?? null)
 const toast = ref<string | null>(null)
 const showHelp = ref(false)
 const showPrivacy = ref(false)
-const segmentedView = ref(true)
-const showFindReplace = ref(false)
+const sidebarSearch = ref<HTMLElement | null>(null)
+const documentSearch = ref<DocumentSearchState | null>(null)
 const isExporting = ref(false)
 const exportError = ref<string | null>(null)
 const fileExportAuthority = ref<WorkspaceExportAuthority | null>(null)
@@ -155,7 +159,6 @@ const jobState = computed(() => {
   }
 })
 
-let analysisTimer: ReturnType<typeof setInterval> | null = null
 let loadedExecutionResult: VerificationResult | null = null
 let toastTimer: ReturnType<typeof setTimeout> | null = null
 let exportGeneration = 0
@@ -167,11 +170,14 @@ const currentOptions = computed<AnalyzeOptions>(() => ({
   enableSecurity: enableSecurity.value,
   enableSensitive: enableSensitive.value,
   enableAdExtreme: enableAdExtreme.value,
+  ...(ocrLanguage.value === undefined ? {} : { ocrLanguage: ocrLanguage.value }),
+  ...(enableExtendedRules.value === undefined ? {} : {
+    enableExtendedRules: enableExtendedRules.value
+  }),
   glossary: glossary.value,
   bannedWords: bannedWords.value
 }))
 
-const pendingCount = computed(() => verificationWorkspace.summary.value.pending)
 const acceptedCount = computed(() => verificationWorkspace.summary.value.accepted)
 const rejectedCount = computed(() => verificationWorkspace.summary.value.rejected)
 
@@ -182,6 +188,28 @@ const currentRevisionText = computed(
     verificationWorkspace.result.value?.text ??
     ''
 )
+const displayIssues = computed(() => {
+  if (
+    verificationWorkspace.requiresReverification.value ||
+    verificationWorkspace.hasReplacementConflicts.value
+  ) {
+    // Manual edits and conflicting reviews do not have a safe source mapping.
+    return []
+  }
+  return projectDocumentIssues(
+    currentRevisionText.value,
+    visibleIssues.value,
+    verificationWorkspace.acceptedReplacements.value
+  )
+})
+const activeDocumentSearch = computed(() =>
+  documentSearch.value?.text === currentRevisionText.value
+    ? documentSearch.value : null
+)
+function updateDocumentSearch(state: DocumentSearchState): void {
+  documentSearch.value = state
+}
+
 const recheckedAuthorityRequiresRecheck = computed(() => {
   const currentResult = result.value
   return (
@@ -217,6 +245,9 @@ const exportBlockedReason = computed(() => {
   return null
 })
 const pdfExportNote = computed(() => {
+  if (result.value?.file_type === 'png' || result.value?.file_type === 'jpg') {
+    return '图片将导出为可编辑 DOCX，保留识别后的文字结构，不覆盖原图，也不保证还原原图版式。'
+  }
   if (result.value?.file_type !== 'pdf') {
     return null
   }
@@ -245,9 +276,6 @@ async function handleUpload(file: File) {
   invalidateRecheckOperation()
   fileExportAuthority.value = null
   fileSource.value = file
-  if (verificationApi && !confirmOptionalSettings()) {
-    return
-  }
   await execution.analyzeFile(file, currentOptions.value)
 }
 
@@ -266,7 +294,7 @@ async function runTextAnalysis(submittedText: string) {
     )
     return
   }
-  if (!verificationApi || !confirmOptionalSettings()) {
+  if (!verificationApi) {
     return
   }
   invalidateRecheckOperation()
@@ -274,13 +302,6 @@ async function runTextAnalysis(submittedText: string) {
   textInput.value = submittedText
   fileSource.value = null
   await execution.analyzeText(submittedText, currentOptions.value)
-}
-
-function confirmOptionalSettings() {
-  if (glossary.value.length || bannedWords.value.length) {
-    return true
-  }
-  return window.confirm('尚未设置自定义术语表和禁用词库，将仅执行通用规则检查。是否继续？')
 }
 
 function setIssueState(issueId: string, state: IssueState) {
@@ -313,6 +334,8 @@ function applyOptions(options: AnalyzeOptions) {
   enableSecurity.value = options.enableSecurity
   enableSensitive.value = options.enableSensitive
   enableAdExtreme.value = options.enableAdExtreme
+  ocrLanguage.value = options.ocrLanguage
+  enableExtendedRules.value = options.enableExtendedRules
   glossary.value = options.glossary.map((term) => ({ ...term }))
   bannedWords.value = [...options.bannedWords]
 }
@@ -348,6 +371,24 @@ function saveFreeEdit(text: string): void {
   }
   invalidateSourceNavigation()
   saveSession()
+}
+
+function undoTextEdit(): void {
+  if (workspaceMutationLocked.value || isAnalyzing.value) {
+    notify('正在处理文档，请稍后撤销修改')
+    return
+  }
+  if (verificationWorkspace.undoTextEdit() === null) {
+    notify('当前没有可撤销的文本修改')
+    return
+  }
+  invalidateSourceNavigation()
+  saveSession()
+  notify(
+    verificationWorkspace.requiresReverification.value
+      ? '已撤销上一次文本修改，请重新检查以刷新问题位置'
+      : '已撤销上一次文本修改，并恢复此前的审阅状态'
+  )
 }
 
 function utf16IndexAtCodePointOffset(
@@ -687,12 +728,7 @@ function captureFileExportAuthority(): WorkspaceExportAuthoritySource | null {
     verificationRunId: currentResult.verification_run_id,
     sourceVersion: currentResult.source_version,
     fileType: currentResult.file_type,
-    requiresOcrReconstruction:
-      currentResult.file_type === 'pdf' &&
-      (currentResult.pdf_metadata === undefined ||
-        currentResult.pdf_metadata.pages.some(
-          (page) => page.kind !== 'text'
-        )),
+    requiresOcrReconstruction: requiresReconstruction(currentResult),
     latestRevisionId: latestPersisted?.revision_id ?? null,
     latestRevisionNumber: latestPersisted?.revision_number ?? 0,
     persistedText: latestPersisted?.text ?? null
@@ -921,7 +957,18 @@ function jobExportFormat(
   if (operation.requiresOcrReconstruction) {
     return 'docx_reconstruction'
   }
+
   return 'original_format'
+}
+
+function requiresReconstruction(currentResult: VerificationResult): boolean {
+  return (
+    currentResult.file_type === 'png' ||
+    currentResult.file_type === 'jpg' ||
+    (currentResult.file_type === 'pdf' &&
+      (currentResult.pdf_metadata === undefined ||
+        currentResult.pdf_metadata.pages.some((page) => page.kind !== 'text')))
+  )
 }
 
 interface ExportOperation {
@@ -967,12 +1014,7 @@ function beginExportOperation(): ExportOperation | null {
     verificationRunId: currentResult.verification_run_id,
     sourceVersion: currentResult.source_version,
     fileType: currentResult.file_type,
-    requiresOcrReconstruction:
-      currentResult.file_type === 'pdf' &&
-      (currentResult.pdf_metadata === undefined ||
-        currentResult.pdf_metadata.pages.some(
-          (page) => page.kind !== 'text'
-        )),
+    requiresOcrReconstruction: requiresReconstruction(currentResult),
     currentRevisionId: currentRevision.revision_id,
     currentRevisionText: currentRevision.text,
     revisionFingerprint: revisionChainFingerprint(chain),
@@ -1083,10 +1125,9 @@ function resetWorkspace() {
   loadedExecutionResult = null
   invalidateSourceNavigation()
   resultTab.value = 'issues'
-  showFindReplace.value = false
+  documentSearch.value = null
   fileSource.value = null
   textInput.value = ''
-  analysisStep.value = 0
   workspaceSession.clear()
 }
 
@@ -1123,11 +1164,11 @@ function saveSession() {
       layer: selectedLayer.value,
       severity: selectedSeverity.value
     },
-    viewMode: segmentedView.value ? 'sentence' : 'continuous',
+    viewMode: 'sentence',
     ui: {
       settingsTab: settingsTab.value,
       resultTab: resultTab.value,
-      showFindReplace: showFindReplace.value,
+      showFindReplace: true,
       trackChanges: trackChanges.value,
       selectedIssueId: selectedIssueId.value
     },
@@ -1144,10 +1185,8 @@ function restoreSession() {
   applyOptions(restored.options)
   selectedLayer.value = restored.filters.layer
   selectedSeverity.value = restored.filters.severity
-  segmentedView.value = restored.viewMode === 'sentence'
   settingsTab.value = restored.ui.settingsTab
   resultTab.value = restored.ui.resultTab
-  showFindReplace.value = restored.ui.showFindReplace
   trackChanges.value = restored.ui.trackChanges
   selectedIssueId.value = restored.ui.selectedIssueId
   fileExportAuthority.value = restored.exportAuthority
@@ -1173,14 +1212,24 @@ function effectiveSuggestion(issue: VerificationIssue): string | null {
     : issue.suggestion
 }
 
-function handleKeyboard(event: KeyboardEvent) {
+async function handleKeyboard(event: KeyboardEvent) {
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'f' && result.value) {
     event.preventDefault()
-    showFindReplace.value = true
+    if (
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(max-width: 760px)').matches
+    ) {
+      reviewPane.value = 'issues'
+    }
+    await nextTick()
+    const input = sidebarSearch.value?.querySelector<HTMLInputElement>('[data-search-input]')
+    if (input) {
+      revealWithinPane(input, sidebarSearch.value?.closest<HTMLElement>('.issues-panel') ?? null)
+      input.focus({ preventScroll: true })
+    }
     return
   }
   if (event.key === 'Escape') {
-    showFindReplace.value = false
     showHelp.value = false
     showPrivacy.value = false
   }
@@ -1201,10 +1250,8 @@ watch(
     () => currentOptions.value,
     () => selectedLayer.value,
     () => selectedSeverity.value,
-    () => segmentedView.value,
     () => settingsTab.value,
     () => resultTab.value,
-    () => showFindReplace.value,
     () => trackChanges.value,
     () => selectedIssueId.value,
     () => fileExportAuthority.value
@@ -1234,26 +1281,9 @@ watch(
     verificationWorkspace.loadResult(executionResult)
     invalidateSourceNavigation()
     resultTab.value = 'issues'
-    showFindReplace.value = false
-    analysisStep.value = 6
+    documentSearch.value = null
+    reviewPane.value = 'document'
     saveSession()
-  }
-)
-
-watch(
-  () => execution.isActive.value,
-  (active) => {
-    if (analysisTimer) {
-      window.clearInterval(analysisTimer)
-      analysisTimer = null
-    }
-    if (!active) {
-      return
-    }
-    analysisStep.value = 0
-    analysisTimer = window.setInterval(() => {
-      analysisStep.value = Math.min(analysisStep.value + 1, 5)
-    }, 420)
   }
 )
 
@@ -1273,9 +1303,6 @@ onBeforeUnmount(() => {
   invalidateExportOperation()
   execution.dispose()
   document.removeEventListener('keydown', handleKeyboard)
-  if (analysisTimer) {
-    window.clearInterval(analysisTimer)
-  }
   if (toastTimer) {
     window.clearTimeout(toastTimer)
   }
@@ -1283,7 +1310,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="shell">
+  <div class="shell" :class="{ 'is-reviewing': result !== null }">
     <WorkspaceHeader
       :theme="theme"
       :has-result="result !== null"
@@ -1350,69 +1377,26 @@ onBeforeUnmount(() => {
       </button>
     </div>
 
-    <main v-if="!result" class="landing">
-      <section class="hero">
-        <div>
-          <span class="eyebrow">DOCUMENT QUALITY GATE</span>
-          <h1>解决文件交付的最后一英里</h1>
-          <p>从字符、词汇、句子、格式、语篇与合规六个维度逐句扫描，精准定位中英文内容问题。</p>
+    <WorkspaceSetup
+      v-if="!result"
+      v-model:text="textInput"
+      v-model:settings-tab="settingsTab"
+      :options="currentOptions"
+      :busy="isAnalyzing"
+      :error="errorMessage"
+      @update:options="applyOptions"
+      @submit-file="handleUpload"
+      @submit-text="runTextAnalysis"
+      @notify="notify"
+    >
+      <template #progress>
+        <div v-if="isAnalyzing && !jobState" class="loading-card" role="status" aria-live="polite">
+          <div class="spinner"></div>
+          <span>正在检查文本，请稍候…</span>
         </div>
-        <div class="radar" aria-hidden="true"><span></span></div>
-      </section>
-
-      <div class="landing-grid">
-        <section class="input-card">
-          <SourceInputPanel
-            v-model:text="textInput"
-            :busy="isAnalyzing"
-            :server-error="errorMessage"
-            @submit-file="handleUpload"
-            @submit-text="runTextAnalysis"
-          />
-
-          <div v-if="isAnalyzing" class="loading-card" role="status" aria-live="polite">
-            <div class="spinner"></div>
-            <div>
-              <strong>正在执行六层检查</strong>
-              <p>步骤 {{ Math.min(analysisStep + 1, 6) }}/6 · 请勿关闭页面</p>
-            </div>
-          </div>
-          <JobProgress v-if="jobState" :state="jobState" />
-          <p class="privacy-note">仅为完成检查处理文档；建议不要上传涉密文件。任务数据默认 24 小时后清理。</p>
-        </section>
-
-        <aside class="settings-card">
-          <div class="side-tabs">
-            <button :class="{ active: settingsTab === 'settings' }" @click="settingsTab = 'settings'">检查设置</button>
-            <button :class="{ active: settingsTab === 'terms' }" @click="settingsTab = 'terms'">
-              术语 {{ glossary.length }}
-            </button>
-            <button :class="{ active: settingsTab === 'banned' }" @click="settingsTab = 'banned'">
-              禁用词 {{ bannedWords.length }}
-            </button>
-          </div>
-
-          <VerificationSettings
-            v-if="settingsTab === 'settings'"
-            :options="currentOptions"
-            @update:options="applyOptions"
-          />
-          <TerminologyEditor
-            v-else
-            :kind="settingsTab === 'terms' ? 'glossary' : 'banned'"
-            :options="currentOptions"
-            @update:options="applyOptions"
-            @notify="notify"
-          />
-        </aside>
-      </div>
-
-      <section class="layers">
-        <article v-for="layer in layers" :key="layer.id" :style="{ '--layer-color': layer.color }">
-          <span>{{ layer.icon }}</span><strong>{{ layer.name }}</strong>
-        </article>
-      </section>
-    </main>
+        <JobProgress v-if="jobState" :state="jobState" />
+      </template>
+    </WorkspaceSetup>
 
     <main v-else class="review-workspace">
       <p
@@ -1433,44 +1417,11 @@ onBeforeUnmount(() => {
       >
         {{ execution.message.value }}
       </p>
-      <section class="stats-strip">
-        <article><small>{{ result.stats.primary_label }}</small><strong>{{ result.stats.primary_count }}</strong></article>
-        <article><small>发现问题</small><strong>{{ result.summary.total }}</strong></article>
-        <article><small>已接受</small><strong class="success">{{ acceptedCount }}</strong></article>
-        <article><small>已忽略</small><strong class="muted-text">{{ rejectedCount }}</strong></article>
-        <article><small>待处理</small><strong class="warning">{{ pendingCount }}</strong></article>
-        <article><small>文件</small><strong class="filename">{{ result.filename }}</strong></article>
-      </section>
-
-      <SearchReplacePanel
-        v-if="showFindReplace"
-        :text="currentRevisionText"
-        :disabled="workspaceMutationLocked"
-        @replace-text="saveSearchReplacement"
-        @close="showFindReplace = false"
-      />
-
-      <section class="review-toolbar">
-        <div>
-          <button
-            class="btn ghost small"
-            type="button"
-            data-action="toggle-search-replace"
-            :aria-expanded="showFindReplace"
-            :disabled="workspaceMutationLocked"
-            @click="showFindReplace = !showFindReplace"
-          >
-            查找替换
-          </button>
-          <button
-            class="btn ghost small"
-            type="button"
-            :class="{ active: segmentedView }"
-            :aria-pressed="segmentedView"
-            @click="segmentedView = !segmentedView"
-          >
-            {{ segmentedView ? '句段视图' : '连续视图' }}
-          </button>
+      <section class="review-summary" aria-label="检查概况">
+        <div class="document-identity">
+          <strong :title="result.filename">{{ result.filename }}</strong>
+          <span>{{ result.stats.primary_count.toLocaleString() }} {{ result.stats.primary_label }}</span>
+          <span>发现问题 <strong>{{ result.summary.total }}</strong></span>
         </div>
         <ReviewActions
           :selected-issue-id="selectedIssueId"
@@ -1490,44 +1441,48 @@ onBeforeUnmount(() => {
         />
       </section>
 
-      <div class="review-grid">
+      <div class="mobile-view-switch" aria-label="审阅视图">
+        <button type="button" :aria-pressed="reviewPane === 'document'" @click="reviewPane = 'document'">文档</button>
+        <button type="button" :aria-pressed="reviewPane === 'issues'" @click="reviewPane = 'issues'">问题 {{ visibleIssues.length }}</button>
+      </div>
+      <div class="review-grid" :data-review-pane="reviewPane">
         <section class="document-panel">
-          <header>
-            <div>
-              <strong>
-                {{
-                  verificationWorkspace.requiresReverification.value
-                    ? '当前手工修订'
-                    : '源文本'
-                }}
-              </strong>
-              <small>{{ result.filename }}</small>
-            </div>
-          </header>
           <EditPreview
             :text="currentRevisionText"
-            :preview-text="modifiedText"
+            :title="verificationWorkspace.requiresReverification.value ? '当前手工修订' : '当前文档'"
             :disabled="workspaceMutationLocked"
             @save="saveFreeEdit"
           >
-            <pre
-              v-if="verificationWorkspace.requiresReverification.value"
-              class="current-revision-text"
-              data-current-revision
-            >{{ currentRevisionText }}</pre>
-            <DocumentViewer
-              v-else
-              :result="result"
-              :issues="visibleIssues"
-              :issue-states="currentIssueStates"
-              :selected-issue-id="selectedIssueId"
-              :mode="segmentedView ? 'sentence' : 'continuous'"
-              @select-issue="issueNavigation.selectIssue"
-            />
+            <template #default="{ showIssueMarkers }">
+              <DocumentViewer
+                :result="result"
+                :text="currentRevisionText"
+                :issues="showIssueMarkers ? displayIssues : []"
+                :issue-states="currentIssueStates"
+                :selected-issue-id="showIssueMarkers ? selectedIssueId : null"
+                mode="sentence"
+                :data-current-revision="verificationWorkspace.requiresReverification.value ? '' : undefined"
+                :reveal-key="reviewPane"
+                :search-matches="activeDocumentSearch?.matches"
+                :active-search-match-index="activeDocumentSearch?.activeMatchIndex"
+                @select-issue="issueNavigation.selectIssue"
+              />
+            </template>
           </EditPreview>
         </section>
 
         <aside class="issues-panel">
+          <div ref="sidebarSearch" class="sidebar-search">
+            <SearchReplacePanel
+              :key="result.verification_run_id"
+              :text="currentRevisionText"
+              :disabled="workspaceMutationLocked"
+              :can-undo="verificationWorkspace.canUndoTextEdit.value && !isAnalyzing"
+              @replace-text="saveSearchReplacement"
+              @search-change="updateDocumentSearch"
+              @undo-text-edit="undoTextEdit"
+            />
+          </div>
           <header class="issues-header">
             <div class="side-tabs compact-tabs">
               <button :class="{ active: resultTab === 'issues' }" @click="resultTab = 'issues'">问题列表</button>
@@ -1556,6 +1511,7 @@ onBeforeUnmount(() => {
               :selected-severity="selectedSeverity"
               :layer-options="layers"
               :type-labels="typeLabels"
+              :reveal-key="reviewPane"
               :disabled="workspaceMutationLocked"
               @select-issue="issueNavigation.selectIssue"
               @update:selected-layer="selectedLayer = $event"
@@ -1586,130 +1542,24 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-:global(*) { box-sizing: border-box; }
-:global(html) { color-scheme: light; }
-:global(html[data-theme='dark']) { color-scheme: dark; }
-:global(body) {
-  margin: 0;
-  min-width: 320px;
-  min-height: 100vh;
-  font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
-  background: var(--bg);
-  color: var(--text);
-}
-.shell {
-  --primary: #2563eb;
-  --primary-2: #06b6d4;
-  --bg: #f5f7fb;
-  --surface: #ffffff;
-  --surface-2: #f8fafc;
-  --border: #e2e8f0;
-  --text: #172033;
-  --muted: #64748b;
-  --shadow: 0 18px 55px rgba(15, 23, 42, .09);
-  min-height: 100vh;
-  background:
-    radial-gradient(circle at 8% 0%, rgba(37, 99, 235, .1), transparent 28rem),
-    radial-gradient(circle at 96% 8%, rgba(6, 182, 212, .09), transparent 25rem),
-    var(--bg);
-}
-:global(html[data-theme='dark']) .shell {
-  --bg: #0c1220;
-  --surface: #131c2e;
-  --surface-2: #0f172a;
-  --border: #26344c;
-  --text: #e5edf8;
-  --muted: #9aa9bd;
-  --shadow: 0 18px 55px rgba(0, 0, 0, .28);
-}
-button, input, textarea, select { font: inherit; }
-button { color: inherit; }
-.topbar {
-  height: 68px;
-  padding: 0 28px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  position: sticky;
-  top: 0;
-  z-index: 20;
-  border-bottom: 1px solid color-mix(in srgb, var(--border) 76%, transparent);
-  background: color-mix(in srgb, var(--surface) 88%, transparent);
-  backdrop-filter: blur(18px);
-}
-.brand { display: flex; align-items: center; gap: 11px; border: 0; background: none; cursor: pointer; text-align: left; }
-.brand-mark {
-  width: 38px; height: 38px; display: grid; place-items: center; border-radius: 13px;
-  color: white; font-weight: 900; background: linear-gradient(135deg, var(--primary), var(--primary-2));
-  box-shadow: 0 8px 20px rgba(37, 99, 235, .28);
-}
-.brand strong, .brand small { display: block; }
-.brand strong { font-size: 16px; }
-.brand small { color: var(--muted); font-size: 11px; margin-top: 1px; }
-.top-actions { display: flex; align-items: center; gap: 8px; }
-.icon-btn { width: 36px; height: 36px; border-radius: 11px; border: 1px solid var(--border); background: var(--surface); cursor: pointer; }
-.btn { border: 1px solid transparent; border-radius: 11px; padding: 9px 15px; font-weight: 700; cursor: pointer; transition: .2s; }
-.btn:disabled { opacity: .55; cursor: wait; }
-.btn.primary { color: white; background: linear-gradient(135deg, var(--primary), var(--primary-2)); box-shadow: 0 7px 18px rgba(37, 99, 235, .2); }
-.btn.ghost { border-color: var(--border); background: var(--surface); }
-.btn.small { padding: 7px 11px; font-size: 12px; }
-.btn.active { border-color: var(--primary); color: var(--primary); }
-.btn.accept { background: #dcfce7; color: #15803d; }
-.btn.reject { background: #fff1f2; color: #be123c; }
-.landing { max-width: 1440px; margin: auto; padding: 36px 28px 50px; }
-.hero {
-  min-height: 215px; padding: 38px 44px; display: flex; align-items: center; justify-content: space-between;
-  overflow: hidden; border-radius: 26px; color: white; background:
-    linear-gradient(110deg, rgba(18, 67, 148, .98), rgba(22, 109, 162, .95) 55%, rgba(15, 145, 148, .92));
-  box-shadow: var(--shadow);
-}
-.hero > div:first-child { max-width: 800px; }
-.eyebrow { font-size: 11px; letter-spacing: .2em; opacity: .76; font-weight: 800; }
-.hero h1 { font-size: clamp(30px, 4vw, 54px); line-height: 1.08; margin: 14px 0; letter-spacing: -.04em; }
-.hero p { max-width: 700px; margin: 0; line-height: 1.8; opacity: .82; }
-.radar { width: 160px; height: 160px; border: 1px solid rgba(255,255,255,.22); border-radius: 50%; position: relative; background: repeating-radial-gradient(circle, transparent 0 24px, rgba(255,255,255,.12) 25px 26px); }
-.radar::before, .radar::after { content: ''; position: absolute; background: rgba(255,255,255,.16); }
-.radar::before { width: 100%; height: 1px; top: 50%; }
-.radar::after { width: 1px; height: 100%; left: 50%; }
-.radar span { position: absolute; inset: 50% 50% 0 50%; transform-origin: top left; background: conic-gradient(from 0deg, rgba(255,255,255,.38), transparent 55deg); animation: sweep 4s linear infinite; }
-@keyframes sweep { to { transform: rotate(360deg); } }
-.landing-grid { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(340px, .8fr); gap: 22px; margin-top: 22px; }
-.input-card, .settings-card, .document-panel, .issues-panel {
-  border: 1px solid var(--border); border-radius: 20px; background: color-mix(in srgb, var(--surface) 96%, transparent); box-shadow: var(--shadow); overflow: hidden;
-}
-.input-card { padding: 24px; }
+.shell { min-height: 100vh; }
+.shell.is-reviewing { height: 100dvh; min-height: 0; display: flex; flex-direction: column; }
+.shell.is-reviewing > :deep(.topbar) { flex-shrink: 0; }
+.document-panel, .issues-panel { border: 1px solid var(--border); border-radius: 10px; background: var(--surface); overflow: hidden; }
 .side-tabs { display: flex; gap: 5px; padding: 4px; border-radius: 12px; background: var(--surface-2); }
 .side-tabs button { padding: 9px 17px; border: 0; border-radius: 9px; color: var(--muted); background: transparent; cursor: pointer; font-weight: 700; }
 .side-tabs button.active { color: var(--primary); background: var(--surface); box-shadow: 0 3px 10px rgba(15,23,42,.08); }
-.document-editor {
-  width: 100%; resize: vertical; border: 1px solid var(--border); border-radius: 15px; color: var(--text); background: var(--surface-2); outline: none;
-}
 input:focus, select:focus { border-color: var(--primary); outline: 3px solid rgba(37, 99, 235, .1); }
-.privacy-note { margin: 17px 0 0; color: var(--muted); font-size: 12px; }
-.loading-card { margin-top: 16px; padding: 14px; display: flex; align-items: center; gap: 12px; border-radius: 13px; background: #eff6ff; color: #1d4ed8; }
+.loading-card { margin-top: 16px; padding: 14px; display: flex; align-items: center; gap: 12px; border-radius: 8px; background: var(--surface-2); color: var(--muted); font-size: 13px; }
 .loading-card p { margin: 3px 0 0; font-size: 12px; }
 .spinner { width: 27px; height: 27px; border: 3px solid #bfdbfe; border-top-color: #2563eb; border-radius: 50%; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
-.settings-card { min-height: 460px; }
-.settings-card > .side-tabs { margin: 16px; }
-.switch { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; color: var(--muted); font-size: 13px; }
-.switch input { width: 35px; height: 20px; accent-color: var(--primary); }
-.switch.compact { padding: 0 8px; }
-.find-panel input, .filters select {
-  min-width: 0; padding: 9px 10px; border: 1px solid var(--border); border-radius: 9px; color: var(--text); background: var(--surface-2);
-}
-.layers { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; margin-top: 18px; }
-.layers article { padding: 13px; display: flex; gap: 9px; align-items: center; border: 1px solid var(--border); border-top: 3px solid var(--layer-color); border-radius: 13px; background: var(--surface); }
-.layers article span { color: var(--layer-color); font-weight: 900; }
-.layers article strong { font-size: 12px; }
-.review-workspace { height: calc(100vh - 68px); padding: 14px 18px 18px; display: flex; flex-direction: column; gap: 11px; }
-.stats-strip { display: grid; grid-template-columns: repeat(5, minmax(90px, 130px)) minmax(220px, 1fr); gap: 8px; }
-.stats-strip article { padding: 10px 13px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
-.stats-strip small, .stats-strip strong { display: block; }
-.stats-strip small { color: var(--muted); font-size: 10px; }
-.stats-strip strong { margin-top: 2px; font-size: 18px; }
-.stats-strip .filename { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
-.success { color: #059669; }.warning { color: #d97706; }.muted-text { color: var(--muted); }
+.review-workspace { isolation: isolate; flex: 1; min-height: 0; width: 100%; padding: 20px 24px; display: flex; flex-direction: column; gap: 12px; max-width: 1680px; margin: auto; }
+.review-workspace > :not(.review-grid) { flex-shrink: 0; }
+.review-summary { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 0 2px 6px; }
+.document-identity { min-width: 0; display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.document-identity > strong { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 16px; font-weight: 600; }
+.document-identity > span { flex: 0 0 auto; font-size: 11px; color: var(--muted); }
 .execution-warning,
 .execution-error {
   margin: 0;
@@ -1758,13 +1608,13 @@ input:focus, select:focus { border-color: var(--primary); outline: 3px solid rgb
   white-space: nowrap;
   border: 0;
 }
-.review-toolbar, .find-panel { padding: 9px; display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
-.review-toolbar > div:first-child { display: flex; gap: 7px; }
-.find-panel { justify-content: flex-start; }
-.review-grid { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(370px, .75fr); gap: 12px; }
+.sidebar-search { flex-shrink: 0; border-bottom: 1px solid var(--border); }
+.issues-panel { overflow: auto; }
+.issues-panel :deep(.issue-list-shell) { min-height: 220px; }
+.issues-panel > .issues-header { flex-shrink: 0; }
+.review-grid { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 370px); gap: 16px; }
 .document-panel, .issues-panel { min-height: 0; display: flex; flex-direction: column; }
-.document-panel > header, .issues-header { min-height: 54px; padding: 10px 15px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border); }
-.document-panel header small { display: block; margin-top: 2px; color: var(--muted); }
+.issues-header { min-height: 54px; padding: 10px 15px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border); }
 .document-content, .document-editor { flex: 1; min-height: 0; margin: 0; padding: 24px 28px; overflow: auto; white-space: pre-wrap; color: var(--text); background: var(--surface); font: 15px/2 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .document-content:not(.preview) { padding: 0; }
 .document-content.preview { color: #075985; }
@@ -1791,35 +1641,21 @@ input:focus, select:focus { border-color: var(--primary); outline: 3px solid rgb
 .compact-tabs { padding: 3px; }
 .compact-tabs button { padding: 7px 10px; font-size: 12px; }
 .issues-header > span { color: var(--muted); font-size: 12px; }
-.summary-panel { padding: 16px; overflow: auto; }
+.summary-panel { min-height: 160px; padding: 16px; overflow: auto; }
 .summary-panel h3 { margin: 8px 0 10px; font-size: 13px; }
 .summary-row { padding: 8px 0; display: flex; justify-content: space-between; border-bottom: 1px solid var(--border); font-size: 12px; }
 .toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); z-index: 40; padding: 11px 18px; border-radius: 10px; color: white; background: #172033; box-shadow: var(--shadow); }
-.modal-backdrop { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 20px; background: rgba(2, 6, 23, .55); }
-.modal { width: min(560px, 100%); padding: 28px; position: relative; border-radius: 18px; background: var(--surface); box-shadow: var(--shadow); }
-.modal h2 { margin-top: 0; }.modal p { color: var(--muted); line-height: 1.8; }
-.modal-close { position: absolute; right: 14px; top: 14px; border: 0; background: none; font-size: 24px; cursor: pointer; }
-@media (max-width: 980px) {
-  .landing-grid, .review-grid { grid-template-columns: 1fr; }
-  .review-workspace { height: auto; }
-  .document-panel { min-height: 540px; }
-  .issues-panel { min-height: 600px; }
-  .layers { grid-template-columns: repeat(3, 1fr); }
-  .stats-strip { grid-template-columns: repeat(3, 1fr); }
-  .radar { display: none; }
-}
-@media (max-width: 680px) {
-  .topbar { padding: 0 13px; }
-  .brand small, .top-actions .compact, .top-actions .ghost { display: none; }
-  .landing { padding: 18px 12px 30px; }
-  .hero { padding: 28px 22px; }
-  .hero h1 { font-size: 32px; }
-  .landing-grid { grid-template-columns: minmax(0, 1fr); }
-  .layers { grid-template-columns: repeat(2, 1fr); }
-  .stats-strip { grid-template-columns: repeat(2, 1fr); }
-  .review-toolbar { align-items: stretch; flex-direction: column; }
-  .review-toolbar > div { overflow-x: auto; }
-  .find-panel { flex-wrap: wrap; }
+.mobile-view-switch { display: none; }
+@media (max-width: 760px) {
+  .review-workspace { padding: 16px 12px; }
+  .review-summary { align-items: flex-start; flex-direction: column; gap: 10px; }
+  .document-identity { width: 100%; flex-wrap: wrap; }
+  .document-identity > strong { max-width: 100%; }
+  .mobile-view-switch { display: flex; padding: 3px; gap: 4px; background: var(--surface-2); border-radius: 8px; }
+  .mobile-view-switch button { flex: 1; border: 0; border-radius: 6px; padding: 10px; background: transparent; cursor: pointer; font-size: 13px; }
+  .mobile-view-switch button[aria-pressed='true'] { background: var(--surface); color: var(--primary); }
+  .review-grid { grid-template-columns: minmax(0, 1fr); }
+  .review-grid[data-review-pane='document'] .issues-panel, .review-grid[data-review-pane='issues'] .document-panel { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; }

@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
 from text_verification.document_processing.errors import OcrOutputError, OcrUnavailableError
 
-SupportedOcrLanguage = Literal["zh", "en"]
+SupportedOcrLanguage = Literal["zh", "en", "ja"]
 OcrEngine = Callable[[object], object]
 
 _EXPECTED_ENGINE_INIT_ERRORS = (
@@ -23,6 +23,7 @@ _EXPECTED_ENGINE_INIT_ERRORS = (
 _LANGUAGE_CONFIG: dict[SupportedOcrLanguage, tuple[str, str]] = {
     "zh": ("CH", "ch"),
     "en": ("EN", "en"),
+    "ja": ("JAPAN", "japan"),
 }
 
 
@@ -114,7 +115,7 @@ class OcrProvider:
     def __init__(
         self,
         *,
-        supported_languages: tuple[SupportedOcrLanguage, ...] = ("zh", "en"),
+        supported_languages: tuple[SupportedOcrLanguage, ...] = ("zh", "en", "ja"),
     ) -> None:
         self._supported_languages = frozenset(supported_languages)
         self._engines: dict[SupportedOcrLanguage, OcrEngine] = {}

@@ -29,6 +29,7 @@ class LegacyAnalyzer(Protocol):
         enable_sensitive: bool = True,
         enable_ad_extreme: bool = False,
         progress_observer: VerificationProgressObserver | None = None,
+        enable_extended_rules: bool = False,
     ) -> list[LegacyIssue]: ...
 
 
@@ -61,7 +62,19 @@ class CompatibilityChecker:
         progress_observer: VerificationProgressObserver | None = None,
     ) -> CheckResult:
         analyzer = self._analyzer_factory()
-        if progress_observer is None:
+        if context.enable_extended_rules:
+            issues = analyzer.analyze(
+                document.text,
+                scenario=context.scenario.value,
+                custom_glossary=list(context.custom_glossary),
+                banned_words=list(context.banned_words),
+                enable_security=context.enable_security,
+                enable_sensitive=context.enable_sensitive,
+                enable_ad_extreme=context.enable_ad_extreme,
+                progress_observer=progress_observer,
+                enable_extended_rules=True,
+            )
+        elif progress_observer is None:
             issues = analyzer.analyze(
                 document.text,
                 scenario=context.scenario.value,

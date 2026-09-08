@@ -10,21 +10,20 @@ import type { AnalyzeOptions, Scenario } from '../../types/verification'
 interface ScenarioOption {
   id: Scenario
   name: string
-  description: string
-  icon: string
 }
 
 const scenarios: ScenarioOption[] = [
-  { id: 'general', name: '通用文档', description: '全面检查', icon: '通' },
-  { id: 'academic', name: '学术论文', description: '术语与格式', icon: '学' },
-  { id: 'business', name: '商务文档', description: '表达与规范', icon: '商' },
-  { id: 'legal', name: '法律文书', description: '严谨与一致', icon: '法' },
-  { id: 'news', name: '新闻稿', description: '准确与时效', icon: '新' },
-  { id: 'technical', name: '技术文档', description: '术语与数字', icon: '技' }
+  { id: 'general', name: '通用文档' },
+  { id: 'academic', name: '学术论文' },
+  { id: 'business', name: '商务文档' },
+  { id: 'legal', name: '法律文书' },
+  { id: 'news', name: '新闻稿' },
+  { id: 'technical', name: '技术文档' }
 ]
 
 const props = defineProps<{
   options: AnalyzeOptions
+  compact?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -39,6 +38,7 @@ function updateOptions(patch: Partial<AnalyzeOptions>): void {
     glossary: props.options.glossary.map((term) => ({ ...term })),
     bannedWords: [...props.options.bannedWords]
   }
+
   try {
     validateVerificationOptionsSize(next)
     errorMessage.value = null
@@ -50,27 +50,62 @@ function updateOptions(patch: Partial<AnalyzeOptions>): void {
         : '检查设置处理失败。'
   }
 }
+
+function selectScenario(event: Event): void {
+  if (!(event.target instanceof HTMLSelectElement)) return
+  const value = event.target.value
+  const scenario = scenarios.find((option) => option.id === value)
+  if (scenario) updateOptions({ scenario: scenario.id })
+}
+
+function selectOcrLanguage(event: Event): void {
+  if (!(event.target instanceof HTMLSelectElement)) return
+  const value = event.target.value
+  if (value === 'zh' || value === 'en' || value === 'ja') {
+    updateOptions({ ocrLanguage: value })
+  }
+}
 </script>
 
 <template>
-  <section class="settings-body" aria-labelledby="verification-settings-heading">
-    <h2 id="verification-settings-heading">文档场景</h2>
-    <div class="scenario-grid">
-      <button
-        v-for="scenario in scenarios"
-        :key="scenario.id"
-        :class="{ active: options.scenario === scenario.id }"
-        :aria-pressed="options.scenario === scenario.id"
-        :data-scenario="scenario.id"
-        type="button"
-        @click="updateOptions({ scenario: scenario.id })"
-      >
-        <span aria-hidden="true">{{ scenario.icon }}</span>
-        <strong>{{ scenario.name }}</strong>
-        <small>{{ scenario.description }}</small>
-      </button>
-    </div>
+  <section class="settings-body" :class="{ compact }" aria-label="检查设置">
+    <label class="scenario-field">
+      <span>文档场景</span>
+      <select aria-label="文档场景" :value="options.scenario" @change="selectScenario">
+        <option v-for="scenario in scenarios" :key="scenario.id" :value="scenario.id" :data-scenario="scenario.id">
+          {{ scenario.name }}
+        </option>
+      </select>
+    </label>
 
+    <template v-if="!compact">
+    <h2>扩展检查</h2>
+    <label class="switch" for="enable-extended-rules">
+      <span>中英文间距、空行与长句建议</span>
+      <input
+        id="enable-extended-rules"
+        :checked="options.enableExtendedRules ?? false"
+        type="checkbox"
+        @change="updateOptions({
+          enableExtendedRules: ($event.target as HTMLInputElement).checked
+        })"
+      />
+    </label>
+    <p class="ocr-note">默认关闭；长句建议仍按文档场景筛选，仅提示人工调整，不自动改写正文。</p>
+    <h2>图片与扫描 PDF</h2>
+    <label class="scenario-field">
+      <span>OCR 识别语言</span>
+      <select
+        aria-label="OCR 识别语言"
+        :value="options.ocrLanguage ?? 'zh'"
+        @change="selectOcrLanguage"
+      >
+        <option value="zh">中英文（默认）</option>
+        <option value="en">英文</option>
+        <option value="ja">日文</option>
+      </select>
+    </label>
+    <p class="ocr-note">用于识别图片中的文字；日文识别不包含日文纠错。图片导出为可编辑 Word，不覆盖原图。</p>
     <h2>合规开关</h2>
     <label class="switch" for="enable-security">
       <span>个人信息与凭证扫描</span>
@@ -105,6 +140,7 @@ function updateOptions(patch: Partial<AnalyzeOptions>): void {
         })"
       />
     </label>
+    </template>
     <p v-if="errorMessage" role="alert">{{ errorMessage }}</p>
   </section>
 </template>
@@ -113,41 +149,13 @@ function updateOptions(patch: Partial<AnalyzeOptions>): void {
 .settings-body {
   padding: 4px 20px 22px;
 }
+.settings-body.compact { padding: 0; }
+.ocr-note { color: var(--muted); font-size: 12px; line-height: 1.7; }
+.scenario-field { display: flex; align-items: center; gap: 12px; font-size: 13px; color: var(--muted); }
+.scenario-field select { min-width: 120px; padding: 8px 28px 8px 10px; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
 .settings-body h2 {
   margin: 18px 0 10px;
   font-size: 14px;
-}
-.scenario-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 8px;
-}
-.scenario-grid button {
-  padding: 12px 7px;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  align-items: center;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  color: inherit;
-  background: var(--surface-2);
-  cursor: pointer;
-}
-.scenario-grid button.active {
-  color: var(--primary);
-  border-color: var(--primary);
-  background: color-mix(in srgb, var(--primary) 8%, var(--surface));
-}
-.scenario-grid button:focus-visible {
-  outline: 3px solid rgba(37, 99, 235, .14);
-}
-.scenario-grid strong {
-  font-size: 12px;
-}
-.scenario-grid small {
-  color: var(--muted);
-  font-size: 10px;
 }
 .switch {
   padding: 10px 0;
@@ -166,10 +174,5 @@ function updateOptions(patch: Partial<AnalyzeOptions>): void {
 [role='alert'] {
   color: #be123c;
   font-weight: 700;
-}
-@media (max-width: 680px) {
-  .scenario-grid {
-    grid-template-columns: repeat(2, 1fr);
-  }
 }
 </style>

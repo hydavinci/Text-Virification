@@ -77,7 +77,9 @@ export function useVerificationExecution({
     close?.()
   }
 
-  function beginRequest(): number | null {
+  function beginRequest(
+    { preserveJobContext = false }: { preserveJobContext?: boolean } = {}
+  ): number | null {
     if (disposed || requestActive) {
       return null
     }
@@ -88,8 +90,10 @@ export function useVerificationExecution({
     resultFetchStarted = false
     state.value = 'submitting'
     result.value = null
-    job.value = null
-    restoredJobId.value = null
+    if (!preserveJobContext) {
+      job.value = null
+      restoredJobId.value = null
+    }
     jobStatus.value = null
     progress.value = 0
     stage.value = null
@@ -129,6 +133,8 @@ export function useVerificationExecution({
     }
     requestActive = false
     terminalObserved = true
+    job.value = null
+    restoredJobId.value = null
     result.value = payload
     state.value = 'completed'
   }
@@ -187,7 +193,7 @@ export function useVerificationExecution({
     options: AnalyzeOptions,
     transformResult: RecheckResultTransform = identityResult
   ): Promise<void> {
-    const generation = beginRequest()
+    const generation = beginRequest({ preserveJobContext: true })
     if (generation === null) {
       return
     }

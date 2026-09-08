@@ -4,6 +4,20 @@ import { describe, expect, it, vi } from 'vitest'
 import SourceInputPanel from '../src/components/workspace/SourceInputPanel.vue'
 
 describe('SourceInputPanel', () => {
+  it.each(['scan.png', 'scan.jpg', 'scan.JPEG'])(
+    'submits image %s through the normal upload workflow',
+    async (name) => {
+      const wrapper = mount(SourceInputPanel)
+      const file = new File(['image'], name)
+      await wrapper.get('[data-dropzone]').trigger('drop', {
+        dataTransfer: { files: [file] }
+      })
+      await wrapper.get('[data-submit-source]').trigger('click')
+      expect(wrapper.emitted('submit-file')?.[0]).toEqual([file])
+      expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+    }
+  )
+
   it.each([
     { modifier: 'ctrlKey', label: 'Ctrl+Enter' },
     { modifier: 'metaKey', label: 'Meta+Enter' }
@@ -76,6 +90,7 @@ describe('SourceInputPanel', () => {
       await wrapper.get('[data-dropzone]').trigger('drop', {
         dataTransfer: { files: [file] }
       })
+      await wrapper.get('[data-submit-source]').trigger('click')
     }
 
     expect(wrapper.emitted('submit-file')?.map(([file]) => file)).toEqual(files)
@@ -134,5 +149,43 @@ describe('SourceInputPanel', () => {
     expect(input.attributes('tabindex')).toBe('-1')
     expect(input.attributes('aria-hidden')).toBe('true')
     expect(dropzone.find('input[type="file"]').exists()).toBe(false)
+  })
+
+  it('stages a file without submitting and submits it only after confirmation', async () => {
+    const wrapper = mount(SourceInputPanel)
+    const file = new File(['document'], 'review.txt')
+    await wrapper.get('[data-dropzone]').trigger('drop', {
+      dataTransfer: { files: [file] }
+    })
+
+    expect(wrapper.emitted('submit-file')).toBeUndefined()
+    expect(wrapper.get('[data-selected-file]').text()).toContain('review.txt')
+    await wrapper.get('[data-submit-source]').trigger('click')
+    expect(wrapper.emitted('submit-file')).toEqual([[file]])
+  })
+
+  it('removes a staged file and prevents a stale selection from being submitted', async () => {
+    const wrapper = mount(SourceInputPanel)
+    await wrapper.get('[data-dropzone]').trigger('drop', {
+      dataTransfer: { files: [new File(['document'], 'review.txt')] }
+    })
+    await wrapper.get('[data-remove-file]').trigger('click')
+
+    expect(wrapper.find('[data-selected-file]').exists()).toBe(false)
+    await wrapper.get('[data-submit-source]').trigger('click')
+    expect(wrapper.emitted('submit-file')).toBeUndefined()
+  })
+
+  it('locks source switching, removal and submission while busy', async () => {
+    const wrapper = mount(SourceInputPanel)
+    await wrapper.get('[data-dropzone]').trigger('drop', {
+      dataTransfer: { files: [new File(['document'], 'review.txt')] }
+    })
+    await wrapper.setProps({ busy: true })
+    for (const selector of ['[data-mode="text"]', '[data-remove-file]', '[data-submit-source]']) {
+      expect(wrapper.get<HTMLButtonElement>(selector).element.disabled).toBe(true)
+    }
+    await wrapper.get('[data-submit-source]').trigger('click')
+    expect(wrapper.emitted('submit-file')).toBeUndefined()
   })
 })

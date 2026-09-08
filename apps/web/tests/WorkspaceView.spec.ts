@@ -6,6 +6,7 @@ import { verificationApiKey } from '../src/api/verification'
 import SourceInputPanel from '../src/components/workspace/SourceInputPanel.vue'
 import DocumentViewer from '../src/components/workspace/DocumentViewer.vue'
 import EditPreview from '../src/components/workspace/EditPreview.vue'
+import ExportPanel from '../src/components/workspace/ExportPanel.vue'
 import IssueList from '../src/components/workspace/IssueList.vue'
 import ReviewActions from '../src/components/workspace/ReviewActions.vue'
 import SearchReplacePanel from '../src/components/workspace/SearchReplacePanel.vue'
@@ -46,6 +47,9 @@ async function selectFile(wrapper: ReturnType<typeof mount>, file: File) {
     value: [file]
   })
   await input.trigger('change')
+  if (!wrapper.find('[role="alert"]').exists()) {
+    await wrapper.get('[data-submit-source]').trigger('click')
+  }
 }
 
 async function emitUpload(wrapper: ReturnType<typeof mount>, file: File) {
@@ -235,6 +239,167 @@ function canonicalWorkspace(wrapper: ReturnType<typeof mount>) {
 }
 
 describe('WorkspaceView', () => {
+  it('shows the filename once and hides only issue markers without replacing the document', async () => {
+    const issue = buildWorkspaceIssue()
+    const payload = buildWorkspaceResult([issue])
+    const wrapper = mount(WorkspaceView, {
+      global: { provide: {
+        [jobsApiKey as symbol]: { createJob: vi.fn(), subscribe: vi.fn(() => vi.fn()) },
+        [verificationApiKey as symbol]: {
+          analyzeFile: vi.fn(), analyzeText: vi.fn().mockResolvedValue(payload),
+          exportReport: vi.fn(), exportOriginal: vi.fn()
+        }
+      } }
+    })
+    wrapper.getComponent(SourceInputPanel).vm.$emit('submit-text', payload.text)
+    await flushPromises()
+
+    expect(wrapper.text().split(payload.filename)).toHaveLength(2)
+    expect(wrapper.get('.edit-actions').text()).toContain('当前文档')
+    expect(wrapper.get('[data-action="start-edit"]').text()).toBe('编辑正文')
+    const content = wrapper.get('.document-content').element
+    const viewer = wrapper.getComponent(DocumentViewer).element
+    const toggle = wrapper.get<HTMLInputElement>('input[aria-label="显示问题标记"]')
+    expect(toggle.element.checked).toBe(true)
+    expect(wrapper.find('[data-issue-role="source"]').exists()).toBe(true)
+    await wrapper.get('[data-search-input]').setValue('丁')
+    await toggle.setValue(false)
+
+    expect(wrapper.get('.document-content').element).toBe(content)
+    expect(wrapper.getComponent(DocumentViewer).element).toBe(viewer)
+    expect(wrapper.find('[data-issue-role="source"]').exists()).toBe(false)
+    expect(wrapper.get('[data-source-text]').text()).toBe('甲乙丙丁')
+    expect(wrapper.get('.active-search-match').text()).toBe('丁')
+    expect(wrapper.findAll('[data-issue-role="list"]')).toHaveLength(1)
+
+    wrapper.getComponent(IssueList).vm.$emit('set-state', issue.issue_id, 'accepted')
+    await flushPromises()
+    expect(wrapper.get('[data-source-text]').text()).toBe('修改丁')
+    await toggle.setValue(true)
+    expect(wrapper.get('.source-segment.accepted').text()).toBe('修改')
+    expect(wrapper.get('.active-search-match').text()).toBe('丁')
+    wrapper.unmount()
+  })
+
+  it('guards text undo while rechecking the edited document', async () => {
+    const payload = buildWorkspaceResult([], '甲乙丙丁')
+    const analyzeText = vi.fn()
+      .mockResolvedValueOnce(payload)
+      .mockImplementationOnce(() => new Promise(() => {}))
+    const wrapper = mount(WorkspaceView, {
+      global: { provide: {
+        [jobsApiKey as symbol]: { createJob: vi.fn(), subscribe: vi.fn(() => vi.fn()) },
+        [verificationApiKey as symbol]: {
+          analyzeFile: vi.fn(), analyzeText,
+          exportReport: vi.fn(), exportOriginal: vi.fn()
+        }
+      } }
+    })
+    wrapper.getComponent(SourceInputPanel).vm.$emit('submit-text', payload.text)
+    await flushPromises()
+    await wrapper.get('[data-search-input]').setValue('甲')
+    await wrapper.get('[data-replacement-input]').setValue('X')
+    await wrapper.get('[data-action="replace-current"]').trigger('click')
+    await flushPromises()
+    const workspace = canonicalWorkspace(wrapper)
+    const revision = workspace.currentRevision.value
+    expect(wrapper.get<HTMLButtonElement>('[data-action="undo-text-edit"]').element.disabled).toBe(false)
+    wrapper.getComponent(ExportPanel).vm.$emit('recheck')
+    await flushPromises()
+    expect(wrapper.get<HTMLButtonElement>('[data-action="undo-text-edit"]').element.disabled).toBe(true)
+    wrapper.getComponent(SearchReplacePanel).vm.$emit('undo-text-edit')
+    expect(workspace.currentRevision.value).toBe(revision)
+    wrapper.unmount()
+  })
+
+  it('undoes replace-all and saved free edits in the same order from the sidebar', async () => {
+    const payload = buildWorkspaceResult([], 'Aa😀aa')
+    const wrapper = mount(WorkspaceView, {
+      global: { provide: {
+        [jobsApiKey as symbol]: { createJob: vi.fn(), subscribe: vi.fn(() => vi.fn()) },
+        [verificationApiKey as symbol]: {
+          analyzeFile: vi.fn(), analyzeText: vi.fn().mockResolvedValue(payload),
+          exportReport: vi.fn(), exportOriginal: vi.fn()
+        }
+      } }
+    })
+    wrapper.getComponent(SourceInputPanel).vm.$emit('submit-text', payload.text)
+    await flushPromises()
+    expect(wrapper.find('.issues-panel [data-action="undo-text-edit"]').exists()).toBe(true)
+    const undo = wrapper.get<HTMLButtonElement>('[data-action="undo-text-edit"]')
+    expect(undo.element.disabled).toBe(true)
+    await wrapper.get('[data-search-input]').setValue('aa')
+    await wrapper.get('[data-replacement-input]').setValue('X')
+    await wrapper.get('[data-action="replace-all"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-source-text]').text()).toBe('X😀X')
+    expect(undo.element.disabled).toBe(false)
+    wrapper.getComponent(EditPreview).vm.$emit('save', '手工编辑')
+    await flushPromises()
+    await undo.trigger('click')
+    expect(wrapper.get('[data-source-text]').text()).toBe('X😀X')
+    await undo.trigger('click')
+    expect(wrapper.get('[data-source-text]').text()).toBe('Aa😀aa')
+    expect(wrapper.find('.reverification-state').exists()).toBe(false)
+    expect(undo.element.disabled).toBe(true)
+    expect(wrapper.findAll('.search-match')).toHaveLength(2)
+    wrapper.unmount()
+  })
+
+  it('shows accepted alternatives immediately, preserves them through filtering, and searches the rendered revision', async () => {
+    const first = buildWorkspaceIssue({ alternatives: ['😀新增\n内容'] })
+    const last = buildWorkspaceIssue({
+      issue_id: '44444444-4444-4444-8444-444444444444',
+      start: 3, end: 4, block_start: 3, block_end: 4,
+      original: '丁', suggestion: '', alternatives: [''],
+      layer: 'format'
+    })
+    const payload = buildWorkspaceResult([first, last])
+    const wrapper = mount(WorkspaceView, {
+      global: { provide: {
+        [jobsApiKey as symbol]: { createJob: vi.fn(), subscribe: vi.fn(() => vi.fn()) },
+        [verificationApiKey as symbol]: {
+          analyzeFile: vi.fn(), analyzeText: vi.fn().mockResolvedValue(payload),
+          exportReport: vi.fn(), exportOriginal: vi.fn()
+        }
+      } }
+    })
+    wrapper.getComponent(SourceInputPanel).vm.$emit('submit-text', payload.text)
+    await flushPromises()
+    expect(wrapper.find('.issues-panel [data-search-input]').exists()).toBe(true)
+    expect(wrapper.find('[data-action="toggle-search-replace"]').exists()).toBe(false)
+    expect(wrapper.find('.review-toolbar').exists()).toBe(false)
+    expect(wrapper.findAll('button').some((button) => /^(段落|紧凑)视图$/.test(button.text()))).toBe(false)
+    const workspace = canonicalWorkspace(wrapper)
+    wrapper.getComponent(IssueList).vm.$emit('update:suggestion', first.issue_id, '😀新增\n内容')
+    wrapper.getComponent(IssueList).vm.$emit('set-state', first.issue_id, 'accepted')
+    await flushPromises()
+    expect(wrapper.get('[data-source-text]').element.textContent).toBe('😀新增\n内容丁')
+    expect(workspace.result.value?.text).toBe('甲乙丙丁')
+    await wrapper.get('[data-search-input]').setValue('丁')
+    expect(wrapper.get('.active-search-match').text()).toBe('丁')
+    wrapper.getComponent(IssueList).vm.$emit('update:selected-layer', 'format')
+    await flushPromises()
+    expect(wrapper.getComponent(IssueList).props('issues')).toHaveLength(1)
+    expect(wrapper.get('[data-source-text]').element.textContent).toBe('😀新增\n内容丁')
+    wrapper.getComponent(IssueList).vm.$emit('set-state', last.issue_id, 'accepted')
+    await flushPromises()
+    expect(wrapper.get('[data-source-text]').element.textContent).toBe('😀新增\n内容')
+    expect(wrapper.find(`[data-issue-role="source"][data-issue-id="${last.issue_id}"]`).exists()).toBe(true)
+    expect(wrapper.find('.active-search-match').exists()).toBe(false)
+    wrapper.getComponent(ReviewActions).vm.$emit('undo-issue', last.issue_id)
+    wrapper.getComponent(ReviewActions).vm.$emit('undo-issue', first.issue_id)
+    await flushPromises()
+    expect(wrapper.get('[data-source-text]').element.textContent).toBe('甲乙丙丁')
+    expect(wrapper.get('.active-search-match').text()).toBe('丁')
+    await wrapper.get('input[aria-label="显示问题标记"]').setValue(false)
+    expect(wrapper.get('.active-search-match').text()).toBe('丁')
+    expect(wrapper.findAll('[data-source-paragraph]')).toHaveLength(1)
+    await wrapper.get('[data-search-input]').setValue('')
+    expect(wrapper.find('.active-search-match').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   beforeEach(() => {
     sessionStorage.clear()
   })
@@ -283,7 +448,7 @@ describe('WorkspaceView', () => {
 
     const viewer = wrapper.getComponent(DocumentViewer)
     const list = wrapper.getComponent(IssueList)
-    await viewer.get(`[data-issue-id="${first.issue_id}"]`).trigger('click')
+    await viewer.get('.source-segment.highlighted').trigger('click')
     expect(
       list.get(`[data-issue-id="${first.issue_id}"]`).attributes('aria-current')
     ).toBe('true')
@@ -324,11 +489,14 @@ describe('WorkspaceView', () => {
       }
     })
 
-    await wrapper.getComponent(VerificationSettings).get('[data-scenario="academic"]').trigger('click')
-    const settings = wrapper.getComponent(VerificationSettings)
+    await wrapper.getComponent(VerificationSettings).get('[aria-label="文档场景"]').setValue('academic')
+    await wrapper.get('[data-open-settings]').trigger('click')
+    const settings = wrapper.findAllComponents(VerificationSettings).at(-1)!
     await settings.get('#enable-security').setValue(false)
     await settings.get('#enable-sensitive').setValue(false)
     await settings.get('#enable-ad-extreme').setValue(true)
+    await settings.get('[aria-label="OCR 识别语言"]').setValue('ja')
+    await settings.get('#enable-extended-rules').setValue(true)
 
     await wrapper.get('.side-tabs button:nth-child(2)').trigger('click')
     const glossary = wrapper.getComponent(TerminologyEditor)
@@ -340,6 +508,7 @@ describe('WorkspaceView', () => {
     const banned = wrapper.getComponent(TerminologyEditor)
     await banned.get('#banned-word').setValue('最好')
     await banned.get('[data-action="add-banned"]').trigger('click')
+    await wrapper.get('[data-close-settings]').trigger('click')
 
     const input = wrapper.getComponent(SourceInputPanel)
     await input.get('[data-mode="text"]').trigger('click')
@@ -355,6 +524,8 @@ describe('WorkspaceView', () => {
       enableSecurity: false,
       enableSensitive: false,
       enableAdExtreme: true,
+      ocrLanguage: 'ja',
+      enableExtendedRules: true,
       glossary: [{ original: 'AI', standard: '人工智能' }],
       bannedWords: ['最好']
     } satisfies AnalyzeOptions)
@@ -386,7 +557,7 @@ describe('WorkspaceView', () => {
     input.vm.$emit('submit-text', '第二次')
     await flushPromises()
 
-    expect(confirm).toHaveBeenCalledTimes(1)
+    expect(confirm).not.toHaveBeenCalled()
     expect(analyzeText).toHaveBeenCalledTimes(1)
     expect(analyzeText).toHaveBeenCalledWith(
       '检查文本',
@@ -427,7 +598,7 @@ describe('WorkspaceView', () => {
     input.vm.$emit('submit-file', second)
     await flushPromises()
 
-    expect(confirm).toHaveBeenCalledTimes(1)
+    expect(confirm).not.toHaveBeenCalled()
     expect(createJob).toHaveBeenCalledTimes(1)
     expect(createJob).toHaveBeenCalledWith(first, expect.any(Object))
     expect(analyzeFile).not.toHaveBeenCalled()
@@ -653,7 +824,7 @@ describe('WorkspaceView', () => {
     await selectFile(wrapper, new File(['MZ'], 'sample.exe'))
 
     expect(createJob).not.toHaveBeenCalled()
-    expect(wrapper.get('[role="alert"]').text()).toContain('DOCX、PDF 或 TXT')
+    expect(wrapper.get('[role="alert"]').text()).toContain('DOCX、DOC、PDF、TXT、RTF、MD')
   })
 
   it('rejects files larger than 25 MiB before upload', async () => {
@@ -900,12 +1071,13 @@ describe('WorkspaceView', () => {
 
     await wrapper.get('.mode-tabs button:nth-child(2)').trigger('click')
     await wrapper.get('.text-mode textarea').setValue('禁用词')
-    await wrapper.get('.text-mode button').trigger('click')
+    await wrapper.get('[data-submit-source]').trigger('click')
     await flushPromises()
+    await wrapper.get('[data-issue-role="list"]').trigger('click')
     await wrapper.get('.issue-actions .accept').trigger('click')
-    await wrapper.get('[data-action="toggle-preview"]').trigger('click')
+    await wrapper.get('input[aria-label="显示问题标记"]').setValue(false)
 
-    expect(wrapper.get('.document-content.preview').text()).toBe('禁用词')
+    expect(wrapper.get('.document-content').text()).toBe('禁用词')
     expect(wrapper.text()).toContain('无自动建议')
     expect(wrapper.text()).not.toContain('null')
     confirm.mockRestore()
@@ -944,7 +1116,6 @@ describe('WorkspaceView', () => {
       .vm.$emit('submit-text', 'Aa😀aa')
     await flushPromises()
     wrapper.getComponent(DocumentViewer).vm.$emit('select-issue', issue.issue_id)
-    await wrapper.get('[data-action="toggle-search-replace"]').trigger('click')
     const search = wrapper.getComponent(SearchReplacePanel)
     await search.get('[data-search-input]').setValue('aa')
     await search.get('[data-replacement-input]').setValue('X')
@@ -962,6 +1133,11 @@ describe('WorkspaceView', () => {
     expect(wrapper.getComponent(ReviewActions).props('selectedIssueId')).toBeNull()
     expect(wrapper.findAll('[data-issue-id]')).toHaveLength(0)
     expect(wrapper.text()).toContain('X😀X')
+    await search.get('[data-search-input]').setValue('X')
+    expect(wrapper.findAll('.search-match')).toHaveLength(2)
+    expect(wrapper.get('.active-search-match').text()).toBe('X')
+    expect(wrapper.get('[data-current-revision]').element.textContent).toBe('X😀X')
+    expect(wrapper.findAll('[data-source-paragraph]')).toHaveLength(1)
     wrapper.unmount()
   })
 
@@ -1002,7 +1178,6 @@ describe('WorkspaceView', () => {
     const revision = workspace.currentRevision.value
     const states = workspace.issueStates.value
 
-    await wrapper.get('[data-action="toggle-search-replace"]').trigger('click')
     const search = wrapper.getComponent(SearchReplacePanel)
     await search.get('[data-search-input]').setValue('甲')
     await search.get('[data-replacement-input]').setValue('甲')
@@ -1046,7 +1221,6 @@ describe('WorkspaceView', () => {
     await editor.get('[data-action="start-edit"]').trigger('click')
     await editor.get('[data-edit-input]').setValue('stale draft')
 
-    await wrapper.get('[data-action="toggle-search-replace"]').trigger('click')
     const search = wrapper.getComponent(SearchReplacePanel)
     await search.get('[data-search-input]').setValue('same')
     await search.get('[data-replacement-input]').setValue('new')
@@ -1295,7 +1469,8 @@ describe('WorkspaceView', () => {
       text: '手工修改文本'
     })
 
-    await wrapper.get('.top-actions .btn.primary').trigger('click')
+    await wrapper.get('[data-toggle-export]').trigger('click')
+    await wrapper.get('[data-action="export-modified"]').trigger('click')
     expect(exportOriginal).not.toHaveBeenCalled()
     expect(exportedBlob).not.toBeNull()
     wrapper.unmount()
@@ -1422,6 +1597,8 @@ describe('WorkspaceView', () => {
     expect(workspace.currentRevision.value).toBe(sourceRevision)
     expect(workspace.modifiedText.value).toBe('abcdef')
     expect(workspace.hasReplacementConflicts.value).toBe(true)
+    expect(wrapper.get('[data-source-text]').element.textContent).toBe('abcdef')
+    expect(wrapper.findAll('[data-issue-role="source"]')).toHaveLength(0)
     expect(workspace.canUndoLastBatch.value).toBe(true)
     expect(wrapper.text()).toContain('撤销批量操作')
 
@@ -1436,6 +1613,7 @@ describe('WorkspaceView', () => {
     expect(workspace.issueStates.value).toEqual({})
     expect(workspace.currentRevision.value).toBe(sourceRevision)
     expect(workspace.hasReplacementConflicts.value).toBe(false)
+    expect(wrapper.findAll('[data-issue-role="source"]')).toHaveLength(payload.issues.length)
     expect(workspace.canUndoLastBatch.value).toBe(false)
     expect(
       wrapper.get('[data-action="undo-batch"]').attributes('disabled')
@@ -1794,8 +1972,10 @@ describe('WorkspaceView', () => {
       .getComponent(SourceInputPanel)
       .vm.$emit('submit-text', '😀甲错乙错')
     await flushPromises()
+    await wrapper.get('[data-issue-role="list"]').trigger('click')
     await wrapper.get('.issue-actions .accept').trigger('click')
-    await wrapper.get('.top-actions .btn.primary').trigger('click')
+    await wrapper.get('[data-toggle-export]').trigger('click')
+    await wrapper.get('[data-action="export-modified"]').trigger('click')
 
     expect(exportedBlob).not.toBeNull()
     const blob = exportedBlob

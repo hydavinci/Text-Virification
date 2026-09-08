@@ -12,6 +12,12 @@ export interface SearchMatch {
   end: number
 }
 
+export interface DocumentSearchState {
+  text: string
+  matches: readonly SearchMatch[]
+  activeMatchIndex: number
+}
+
 export interface SearchReplacement {
   kind: 'current' | 'all'
   count: number

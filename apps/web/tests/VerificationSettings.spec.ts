@@ -11,6 +11,8 @@ function verificationOptionsBytes(options: AnalyzeOptions): number {
       enable_security: options.enableSecurity,
       enable_sensitive: options.enableSensitive,
       enable_ad_extreme: options.enableAdExtreme,
+      ocr_language: options.ocrLanguage ?? 'zh',
+      enable_extended_rules: options.enableExtendedRules ?? false,
       custom_glossary: options.glossary,
       banned_words: options.bannedWords
     })
@@ -58,12 +60,32 @@ function buildOptions(): AnalyzeOptions {
 }
 
 describe('VerificationSettings', () => {
+  it('offers extended formatting rules as an opt-in setting', async () => {
+    const options = buildOptions()
+    const wrapper = mount(VerificationSettings, { props: { options } })
+    expect(wrapper.get('#enable-extended-rules').element).toHaveProperty('checked', false)
+    await wrapper.get('#enable-extended-rules').setValue(true)
+    expect(wrapper.emitted('update:options')?.[0]).toEqual([
+      { ...options, enableExtendedRules: true }
+    ])
+  })
+
+  it('selects Japanese OCR without changing proofreading or compliance settings', async () => {
+    const options = buildOptions()
+    const wrapper = mount(VerificationSettings, { props: { options } })
+    await wrapper.get('[aria-label="OCR 识别语言"]').setValue('ja')
+    expect(wrapper.emitted('update:options')?.[0]).toEqual([
+      { ...options, ocrLanguage: 'ja' }
+    ])
+    expect(wrapper.text()).toContain('不包含日文纠错')
+  })
+
   it('offers all six scenarios and emits a complete immutable option snapshot', async () => {
     const options = buildOptions()
     const wrapper = mount(VerificationSettings, { props: { options } })
 
     expect(wrapper.findAll('[data-scenario]')).toHaveLength(6)
-    await wrapper.get('[data-scenario="academic"]').trigger('click')
+    await wrapper.get('[aria-label="文档场景"]').setValue('academic')
 
     expect(wrapper.emitted('update:options')?.[0]).toEqual([
       {
@@ -111,7 +133,7 @@ describe('VerificationSettings', () => {
     expect(verificationOptionsBytes(options)).toBe(64 * 1024)
     const wrapper = mount(VerificationSettings, { props: { options } })
 
-    await wrapper.get('[data-scenario="technical"]').trigger('click')
+    await wrapper.get('[aria-label="文档场景"]').setValue('technical')
 
     expect(wrapper.emitted('update:options')).toBeUndefined()
     expect(wrapper.get('[role="alert"]').text()).toBe(

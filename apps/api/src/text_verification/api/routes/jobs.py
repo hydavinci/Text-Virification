@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
 from importlib import import_module
 from time import monotonic
-from typing import Annotated, BinaryIO, NoReturn
+from typing import Annotated, BinaryIO, Literal, NoReturn
 from urllib.parse import quote
 from uuid import UUID, uuid4
 
@@ -143,6 +143,8 @@ class JobRecheckRequest(BaseModel):
 
     text: str = Field(max_length=5_000_000)
     scenario: Scenario = Scenario.GENERAL
+    ocr_language: Literal["zh", "en", "ja"] = "zh"
+    enable_extended_rules: bool = False
     enable_security: bool = True
     enable_sensitive: bool = True
     enable_ad_extreme: bool = False
@@ -231,6 +233,8 @@ async def recheck_job_text(
     try:
         options = build_verification_options(
             scenario=payload.scenario,
+            ocr_language=payload.ocr_language,
+            enable_extended_rules=payload.enable_extended_rules,
             custom_glossary=parse_glossary(payload.custom_glossary),
             banned_words=parse_banned_words(payload.banned_words),
             enable_security=payload.enable_security,
@@ -438,6 +442,8 @@ def create_job(
     storage: Annotated[JobStorage, Depends(get_job_storage)],
     settings: Annotated[Settings, Depends(get_settings)],
     scenario: Annotated[Scenario, Form()] = Scenario.GENERAL,
+    ocr_language: Annotated[Literal["zh", "en", "ja"], Form()] = "zh",
+    enable_extended_rules: Annotated[bool, Form()] = False,
     enable_security: Annotated[bool, Form()] = True,
     enable_sensitive: Annotated[bool, Form()] = True,
     enable_ad_extreme: Annotated[bool, Form()] = False,
@@ -453,6 +459,8 @@ def create_job(
     try:
         verification_options = build_verification_options(
             scenario=scenario,
+            ocr_language=ocr_language,
+            enable_extended_rules=enable_extended_rules,
             custom_glossary=parse_glossary(custom_glossary),
             banned_words=parse_banned_words(banned_words),
             enable_security=enable_security,

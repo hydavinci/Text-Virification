@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from uuid import UUID
 
 import pytest
@@ -75,6 +76,8 @@ def test_job_bound_recheck_returns_fresh_result_and_opaque_grant(
         data={
             "text": "重新检查文本",
             "scenario": "general",
+            "ocr_language": "en",
+            "enable_extended_rules": "true",
             "enable_security": "true",
             "enable_sensitive": "false",
             "enable_ad_extreme": "true",
@@ -91,6 +94,8 @@ def test_job_bound_recheck_returns_fresh_result_and_opaque_grant(
     assert payload["result"]["text"] == "重新检查文本"
     assert payload["result"]["success"] is True
     assert calls[0][0:2] == (JOB_ID, "重新检查文本")
+    assert calls[0][2].ocr_language == "en"
+    assert calls[0][2].enable_extended_rules is True
 
 
 def test_recheck_accepts_multipart_text_above_framework_default_when_configured(
@@ -178,3 +183,94 @@ def test_recheck_validation_errors_do_not_reflect_form_secrets(
     assert response.status_code == 422
     assert secret not in response.text
     assert secret not in caplog.text
+
+
+@pytest.mark.parametrize("text", [
+    "第一段\n\n第二段\n",
+    "第一段\r\n第二段\r末尾 & + = % 😀\n",
+])
+def test_urlencoded_recheck_preserves_exact_text(client, app: FastAPI, text: str) -> None:
+    from text_verification.api.dependencies import get_job_recheck_service
+
+    class EchoService:
+        def recheck(self, job_id, submitted_text, options):
+            return JobRecheckResult(
+                result=result().model_copy(update={"text": submitted_text}),
+                grant="server-issued-opaque-grant",
+            )
+
+    app.dependency_overrides[get_job_recheck_service] = EchoService
+    response = client.post(f"/api/v1/jobs/{JOB_ID}/recheck", data={"text": text})
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["text"] == text
+
+
+def test_urlencoded_recheck_preserves_final_options_field(client, app: FastAPI) -> None:
+    from text_verification.api.dependencies import get_job_recheck_service
+
+    class EchoOptionsService:
+        def recheck(self, job_id, submitted_text, options):
+            return JobRecheckResult(
+                result=result(),
+                grant="|".join(options.banned_words),
+            )
+
+    app.dependency_overrides[get_job_recheck_service] = EchoOptionsService
+    response = client.post(
+        f"/api/v1/jobs/{JOB_ID}/recheck",
+        data={"text": "正文", "banned_words": '["保留末尾字段"]'},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["grant"] == "保留末尾字段"
+
+
+@pytest.mark.parametrize("text, expected_status", [
+    ("中文\n", 200),
+    ("中文\nx", 200),
+    ("中文\nxx", 413),
+])
+def test_urlencoded_recheck_limits_decoded_utf8_bytes(
+    client, app: FastAPI, tmp_path, text: str, expected_status: int,
+) -> None:
+    from text_verification.api.dependencies import get_job_recheck_service
+
+    class EchoService:
+        def recheck(self, job_id, submitted_text, options):
+            return JobRecheckResult(result=result(), grant="opaque-grant")
+
+    app.dependency_overrides[get_job_recheck_service] = EchoService
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        app_env="test", storage_root=tmp_path, max_upload_bytes=8,
+    )
+    response = client.post(f"/api/v1/jobs/{JOB_ID}/recheck", data={"text": text})
+    assert response.status_code == expected_status, response.text
+
+
+def test_urlencoded_recheck_allows_encoded_options_with_near_limit_text(
+    client, app: FastAPI, tmp_path,
+) -> None:
+    from text_verification.api.dependencies import get_job_recheck_service
+
+    class EchoService:
+        def recheck(self, job_id, submitted_text, options):
+            return JobRecheckResult(
+                result=result(),
+                grant=str(len(options.banned_words)),
+            )
+
+    app.dependency_overrides[get_job_recheck_service] = EchoService
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        app_env="test", storage_root=tmp_path, max_upload_bytes=1_000_000,
+    )
+    response = client.post(
+        f"/api/v1/jobs/{JOB_ID}/recheck",
+        data={
+            "text": "中" * 333_333,
+            "banned_words": json.dumps(
+                [f"{index}" + "术" * 100 for index in range(100)],
+                ensure_ascii=False,
+            ),
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["grant"] == "100"

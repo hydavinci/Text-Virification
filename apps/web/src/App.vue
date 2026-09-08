@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import WorkspaceView from './views/WorkspaceView.vue'
+import './styles/theme.css'
 </script>
 
 <template>

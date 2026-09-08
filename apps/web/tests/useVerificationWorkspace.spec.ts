@@ -2326,6 +2326,112 @@ describe('useVerificationWorkspace', () => {
     expect(workspace.visibleIssues.value).toEqual([earlier, later])
   })
 
+  it('undoes text edits in order and restores the exact pre-edit review state', () => {
+    const issue = buildIssue()
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(buildResult([issue]))
+    workspace.selectSuggestion(issue.issue_id, '😀新词')
+    workspace.acceptIssue(issue.issue_id)
+    const review = workspace.currentRevision.value
+    workspace.saveManualEdit('第一次替换')
+    workspace.saveManualEdit('第二次替换')
+    const beforeUndo = workspace.currentRevision.value
+    const chain = workspace.revisionChain.value
+
+    expect(workspace.canUndoTextEdit?.value).toBe(true)
+    const firstUndo = workspace.undoTextEdit()
+    expect(firstUndo?.text).toBe('第一次替换')
+    expect(firstUndo?.parent_revision_id).toBe(beforeUndo?.revision_id)
+    expect(workspace.requiresReverification.value).toBe(true)
+    expect(workspace.revisionChain.value.slice(0, chain.length)).toEqual(chain)
+
+    workspace.undoTextEdit()
+    expect(workspace.modifiedText.value).toBe('甲😀新词丙丁')
+    expect(workspace.currentRevision.value?.text).toBe(review?.text)
+    expect(workspace.currentRevision.value?.kind).toBe('review')
+    expect(workspace.issueStates.value).toEqual({ [issue.issue_id]: 'accepted' })
+    expect(workspace.selectedSuggestions.value).toEqual({ [issue.issue_id]: '😀新词' })
+    expect(workspace.requiresReverification.value).toBe(false)
+    expect(workspace.visibleIssues.value).toHaveLength(1)
+    expect(workspace.canUndoTextEdit.value).toBe(false)
+    expect(workspace.undoTextEdit()).toBeNull()
+    expect(workspace.revisionChain.value).toHaveLength(chain.length + 2)
+  })
+
+  it('does not record no-op edits and branches text undo without resurrecting undone edits', () => {
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(buildResult([]))
+    expect(workspace.canUndoTextEdit?.value).toBe(false)
+    workspace.saveManualEdit('甲乙丙丁')
+    expect(workspace.canUndoTextEdit.value).toBe(false)
+    workspace.saveManualEdit('A')
+    workspace.saveManualEdit('B')
+    workspace.undoTextEdit()
+    workspace.saveManualEdit('C')
+    workspace.undoTextEdit()
+    expect(workspace.modifiedText.value).toBe('A')
+    workspace.undoTextEdit()
+    expect(workspace.modifiedText.value).toBe('甲乙丙丁')
+    expect(workspace.canUndoTextEdit.value).toBe(false)
+    expect(workspace.requiresReverification.value).toBe(false)
+  })
+
+  it.each(['clear', 'recheck'] as const)('clears text undo when %s replaces the editing context', (action) => {
+    const workspace = useVerificationWorkspace()
+    const result = buildResult([])
+    workspace.loadResult(result)
+    workspace.saveManualEdit('不能跨文档撤销')
+    if (action === 'clear') {
+      workspace.clearResult()
+    } else {
+      workspace.loadResult(result)
+    }
+    expect(workspace.canUndoTextEdit.value).toBe(false)
+    expect(workspace.undoTextEdit()).toBeNull()
+  })
+
+  it('keeps persisted revisions and their numbering when undo appends a compensation', () => {
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(buildResult([]))
+    const manual = workspace.saveManualEdit('已持久化的修改')
+    expect(workspace.hydratePersistedRevision({
+      ...manual,
+      persistence_state: 'persisted',
+      revision_number: 1
+    })).toBe(true)
+    const persisted = workspace.currentRevision.value
+    const undo = workspace.undoTextEdit()
+    expect(undo?.parent_revision_id).toBe(persisted?.revision_id)
+    expect(undo?.revision_number).toBeNull()
+    expect(workspace.revisionChain.value[1]).toBe(persisted)
+    expect(workspace.hydratePersistedRevision({
+      ...undo,
+      persistence_state: 'persisted',
+      revision_number: 2
+    })).toBe(true)
+    expect(workspace.modifiedText.value).toBe('甲乙丙丁')
+  })
+
+  it('restores conflicting review decisions without treating their positions as manual text', () => {
+    const first = buildIssue()
+    const second = buildIssue({
+      issue_id: '44444444-4444-4444-8444-444444444444',
+      start: 0, end: 2, block_start: 0, block_end: 2,
+      original: '甲乙', suggestion: 'C'
+    })
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(buildResult([first, second]))
+    workspace.acceptIssues([first.issue_id, second.issue_id])
+    workspace.saveManualEdit('临时手工修改')
+    expect(Object.isFrozen(workspace.textUndoHistory.value)).toBe(true)
+    expect(Object.isFrozen(workspace.textUndoHistory.value[0].reviewState?.issueStates)).toBe(true)
+    workspace.undoTextEdit()
+    expect(workspace.modifiedText.value).toBe('甲乙丙丁')
+    expect(workspace.hasReplacementConflicts.value).toBe(true)
+    expect(workspace.requiresReverification.value).toBe(false)
+    expect(workspace.summary.value.accepted).toBe(2)
+  })
+
   it('creates immutable manual revisions and invalidates source-bound decisions', () => {
     const issue = buildIssue()
     const workspace = useVerificationWorkspace()

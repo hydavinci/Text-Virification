@@ -14,7 +14,7 @@ import {
 } from './useVerificationWorkspace'
 import { MAX_VERIFICATION_ISSUES } from '../validation/verificationLimits'
 
-export const WORKSPACE_SESSION_VERSION = 6
+export const WORKSPACE_SESSION_VERSION = 7
 export const WORKSPACE_SESSION_KEY = 'text-verification-session'
 export const MAX_WORKSPACE_SESSION_RAW_BYTES = 32 * 1024 * 1024
 export const MAX_WORKSPACE_RESULT_BLOCKS = 20_000
@@ -129,7 +129,7 @@ const LAYERS = new Set([
   'security'
 ])
 const SEVERITIES = new Set(['all', 'error', 'warning', 'info'])
-const FILE_TYPES = new Set(['docx', 'doc', 'pdf', 'txt', 'rtf', 'md', 'csv'])
+const FILE_TYPES = new Set(['docx', 'doc', 'pdf', 'txt', 'rtf', 'md', 'csv', 'png', 'jpg'])
 const EXPORT_AUTHORITY_KEYS = [
   'jobId',
   'documentId',
@@ -218,7 +218,8 @@ export function useWorkspaceSession(
         revisionChain: workspace.revisionChain.value,
         requiresReverification: workspace.requiresReverification.value,
         issueStates: workspace.issueStates.value,
-        selectedSuggestions: workspace.selectedSuggestions.value
+        selectedSuggestions: workspace.selectedSuggestions.value,
+        textUndoHistory: workspace.textUndoHistory.value
       },
       ...state
     }
@@ -279,6 +280,7 @@ export function useWorkspaceSession(
       }
       const prepared =
         prepareSession(parsed, workspace) ??
+        prepareVersion6Session(parsed, workspace) ??
         prepareVersion5Session(parsed, workspace) ??
         prepareVersion4Session(parsed, workspace) ??
         prepareVersion3Session(parsed, workspace) ??
@@ -358,6 +360,10 @@ function hasBoundedSessionPayload(value: unknown): boolean {
     Array.isArray(workspace.revisionChain) &&
     workspace.revisionChain.length <= MAX_WORKSPACE_REVISION_CHAIN &&
     workspace.revisionChain.every(hasBoundedRevision) &&
+    (
+      !Object.hasOwn(workspace, 'textUndoHistory') ||
+      hasBoundedTextUndoHistory(workspace.textUndoHistory)
+    ) &&
     hasBoundedRecord(workspace.issueStates, MAX_WORKSPACE_RESULT_ISSUES) &&
     hasBoundedRecord(
       workspace.selectedSuggestions,
@@ -366,6 +372,25 @@ function hasBoundedSessionPayload(value: unknown): boolean {
     (
       !Object.hasOwn(value, 'options') ||
       hasBoundedOptions(value.options)
+    )
+  )
+}
+
+function hasBoundedTextUndoHistory(value: unknown): boolean {
+  return (
+    Array.isArray(value) &&
+    value.length <= MAX_WORKSPACE_REVISION_CHAIN &&
+    value.every((entry) =>
+      isRecord(entry) &&
+      (entry.revisionId === null || isBoundedText(entry.revisionId, 36)) &&
+      (
+        entry.reviewState === null ||
+        (
+          isRecord(entry.reviewState) &&
+          hasBoundedRecord(entry.reviewState.issueStates, MAX_WORKSPACE_RESULT_ISSUES) &&
+          hasBoundedRecord(entry.reviewState.selectedSuggestions, MAX_WORKSPACE_RESULT_ISSUES)
+        )
+      )
     )
   )
 }
@@ -545,6 +570,22 @@ function prepareSession(
     !hasExactKeys(value, SESSION_KEYS) ||
     value.version !== WORKSPACE_SESSION_VERSION ||
     !isRecord(value.workspace) ||
+    !hasExactKeys(value.workspace, [...WORKSPACE_KEYS, 'textUndoHistory'])
+  ) {
+    return null
+  }
+  return prepareSessionState(value, workspace, value.exportAuthority)
+}
+
+function prepareVersion6Session(
+  value: unknown,
+  workspace: VerificationWorkspace
+): PreparedSession | null {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, SESSION_KEYS) ||
+    value.version !== 6 ||
+    !isRecord(value.workspace) ||
     !hasExactKeys(value.workspace, WORKSPACE_KEYS)
   ) {
     return null
@@ -634,7 +675,10 @@ function prepareSessionState(
     revisionChain: workspaceValue.revisionChain,
     requiresReverification: workspaceValue.requiresReverification,
     issueStates: workspaceValue.issueStates,
-    selectedSuggestions: workspaceValue.selectedSuggestions
+    selectedSuggestions: workspaceValue.selectedSuggestions,
+    ...(Object.hasOwn(workspaceValue, 'textUndoHistory')
+      ? { textUndoHistory: workspaceValue.textUndoHistory }
+      : {})
   })
   if (
     preparedWorkspace === null ||
@@ -839,7 +883,11 @@ function preparedExportAuthoritySource(
 function preparedOptions(value: unknown): AnalyzeOptions | null {
   if (
     !isRecord(value) ||
-    !hasExactKeys(value, OPTION_KEYS) ||
+    !hasExactKeys(value, [
+      ...OPTION_KEYS,
+      ...('ocrLanguage' in value ? ['ocrLanguage'] : []),
+      ...('enableExtendedRules' in value ? ['enableExtendedRules'] : [])
+    ]) ||
     !Array.isArray(value.glossary) ||
     !Array.isArray(value.bannedWords)
   ) {
@@ -847,9 +895,13 @@ function preparedOptions(value: unknown): AnalyzeOptions | null {
   }
   try {
     const snapshot = createAnalyzeOptionsSnapshot(
-      value as unknown as AnalyzeOptions
+      value as unknown as AnalyzeOptions,
+      'persisted'
     )
-    return JSON.stringify(value) === JSON.stringify(snapshot)
+    return OPTION_KEYS.every(
+      (key) => JSON.stringify(value[key]) === JSON.stringify(snapshot[key])
+    ) && value.ocrLanguage === snapshot.ocrLanguage &&
+      value.enableExtendedRules === snapshot.enableExtendedRules
       ? snapshot
       : null
   } catch {

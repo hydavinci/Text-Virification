@@ -3,7 +3,7 @@ import { nextTick, ref, watch } from 'vue'
 
 const props = defineProps<{
   text: string
-  previewText: string
+  title?: string
   disabled?: boolean
 }>()
 
@@ -12,7 +12,7 @@ const emit = defineEmits<{
 }>()
 
 const editing = ref(false)
-const previewing = ref(false)
+const showIssueMarkers = ref(true)
 const draft = ref(props.text)
 const baseText = ref(props.text)
 const conflicted = ref(false)
@@ -28,7 +28,6 @@ async function startEdit(): Promise<void> {
   draft.value = props.text
   conflicted.value = false
   status.value = ''
-  previewing.value = false
   editing.value = true
   await nextTick()
   editor.value?.focus()
@@ -70,11 +69,6 @@ async function saveEdit(): Promise<void> {
   await finishEditing()
 }
 
-function togglePreview(): void {
-  previewing.value = !previewing.value
-  status.value = previewing.value ? '正在显示修改预览' : ''
-}
-
 watch(
   () => props.text,
   (text) => {
@@ -93,7 +87,8 @@ watch(
 
 <template>
   <div class="edit-preview">
-    <div class="edit-actions" aria-label="文档编辑和预览">
+    <div class="edit-actions" aria-label="文档编辑和显示">
+      <strong class="document-title">{{ title ?? '当前文档' }}</strong>
       <button
         v-if="!editing"
         ref="startButton"
@@ -102,7 +97,7 @@ watch(
         :disabled="disabled"
         @click="startEdit"
       >
-        编辑原文
+        编辑正文
       </button>
       <button
         v-if="editing"
@@ -123,16 +118,15 @@ watch(
       >
         取消编辑
       </button>
-      <button
-        v-if="!editing"
-        type="button"
-        data-action="toggle-preview"
-        :disabled="disabled"
-        :aria-pressed="previewing"
-        @click="togglePreview"
-      >
-        {{ previewing ? '返回文档' : '修改预览' }}
-      </button>
+      <label v-if="!editing" class="marker-toggle">
+        <input
+          v-model="showIssueMarkers"
+          type="checkbox"
+          aria-label="显示问题标记"
+          :disabled="disabled"
+        />
+        显示问题标记
+      </label>
       <span
         data-edit-status
         role="status"
@@ -152,13 +146,8 @@ watch(
       data-edit-input
       aria-label="编辑文档内容"
     />
-    <pre
-      v-else-if="previewing"
-      class="document-content preview"
-      data-preview-content
-    >{{ previewText }}</pre>
     <div v-else class="document-content">
-      <slot />
+      <slot :show-issue-markers="showIssueMarkers" />
     </div>
   </div>
 </template>
@@ -175,10 +164,30 @@ watch(
   min-height: 45px;
   padding: 7px 12px;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 7px;
   border-bottom: 1px solid var(--border);
   background: var(--surface-2);
+}
+
+.document-title {
+  margin-right: auto;
+  font-size: 14px;
+}
+
+.marker-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 32px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.marker-toggle input {
+  margin: 0;
+  accent-color: var(--primary);
 }
 
 button {
@@ -208,6 +217,7 @@ button.reject {
 }
 
 button:focus-visible,
+input:focus-visible,
 textarea:focus-visible {
   outline: 3px solid color-mix(in srgb, var(--primary) 35%, transparent);
   outline-offset: 2px;
@@ -232,14 +242,13 @@ textarea:focus-visible {
   white-space: pre-wrap;
   color: var(--text);
   background: var(--surface);
-  font: 15px/2 ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: inherit;
+  font-size: 16px;
+  line-height: 1.9;
 }
 
 .document-content:has(> :deep(.document-viewer)) {
   padding: 0;
 }
 
-.preview {
-  color: #075985;
-}
 </style>

@@ -2,6 +2,7 @@
 import { nextTick, ref, watch } from 'vue'
 
 import IssueDetails from './IssueDetails.vue'
+import { revealWithinPane } from '../../utils/revealWithinPane'
 import type {
   IssueState,
   VerificationIssue
@@ -20,6 +21,7 @@ const props = withDefaults(
   defineProps<{
     issues: readonly VerificationIssue[]
     selectedIssueId: string | null
+    revealKey?: string
     issueStates: Readonly<Record<string, IssueState>>
     selectedSuggestions: Readonly<Record<string, string | null>>
     selectedLayer?: IssueLayerFilter
@@ -66,16 +68,12 @@ async function scrollSelectedIssue(issueId: string | null): Promise<void> {
       element.dataset.issueId === issueId &&
       element.dataset.issueRole === 'list'
   )
-  if (control && typeof control.scrollIntoView === 'function') {
-    control.scrollIntoView({
-      behavior:
-        typeof window.matchMedia === 'function' &&
-        window.matchMedia('(prefers-reduced-motion: reduce)').matches
-          ? 'auto'
-          : 'smooth',
-      block: 'center',
-      inline: 'nearest'
-    })
+  if (control) {
+    revealWithinPane(control, root.value?.querySelector<HTMLElement>('.issue-list') ?? null)
+    const sidebar = root.value?.closest<HTMLElement>('.issues-panel')
+    if (sidebar) {
+      revealWithinPane(control, sidebar)
+    }
   }
 }
 
@@ -99,8 +97,8 @@ function updateSeverity(event: Event): void {
 }
 
 watch(
-  () => props.selectedIssueId,
-  (issueId) => {
+  () => [props.selectedIssueId, props.revealKey] as const,
+  ([issueId]) => {
     void scrollSelectedIssue(issueId)
   },
   { flush: 'post', immediate: true }
@@ -162,6 +160,7 @@ watch(
           :aria-current="
             selectedIssueId === issue.issue_id ? 'true' : undefined
           "
+          :aria-expanded="selectedIssueId === issue.issue_id"
           :data-issue-id="issue.issue_id"
           data-issue-role="list"
           :disabled="disabled"
@@ -169,17 +168,18 @@ watch(
           @keydown.enter.prevent="activateIssue(issue.issue_id)"
           @keydown.space.prevent="activateIssue(issue.issue_id)"
         >
-          <span>{{ typeLabels[issue.type] ?? issue.type }}</span>
-          <span>
-            {{
-              layerOptions.find((layer) => layer.id === issue.layer)?.name ??
-              issue.layer
-            }}
+          <span class="issue-meta">
+            <span>{{ typeLabels[issue.type] ?? issue.type }}</span>
+            <span class="severity">{{ { error: '错误', warning: '警告', info: '建议' }[issue.severity] }}</span>
+            <span v-if="issueStates[issue.issue_id] === 'accepted'">已接受</span>
+            <span v-else-if="issueStates[issue.issue_id] === 'rejected'">已忽略</span>
           </span>
-          <span class="severity">{{ issue.severity }}</span>
+          <span class="issue-message">{{ issue.message }}</span>
+          <span v-if="selectedIssueId !== issue.issue_id" class="issue-original">{{ issue.original }}</span>
         </button>
 
         <IssueDetails
+          v-if="selectedIssueId === issue.issue_id"
           :issue="issue"
           :selected-suggestion="selectedSuggestions[issue.issue_id]"
           :disabled="disabled"
@@ -188,7 +188,7 @@ watch(
           "
         />
 
-        <div class="issue-actions" aria-label="问题处理">
+        <div v-if="selectedIssueId === issue.issue_id" class="issue-actions" aria-label="问题处理">
           <button
             class="accept"
             type="button"
@@ -247,6 +247,13 @@ watch(
 
 .filters select {
   min-width: 0;
+  width: 100%;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--text);
+  background: var(--surface);
+  font-size: 12px;
 }
 
 .issue-list {
@@ -260,37 +267,29 @@ watch(
   margin-bottom: 9px;
   padding: 13px;
   border: 1px solid var(--border);
-  border-left: 4px solid #f59e0b;
-  border-radius: 12px;
+  border-radius: 8px;
   background: var(--surface);
 }
 
-.issue-card.error {
-  border-left-color: #ef4444;
-}
-
-.issue-card.info {
-  border-left-color: #3b82f6;
-}
-
 .issue-card.accepted {
-  background: color-mix(in srgb, #dcfce7 46%, var(--surface));
+  background: color-mix(in srgb, #22c55e 5%, var(--surface));
 }
 
 .issue-card.rejected {
-  opacity: 0.58;
+  color: var(--muted);
 }
 
 .issue-card.selected {
-  outline: 2px solid #2563eb;
-  outline-offset: -2px;
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 3%, var(--surface));
 }
 
 .issue-select {
   width: 100%;
   display: flex;
-  align-items: center;
-  gap: 5px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
   padding: 0;
   border: 0;
   color: inherit;
@@ -299,19 +298,13 @@ watch(
   text-align: left;
 }
 
-.issue-select span {
-  padding: 3px 7px;
-  border-radius: 999px;
-  color: var(--muted);
-  background: var(--surface-2);
-  font-size: 10px;
-  font-weight: 800;
-}
-
-.issue-select .severity {
-  margin-left: auto;
-  text-transform: uppercase;
-}
+.issue-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; color: var(--muted); font-size: 11px; }
+.severity { margin-left: auto; font-size: 10px; }
+.error .severity { color: #c23b3b; }
+.warning .severity { color: #a36710; }
+.info .severity { color: var(--primary); }
+.issue-message { color: var(--text); font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.issue-original { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--muted); }
 
 .issue-select:focus-visible {
   border-radius: 7px;

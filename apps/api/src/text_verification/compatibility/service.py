@@ -73,14 +73,18 @@ def parse_banned_words(value: str) -> list[str]:
 def build_verification_options(
     *,
     scenario: Scenario,
+    ocr_language: str = "zh",
     custom_glossary: list[dict[str, str]],
     banned_words: list[str],
     enable_security: bool,
     enable_sensitive: bool,
     enable_ad_extreme: bool,
+    enable_extended_rules: bool = False,
 ) -> VerificationOptions:
     return VerificationOptions(
         scenario=scenario,
+        ocr_language=ocr_language,
+        enable_extended_rules=enable_extended_rules,
         custom_glossary=custom_glossary,
         banned_words=banned_words,
         enable_security=enable_security,

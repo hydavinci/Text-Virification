@@ -275,6 +275,8 @@ def test_create_job_persists_nondefault_verification_options_without_exposing_li
         files={"file": ("sample.txt", b"colour forbidden", "text/plain")},
         data={
             "scenario": "legal",
+            "ocr_language": "ja",
+            "enable_extended_rules": "true",
             "enable_security": "false",
             "enable_sensitive": "false",
             "enable_ad_extreme": "true",
@@ -291,6 +293,8 @@ def test_create_job_persists_nondefault_verification_options_without_exposing_li
     assert job is not None
     assert job.verification_options == VerificationOptions(
         scenario="legal",
+        ocr_language="ja",
+        enable_extended_rules=True,
         enable_security=False,
         enable_sensitive=False,
         enable_ad_extreme=True,

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   AnalyzeOptionsError,
+  appendAnalyzeOptions,
   createAnalyzeOptionsSnapshot
 } from '../src/api/analyzeOptions'
 import type { AnalyzeOptions } from '../src/types/verification'
@@ -29,6 +30,8 @@ function backendPayloadBytes(options: AnalyzeOptions): number {
       enable_security: options.enableSecurity,
       enable_sensitive: options.enableSensitive,
       enable_ad_extreme: options.enableAdExtreme,
+      ocr_language: options.ocrLanguage ?? 'zh',
+      enable_extended_rules: options.enableExtendedRules ?? false,
       custom_glossary: options.glossary,
       banned_words: options.bannedWords
     })
@@ -58,6 +61,38 @@ function optionsWithSerializedBytes(target: number): AnalyzeOptions {
 }
 
 describe('createAnalyzeOptionsSnapshot', () => {
+  it('serializes optional extended rules without enabling them for old options', () => {
+    const enabled = { ...baseOptions(), enableExtendedRules: true }
+    const body = new FormData()
+    appendAnalyzeOptions(body, createAnalyzeOptionsSnapshot(enabled))
+    expect(body.get('enable_extended_rules')).toBe('true')
+    const defaultBody = new FormData()
+    appendAnalyzeOptions(defaultBody, createAnalyzeOptionsSnapshot(baseOptions()))
+    expect(defaultBody.get('enable_extended_rules')).toBe('false')
+  })
+
+  it('preserves the selected OCR language in the backend request', () => {
+    const selected = { ...baseOptions(), ocrLanguage: 'ja' as const }
+    const snapshot = createAnalyzeOptionsSnapshot(selected)
+    const body = new FormData()
+    appendAnalyzeOptions(body, snapshot)
+    expect(body.get('ocr_language')).toBe('ja')
+    expect(snapshot).toMatchObject({ ocrLanguage: 'ja' })
+  })
+
+  it('defaults old option snapshots to bilingual OCR', () => {
+    const body = new FormData()
+    appendAnalyzeOptions(body, createAnalyzeOptionsSnapshot(baseOptions()))
+    expect(body.get('ocr_language')).toBe('zh')
+  })
+
+  it('rejects unsupported OCR languages rather than silently selecting another engine', () => {
+    const invalid = { ...baseOptions(), ocrLanguage: 'unknown' }
+    // Exercise validation of untrusted restored/request options.
+    // @ts-expect-error Unsupported language must be rejected at runtime.
+    expect(() => createAnalyzeOptionsSnapshot(invalid)).toThrow(AnalyzeOptionsError)
+  })
+
   it.each([
     ['U+001C', '\u001c'],
     ['U+001D', '\u001d'],

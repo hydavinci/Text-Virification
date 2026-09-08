@@ -1,11 +1,61 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from importlib.resources import as_file, files
 from pathlib import Path
 
 import pytest
+
+
+@pytest.mark.parametrize(
+    ("name", "entries"),
+    [
+        ("ad_extreme_words", {"extreme_words": ["best"]}),
+        ("sensitive_rules", {
+            "politics": [], "ethnic_religion": [],
+            "territory_standard": [{"bad": "old", "good": "new"}],
+        }),
+    ],
+)
+def test_legacy_metadata_preserves_entries_and_hot_reload(
+    tmp_path: Path, name: str, entries: dict,
+) -> None:
+    from text_verification.infrastructure.dictionary_loader import DictionaryLoader
+
+    path = tmp_path / f"{name}.json"
+    payload = {**entries, "version": "2026-08", "description": "Reviewed dictionary"}
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    loader = DictionaryLoader(root=tmp_path)
+    snapshot = loader.load(name)
+    assert snapshot.entries.model_dump(
+        mode="json", exclude={"version", "description"}, exclude_none=True,
+    ) == entries
+    assert snapshot.version == hashlib.sha256(path.read_bytes()).hexdigest()
+
+    payload["version"] = "2026-09"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    updated = loader.load(name)
+    assert updated.version != snapshot.version
+    assert updated.entries.version == "2026-09"
+
+
+@pytest.mark.parametrize("metadata", [
+    {"version": 12}, {"description": []}, {"unexpected": "value"},
+])
+def test_legacy_metadata_does_not_relax_dictionary_validation(
+    tmp_path: Path, metadata: dict,
+) -> None:
+    from text_verification.infrastructure.dictionary_loader import (
+        DictionaryLoader,
+        DictionaryLoadError,
+    )
+
+    path = tmp_path / "ad_extreme_words.json"
+    path.write_text(json.dumps({"extreme_words": ["best"], **metadata}), encoding="utf-8")
+    with pytest.raises(DictionaryLoadError):
+        DictionaryLoader(root=tmp_path).load("ad_extreme_words")
 
 
 def test_dictionary_snapshot_uses_packaged_bytes_for_deterministic_version() -> None:

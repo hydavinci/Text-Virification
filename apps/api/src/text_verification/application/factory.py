@@ -32,6 +32,7 @@ from text_verification.exporters.docx_reconstruction import (
 )
 from text_verification.exporters.registry import ExporterRegistry
 from text_verification.parsers.compatibility_parser import CompatibilityParser
+from text_verification.parsers.image_parser import ImageParser
 from text_verification.parsers.pdf_parser import PdfParser
 from text_verification.parsers.registry import ParserRegistry
 
@@ -78,14 +79,17 @@ def build_default_verification_pipeline(
     settings: Settings | None = None,
 ) -> VerificationPipeline:
     resolved_settings = settings or get_settings()
+    ocr = OcrProvider()
     return VerificationPipeline(
         parsers=ParserRegistry(
             (
-                cast(Parser, PdfParser(ocr=OcrProvider())),
+                cast(Parser, PdfParser(ocr=ocr)),
+                cast(Parser, ImageParser(file_type=FileType.PNG, ocr=ocr)),
+                cast(Parser, ImageParser(file_type=FileType.JPG, ocr=ocr)),
                 *(
                     cast(Parser, CompatibilityParser(file_type))
                     for file_type in FileType
-                    if file_type is not FileType.PDF
+                    if file_type not in {FileType.PDF, FileType.PNG, FileType.JPG}
                 ),
             )
         ),

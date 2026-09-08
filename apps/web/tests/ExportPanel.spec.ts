@@ -4,6 +4,30 @@ import { describe, expect, it } from 'vitest'
 import ExportPanel from '../src/components/workspace/ExportPanel.vue'
 
 describe('ExportPanel', () => {
+  it('keeps export choices collapsed until requested without hiding the blocked reason', async () => {
+    const wrapper = mount(ExportPanel, {
+      attachTo: document.body,
+      props: {
+        trackChanges: true,
+        reportDisabled: true,
+        modifiedDisabled: true,
+        recheckDisabled: false,
+        busy: false,
+        blockedReason: '当前文本需要重新检查'
+      }
+    })
+    const toggle = wrapper.get('[data-toggle-export]')
+    expect(toggle.attributes('aria-expanded')).toBe('false')
+    expect(wrapper.get('[data-export-options]').isVisible()).toBe(false)
+    expect(wrapper.get('[role="status"]').isVisible()).toBe(true)
+    await toggle.trigger('click')
+    expect(toggle.attributes('aria-expanded')).toBe('true')
+    expect(wrapper.get('[data-export-options]').isVisible()).toBe(true)
+    await wrapper.get('[data-export-options]').trigger('keydown', { key: 'Escape' })
+    expect(toggle.attributes('aria-expanded')).toBe('false')
+    wrapper.unmount()
+  })
+
   it('emits labelled report, revision export, recheck, and tracked-change actions', async () => {
     const wrapper = mount(ExportPanel, {
       props: {

@@ -215,6 +215,25 @@ def test_recognize_caches_one_engine_per_language(monkeypatch) -> None:
     ]
 
 
+def test_recognize_configures_installed_rapidocr_japanese_model(monkeypatch) -> None:
+    constructor_calls: list[dict[str, object]] = []
+
+    def fake_constructor(*, params: dict[str, object]) -> object:
+        constructor_calls.append(params)
+        return lambda image: _payload(text="日本語")
+
+    fake_module = SimpleNamespace(
+        RapidOCR=fake_constructor,
+        LangRec=SimpleNamespace(CH="ch", EN="en", JAPAN="japan"),
+    )
+    monkeypatch.setattr(importlib, "import_module", lambda name: fake_module)
+
+    result = OcrProvider().recognize(object(), "ja")
+
+    assert [box.text for box in result] == ["日本語"]
+    assert constructor_calls == [{"Rec.lang_type": "japan"}]
+
+
 def test_recognize_normalizes_ndarray_like_provider_output(monkeypatch) -> None:
     class FakeEngine:
         def __call__(self, image: object) -> object:

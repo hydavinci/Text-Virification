@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
-from typing import ParamSpec, Protocol, runtime_checkable
+from typing import Literal, ParamSpec, Protocol, runtime_checkable
 from uuid import UUID, uuid4
 
 from text_verification.domain.documents import DocumentModel, ExportFormat, FileType
@@ -33,6 +33,7 @@ class CheckContext:
     industry_dictionary_ids: tuple[str, ...] = ()
     personal_dictionary: tuple[dict[str, str], ...] = ()
     scenario: Scenario = Scenario.GENERAL
+    enable_extended_rules: bool = False
     enable_security: bool = True
     enable_sensitive: bool = True
     enable_ad_extreme: bool = False
@@ -53,6 +54,7 @@ class CheckContext:
         return cls(
             personal_dictionary=glossary,
             scenario=options.scenario,
+            enable_extended_rules=options.enable_extended_rules,
             enable_security=options.enable_security,
             enable_sensitive=options.enable_sensitive,
             enable_ad_extreme=options.enable_ad_extreme,
@@ -97,6 +99,14 @@ class ProgressAwareParser(Protocol):
 @runtime_checkable
 class OcrDeferrableParser(Protocol):
     def parse_without_ocr(self, source_path: Path) -> DocumentModel: ...
+
+
+@runtime_checkable
+class OcrLanguageConfigurableParser(Protocol):
+    def with_ocr_language(
+        self,
+        language: Literal["zh", "en", "ja"],
+    ) -> Parser: ...
 
 
 @dataclass(frozen=True)

@@ -26,6 +26,7 @@ from text_verification.domain.ports import (
     CheckContext,
     CheckResult,
     OcrDeferrableParser,
+    OcrLanguageConfigurableParser,
     ProgressAwareParser,
     VerificationProgressObserver,
     VerificationProgressStage,
@@ -188,6 +189,8 @@ class VerificationPipeline:
         if source_path is None:
             raise AssertionError("source_path must be set for stored input")
         try:
+            if isinstance(parser, OcrLanguageConfigurableParser):
+                parser = parser.with_ocr_language(command.options.ocr_language)
             if (
                 command.execution_mode is VerificationExecutionMode.SYNCHRONOUS
                 and not self._ocr_in_synchronous_mode

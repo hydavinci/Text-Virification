@@ -1,23 +1,26 @@
 <script setup lang="ts">
-import { toRef } from 'vue'
+import { toRef, watch } from 'vue'
 
 import {
   useSearchReplace,
+  type DocumentSearchState,
   type SearchReplacement
 } from '../../composables/useSearchReplace'
 
 const props = defineProps<{
   text: string
   disabled?: boolean
+  canUndo?: boolean
 }>()
 
 const emit = defineEmits<{
+  'undo-text-edit': []
+  'search-change': [state: DocumentSearchState]
   'replace-text': [
     text: string,
     kind: SearchReplacement['kind'],
     count: number
   ]
-  close: []
 }>()
 
 const search = useSearchReplace({
@@ -26,6 +29,21 @@ const search = useSearchReplace({
     emit('replace-text', nextText, action.kind, action.count)
   }
 })
+
+function navigateSearch(event: KeyboardEvent): void {
+  if (props.disabled || event.isComposing) return
+  event.preventDefault()
+  if (event.shiftKey) search.previous()
+  else search.next()
+}
+
+watch(
+  [() => props.text, search.matches, search.activeMatchIndex],
+  ([text, matches, activeMatchIndex]) => {
+    emit('search-change', { text, matches, activeMatchIndex })
+  },
+  { immediate: true }
+)
 </script>
 
 <template>
@@ -38,6 +56,7 @@ const search = useSearchReplace({
         aria-label="查找内容"
         autocomplete="off"
         :disabled="disabled"
+        @keydown.enter="navigateSearch"
       />
     </label>
     <label>
@@ -105,30 +124,32 @@ const search = useSearchReplace({
       >
         全部替换
       </button>
-      <button
-        type="button"
-        data-action="close-search-replace"
-        @click="emit('close')"
-      >
-        关闭
-      </button>
     </div>
+    <button
+      class="undo-text-edit"
+      type="button"
+      data-action="undo-text-edit"
+      title="撤销上一次替换或已保存的原文编辑"
+      :disabled="disabled || !canUndo"
+      @click="emit('undo-text-edit')"
+    >
+      撤销修改
+    </button>
   </section>
 </template>
 
 <style scoped>
 .search-replace-panel {
-  padding: 9px;
-  display: flex;
+  padding: 12px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   align-items: end;
   gap: 10px;
-  flex-wrap: wrap;
-  border: 1px solid var(--border);
-  border-radius: 12px;
   background: var(--surface);
 }
 
 label {
+  min-width: 0;
   display: grid;
   gap: 4px;
   color: var(--muted);
@@ -137,7 +158,8 @@ label {
 
 input[type='text'],
 input:not([type]) {
-  min-width: 170px;
+  min-width: 0;
+  width: 100%;
   padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: 9px;
@@ -153,7 +175,7 @@ input:not([type]) {
 }
 
 .status {
-  min-width: 112px;
+  min-width: 0;
   margin: 0;
   align-self: center;
   color: var(--muted);
@@ -161,14 +183,19 @@ input:not([type]) {
 }
 
 .actions {
-  display: flex;
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   align-items: center;
   gap: 6px;
-  flex-wrap: wrap;
+}
+
+.undo-text-edit {
+  grid-column: 1 / -1;
 }
 
 button {
-  padding: 7px 11px;
+  padding: 7px 2px;
   border: 1px solid var(--border);
   border-radius: 9px;
   color: var(--text);

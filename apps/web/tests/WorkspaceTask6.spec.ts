@@ -274,6 +274,38 @@ describe('WorkspaceView Task 6 integration', () => {
     document.documentElement.removeAttribute('data-theme')
   })
 
+  it.each(['png', 'jpg'] as const)(
+    'exports restored %s OCR results as editable Word, never as raster edits',
+    async (fileType) => {
+      seedSession({
+        ...result, file_type: fileType,
+        source_name: `scan.${fileType}`, filename: `scan.${fileType}`
+      })
+      const exportJob = vi.fn()
+      const wrapper = mountWorkspace(verificationApi({ exportJob }))
+      await flushPromises()
+      await wrapper.get('[data-toggle-export]').trigger('click')
+      await wrapper.get('[data-action="export-modified"]').trigger('click')
+      await flushPromises()
+      expect(exportJob).toHaveBeenCalledWith(
+        result.document_id, 'docx_reconstruction', null, true, expect.any(Function)
+      )
+      expect(wrapper.text()).toContain('图片将导出为可编辑 DOCX')
+      wrapper.unmount()
+    }
+  )
+
+  it('restores legacy compact sessions into paragraph view with sidebar search visible', async () => {
+    seedSession()
+    const wrapper = mountWorkspace(verificationApi())
+    await flushPromises()
+
+    expect(wrapper.get('[data-view-mode]').attributes('data-view-mode')).toBe('sentence')
+    expect(wrapper.find('.issues-panel [data-search-input]').exists()).toBe(true)
+    expect(wrapper.find('[data-action="toggle-search-replace"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it('does not synthesize compatibility file identity for canonical job results', () => {
     const {
       file_id: _fileId,
@@ -285,6 +317,67 @@ describe('WorkspaceView Task 6 integration', () => {
 
     expect(snapshot?.file_id).toBeNull()
     expect(snapshot?.file_ext).toBeNull()
+  })
+
+  it('keeps edits and undo history restorable after a failed file recheck', async () => {
+    seedSession()
+    const api = verificationApi({
+      recheckJob: vi.fn().mockRejectedValue(
+        new Error('Secure recheck provenance is not configured.')
+      )
+    })
+    const wrapper = mountWorkspace(api)
+    await flushPromises()
+    const editor = wrapper.getComponent(EditPreview)
+    await editor.get('[data-action="start-edit"]').trigger('click')
+    await editor.get('[data-edit-input]').setValue('手工修改文本')
+    await editor.get('[data-action="save-edit"]').trigger('click')
+    await wrapper.get('[data-action="recheck"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-review-execution-error]').text()).toContain('not configured')
+    expect(wrapper.find('[data-session-warning]').exists()).toBe(false)
+    const restored = useVerificationWorkspace()
+    const session = useWorkspaceSession(window.sessionStorage, restored).restore()
+    expect(session?.jobId).toBe(result.document_id)
+    expect(restored.modifiedText.value).toBe('手工修改文本')
+    expect(restored.canUndoTextEdit.value).toBe(true)
+    wrapper.unmount()
+
+    const reloaded = mountWorkspace(api)
+    await flushPromises()
+    await reloaded.get('[data-action="undo-text-edit"]').trigger('click')
+    await flushPromises()
+    expect(reloaded.getComponent(EditPreview).props('text')).toBe('帐号测试')
+    expect(reloaded.find('[data-session-warning]').exists()).toBe(false)
+    reloaded.unmount()
+  })
+
+  it('allows retrying a failed file recheck without reloading the workspace', async () => {
+    seedSession()
+    const checked = directResult(result.text, {
+      documentId: '77777777-7777-4777-8777-777777777777',
+      runId: '88888888-8888-4888-8888-888888888888',
+      sourceVersion: `sha256:${'b'.repeat(64)}`
+    })
+    const recheckJob = vi.fn()
+      .mockRejectedValueOnce(new Error('Temporary recheck failure'))
+      .mockResolvedValueOnce({ result: checked, grant: 'server-issued-grant' })
+    const wrapper = mountWorkspace(verificationApi({ recheckJob }))
+    await flushPromises()
+    await wrapper.get('[data-action="recheck"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-action="recheck"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-review-execution-error]').exists()).toBe(false)
+    expect(wrapper.find('[data-session-warning]').exists()).toBe(false)
+    const restored = useVerificationWorkspace()
+    const session = useWorkspaceSession(window.sessionStorage, restored).restore()
+    expect(restored.result.value?.document_id).toBe(checked.document_id)
+    expect(session?.jobId).toBeNull()
+    expect(session?.exportAuthority?.jobId).toBe(result.document_id)
+    wrapper.unmount()
   })
 
   it('persists the draft chain before revision-keyed reconstruction export', async () => {
@@ -454,7 +547,9 @@ describe('WorkspaceView Task 6 integration', () => {
     ['txt', 'original_format'],
     ['rtf', 'original_format'],
     ['md', 'original_format'],
-    ['csv', 'original_format']
+    ['csv', 'original_format'],
+    ['png', 'docx_reconstruction'],
+    ['jpg', 'docx_reconstruction']
   ] as const)(
     'retains %s job export authority after manual text recheck',
     async (fileType, expectedFormat) => {
@@ -989,6 +1084,7 @@ describe('WorkspaceView Task 6 integration', () => {
       verificationApi({ persistRevision, exportJob: vi.fn() })
     )
     await flushPromises()
+    await wrapper.get('[data-issue-role="list"]').trigger('click')
     await wrapper.get('[data-action="accept-batch"]').trigger('click')
     await wrapper.get('[data-action="export-modified"]').trigger('click')
     await flushPromises()
@@ -998,7 +1094,7 @@ describe('WorkspaceView Task 6 integration', () => {
         .disabled
     ).toBe(true)
     expect(
-      wrapper.get<HTMLButtonElement>('[data-action="toggle-search-replace"]')
+      wrapper.get<HTMLInputElement>('[data-search-input]')
         .element.disabled
     ).toBe(true)
     expect(
@@ -1113,10 +1209,9 @@ describe('WorkspaceView Task 6 integration', () => {
     const wrapper = mountWorkspace(verificationApi())
     await flushPromises()
 
-    await wrapper.get('[aria-pressed="false"].btn.small').trigger('click')
     await wrapper.get('.compact-tabs button:nth-child(2)').trigger('click')
     await wrapper
-      .get(`[data-issue-id="${issue.issue_id}"][data-issue-role="source"]`)
+      .get('.source-segment.highlighted')
       .trigger('click')
     await wrapper.get<HTMLInputElement>('[data-track-changes]').setValue(false)
     await flushPromises()

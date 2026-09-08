@@ -7,7 +7,7 @@ import {
 } from '../../validation/verificationLimits'
 
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024
-const ACCEPTED_EXTENSIONS = ['docx', 'doc', 'pdf', 'txt', 'rtf', 'md', 'csv']
+const ACCEPTED_EXTENSIONS = ['docx', 'doc', 'pdf', 'txt', 'rtf', 'md', 'csv', 'png', 'jpg', 'jpeg']
 
 const props = withDefaults(defineProps<{
   busy?: boolean
@@ -30,6 +30,7 @@ const draft = ref(props.text)
 const validationError = ref<string | null>(null)
 const isDragging = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
+const selectedFile = ref<File | null>(null)
 
 const visibleError = computed(
   () => validationError.value ?? props.serverError ?? null
@@ -81,7 +82,7 @@ function handleFileChange(event: Event): void {
   const input = event.target as HTMLInputElement
   const file = input.files?.[0]
   if (file) {
-    validateAndSubmitFile(file)
+    selectFile(file)
   }
   input.value = ''
 }
@@ -93,15 +94,19 @@ function handleDrop(event: DragEvent): void {
   }
   const file = event.dataTransfer?.files[0]
   if (file) {
-    validateAndSubmitFile(file)
+    selectFile(file)
   }
 }
 
-function validateAndSubmitFile(file: File): void {
+function selectFile(file: File): void {
+  if (props.busy) {
+    return
+  }
+  selectedFile.value = null
   const extension = file.name.split('.').pop()?.toLowerCase()
   if (!extension || !ACCEPTED_EXTENSIONS.includes(extension)) {
     validationError.value =
-      'Please upload a DOCX、PDF 或 TXT file，或 DOC、RTF、MD、CSV 文件.'
+      '请选择 DOCX、DOC、PDF、TXT、RTF、MD、CSV、PNG 或 JPEG 文件。'
     return
   }
   if (file.size > MAX_UPLOAD_BYTES) {
@@ -109,7 +114,24 @@ function validateAndSubmitFile(file: File): void {
     return
   }
   validationError.value = null
-  emit('submit-file', file)
+  selectedFile.value = file
+}
+
+function submitSource(): void {
+  if (props.busy) return
+  if (mode.value === 'text') {
+    submitText()
+  } else if (selectedFile.value) {
+    emit('submit-file', selectedFile.value)
+  } else {
+    validationError.value = '请先选择需要检查的文件。'
+  }
+}
+
+function removeFile(): void {
+  if (props.busy) return
+  selectedFile.value = null
+  validationError.value = null
 }
 
 function openFilePicker(): void {
@@ -134,6 +156,7 @@ function handleDropzoneKeydown(event: KeyboardEvent): void {
         :class="{ active: mode === 'file' }"
         :aria-pressed="mode === 'file'"
         type="button"
+        :disabled="busy"
         @click="mode = 'file'"
       >
         上传文件
@@ -143,6 +166,7 @@ function handleDropzoneKeydown(event: KeyboardEvent): void {
         :class="{ active: mode === 'text' }"
         :aria-pressed="mode === 'text'"
         type="button"
+        :disabled="busy"
         @click="mode = 'text'"
       >
         粘贴文本
@@ -165,27 +189,41 @@ function handleDropzoneKeydown(event: KeyboardEvent): void {
       @dragleave.prevent="isDragging = false"
       @drop.prevent="handleDrop"
     >
-      <span class="upload-icon" aria-hidden="true">↑</span>
-      <strong>{{ busy ? '正在检查文档…' : '将文件拖到此处，或点击选择文件' }}</strong>
-      <span>支持 DOCX、DOC、PDF、TXT、RTF、MD、CSV · 最大 25 MiB</span>
+      <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+        <path d="M12 16V4m-4 4 4-4 4 4M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3" />
+      </svg>
+      <strong>{{ selectedFile ? '文件已就绪，可点击更换' : '拖放文档到这里' }}</strong>
+      <span class="choose-file">{{ selectedFile ? '更换文件' : '或点击选择文件' }}</span>
+      <small>DOCX、DOC、PDF、TXT、RTF、MD、CSV、PNG、JPEG · 最大 25 MiB</small>
     </div>
     <input
       v-if="mode === 'file'"
       ref="fileInput"
       :disabled="busy"
       type="file"
-      accept=".docx,.doc,.pdf,.txt,.rtf,.md,.csv"
+      accept=".docx,.doc,.pdf,.txt,.rtf,.md,.csv,.png,.jpg,.jpeg"
       hidden
       tabindex="-1"
       aria-hidden="true"
       @change="handleFileChange"
     />
 
-    <div v-else class="text-mode">
+    <div v-if="mode === 'file' && selectedFile" class="selected-file" data-selected-file>
+      <div>
+        <strong>{{ selectedFile.name }}</strong>
+        <small>{{ (selectedFile.size / 1024).toFixed(1) }} KB · 等待开始检查</small>
+      </div>
+      <button type="button" data-remove-file :disabled="busy" @click="removeFile">
+        移除
+      </button>
+    </div>
+
+    <div v-if="mode === 'text'" class="text-mode">
       <label for="source-text">待检查文本</label>
       <textarea
         id="source-text"
         :value="draft"
+        :disabled="busy"
         placeholder="在此粘贴需要检查的文本内容…"
         @input="updateDraft"
         @keydown="handleTextKeydown"
@@ -193,18 +231,23 @@ function handleDropzoneKeydown(event: KeyboardEvent): void {
       <div class="text-footer">
         <span>{{ draftCodePoints.toLocaleString() }} 字符</span>
         <span>Ctrl/⌘ + Enter 快速提交</span>
-        <button
-          class="btn primary"
-          :disabled="busy"
-          type="button"
-          @click="submitText"
-        >
-          开始检查
-        </button>
       </div>
     </div>
 
     <p v-if="visibleError" role="alert">{{ visibleError }}</p>
+    <slot name="settings" />
+    <div class="submit-row">
+      <button
+        class="btn primary"
+        data-submit-source
+        :disabled="busy"
+        type="button"
+        @click="submitSource"
+      >
+        {{ busy ? '正在检查…' : '开始检查' }}
+        <span v-if="!busy" aria-hidden="true">→</span>
+      </button>
+    </div>
   </section>
 </template>
 
@@ -239,27 +282,27 @@ function handleDropzoneKeydown(event: KeyboardEvent): void {
   font-weight: 700;
   cursor: pointer;
 }
-.btn:disabled {
+.btn:disabled, button:disabled {
   opacity: .55;
-  cursor: wait;
+  cursor: not-allowed;
 }
 .btn.primary {
-  color: white;
-  background: linear-gradient(135deg, var(--primary), var(--primary-2));
-  box-shadow: 0 7px 18px rgba(37, 99, 235, .2);
+  color: var(--on-primary);
+  background: var(--primary);
 }
 .dropzone {
-  min-height: 280px;
-  padding: 34px;
+  min-height: 220px;
+  padding: 24px;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 10px;
-  border: 1.5px dashed #94a3b8;
-  border-radius: 16px;
-  color: #64748b;
-  background: color-mix(in srgb, #eff6ff 70%, transparent);
+  border: 1px dashed var(--border-strong);
+  border-radius: 10px;
+  color: var(--muted);
+  background: var(--surface-2);
+  text-align: center;
   cursor: pointer;
   transition: .2s;
 }
@@ -271,25 +314,29 @@ function handleDropzoneKeydown(event: KeyboardEvent): void {
 }
 .dropzone.dragging {
   border-style: solid;
-  border-color: #06b6d4;
-  color: #0369a1;
-  transform: translateY(-2px);
+  border-color: var(--primary);
+  color: var(--primary);
 }
 .dropzone.busy {
   opacity: .6;
   cursor: wait;
 }
 .upload-icon {
-  width: 56px;
-  height: 56px;
-  display: grid;
-  place-items: center;
-  border-radius: 18px;
-  color: white;
-  background: linear-gradient(135deg, #2563eb, #06b6d4);
-  font-size: 30px;
-  box-shadow: 0 10px 22px rgba(37, 99, 235, .22);
+  width: 32px;
+  height: 32px;
+  margin-bottom: 4px;
+  color: var(--primary);
 }
+.dropzone strong { color: var(--text); font-size: 15px; font-weight: 500; }
+.dropzone small { margin-top: 8px; font-size: 11px; line-height: 1.7; }
+.choose-file { color: var(--primary); font-size: 13px; }
+.selected-file { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; }
+.selected-file > div { min-width: 0; }
+.selected-file strong { display: block; overflow-wrap: anywhere; font-size: 13px; font-weight: 500; }
+.selected-file small { display: block; color: var(--muted); margin-top: 4px; font-size: 11px; }
+.selected-file button { flex: 0 0 auto; border: 0; padding: 8px; color: var(--muted); background: transparent; cursor: pointer; }
+.submit-row { display: flex; justify-content: flex-end; margin-top: 20px; }
+.submit-row .btn { min-height: 42px; min-width: 138px; display: flex; align-items: center; justify-content: center; gap: 20px; font-size: 13px; font-weight: 500; border-radius: 8px; }
 .text-mode > label {
   display: block;
   margin-bottom: 8px;
@@ -298,11 +345,11 @@ function handleDropzoneKeydown(event: KeyboardEvent): void {
 }
 .text-mode textarea {
   width: 100%;
-  min-height: 280px;
+  min-height: 220px;
   padding: 18px;
   resize: vertical;
   border: 1px solid var(--border);
-  border-radius: 15px;
+  border-radius: 10px;
   color: var(--text);
   background: var(--surface-2);
   outline: none;

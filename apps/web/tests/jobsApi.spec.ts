@@ -20,7 +20,9 @@ const ALL_JOB_FILE_TYPES = [
   'txt',
   'rtf',
   'md',
-  'csv'
+  'csv',
+  'png',
+  'jpg'
 ] as const
 const EVENT_SOURCE_CONNECTING = 0
 const EVENT_SOURCE_CLOSED = 2
@@ -1036,7 +1038,7 @@ describe('createJobsApi', () => {
 
   it('exports the exact backend file-format and progress-stage unions', () => {
     const allFormats: readonly JobRead['file_type'][] = JOB_FILE_TYPE_VALUES
-    expect(allFormats).toEqual(['docx', 'doc', 'pdf', 'txt', 'rtf', 'md', 'csv'])
+    expect(allFormats).toEqual(['docx', 'doc', 'pdf', 'txt', 'rtf', 'md', 'csv', 'png', 'jpg'])
     expect(JOB_PROGRESS_STAGE_VALUES).toEqual([
       'queued',
       'upload_validated',

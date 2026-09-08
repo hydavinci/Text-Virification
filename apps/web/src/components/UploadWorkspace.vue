@@ -2,7 +2,7 @@
 import { computed, ref } from 'vue'
 
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024
-const ACCEPTED_EXTENSIONS = ['docx', 'doc', 'pdf', 'txt', 'rtf', 'md', 'csv']
+const ACCEPTED_EXTENSIONS = ['docx', 'doc', 'pdf', 'txt', 'rtf', 'md', 'csv', 'png', 'jpg', 'jpeg']
 
 const props = defineProps<{
   serverError?: string | null
@@ -43,7 +43,7 @@ function validateAndEmit(file: File) {
   const extension = file.name.split('.').pop()?.toLowerCase()
 
   if (!extension || !ACCEPTED_EXTENSIONS.includes(extension)) {
-    validationError.value = 'Please upload a DOCX、PDF 或 TXT file，或 DOC、RTF、MD、CSV 文件.'
+    validationError.value = '请选择 DOCX、DOC、PDF、TXT、RTF、MD、CSV、PNG 或 JPEG 文件。'
     return
   }
 
@@ -69,12 +69,12 @@ function validateAndEmit(file: File) {
     >
       <span class="upload-icon">↑</span>
       <strong>{{ busy ? '正在检查文档…' : '将文件拖到此处，或点击选择文件' }}</strong>
-      <span>支持 DOCX、DOC、PDF、TXT、RTF、MD、CSV · 最大 25 MiB</span>
+      <span>支持 DOCX、DOC、PDF、TXT、RTF、MD、CSV、PNG、JPEG · 最大 25 MiB</span>
       <span class="sr-only">Select a source document</span>
       <input
         :disabled="busy"
         type="file"
-        accept=".docx,.doc,.pdf,.txt,.rtf,.md,.csv"
+        accept=".docx,.doc,.pdf,.txt,.rtf,.md,.csv,.png,.jpg,.jpeg"
         @change="handleFileChange"
       />
     </label>

@@ -21,7 +21,9 @@ export const JOB_FILE_TYPE_VALUES = [
   'txt',
   'rtf',
   'md',
-  'csv'
+  'csv',
+  'png',
+  'jpg'
 ] as const
 
 export type JobFileType = (typeof JOB_FILE_TYPE_VALUES)[number]

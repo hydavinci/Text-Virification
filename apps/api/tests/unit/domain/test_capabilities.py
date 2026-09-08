@@ -5,7 +5,7 @@ from text_verification.domain.capabilities import (
 from text_verification.domain.documents import FileType
 
 
-def test_default_manifest_declares_seven_formats() -> None:
+def test_default_manifest_declares_image_formats_for_async_jobs_only() -> None:
     manifest = default_capability_manifest()
 
     assert [item.file_type for item in manifest.formats] == [
@@ -16,8 +16,18 @@ def test_default_manifest_declares_seven_formats() -> None:
         FileType.RTF,
         FileType.MARKDOWN,
         FileType.CSV,
+        FileType.PNG,
+        FileType.JPG,
     ]
     assert manifest.for_type(FileType.PDF).supports_ocr is True
+    assert manifest.for_type(FileType.PNG).extensions == (".png",)
+    assert manifest.for_type(FileType.JPG).extensions == (".jpg", ".jpeg")
+    assert manifest.for_type(FileType.PNG).profiles == (
+        CapabilityProfile.ASYNCHRONOUS_JOB,
+    )
+    assert manifest.for_type(FileType.JPG).profiles == (
+        CapabilityProfile.ASYNCHRONOUS_JOB,
+    )
 
 
 def test_manifest_declares_distinct_sync_and_async_format_profiles() -> None:
@@ -36,6 +46,8 @@ def test_manifest_declares_distinct_sync_and_async_format_profiles() -> None:
         FileType.DOCX,
         FileType.DOC,
         FileType.PDF,
+        FileType.PNG,
+        FileType.JPG,
         FileType.TXT,
         FileType.RTF,
         FileType.MARKDOWN,

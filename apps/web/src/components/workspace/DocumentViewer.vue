@@ -7,6 +7,9 @@ import type {
   VerificationResult
 } from '../../types/verification'
 import { MAX_VERIFICATION_ISSUES } from '../../validation/verificationLimits'
+import type { SearchMatch } from '../../composables/useSearchReplace'
+import type { DocumentIssue } from '../../utils/documentPresentation'
+import { revealWithinPane } from '../../utils/revealWithinPane'
 
 type DocumentViewMode = 'sentence' | 'continuous'
 
@@ -23,6 +26,7 @@ interface StructuralSourceSegment {
   start: number
   text: string
   issueCount: number
+  searchMatchIndex: number | null
   markers: readonly StructuralSourceMarker[]
 }
 
@@ -44,7 +48,7 @@ interface IndexedText {
 }
 
 interface PreparedIssue {
-  issue: VerificationIssue
+  issue: DocumentIssue
   issueId: string
   start: number
   end: number
@@ -63,14 +67,20 @@ interface IssueStateEvent {
 const props = withDefaults(
   defineProps<{
     result: VerificationResult
-    issues?: readonly VerificationIssue[]
+    text?: string
+    issues?: readonly DocumentIssue[]
     issueStates?: Readonly<Record<string, IssueState>>
     selectedIssueId: string | null
+    revealKey?: string
     mode?: DocumentViewMode
+    searchMatches?: readonly SearchMatch[]
+    activeSearchMatchIndex?: number
   }>(),
   {
     issues: undefined,
     issueStates: () => ({}),
+    searchMatches: () => [],
+    activeSearchMatchIndex: -1,
     mode: 'sentence'
   }
 )
@@ -107,7 +117,7 @@ function indexText(text: string): IndexedText {
 function validatedIssues(
   text: string,
   indexedText: IndexedText,
-  sourceIssues: readonly VerificationIssue[]
+  sourceIssues: readonly DocumentIssue[]
 ): readonly PreparedIssue[] {
   if (sourceIssues.length > MAX_VERIFICATION_ISSUES) {
     return []
@@ -122,7 +132,7 @@ function validatedIssues(
       !Number.isInteger(start) ||
       !Number.isInteger(end) ||
       start < 0 ||
-      end <= start ||
+      end < start ||
       end > indexedText.characters.length ||
       utf16Start === undefined ||
       utf16End === undefined ||
@@ -136,9 +146,10 @@ function validatedIssues(
 }
 
 const sourceStructure = computed<SourceStructure>(() => {
-  const indexedText = indexText(props.result.text)
+  const text = props.text ?? props.result.text
+  const indexedText = indexText(text)
   const issues = validatedIssues(
-    props.result.text,
+    text,
     indexedText,
     props.issues ?? props.result.issues
   )
@@ -160,28 +171,50 @@ const sourceStructure = computed<SourceStructure>(() => {
     const starts = startingAt.get(prepared.start) ?? []
     starts.push(prepared)
     startingAt.set(prepared.start, starts)
-    const ends = endingAt.get(prepared.end) ?? []
-    ends.push(prepared)
-    endingAt.set(prepared.end, ends)
+    if (prepared.end > prepared.start) {
+      const ends = endingAt.get(prepared.end) ?? []
+      ends.push(prepared)
+      endingAt.set(prepared.end, ends)
+    }
+  }
+  const matches = props.searchMatches
+    .map((match, index) => ({ ...match, index }))
+    .filter(({ start, end }) =>
+      Number.isInteger(start) && Number.isInteger(end) &&
+      start >= 0 && end > start && end <= indexedText.characters.length
+    )
+  for (const match of matches) {
+    boundaries.add(match.start)
+    boundaries.add(match.end)
   }
 
   const orderedBoundaries = [...boundaries].sort((left, right) => left - right)
   let activeCount = 0
+  let matchIndex = 0
   const collected: StructuralSourceSegment[] = []
-  for (let index = 0; index < orderedBoundaries.length - 1; index += 1) {
+  for (let index = 0; index < orderedBoundaries.length; index += 1) {
     const start = orderedBoundaries[index]
-    const end = orderedBoundaries[index + 1]
+    const end = orderedBoundaries[index + 1] ?? start
     activeCount -= endingAt.get(start)?.length ?? 0
     const startingIssues = startingAt.get(start) ?? []
-    activeCount += startingIssues.length
+    if (start === end && startingIssues.length === 0) {
+      continue
+    }
+    activeCount += startingIssues.filter((issue) => issue.end > issue.start).length
+    while (matches[matchIndex] && matches[matchIndex].end <= start) {
+      matchIndex += 1
+    }
+    const match = matches[matchIndex]
     collected.push({
       start,
       text: indexedText.characters.slice(start, end).join(''),
       issueCount: activeCount,
+      searchMatchIndex: start < end && match && match.start <= start
+        ? match.index : null,
       markers: startingIssues
         .map(({ issue, issueId }) => ({
           issueId,
-          label: `${issue.message}：${issue.original}`,
+          label: `${issue.message}：${issue.sourceOriginal ?? issue.original}`,
           severity: issue.severity
         }))
     })
@@ -219,6 +252,9 @@ const segments = computed<readonly SourceSegment[]>(() => {
   const startingAt = new Map<number, IssueStateEvent[]>()
   const endingAt = new Map<number, IssueStateEvent[]>()
   for (const issue of structure.issues) {
+    if (issue.start === issue.end) {
+      continue
+    }
     const event = {
       state: props.issueStates[issue.issueId] ?? 'pending',
       selected: props.selectedIssueId === issue.issueId
@@ -263,8 +299,19 @@ const lines = computed<readonly SourceLine[]>(() => {
   }))
 })
 
-function activateIssue(issueId: string): void {
-  emit('select-issue', issueId)
+function activateSegment(segment: SourceSegment, fromPointer = false): void {
+  if (fromPointer && window.getSelection()?.isCollapsed === false) {
+    return
+  }
+  const issues = sourceStructure.value.issues.filter(
+    (issue) => issue.start <= segment.start && issue.end > segment.start
+  )
+  if (issues.length > 0) {
+    const selectedIndex = issues.findIndex(
+      (issue) => issue.issueId === props.selectedIssueId
+    )
+    emit('select-issue', issues[(selectedIndex + 1) % issues.length].issueId)
+  }
 }
 
 async function scrollSelectedSource(issueId: string | null): Promise<void> {
@@ -282,23 +329,33 @@ async function scrollSelectedSource(issueId: string | null): Promise<void> {
       element.dataset.issueId === issueId &&
       element.dataset.issueRole === 'source'
   )
-  if (control && typeof control.scrollIntoView === 'function') {
-    control.scrollIntoView({
-      behavior:
-        typeof window.matchMedia === 'function' &&
-        window.matchMedia('(prefers-reduced-motion: reduce)').matches
-          ? 'auto'
-          : 'smooth',
-      block: 'center',
-      inline: 'nearest'
-    })
+  if (control) {
+    revealWithinPane(control, root.value?.closest<HTMLElement>('.document-content') ?? null)
   }
 }
 
 watch(
-  () => props.selectedIssueId,
-  (issueId) => {
+  () => [props.selectedIssueId, props.revealKey, props.mode] as const,
+  ([issueId]) => {
     void scrollSelectedSource(issueId)
+  },
+  { flush: 'post', immediate: true }
+)
+
+watch(
+  () => [props.searchMatches, props.activeSearchMatchIndex, props.revealKey, props.mode] as const,
+  async ([matches, index]) => {
+    if (!matches[index]) {
+      return
+    }
+    await nextTick()
+    if (matches !== props.searchMatches || index !== props.activeSearchMatchIndex) {
+      return
+    }
+    const match = root.value?.querySelector<HTMLElement>(`[data-search-match="${index}"]`)
+    if (match) {
+      revealWithinPane(match, root.value?.closest<HTMLElement>('.document-content') ?? null)
+    }
   },
   { flush: 'post', immediate: true }
 )
@@ -307,31 +364,23 @@ watch(
 <template>
   <div ref="root" class="document-viewer" :data-view-mode="mode">
     <template v-if="mode === 'sentence'">
-      <ol class="line-numbers" aria-hidden="true">
-        <li
-          v-for="line in lines"
-          :key="line.number"
-          data-line-number
-        >
-          {{ line.number }}
-        </li>
-      </ol>
-      <div class="source-lines" data-source-text aria-label="源文本">
+      <article class="source-lines" data-source-text aria-label="文档正文">
         <div
           v-for="line in lines"
           :key="line.number"
           class="source-line"
           data-source-line
+          data-source-paragraph
         >
           <template
             v-for="segment in line.segments"
             :key="segment.start"
           >
-            <button
+            <span
               v-for="marker in segment.markers"
               :key="marker.issueId"
-              type="button"
-              class="issue-marker"
+              class="issue-anchor"
+              aria-hidden="true"
               :class="[
                 `severity-${marker.severity}`,
                 marker.state,
@@ -343,10 +392,7 @@ watch(
               "
               :data-issue-id="marker.issueId"
               data-issue-role="source"
-              @click="activateIssue(marker.issueId)"
-              @keydown.enter.prevent="activateIssue(marker.issueId)"
-              @keydown.space.prevent="activateIssue(marker.issueId)"
-            ></button>
+            ></span>
             <span
               :class="[
                 'source-segment',
@@ -355,24 +401,36 @@ watch(
                   overlapping: segment.issueCount > 1,
                   accepted: segment.hasAccepted,
                   rejected: segment.allRejected,
-                  selected: segment.selected
+                  selected: segment.selected,
+                  'source-break': segment.text === '\n',
+                  'search-match': segment.searchMatchIndex !== null,
+                  'active-search-match': segment.searchMatchIndex !== null &&
+                    segment.searchMatchIndex === activeSearchMatchIndex
                 }
               ]"
               :data-issue-count="segment.issueCount || undefined"
+              :data-search-match="segment.searchMatchIndex ?? undefined"
+              :role="segment.issueCount > 0 ? 'button' : undefined"
+              :tabindex="segment.issueCount > 0 ? 0 : undefined"
+              :aria-current="segment.selected ? 'true' : undefined"
+              :aria-label="segment.issueCount > 1 ? `此处有 ${segment.issueCount} 个问题，点击切换` : undefined"
+              @click="activateSegment(segment, true)"
+              @keydown.enter.prevent="activateSegment(segment)"
+              @keydown.space.prevent="activateSegment(segment)"
             >{{ segment.text }}</span>
           </template>
         </div>
-      </div>
+      </article>
     </template>
 
-    <pre v-else class="continuous-source" data-source-text aria-label="源文本"><template
+    <pre v-else class="continuous-source" data-source-text aria-label="文档正文"><template
       v-for="segment in segments"
       :key="segment.start"
-    ><button
+    ><span
       v-for="marker in segment.markers"
       :key="marker.issueId"
-      type="button"
-      class="issue-marker"
+      class="issue-anchor"
+      aria-hidden="true"
       :class="[
         `severity-${marker.severity}`,
         marker.state,
@@ -382,10 +440,7 @@ watch(
       :aria-current="selectedIssueId === marker.issueId ? 'true' : undefined"
       :data-issue-id="marker.issueId"
       data-issue-role="source"
-      @click="activateIssue(marker.issueId)"
-      @keydown.enter.prevent="activateIssue(marker.issueId)"
-      @keydown.space.prevent="activateIssue(marker.issueId)"
-    ></button><span
+    ></span><span
       :class="[
         'source-segment',
         {
@@ -393,62 +448,75 @@ watch(
           overlapping: segment.issueCount > 1,
           accepted: segment.hasAccepted,
           rejected: segment.allRejected,
-          selected: segment.selected
+          selected: segment.selected,
+          'search-match': segment.searchMatchIndex !== null,
+          'active-search-match': segment.searchMatchIndex !== null &&
+            segment.searchMatchIndex === activeSearchMatchIndex
         }
       ]"
       :data-issue-count="segment.issueCount || undefined"
+      :data-search-match="segment.searchMatchIndex ?? undefined"
+      :role="segment.issueCount > 0 ? 'button' : undefined"
+      :tabindex="segment.issueCount > 0 ? 0 : undefined"
+      :aria-current="segment.selected ? 'true' : undefined"
+      :aria-label="segment.issueCount > 1 ? `此处有 ${segment.issueCount} 个问题，点击切换` : undefined"
+      @click="activateSegment(segment, true)"
+      @keydown.enter.prevent="activateSegment(segment)"
+      @keydown.space.prevent="activateSegment(segment)"
     >{{ segment.text }}</span></template></pre>
   </div>
 </template>
 
 <style scoped>
 .document-viewer {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  position: relative;
   min-height: 100%;
   color: var(--text);
   background: var(--surface);
-  font: 15px/2 ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: inherit;
+  font-size: 16px;
+  line-height: 1.9;
 }
 
-.line-numbers {
-  margin: 0;
-  padding: 24px 12px 24px 18px;
-  list-style: none;
-  color: var(--muted);
-  background: var(--surface-2);
-  text-align: right;
-  user-select: none;
-}
-
-.line-numbers li {
-  min-height: 2em;
-}
-
-.source-lines {
+.source-lines,
+.continuous-source {
+  width: 100%;
+  max-width: 52rem;
   min-width: 0;
-  padding: 24px 28px 24px 16px;
+  margin: 0 auto;
+  padding: 32px clamp(20px, 3vw, 40px);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
 .source-line {
-  display: contents;
+  min-height: 1.9em;
+}
+
+.source-line + .source-line {
+  margin-top: 0.85em;
+}
+
+/* Block layout provides the line break; keep the original newline in the text. */
+.source-break {
+  white-space: normal;
 }
 
 .continuous-source {
-  grid-column: 1 / -1;
   min-height: 100%;
-  margin: 0;
-  padding: 24px 28px;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
   font: inherit;
 }
 
 .source-segment.highlighted {
   border-radius: 3px;
+  color: #713f12;
   background: #fef3c7;
+  cursor: pointer;
+}
+
+.source-segment:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 1px;
 }
 
 .source-segment.overlapping {
@@ -457,12 +525,14 @@ watch(
 }
 
 .source-segment.selected {
+  color: #1e3a8a;
   background: #bfdbfe;
   outline: 2px solid #2563eb;
   outline-offset: 1px;
 }
 
 .source-segment.accepted {
+  color: #14532d;
   background: #bbf7d0;
 }
 
@@ -471,44 +541,25 @@ watch(
   text-decoration: line-through;
 }
 
-.issue-marker {
-  width: 0.85rem;
-  height: 0.85rem;
-  margin: 0 0.12rem;
-  padding: 0;
-  vertical-align: 0.12rem;
-  border: 2px solid var(--surface);
-  border-radius: 999px;
-  background: #f59e0b;
-  box-shadow: 0 0 0 1px #b45309;
-  cursor: pointer;
+.source-segment.search-match {
+  color: #713f12;
+  background: #fef08a;
+  opacity: 1;
+  text-decoration: none;
 }
 
-.issue-marker.severity-error {
-  background: #ef4444;
-  box-shadow: 0 0 0 1px #b91c1c;
+.source-segment.active-search-match {
+  color: #431407;
+  background: #fdba74;
+  outline: 2px solid #ea580c;
+  outline-offset: 1px;
+  border-radius: 2px;
 }
 
-.issue-marker.severity-info {
-  background: #3b82f6;
-  box-shadow: 0 0 0 1px #1d4ed8;
-}
-
-.issue-marker.selected {
-  box-shadow: 0 0 0 3px #2563eb;
-}
-
-.issue-marker.accepted {
-  background: #16a34a;
-  box-shadow: 0 0 0 1px #15803d;
-}
-
-.issue-marker.rejected {
-  opacity: 0.52;
-}
-
-.issue-marker:focus-visible {
-  outline: 3px solid #2563eb;
-  outline-offset: 3px;
+.issue-anchor {
+  position: absolute;
+  width: 0;
+  height: 1em;
+  pointer-events: none;
 }
 </style>

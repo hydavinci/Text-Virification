@@ -44,7 +44,8 @@ type TerminologyState = Pick<AnalyzeOptions, 'glossary' | 'bannedWords'> &
   Partial<
     Pick<
       AnalyzeOptions,
-      'scenario' | 'enableSecurity' | 'enableSensitive' | 'enableAdExtreme'
+      'scenario' | 'enableSecurity' | 'enableSensitive' | 'enableAdExtreme' |
+      'ocrLanguage' | 'enableExtendedRules'
     >
   >
 
@@ -85,6 +86,8 @@ export function verificationOptionsJsonBytes(options: AnalyzeOptions): number {
       enable_security: options.enableSecurity,
       enable_sensitive: options.enableSensitive,
       enable_ad_extreme: options.enableAdExtreme,
+      ocr_language: options.ocrLanguage ?? 'zh',
+      enable_extended_rules: options.enableExtendedRules ?? false,
       custom_glossary: options.glossary.map(({ original, standard }) => ({
         original,
         standard
@@ -584,6 +587,8 @@ export function useTerminology(initial: TerminologyState = {
     enableSecurity: initial.enableSecurity ?? true,
     enableSensitive: initial.enableSensitive ?? true,
     enableAdExtreme: initial.enableAdExtreme ?? false,
+    ocrLanguage: initial.ocrLanguage ?? 'zh',
+    enableExtendedRules: initial.enableExtendedRules ?? false,
     glossary: initial.glossary.map((term) => ({ ...term })),
     bannedWords: [...initial.bannedWords]
   }
@@ -591,6 +596,8 @@ export function useTerminology(initial: TerminologyState = {
   const enableSecurity = ref(initialOptions.enableSecurity)
   const enableSensitive = ref(initialOptions.enableSensitive)
   const enableAdExtreme = ref(initialOptions.enableAdExtreme)
+  const ocrLanguage = ref(initialOptions.ocrLanguage)
+  const enableExtendedRules = ref(initialOptions.enableExtendedRules)
   const glossary = ref<GlossaryTerm[]>([])
   const bannedWords = ref<string[]>([])
 
@@ -603,6 +610,8 @@ export function useTerminology(initial: TerminologyState = {
       enableSecurity: enableSecurity.value,
       enableSensitive: enableSensitive.value,
       enableAdExtreme: enableAdExtreme.value,
+      ocrLanguage: ocrLanguage.value,
+      enableExtendedRules: enableExtendedRules.value,
       glossary: nextGlossary.map((term) => ({ ...term })),
       bannedWords: [...nextBannedWords]
     }
@@ -620,6 +629,8 @@ export function useTerminology(initial: TerminologyState = {
     enableSecurity.value = options.enableSecurity
     enableSensitive.value = options.enableSensitive
     enableAdExtreme.value = options.enableAdExtreme
+    ocrLanguage.value = options.ocrLanguage ?? 'zh'
+    enableExtendedRules.value = options.enableExtendedRules ?? false
     glossary.value = nextGlossary
     bannedWords.value = nextBannedWords
   }

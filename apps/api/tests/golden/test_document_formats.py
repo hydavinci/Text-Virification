@@ -64,6 +64,12 @@ def _pdf(target: Path) -> bytes:
         document.close()
 
 
+def _image(target: Path) -> bytes:
+    pixmap = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 64, 32), False)
+    pixmap.clear_with(0xFFFFFF)
+    return pixmap.tobytes("png" if target.suffix == ".png" else "jpeg")
+
+
 def _matrix_payload(file_type: FileType, target: Path) -> bytes:
     if file_type is FileType.TXT:
         return MATRIX_TEXT.encode()
@@ -116,11 +122,13 @@ FORMAT_BUILDERS: dict[FileType, Callable[[Path], bytes]] = {
     FileType.RTF: _rtf,
     FileType.MARKDOWN: _markdown,
     FileType.CSV: _csv,
+    FileType.PNG: _image,
+    FileType.JPG: _image,
 }
 
 
 @pytest.mark.parametrize("file_type", list(FileType))
-def test_async_storage_accepts_all_seven_formats(
+def test_async_storage_accepts_all_supported_formats(
     tmp_path: Path,
     file_type: FileType,
 ) -> None:
@@ -135,7 +143,10 @@ def test_async_storage_accepts_all_seven_formats(
     assert stored.file_type is file_type
 
 
-@pytest.mark.parametrize("file_type", list(FORMAT_BUILDERS))
+@pytest.mark.parametrize(
+    "file_type",
+    [file_type for file_type in FORMAT_BUILDERS if file_type not in {FileType.PNG, FileType.JPG}],
+)
 def test_six_self_contained_golden_formats_produce_equivalent_issue_semantics(
     tmp_path: Path,
     file_type: FileType,
@@ -186,8 +197,11 @@ def test_legacy_doc_golden_is_explicitly_converter_limited(tmp_path: Path) -> No
     assert any(issue.type == "pii_email" for issue in result.issues)
 
 
-@pytest.mark.parametrize("file_type", list(FileType))
-def test_seven_format_parse_verify_export_reparse_semantics(
+@pytest.mark.parametrize(
+    "file_type",
+    [file_type for file_type in FileType if file_type not in {FileType.PNG, FileType.JPG}],
+)
+def test_editable_format_parse_verify_export_reparse_semantics(
     tmp_path: Path,
     file_type: FileType,
 ) -> None:

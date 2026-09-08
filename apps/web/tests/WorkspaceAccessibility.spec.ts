@@ -103,4 +103,35 @@ describe('workspace accessibility surfaces', () => {
     expect(appSource).toMatch(/transition-duration:\s*\.01ms\s*!important/)
     expect(appSource).toMatch(/transition-delay:\s*0ms\s*!important/)
   })
+
+  it('opens advanced settings on demand and restores focus on Escape', async () => {
+    window.sessionStorage.clear()
+    const wrapper = mount(WorkspaceView, {
+      attachTo: document.body,
+      global: {
+        provide: {
+          [jobsApiKey as symbol]: {
+            createJob: vi.fn(),
+            getResult: vi.fn(),
+            subscribe: vi.fn()
+          }
+        }
+      }
+    })
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    const opener = wrapper.get<HTMLButtonElement>('[data-open-settings]')
+    opener.element.focus()
+    await opener.trigger('click')
+    await nextTick()
+
+    const dialog = wrapper.get('[role="dialog"]')
+    expect(dialog.text()).toContain('检查设置')
+    const close = wrapper.get<HTMLButtonElement>('[data-close-settings]')
+    expect(document.activeElement).toBe(close.element)
+    await dialog.trigger('keydown', { key: 'Escape' })
+    await nextTick()
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    expect(document.activeElement).toBe(opener.element)
+    wrapper.unmount()
+  })
 })

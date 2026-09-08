@@ -1,4 +1,6 @@
-FROM node:22-slim AS builder
+ARG NODE_IMAGE=node:22-slim
+ARG NGINX_IMAGE=nginx:1.27-alpine
+FROM ${NODE_IMAGE} AS builder
 
 WORKDIR /app
 
@@ -8,7 +10,7 @@ RUN npm ci
 COPY . .
 RUN npm run build
 
-FROM nginx:1.27-alpine AS runtime
+FROM ${NGINX_IMAGE} AS runtime
 
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=builder /app/dist /usr/share/nginx/html

@@ -30,6 +30,7 @@ from text_verification.domain.verification import (
 )
 from text_verification.infrastructure.dictionary_loader import DictionaryLoadError
 from text_verification.parsers import compatibility_parser as compatibility_parser_module
+from text_verification.parsers import image_parser as image_parser_module
 from text_verification.parsers import pdf_parser as pdf_parser_module
 from text_verification.parsers.registry import ParserRegistry
 
@@ -110,7 +111,10 @@ def test_pipeline_parses_checks_reviews_and_summarizes_in_order(tmp_path: Path) 
         direct_text=None,
         source_name="用户原始名称.txt",
         file_type=FileType.TXT,
-        options=VerificationOptions(scenario=Scenario.BUSINESS),
+        options=VerificationOptions(
+            scenario=Scenario.BUSINESS,
+            enable_extended_rules=True,
+        ),
         execution_mode=VerificationExecutionMode.ASYNCHRONOUS,
     )
     pipeline = VerificationPipeline(
@@ -131,6 +135,7 @@ def test_pipeline_parses_checks_reviews_and_summarizes_in_order(tmp_path: Path) 
     assert result.execution_mode is VerificationExecutionMode.ASYNCHRONOUS
     assert result.analysis_mode is VerificationAnalysisMode.LOCAL_PLUS_LLM
     assert result.verification_run_id == checker.contexts[0].verification_run_id
+    assert checker.contexts[0].enable_extended_rules is True
     assert reviewer.run_ids == [result.verification_run_id]
     assert result.dictionary_versions == {"sensitive_rules": "sha256:rules"}
     assert result.stats.model_dump() == {
@@ -512,7 +517,7 @@ def test_default_factory_runs_direct_text_through_compatibility_checker() -> Non
     assert result.degradation.is_degraded is False
 
 
-def test_default_factory_resolves_all_seven_parsers(
+def test_default_factory_resolves_all_registered_parsers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fake_parse(
@@ -527,6 +532,7 @@ def test_default_factory_resolves_all_seven_parsers(
 
     monkeypatch.setattr(compatibility_parser_module.CompatibilityParser, "parse", fake_parse)
     monkeypatch.setattr(pdf_parser_module.PdfParser, "parse", fake_parse)
+    monkeypatch.setattr(image_parser_module.ImageParser, "parse", fake_parse)
     pipeline = build_default_verification_pipeline(Settings(llm_api_key=""))
 
     resolved_types = {

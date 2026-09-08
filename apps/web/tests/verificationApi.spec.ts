@@ -298,7 +298,7 @@ describe('createVerificationApi', () => {
       '/api/v1/jobs/55555555-5555-4555-8555-555555555555/recheck',
       expect.objectContaining({ method: 'POST' })
     )
-    const body = fetchMock.mock.calls[0]?.[1]?.body as FormData
+    const body = fetchMock.mock.calls[0]?.[1]?.body as URLSearchParams
     expect(body.get('text')).toBe(rechecked.text)
   })
 

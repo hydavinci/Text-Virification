@@ -4,6 +4,7 @@ import io
 import zipfile
 from uuid import uuid4
 
+import pymupdf
 import pytest
 
 from text_verification.domain.capabilities import CapabilityProfile
@@ -24,6 +25,12 @@ def make_docx_bytes() -> bytes:
 
 def make_doc_bytes() -> bytes:
     return bytes.fromhex("D0CF11E0A1B11AE1") + b"\x00" * 16
+
+
+def make_image_bytes(file_type: FileType, *, width: int = 8, height: int = 6) -> bytes:
+    pixmap = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, width, height), False)
+    pixmap.clear_with(0x7F3F1F)
+    return pixmap.tobytes("png" if file_type is FileType.PNG else "jpeg")
 
 
 @pytest.fixture
@@ -117,3 +124,51 @@ def test_document_storage_async_profile_accepts_all_canonical_formats(tmp_path) 
     )
 
     assert storage.save_bytes(uuid4(), "sample.doc", make_doc_bytes()).file_type is FileType.DOC
+
+
+@pytest.mark.parametrize(
+    ("name", "file_type"),
+    [
+        ("sample.png", FileType.PNG),
+        ("sample.jpg", FileType.JPG),
+        ("sample.jpeg", FileType.JPG),
+    ],
+)
+def test_async_storage_accepts_valid_images_and_normalizes_jpeg_alias(
+    tmp_path,
+    name: str,
+    file_type: FileType,
+) -> None:
+    storage = DocumentStorage(
+        tmp_path,
+        max_upload_bytes=25 * 1024 * 1024,
+        profile=CapabilityProfile.ASYNCHRONOUS_JOB,
+    )
+
+    stored = storage.save_bytes(uuid4(), name, make_image_bytes(file_type))
+
+    assert stored.file_type is file_type
+    assert stored.path.name == f"source.{file_type.value}"
+
+
+@pytest.mark.parametrize(
+    ("name", "content"),
+    [
+        ("spoofed.png", b"not an image"),
+        ("spoofed.jpg", b"\x89PNG\r\n\x1a\nnot a jpeg"),
+        ("corrupt.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * 40),
+    ],
+)
+def test_async_storage_rejects_spoofed_or_corrupt_images(
+    tmp_path,
+    name: str,
+    content: bytes,
+) -> None:
+    storage = DocumentStorage(
+        tmp_path,
+        max_upload_bytes=25 * 1024 * 1024,
+        profile=CapabilityProfile.ASYNCHRONOUS_JOB,
+    )
+
+    with pytest.raises(InvalidUpload):
+        storage.save_bytes(uuid4(), name, content)

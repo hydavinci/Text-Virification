@@ -3,7 +3,8 @@ export type IssueSeverity = 'error' | 'warning' | 'info'
 export type IssueState = 'pending' | 'accepted' | 'rejected'
 export type VerificationExecutionMode = 'synchronous' | 'asynchronous'
 export type VerificationAnalysisMode = 'local_only' | 'local_plus_llm'
-export type FileType = 'docx' | 'doc' | 'pdf' | 'txt' | 'rtf' | 'md' | 'csv'
+export type FileType = 'docx' | 'doc' | 'pdf' | 'txt' | 'rtf' | 'md' | 'csv' | 'png' | 'jpg'
+export type OcrLanguage = 'zh' | 'en' | 'ja'
 export type JsonPrimitive = string | number | boolean | null
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue }
 export type BoundingBox = [number, number, number, number]
@@ -255,6 +256,8 @@ export interface AnalyzeOptions {
   enableSecurity: boolean
   enableSensitive: boolean
   enableAdExtreme: boolean
+  ocrLanguage?: OcrLanguage
+  enableExtendedRules?: boolean
   glossary: GlossaryTerm[]
   bannedWords: string[]
 }

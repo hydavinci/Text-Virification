@@ -80,6 +80,13 @@ class PdfParser:
     ocr_language: SupportedOcrLanguage = "zh"
     supported_type: FileType = field(default=FileType.PDF, init=False)
 
+    def with_ocr_language(self, language: SupportedOcrLanguage) -> PdfParser:
+        return PdfParser(
+            ocr=self.ocr,
+            limits=self.limits,
+            ocr_language=language,
+        )
+
     def parse(self, source_path: Path) -> DocumentModel:
         return self._parse(source_path, progress_observer=None)
 

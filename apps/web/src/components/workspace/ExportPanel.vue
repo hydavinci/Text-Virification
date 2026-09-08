@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { onBeforeUnmount, onMounted, ref } from 'vue'
+
 defineProps<{
   trackChanges: boolean
   reportDisabled: boolean
@@ -14,10 +16,34 @@ defineEmits<{
   'export-modified': []
   'update:trackChanges': [value: boolean]
 }>()
+
+const expanded = ref(false)
+const panel = ref<HTMLElement | null>(null)
+const trigger = ref<HTMLButtonElement | null>(null)
+
+function closeOptions(): void {
+  expanded.value = false
+  trigger.value?.focus()
+}
+
+function dismissOutside(event: PointerEvent): void {
+  if (event.target instanceof Node && !panel.value?.contains(event.target)) {
+    expanded.value = false
+  }
+}
+
+function dismissOnBlur(event: FocusEvent): void {
+  if (event.relatedTarget instanceof Node && !panel.value?.contains(event.relatedTarget)) {
+    expanded.value = false
+  }
+}
+
+onMounted(() => document.addEventListener('pointerdown', dismissOutside))
+onBeforeUnmount(() => document.removeEventListener('pointerdown', dismissOutside))
 </script>
 
 <template>
-  <div class="export-panel" aria-label="导出操作">
+  <div ref="panel" class="export-panel" aria-label="导出操作" @focusout="dismissOnBlur">
     <button
       class="btn ghost"
       type="button"
@@ -27,6 +53,26 @@ defineEmits<{
     >
       重新检查
     </button>
+    <div class="export-disclosure">
+      <button
+        ref="trigger"
+        class="btn primary"
+        type="button"
+        data-toggle-export
+        :aria-expanded="expanded"
+        @click="expanded = !expanded"
+        @keydown.esc.prevent="closeOptions"
+      >
+        {{ busy ? '正在导出…' : '导出' }} <span aria-hidden="true">⌄</span>
+      </button>
+      <div
+        v-show="expanded"
+        class="export-options"
+        data-export-options
+        role="group"
+        aria-label="导出选项"
+        @keydown.esc.prevent.stop="closeOptions"
+      >
     <button
       class="btn ghost"
       type="button"
@@ -37,7 +83,7 @@ defineEmits<{
       检查报告
     </button>
     <button
-      class="btn primary"
+      class="btn ghost"
       type="button"
       data-action="export-modified"
       :disabled="modifiedDisabled || busy"
@@ -61,6 +107,8 @@ defineEmits<{
       />
       <span>保留修订</span>
     </label>
+      </div>
+    </div>
     <small v-if="blockedReason" class="blocked-reason" role="status" aria-live="polite">
       {{ blockedReason }}
     </small>
@@ -77,12 +125,12 @@ defineEmits<{
 }
 .btn {
   border: 1px solid transparent;
-  border-radius: 11px;
+  border-radius: 8px;
   padding: 9px 15px;
   color: inherit;
   background: var(--surface);
   font: inherit;
-  font-weight: 700;
+  font-weight: 500;
   cursor: pointer;
 }
 .btn:disabled {
@@ -90,9 +138,8 @@ defineEmits<{
   cursor: not-allowed;
 }
 .btn.primary {
-  color: white;
-  background: linear-gradient(135deg, var(--primary), var(--primary-2));
-  box-shadow: 0 7px 18px rgba(37, 99, 235, .2);
+  color: var(--on-primary);
+  background: var(--primary);
 }
 .btn.ghost {
   border-color: var(--border);
@@ -111,15 +158,20 @@ defineEmits<{
   accent-color: var(--primary);
 }
 .blocked-reason {
-  max-width: 18rem;
+  max-width: 22rem;
   color: var(--muted);
   line-height: 1.3;
 }
+.export-panel { flex-wrap: wrap; font-size: 12px; }
+.export-disclosure { position: relative; }
+.export-options { position: absolute; right: 0; top: calc(100% + 8px); z-index: 30; width: 220px; padding: 8px; display: flex; flex-direction: column; gap: 4px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow); }
+.export-options .btn { text-align: left; border: 0; padding: 11px; }
+.export-options .btn:hover:not(:disabled) { background: var(--surface-2); }
+.export-options .switch { padding: 12px 8px 8px; border-top: 1px solid var(--border); }
 @media (max-width: 760px) {
   .export-panel {
-    width: 100%;
     flex-wrap: wrap;
-    justify-content: flex-start;
+    justify-content: flex-end;
   }
 }
 </style>

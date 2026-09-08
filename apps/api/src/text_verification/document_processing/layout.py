@@ -387,6 +387,7 @@ def build_ocr_layout(
     language: str,
     max_boxes: int = DEFAULT_MAX_LAYOUT_BOXES,
     max_candidate_checks: int = DEFAULT_MAX_LAYOUT_CANDIDATE_CHECKS,
+    grid_tables: tuple[OcrTable, ...] = (),
 ) -> OcrLayoutResult:
     _strict_limit(max_boxes, field_name="max_boxes")
     _strict_limit(max_candidate_checks, field_name="max_candidate_checks")
@@ -399,8 +400,21 @@ def build_ocr_layout(
     if len({box.box_index for box in boxes}) != len(boxes):
         raise OcrLayoutError("OCR layout box indices must be unique.")
 
-    lines = _group_lines(boxes, language=language, max_candidate_checks=max_candidate_checks)
-    tables, table_line_indices = _detect_tables(lines)
+    grid_box_indices = {
+        box.box_index
+        for table in grid_tables
+        for row in table.rows
+        for cell in row
+        for box in cell.boxes
+    }
+    remaining_boxes = tuple(box for box in boxes if box.box_index not in grid_box_indices)
+    lines = _group_lines(
+        remaining_boxes, language=language, max_candidate_checks=max_candidate_checks
+    )
+    inferred_tables, table_line_indices = _detect_tables(
+        lines, table_index_offset=len(grid_tables)
+    )
+    tables = [*grid_tables, *inferred_tables]
     elements = [
         _table_element(cell, table=table, language=language)
         for table in tables
@@ -478,6 +492,8 @@ def _line(builder: _LineBuilder, *, line_index: int, language: str) -> OcrLayout
 
 def _detect_tables(
     lines: tuple[OcrLayoutLine, ...],
+    *,
+    table_index_offset: int = 0,
 ) -> tuple[list[OcrTable], set[int]]:
     candidate_rows = [line for line in lines if _is_table_row_candidate(line)]
     groups: list[list[OcrLayoutLine]] = []
@@ -501,7 +517,7 @@ def _detect_tables(
             or (len(rows) == 2 and not _has_strong_two_row_evidence(rows))
         ):
             continue
-        table_index = len(tables)
+        table_index = table_index_offset + len(tables)
         column_count = len(rows[0].boxes)
         cells = tuple(
             tuple(

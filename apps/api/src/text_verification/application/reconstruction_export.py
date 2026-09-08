@@ -93,6 +93,8 @@ MEDIA_TYPES = {
     FileType.PDF: "application/pdf",
     FileType.RTF: "application/rtf",
     FileType.TXT: "text/plain",
+    FileType.PNG: "image/png",
+    FileType.JPG: "image/jpeg",
 }
 MAX_REVISION_PROJECTION_BLOCKS = MAX_CANONICAL_RESULT_BLOCKS
 MAX_REVISION_PROJECTION_TOTAL_CODEPOINTS = (
@@ -250,6 +252,13 @@ class ReconstructionExportService:
             output_file_type = FileType.DOCX
             file_name = _reconstruction_file_name(job.source_name)
         else:
+            if document.file_type in {FileType.PNG, FileType.JPG}:
+                raise VerificationError(
+                    "original_format_export_failed",
+                    "exporting",
+                    "Raster image sources cannot be edited in their original format.",
+                    False,
+                )
             output_file_type = document.file_type
             file_name = _original_format_file_name(
                 job.source_name,
@@ -1587,8 +1596,11 @@ def _covered_length(ranges: list[tuple[int, int]]) -> int:
 
 def _validate_reconstruction_eligibility(document: DocumentModel) -> None:
     if (
-        document.file_type is not FileType.PDF
-        or document.metadata.pdf is None
+        document.file_type not in {FileType.PDF, FileType.PNG, FileType.JPG}
+        or (
+            document.file_type is FileType.PDF
+            and document.metadata.pdf is None
+        )
         or not document.blocks
         or not any(
             block.page is not None

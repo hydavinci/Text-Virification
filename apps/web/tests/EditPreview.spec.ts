@@ -9,8 +9,7 @@ function mountEditor() {
   const wrapper = mount(EditPreview, {
     attachTo: host,
     props: {
-      text: '当前修订',
-      previewText: '修改预览'
+      text: '当前修订'
     },
     slots: {
       default: '<div data-source-content>源文档视图</div>'
@@ -67,7 +66,7 @@ describe('EditPreview', () => {
     host.remove()
   })
 
-  it('emits one changed nonempty save and previews the canonical revision text', async () => {
+  it('emits one changed nonempty save and returns to the document', async () => {
     const { host, wrapper } = mountEditor()
 
     await wrapper.get('[data-action="start-edit"]').trigger('click')
@@ -79,8 +78,31 @@ describe('EditPreview', () => {
       '编辑已保存，需要重新检查'
     )
 
-    await wrapper.get('[data-action="toggle-preview"]').trigger('click')
-    expect(wrapper.get('[data-preview-content]').text()).toBe('修改预览')
+    expect(wrapper.find('[data-source-content]').exists()).toBe(true)
+    expect(wrapper.get('[data-action="start-edit"]').text()).toBe('编辑正文')
+    wrapper.unmount()
+    host.remove()
+  })
+
+  it('preserves the marker preference through editing and locks it when disabled', async () => {
+    const { host, wrapper } = mountEditor()
+    const toggle = () => wrapper.get<HTMLInputElement>(
+      'input[aria-label="显示问题标记"]'
+    )
+
+    expect(toggle().element.checked).toBe(true)
+    await toggle().setValue(false)
+    expect(toggle().element.checked).toBe(false)
+    await wrapper.get('[data-action="start-edit"]').trigger('click')
+    expect(wrapper.find('input[aria-label="显示问题标记"]').exists()).toBe(false)
+    await wrapper.get('[data-action="cancel-edit"]').trigger('click')
+    expect(toggle().element.checked).toBe(false)
+
+    await wrapper.setProps({ disabled: true })
+    expect(toggle().element.disabled).toBe(true)
+    await wrapper.setProps({ disabled: false })
+    await toggle().setValue(true)
+    expect(toggle().element.checked).toBe(true)
     wrapper.unmount()
     host.remove()
   })

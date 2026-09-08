@@ -29,6 +29,8 @@ from text_verification.domain.verification import (
     LEGACY_TYPE_LABELS,
 )
 
+_LONG_SENTENCE_ANCHOR_CHARS = 200
+
 
 @dataclass
 class Issue:
@@ -951,7 +953,8 @@ class TextAnalyzer:
                 enable_security: bool = True,
                 enable_sensitive: bool = True,
                 enable_ad_extreme: bool = False,
-                progress_observer: VerificationProgressObserver | None = None) -> List[Issue]:
+                progress_observer: VerificationProgressObserver | None = None,
+                enable_extended_rules: bool = False) -> List[Issue]:
         previous_budget = self._issue_budget
         self._issue_budget = _IssueBudget(self._max_issues)
         try:
@@ -964,6 +967,7 @@ class TextAnalyzer:
                 enable_sensitive=enable_sensitive,
                 enable_ad_extreme=enable_ad_extreme,
                 progress_observer=progress_observer,
+                enable_extended_rules=enable_extended_rules,
             )
         finally:
             self._issue_budget = previous_budget
@@ -974,7 +978,8 @@ class TextAnalyzer:
                  enable_security: bool = True,
                  enable_sensitive: bool = True,
                  enable_ad_extreme: bool = False,
-                 progress_observer: VerificationProgressObserver | None = None) -> List[Issue]:
+                 progress_observer: VerificationProgressObserver | None = None,
+                 enable_extended_rules: bool = False) -> List[Issue]:
         """分析文本，返回所有检测到的问题。
         scenario 控制不同文档类型的检查侧重。
         custom_glossary 为自定义术语表，每项 {'original': str, 'standard': str}。
@@ -998,6 +1003,7 @@ class TextAnalyzer:
         punctuation_issues = self._check_punctuation(text)
         bracket_issues = self._check_brackets_quotes(text)
         spacing_issues = self._check_extra_spaces(text)
+        extended_spacing_issues = self._check_spacing(text) if enable_extended_rules else []
         number_issues = self._check_number_format(text)
 
         if progress_observer is not None:
@@ -1032,6 +1038,7 @@ class TextAnalyzer:
         grammar_issues = self._check_grammar_patterns(text)
         repetition_issues = self._check_repeated_words(text)
         colloquial_issues = self._check_colloquial(text)
+        long_sentence_issues = self._check_long_sentences(text) if enable_extended_rules else []
 
         if progress_observer is not None:
             progress_observer(VerificationProgressStage.CHECKING_ENGLISH)
@@ -1051,9 +1058,11 @@ class TextAnalyzer:
             *punctuation_issues,
             *bracket_issues,
             *spacing_issues,
+            *extended_spacing_issues,
             *number_issues,
             *repetition_issues,
             *colloquial_issues,
+            *long_sentence_issues,
             *banned_word_issues,
             *pii_issues,
             *sensitive_issues,
@@ -1295,7 +1304,13 @@ class TextAnalyzer:
     def _check_spacing(self, text: str) -> List[Issue]:
         """空格和格式问题检测"""
         issues = self._issue_list()
-        skip = self._build_delim_skip_mask(text)
+        skip = [
+            delimiter or technical
+            for delimiter, technical in zip(
+                self._build_delim_skip_mask(text),
+                self._build_technical_skip_mask(text),
+            )
+        ]
 
         # 1. 中英文之间缺少空格
         missing_space = re.compile(r'([\u4e00-\u9fa5])([a-zA-Z0-9])')
@@ -1465,38 +1480,44 @@ class TextAnalyzer:
         issues = self._issue_list()
 
         # 按中文句末标点分句
-        sentence_pattern = re.compile(r'[^。！？\n]+[。！？]')
+        sentence_pattern = re.compile(r'[^。！？\n]+(?:[。！？]|\n|$)')
         for match in sentence_pattern.finditer(text):
             sentence = match.group()
+            if sentence[-1] not in '。！？':
+                continue
             # 计算中文字符数
-            cn_chars = len(re.findall(r'[\u4e00-\u9fa5]', sentence))
+            cn_chars = sum(1 for _ in re.finditer(r'[\u4e00-\u9fa5]', sentence))
             if cn_chars > 80:
+                anchor_end = match.start() + min(len(sentence), _LONG_SENTENCE_ANCHOR_CHARS)
                 issues.append(Issue(
                     type='style',
                     severity='info',
-                    original=sentence[:30] + '...' if len(sentence) > 30 else sentence,
-                    suggestion='（建议拆分为多个短句）',
+                    original=text[match.start():anchor_end],
+                    suggestion=None,
                     position=match.start(),
-                    end_position=match.end(),
-                    context=self._get_context(text, match.start(), match.end()),
+                    end_position=anchor_end,
+                    context=self._get_context(text, match.start(), anchor_end),
                     description=f'此句较长（约{cn_chars}字），长句可能影响理解，建议适当拆分',
                     rule_id='long_sentence_cn'
                 ))
 
         # 英文长句检测（按句号分句）
-        en_sentence_pattern = re.compile(r'[A-Za-z][^.!?\n]+[.!?]')
+        en_sentence_pattern = re.compile(r'[A-Za-z][^.!?\n]+(?:[.!?]|\n|$)')
         for match in en_sentence_pattern.finditer(text):
             sentence = match.group()
+            if sentence[-1] not in '.!?':
+                continue
             word_count = len(sentence.split())
             if word_count > 40:
+                anchor_end = match.start() + min(len(sentence), _LONG_SENTENCE_ANCHOR_CHARS)
                 issues.append(Issue(
                     type='style',
                     severity='info',
-                    original=sentence[:40] + '...' if len(sentence) > 40 else sentence,
-                    suggestion='（建议拆分为多个短句）',
+                    original=text[match.start():anchor_end],
+                    suggestion=None,
                     position=match.start(),
-                    end_position=match.end(),
-                    context=self._get_context(text, match.start(), match.end()),
+                    end_position=anchor_end,
+                    context=self._get_context(text, match.start(), anchor_end),
                     description=f'此英文句子较长（约{word_count}词），建议适当拆分以提升可读性',
                     rule_id='long_sentence_en'
                 ))

@@ -11,6 +11,7 @@ from threading import Event, Lock, RLock
 from typing import Any
 from uuid import UUID, uuid4
 
+import pymupdf
 import pytest
 from docx import Document
 
@@ -63,6 +64,7 @@ from text_verification.infrastructure.verification_repository import (
     JobResultSnapshot,
     JobResultState,
 )
+from text_verification.parsers.image_parser import ImageParser
 from text_verification.parsers.pdf_parser import PdfParser
 
 PDF_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "pdf"
@@ -409,6 +411,32 @@ def _job_and_result(storage: JobStorage) -> tuple[JobRead, VerificationResult]:
         job_id=job_id,
         source_name=parsed.source_name,
         file_type=FileType.PDF,
+        size_bytes=stored.size_bytes,
+        status=JobStatus.COMPLETED,
+        progress=100,
+        created_at=now,
+        expires_at=now + timedelta(hours=24),
+    )
+    return job, _result(parsed)
+
+
+def _image_job_and_result(storage: JobStorage) -> tuple[JobRead, VerificationResult]:
+    job_id = uuid4()
+    pixmap = pymupdf.Pixmap(
+        pymupdf.csRGB,
+        pymupdf.IRect(0, 0, 320, 180),
+        False,
+    )
+    pixmap.clear_with(0xFFFFFF)
+    stored = storage.save_bytes(job_id, "scan.png", pixmap.tobytes("png"))
+    parsed = ImageParser(file_type=FileType.PNG, ocr=_FakeOcr()).parse(
+        stored.path
+    ).model_copy(update={"document_id": job_id, "source_name": "scan.png"})
+    now = datetime(2026, 9, 8, 5, 0, tzinfo=UTC)
+    job = JobRead(
+        job_id=job_id,
+        source_name=parsed.source_name,
+        file_type=FileType.PNG,
         size_bytes=stored.size_bytes,
         status=JobStatus.COMPLETED,
         progress=100,
@@ -1824,7 +1852,10 @@ def test_job_owned_original_format_export_uses_the_persisted_revision(
     assert artifact.file_name.endswith(".txt")
 
 
-@pytest.mark.parametrize("file_type", list(FileType))
+@pytest.mark.parametrize(
+    "file_type",
+    [file_type for file_type in FileType if file_type not in {FileType.PNG, FileType.JPG}],
+)
 def test_job_owned_original_export_uses_a_verified_snapshot_for_every_format(
     tmp_path: Path,
     file_type: FileType,
@@ -1902,6 +1933,46 @@ def test_job_owned_original_export_uses_a_verified_snapshot_for_every_format(
     with download.handle:
         assert download.handle.read_bytes() == original_bytes
     assert observed == [original_bytes]
+
+
+def test_image_job_exports_docx_reconstruction_and_preserves_source_identity(
+    tmp_path: Path,
+) -> None:
+    storage = JobStorage(tmp_path / "jobs", max_upload_bytes=5 * 1024 * 1024)
+    job, result = _image_job_and_result(storage)
+    state = _RepositoryState({job.job_id: result})
+
+    artifact = _service(storage, state).export(
+        job,
+        ExportFormat.DOCX_RECONSTRUCTION,
+    )
+    download = _service(storage, state).download(
+        job.job_id,
+        artifact.export_artifact_id,
+    )
+
+    assert artifact.file_type is FileType.DOCX
+    assert state.artifacts[artifact.export_artifact_id].source_version == result.source_version
+    with download.handle:
+        reconstructed = Document(download.handle.path)
+        assert [paragraph.text for paragraph in reconstructed.paragraphs] == [
+            "test@example.com"
+        ]
+
+
+def test_image_job_original_format_export_is_explicitly_rejected(
+    tmp_path: Path,
+) -> None:
+    storage = JobStorage(tmp_path / "jobs", max_upload_bytes=5 * 1024 * 1024)
+    job, result = _image_job_and_result(storage)
+    state = _RepositoryState({job.job_id: result})
+
+    with pytest.raises(VerificationError) as raised:
+        _service(storage, state).export(job, ExportFormat.ORIGINAL_FORMAT)
+
+    assert raised.value.code == "original_format_export_failed"
+    assert "Raster image" in raised.value.message
+    assert state.artifacts == {}
 
 
 def test_job_owned_original_export_rejects_tampered_source_without_artifact(

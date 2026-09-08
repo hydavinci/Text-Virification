@@ -394,6 +394,26 @@ def test_compatibility_checker_uses_text_analyzer_and_domain_issue_adapter() -> 
     assert dict(result.dictionary_versions) == {"sensitive_rules": "sha256:rules"}
 
 
+def test_compatibility_checker_passes_extended_rules_only_when_enabled() -> None:
+    analyzer = RecordingAnalyzer(issues=[], dictionary_versions={})
+    checker = CompatibilityChecker(analyzer=analyzer)
+    document = _document(text="DocumentAPI")
+
+    checker.check(
+        document,
+        CheckContext.from_options(VerificationOptions()),
+    )
+    checker.check(
+        document,
+        CheckContext.from_options(
+            VerificationOptions(enable_extended_rules=True)
+        ),
+    )
+
+    assert "enable_extended_rules" not in analyzer.calls[0]
+    assert analyzer.calls[1]["enable_extended_rules"] is True
+
+
 def test_compatibility_exporter_exposes_registered_file_type() -> None:
     exporter = CompatibilityExporter(
         FileType.PDF,

@@ -22,6 +22,7 @@ import type {
   WorkspaceReviewSummary
 } from '../types/verification'
 import { isVerificationIssueCountAllowed } from '../validation/verificationLimits'
+import type { DocumentTextReplacement } from '../utils/documentPresentation'
 
 interface BatchStateSnapshot {
   documentId: string
@@ -55,6 +56,7 @@ type PriorIssueState =
 interface AcceptedReplacementPlan {
   readonly conflictIssueIds: readonly string[]
   readonly text: string
+  readonly replacements: readonly DocumentTextReplacement[]
 }
 
 export interface WorkspaceReadonlyValue<T> {
@@ -1442,7 +1444,9 @@ function isFileType(value: unknown): value is VerificationResult['file_type'] {
     value === 'txt' ||
     value === 'rtf' ||
     value === 'md' ||
-    value === 'csv'
+    value === 'csv' ||
+    value === 'png' ||
+    value === 'jpg'
   )
 }
 
@@ -1719,6 +1723,14 @@ function restoredRevision(
   } as DocumentRevision)
 }
 
+export interface TextUndoEntry {
+  readonly revisionId: string | null
+  readonly reviewState: Readonly<{
+    issueStates: Readonly<Record<string, IssueState>>
+    selectedSuggestions: Readonly<Record<string, string | null>>
+  }> | null
+}
+
 export interface PreparedWorkspaceRestore {
   result: VerificationResult
   safeIssues: readonly VerificationIssue[]
@@ -1727,7 +1739,10 @@ export interface PreparedWorkspaceRestore {
   currentRevision: Readonly<DocumentRevision>
   revisionChain: readonly Readonly<DocumentRevision>[]
   requiresReverification: boolean
+  textUndoHistory: readonly TextUndoEntry[]
 }
+
+type PreparedWorkspaceBase = Omit<PreparedWorkspaceRestore, 'textUndoHistory'>
 
 function restoredStableState(
   value: unknown,
@@ -1810,7 +1825,7 @@ function planAcceptedEffectiveReplacements(
       .map(({ issue }) => issue.issue_id)
   )
   if (conflictIssueIds.length > 0 || accepted.length === 0) {
-    return { conflictIssueIds, text: resultText }
+    return { conflictIssueIds, text: resultText, replacements: Object.freeze([]) }
   }
 
   const offsets = utf16OffsetsByCodePoint(resultText)
@@ -1825,7 +1840,10 @@ function planAcceptedEffectiveReplacements(
   parts.push(resultText.slice(utf16Cursor))
   return {
     conflictIssueIds,
-    text: parts.join('')
+    text: parts.join(''),
+    replacements: Object.freeze(accepted.map(({ issue, suggestion }) =>
+      Object.freeze({ start: issue.start, end: issue.end, text: suggestion })
+    ))
   }
 }
 
@@ -1910,9 +1928,9 @@ function restoredRevisionChain(
   return Object.freeze(chain)
 }
 
-export function prepareWorkspaceRestore(
+function prepareWorkspaceRestoreBase(
   saved: unknown
-): PreparedWorkspaceRestore | null {
+): PreparedWorkspaceBase | null {
   if (!isRecord(saved) || !hasOwn(saved, 'result')) {
     return null
   }
@@ -2052,6 +2070,114 @@ export function prepareWorkspaceRestore(
   }
 }
 
+function restoreTextUndoHistory(
+  value: unknown,
+  workspace: PreparedWorkspaceBase
+): readonly TextUndoEntry[] | null {
+  if (
+    !Array.isArray(value) ||
+    value.length >= workspace.revisionChain.length ||
+    (!workspace.requiresReverification && value.length > 0)
+  ) {
+    return null
+  }
+  const indexes = new Map(
+    workspace.revisionChain.map((revision, index) => [revision.revision_id, index])
+  )
+  const validIds = new Set(workspace.safeIssues.map((issue) => issue.issue_id))
+  const restored: TextUndoEntry[] = []
+  let previousIndex = -1
+  for (const candidate of value) {
+    if (
+      !isRecord(candidate) ||
+      Object.keys(candidate).length !== 2 ||
+      !hasOwn(candidate, 'revisionId') ||
+      !hasOwn(candidate, 'reviewState') ||
+      (candidate.revisionId !== null && typeof candidate.revisionId !== 'string')
+    ) {
+      return null
+    }
+    const index = indexes.get(candidate.revisionId)
+    if (
+      index === undefined ||
+      index <= previousIndex ||
+      workspace.revisionChain[index + 1]?.kind !== 'manual'
+    ) {
+      return null
+    }
+    previousIndex = index
+    const revision = workspace.revisionChain[index]
+    let reviewState: TextUndoEntry['reviewState'] = null
+    if (candidate.reviewState !== null) {
+      const state = candidate.reviewState
+      if (
+        restored.length !== 0 ||
+        revision.kind === 'manual' ||
+        !isRecord(state) ||
+        Object.keys(state).length !== 2 ||
+        !isRecord(state.issueStates) ||
+        !isRecord(state.selectedSuggestions)
+      ) {
+        return null
+      }
+      const states = restoredStableState(state.issueStates, validIds)
+      const suggestions = restoredSuggestions(state.selectedSuggestions, validIds)
+      if (
+        states === null ||
+        suggestions === null ||
+        Object.keys(states).length !== Object.keys(state.issueStates).length ||
+        Object.keys(suggestions).length !== Object.keys(state.selectedSuggestions).length
+      ) {
+        return null
+      }
+      const plan = planAcceptedEffectiveReplacements(
+        workspace.result.text,
+        workspace.safeIssues,
+        (issue) => states[issue.issue_id],
+        (issue) => restoredSuggestion(issue, suggestions)
+      )
+      if (plan.conflictIssueIds.length === 0 && plan.text !== revision.text) {
+        return null
+      }
+      reviewState = Object.freeze({
+        issueStates: Object.freeze(states),
+        selectedSuggestions: Object.freeze(suggestions)
+      })
+    }
+    restored.push(Object.freeze({ revisionId: candidate.revisionId, reviewState }))
+  }
+  return Object.freeze(restored)
+}
+
+export function prepareWorkspaceRestore(saved: unknown): PreparedWorkspaceRestore | null {
+  const prepared = prepareWorkspaceRestoreBase(saved)
+  if (prepared === null || !isRecord(saved)) {
+    return null
+  }
+  let textUndoHistory: readonly TextUndoEntry[]
+  if (hasOwn(saved, 'textUndoHistory')) {
+    const restored = restoreTextUndoHistory(saved.textUndoHistory, prepared)
+    if (restored === null) {
+      return null
+    }
+    textUndoHistory = restored
+  } else {
+    // Older sessions retain text revisions, but not the decisions before an edit.
+    const legacy: TextUndoEntry[] = []
+    for (let index = prepared.revisionChain.length - 1; index > 0; index -= 1) {
+      if (prepared.revisionChain[index].kind !== 'manual') {
+        break
+      }
+      legacy.push(Object.freeze({
+        revisionId: prepared.revisionChain[index - 1].revision_id,
+        reviewState: null
+      }))
+    }
+    textUndoHistory = Object.freeze(legacy.reverse())
+  }
+  return { ...prepared, textUndoHistory }
+}
+
 export function useVerificationWorkspace() {
   const result = shallowRef<VerificationResult | null>(null)
   const issueStates = ref<Record<string, IssueState>>({})
@@ -2063,6 +2189,7 @@ export function useVerificationWorkspace() {
   )
   const requiresReverification = ref(false)
   const batchHistory = ref<BatchStateSnapshot[]>([])
+  const textUndoHistory = shallowRef<readonly TextUndoEntry[]>(Object.freeze([]))
 
   const visibleIssues = computed<readonly VerificationIssue[]>(() =>
     requiresReverification.value ? Object.freeze([]) : safeIssues.value
@@ -2083,7 +2210,8 @@ export function useVerificationWorkspace() {
     if (currentResult === null) {
       return {
         conflictIssueIds: Object.freeze([]),
-        text: ''
+        text: '',
+        replacements: Object.freeze([])
       }
     }
     return planAcceptedEffectiveReplacements(
@@ -2208,6 +2336,7 @@ export function useVerificationWorkspace() {
     requiresReverification.value = false
     batchHistory.value = []
     if (!sameSourceRevision) {
+      textUndoHistory.value = Object.freeze([])
       const source = sourceRevision(canonicalResult)
       currentRevision.value = source
       revisionChain.value = Object.freeze([source])
@@ -2223,6 +2352,7 @@ export function useVerificationWorkspace() {
     selectedSuggestions.value = {}
     currentRevision.value = null
     revisionChain.value = Object.freeze([])
+    textUndoHistory.value = Object.freeze([])
     requiresReverification.value = false
     batchHistory.value = []
   }
@@ -2385,19 +2515,20 @@ export function useVerificationWorkspace() {
     selectedSuggestions.value = prepared.selectedSuggestions
     currentRevision.value = prepared.currentRevision
     revisionChain.value = prepared.revisionChain
+    textUndoHistory.value = prepared.textUndoHistory
     requiresReverification.value = prepared.requiresReverification
     batchHistory.value = []
   }
 
-  function saveManualEdit(text: string): Readonly<DocumentRevision> | null {
+  function appendTextRevision(
+    text: string,
+    kind: 'manual' | 'review'
+  ): Readonly<DocumentRevision> | null {
     const currentResult = result.value
     if (currentResult === null) {
       return null
     }
     const priorRevision = currentRevision.value ?? sourceRevision(currentResult)
-    if (text === priorRevision.text) {
-      return null
-    }
     const revision = Object.freeze({
       revision_id: globalThis.crypto.randomUUID(),
       document_id: currentResult.document_id,
@@ -2407,14 +2538,62 @@ export function useVerificationWorkspace() {
       created_at: new Date().toISOString(),
       parent_revision_id: priorRevision.revision_id,
       persistence_state: 'draft' as const,
-      kind: 'manual' as const,
+      kind,
       text
     })
     currentRevision.value = revision
     revisionChain.value = Object.freeze([...revisionChain.value, revision])
+    return revision
+  }
+
+  function saveManualEdit(text: string): Readonly<DocumentRevision> | null {
+    const priorRevision = currentRevision.value
+    if (priorRevision === null || text === priorRevision.text) {
+      return null
+    }
+    const entry = Object.freeze({
+      revisionId: priorRevision.revision_id,
+      reviewState: requiresReverification.value
+        ? null
+        : Object.freeze({
+          issueStates: Object.freeze({ ...issueStates.value }),
+          selectedSuggestions: Object.freeze({ ...selectedSuggestions.value })
+        })
+    })
+    const revision = appendTextRevision(text, 'manual')
+    if (revision === null) {
+      return null
+    }
+    textUndoHistory.value = Object.freeze([...textUndoHistory.value, entry])
     requiresReverification.value = true
     issueStates.value = {}
     selectedSuggestions.value = {}
+    batchHistory.value = []
+    return revision
+  }
+
+  function undoTextEdit(): Readonly<DocumentRevision> | null {
+    const entry = textUndoHistory.value.at(-1)
+    if (entry === undefined || !requiresReverification.value) {
+      return null
+    }
+    const target = revisionChain.value.find(
+      (revision) => revision.revision_id === entry.revisionId
+    )
+    if (target === undefined) {
+      return null
+    }
+    const revision = appendTextRevision(
+      target.text,
+      entry.reviewState === null ? 'manual' : 'review'
+    )
+    if (revision === null) {
+      return null
+    }
+    textUndoHistory.value = Object.freeze(textUndoHistory.value.slice(0, -1))
+    issueStates.value = { ...entry.reviewState?.issueStates }
+    selectedSuggestions.value = { ...entry.reviewState?.selectedSuggestions }
+    requiresReverification.value = entry.reviewState === null
     batchHistory.value = []
     return revision
   }
@@ -2491,10 +2670,15 @@ export function useVerificationWorkspace() {
     ),
     currentRevision: workspaceReadonlyValue(() => currentRevision.value),
     revisionChain: workspaceReadonlyValue(() => revisionChain.value),
+    textUndoHistory: workspaceReadonlyValue(() => textUndoHistory.value),
+    canUndoTextEdit: workspaceReadonlyValue(() => textUndoHistory.value.length > 0),
     requiresReverification: workspaceReadonlyValue(
       () => requiresReverification.value
     ),
     modifiedText: workspaceReadonlyValue(() => modifiedText.value),
+    acceptedReplacements: workspaceReadonlyValue(
+      () => acceptedReplacementPlan.value.replacements
+    ),
     visibleIssues: workspaceReadonlyValue(() => visibleIssues.value),
     summary: workspaceReadonlyValue(() => summary.value),
     replacementConflictIssueIds: workspaceReadonlyValue(
@@ -2522,6 +2706,7 @@ export function useVerificationWorkspace() {
     prepareWorkspaceRestore,
     commitWorkspaceRestore,
     saveManualEdit,
+    undoTextEdit,
     hydratePersistedRevision
   }
 }

@@ -43,6 +43,8 @@ def test_job_storage_uses_manifest_async_profile(tmp_path):
             FileType.RTF,
             FileType.MARKDOWN,
             FileType.CSV,
+            FileType.PNG,
+            FileType.JPG,
         }
     )
 
