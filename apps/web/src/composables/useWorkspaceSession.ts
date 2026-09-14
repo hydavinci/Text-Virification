@@ -544,7 +544,7 @@ function prepareLegacySession(
         settingsTab: 'settings',
         resultTab: 'issues',
         showFindReplace: false,
-        trackChanges: true,
+        trackChanges: false,
         selectedIssueId: null
       },
       jobId: null,

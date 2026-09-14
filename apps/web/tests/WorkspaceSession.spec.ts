@@ -164,6 +164,20 @@ function uiState() {
 }
 
 describe('useWorkspaceSession', () => {
+  it('defaults tracking off when restoring a legacy workspace without export preferences', () => {
+    const storage = new MemoryStorage()
+    storage.setItem('text-verification-session', JSON.stringify({
+      result: { ...result, execution_mode: 'synchronous' },
+      workingText: result.text,
+      issueStates: {},
+      selectedSuggestions: {}
+    }))
+
+    const restored = useWorkspaceSession(storage, useVerificationWorkspace()).restore()
+    expect(restored).not.toBeNull()
+    expect(restored?.ui.trackChanges).toBe(false)
+  })
+
   it('restores and resaves exact-limit legacy options without losing edits or undo', () => {
     const legacy: AnalyzeOptions = {
       ...options,

@@ -1,6 +1,7 @@
 export function revealWithinPane(
   target: HTMLElement,
-  pane: HTMLElement | null
+  pane: HTMLElement | null,
+  revealHorizontal = false
 ): void {
   if (!pane || pane.clientHeight === 0) {
     return
@@ -17,5 +18,14 @@ export function revealWithinPane(
       targetBounds.bottom - bottom,
       targetBounds.top - top
     )
+  }
+  if (revealHorizontal) {
+    const left = paneBounds.left + pane.clientLeft
+    const right = left + pane.clientWidth
+    if (targetBounds.left < left) {
+      pane.scrollLeft += targetBounds.left - left
+    } else if (targetBounds.right > right) {
+      pane.scrollLeft += Math.min(targetBounds.right - right, targetBounds.left - left)
+    }
   }
 }

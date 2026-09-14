@@ -3,6 +3,7 @@ import { nextTick } from 'vue'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { jobsApiKey } from '../src/api/jobs'
+import AccessibleDialog from '../src/components/workspace/AccessibleDialog.vue'
 import PrivacyDialog from '../src/components/workspace/PrivacyDialog.vue'
 import WorkspaceHeader from '../src/components/workspace/WorkspaceHeader.vue'
 import WorkspaceView from '../src/views/WorkspaceView.vue'
@@ -13,6 +14,30 @@ afterEach(() => {
 })
 
 describe('workspace accessibility surfaces', () => {
+  it('excludes controls disabled by a fieldset from the dialog focus loop', async () => {
+    const wrapper = mount(AccessibleDialog, {
+      attachTo: document.body,
+      props: {
+        open: false,
+        labelledBy: 'test-dialog-title',
+        closeLabel: '关闭',
+        closeDataAttribute: 'data-close'
+      },
+      slots: {
+        default: '<h2 id="test-dialog-title">设置</h2><button data-tab>检查项</button><fieldset disabled><input aria-label="只读设置"></fieldset>'
+      }
+    })
+    await wrapper.setProps({ open: true })
+    await nextTick()
+    const tab = wrapper.get<HTMLButtonElement>('[data-tab]')
+    tab.element.focus()
+    await wrapper.get('[role="dialog"]').trigger('keydown', { key: 'Tab' })
+    expect(document.activeElement).toBe(wrapper.get('[data-close]').element)
+    await wrapper.get('[role="dialog"]').trigger('keydown', { key: 'Tab', shiftKey: true })
+    expect(document.activeElement).toBe(tab.element)
+    wrapper.unmount()
+  })
+
   it('uses keyboard-operable branding and labelled header controls', () => {
     const wrapper = mount(WorkspaceHeader, {
       props: {

@@ -8,8 +8,40 @@ const jobId = documentId
 const artifactId = '66666666-6666-4666-8666-666666666666'
 const sourceVersion = `sha256:${'a'.repeat(64)}`
 
+function reviewLayout(text: string) {
+  const characters = Array.from(text)
+  const pages = []
+  for (let offset = 0; offset < Math.max(1, characters.length); offset += 300) {
+    const content = characters.slice(offset, offset + 300)
+    pages.push({
+      width: 600, height: 800,
+      image: `data:image/svg+xml;base64,${btoa(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="600" height="800"><path d="M30 60h16v20H30z"/></svg>'
+      )}`,
+      text: content.join(''),
+      glyphs: content.map((_, index) => ({
+        start: offset + index, end: offset + index + 1,
+        x: 30 + index % 30 * 16, y: 60 + Math.floor(index / 30) * 24, width: 16, height: 20
+      }))
+    })
+  }
+  return { pages, revision_applied: true, notice: null }
+}
+
+test.beforeEach(async ({ page }) => {
+  await page.route('**/api/v1/jobs/*/preview/layout', async (route) => {
+    await route.fulfill({ json: reviewLayout(route.request().postDataJSON().text) })
+  })
+})
+
 test('minimal setup preserves advanced options and remains usable at desktop and mobile widths', async ({ page }) => {
   await page.goto('/')
+  await expect(page.getByRole('button', { name: /^检查设置/ })).toHaveCount(1)
+  await expect(page.locator('.input-card [data-open-settings]')).toBeVisible()
+  await expect(page.locator('.topbar [data-open-settings]')).toHaveCount(0)
+  await page.getByRole('button', { name: '粘贴文本' }).click()
+  await expect(page.getByRole('button', { name: /^检查设置/ })).toHaveCount(1)
+  await page.getByRole('button', { name: '上传文件' }).click()
   await page.getByLabel('文档场景').selectOption('academic')
   await page.locator('[data-open-settings]').click()
   const dialog = page.getByRole('dialog', { name: '检查设置', exact: true })
@@ -53,6 +85,143 @@ test('removing a focused term keeps keyboard focus inside the settings drawer', 
   await page.keyboard.press('Escape')
   await expect(dialog).not.toBeVisible()
   await expect(page.locator('[data-open-settings]')).toBeFocused()
+})
+
+test('review settings stay accessible on desktop and mobile and apply only on recheck', async ({ page }) => {
+  const text = '帐号测试'
+  const submissions: FormData[] = []
+  await page.route('**/api/v1/analyze', async (route) => {
+    const request = route.request()
+    const body = await new Response(request.postDataBuffer(), {
+      headers: { 'Content-Type': request.headers()['content-type'] }
+    }).formData()
+    submissions.push(body)
+    const submitted = String(body.get('text'))
+    await route.fulfill({ json: {
+      success: true,
+      filename: '设置检查.txt',
+      source_name: '设置检查.txt',
+      file_type: 'txt',
+      text: submitted,
+      blocks: [block(submitted)],
+      parser_name: 'compatibility-flat-text',
+      parser_version: '1',
+      stats: stats(submitted),
+      issues: [issue(submitted)],
+      summary: summary(),
+      file_id: null,
+      file_ext: null,
+      document_id: documentId,
+      verification_run_id: runId,
+      source_version: sourceVersion,
+      execution_mode: 'synchronous',
+      analysis_mode: 'local_only',
+      dictionary_versions: {},
+      degradation: { is_degraded: false, reasons: [] },
+      scenario: body.get('scenario')
+    } })
+  })
+  await page.goto('/')
+  await page.getByRole('button', { name: '粘贴文本' }).click()
+  await page.getByLabel('待检查文本').fill(text)
+  await page.locator('[data-submit-source]').click()
+  await expect(page.locator('.review-grid')).toBeVisible()
+  await expect(page.locator('.review-grid > .search-panel [data-search-input]')).toHaveCount(1)
+  await expect(page.locator('.issues-panel [data-search-input]')).toHaveCount(0)
+  const opener = page.locator('.topbar [data-open-settings]')
+  const dialog = page.getByRole('dialog', { name: '检查设置', exact: true })
+  for (const width of [1440, 390, 320]) {
+    await page.setViewportSize({ width, height: 900 })
+    const buttonStyles = await page.locator(
+      '.topbar [data-open-settings], .topbar [data-action="recheck"], .topbar [data-toggle-export]'
+    ).evaluateAll((buttons) => buttons.map((button) => {
+      const style = getComputedStyle(button)
+      return {
+        fontSize: style.fontSize,
+        fontWeight: style.fontWeight,
+        lineHeight: style.lineHeight,
+        padding: style.padding,
+        borderRadius: style.borderRadius,
+        height: button.getBoundingClientRect().height
+      }
+    }))
+    expect(buttonStyles).toHaveLength(3)
+    expect(buttonStyles[0]).toEqual(buttonStyles[1])
+    expect(buttonStyles[0]).toEqual(buttonStyles[2])
+    await expect(opener).toBeVisible()
+    await opener.click()
+    await expect(dialog).toBeVisible()
+    await dialog.getByLabel('文档场景').selectOption('news')
+    await dialog.getByLabel('政治与敏感表述检查').uncheck()
+    await dialog.locator('#enable-extended-rules').check()
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width)
+    await page.keyboard.press('Escape')
+    await expect(opener).toBeFocused()
+    await expect(page.locator('[data-source-text]')).toHaveText(text)
+    expect(submissions).toHaveLength(1)
+  }
+  await page.reload()
+  await expect(page.locator('.review-grid')).toBeVisible()
+  await opener.click()
+  await expect(dialog.getByLabel('文档场景')).toHaveValue('news')
+  await expect(dialog.getByLabel('政治与敏感表述检查')).not.toBeChecked()
+  await page.keyboard.press('Escape')
+  await page.getByRole('button', { name: '重新检查', exact: true }).click()
+  await expect.poll(() => submissions.length).toBe(2)
+  expect(submissions[1].get('text')).toBe(text)
+  expect(submissions[1].get('scenario')).toBe('news')
+  expect(submissions[1].get('enable_sensitive')).toBe('false')
+  expect(submissions[1].get('enable_extended_rules')).toBe('true')
+})
+
+test('unified layout locates an already-selected restored issue without changing views', async ({ page }) => {
+  const prefix = '保留原文段落。\n'.repeat(100)
+  const text = `${prefix}帐号测试`
+  const start = Array.from(prefix).length
+  await page.route('**/api/v1/analyze', (route) => route.fulfill({ json: {
+    success: true, filename: 'long.txt', source_name: 'long.txt', file_type: 'txt',
+    text, blocks: [block(text)], parser_name: 'compatibility-flat-text', parser_version: '1',
+    stats: stats(text), issues: [{
+      ...issue('帐号测试'), start, end: start + 2, block_start: start, block_end: start + 2,
+      position: start, end_position: start + 2
+    }],
+    summary: summary(), file_id: null, file_ext: null, document_id: documentId,
+    verification_run_id: runId, source_version: sourceVersion,
+    execution_mode: 'synchronous', analysis_mode: 'local_only', dictionary_versions: {},
+    degradation: { is_degraded: false, reasons: [] }, scenario: 'general'
+  } }))
+  await page.goto('/')
+  await page.getByRole('button', { name: '粘贴文本' }).click()
+  await page.getByLabel('待检查文本').fill(text)
+  await page.locator('[data-submit-source]').click()
+  await page.locator('[data-issue-role="list"]').click()
+  await page.evaluate((jobId) => {
+    const saved = JSON.parse(sessionStorage.getItem('text-verification-session')!)
+    saved.workspace.result.execution_mode = 'asynchronous'
+    saved.workspace.result.file_type = 'docx'
+    saved.workspace.result.filename = 'long.docx'
+    saved.workspace.result.source_name = 'long.docx'
+    saved.jobId = jobId
+    sessionStorage.setItem('text-verification-session', JSON.stringify(saved))
+  }, jobId)
+  await page.reload()
+  await expect(page.locator('.layout-page').first()).toBeVisible()
+  await page.locator('.layout-page img').first().evaluate((image: HTMLImageElement) => image.decode())
+  await expect(page.locator('.layout-page img').first()).toHaveAttribute('src', /^data:image\/svg\+xml;base64,/)
+  await expect(page.locator('[data-original-layout], [data-text-review]')).toHaveCount(0)
+  await page.locator('.layout-scroll').evaluate((element) => { element.scrollTop = 0 })
+  await page.locator('[data-issue-role="list"]').click()
+  await expect(page.locator('.layout-issue.selected')).toBeVisible()
+  await expect.poll(() => page.locator('.layout-scroll').evaluate((element) => element.scrollTop))
+    .toBeGreaterThan(0)
+  await page.getByLabel('文档缩放').selectOption('200')
+  await expect.poll(() => page.locator('.layout-scroll').evaluate((element) => element.scrollLeft))
+    .toBeGreaterThan(0)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.getByRole('button', { name: /^问题 1$/ }).click()
+  await page.locator('[data-issue-role="list"]').click()
+  await expect(page.locator('.layout-issue.selected')).toBeVisible()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390)
 })
 
 for (const [width, height] of [
@@ -106,6 +275,20 @@ for (const [width, height] of [
     await page.locator('[data-submit-source]').click()
     await expect(page.locator('.review-grid')).toBeVisible()
     await expect(page.getByText('长文档.txt', { exact: true })).toHaveCount(1)
+    if (width > 760) {
+      const panels = await page.locator('.review-grid').evaluate((element) =>
+        ['.search-panel', '.document-panel', '.issues-panel'].map((selector) => {
+          const box = element.querySelector(selector)!.getBoundingClientRect()
+          return { x: box.x, right: box.right, y: box.y, height: box.height, width: box.width }
+        })
+      )
+      expect(panels[0].right).toBeLessThan(panels[1].x)
+      expect(panels[1].right).toBeLessThan(panels[2].x)
+      expect(panels[1].width).toBeGreaterThan(panels[0].width)
+      expect(panels[1].width).toBeGreaterThan(panels[2].width)
+      expect(panels[1].y).toBe(panels[2].y)
+      expect(panels[1].height).toBe(panels[2].height)
+    }
     await expect(page.locator('.edit-actions').getByText('当前文档', { exact: true })).toBeVisible()
     await expect(page.getByRole('button', { name: '编辑正文', exact: true })).toBeVisible()
     expect(await page.locator('.review-grid').evaluate(
@@ -150,14 +333,19 @@ for (const [width, height] of [
         documentScroll: document.querySelector('.edit-preview > .document-content')!.scrollTop
       }
     })
-    const search = page.locator('.issues-panel [data-search-input]')
+    const search = page.locator('.search-panel [data-search-input]')
     await expect(page.locator('[data-action="toggle-search-replace"]')).toHaveCount(0)
     await expect(page.getByRole('button', { name: /^(段落|紧凑)视图$/ })).toHaveCount(0)
     await page.keyboard.press('Control+f')
     await expect(search).toBeFocused()
-    expect(await page.locator('.issue-list').evaluate(
-      (element) => element.clientHeight
-    )).toBeGreaterThanOrEqual(100)
+    if (width > 760) {
+      expect(await page.locator('.issue-list').evaluate(
+        (element) => element.clientHeight
+      )).toBeGreaterThanOrEqual(100)
+    } else {
+      await expect(page.locator('.search-panel')).toBeVisible()
+      await expect(page.locator('.issues-panel')).not.toBeVisible()
+    }
     const beforeSearch = await reviewLayout()
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width)
     await page.keyboard.press('Escape')
@@ -168,6 +356,9 @@ for (const [width, height] of [
     expect(await reviewLayout()).toEqual(beforeSearch)
 
     const pageScrollBeforeNavigation = await page.evaluate(() => window.scrollY)
+    if (width <= 760) {
+      await page.getByRole('button', { name: '问题 1', exact: true }).click()
+    }
     await page.locator('[data-issue-role="list"]').click()
     if (width <= 760) {
       await page.getByRole('button', { name: '文档', exact: true }).click()
@@ -471,6 +662,13 @@ test(`${sourceType} job persists its revision before ${exportFormat} export${und
   const revisionRequests: Record<string, unknown>[] = []
   const exportRequests: Record<string, unknown>[] = []
   let jobSubmissions = 0
+  const previewTexts: string[] = []
+  await page.route(`**/api/v1/jobs/${jobId}/preview/layout`, async (route) => {
+    const payload = route.request().postDataJSON()
+    expect(payload.source_version).toBe(sourceVersion)
+    previewTexts.push(payload.text)
+    await route.fulfill({ json: reviewLayout(payload.text) })
+  })
   await page.route('**/api/v1/jobs', async (route) => {
     jobSubmissions += 1
     if (sourceType === 'png') {
@@ -606,18 +804,25 @@ test(`${sourceType} job persists its revision before ${exportFormat} export${und
   await expect(
     page.locator('.review-summary').getByTitle(`sample.${sourceType}`, { exact: true })
   ).toBeVisible()
+  await expect(page.locator('[data-original-layout], [data-text-review]')).toHaveCount(0)
+  await expect(page.locator('.layout-page img')).toBeVisible()
+  await page.locator('[data-issue-role="list"]').first().click()
+  await expect(page.locator('.layout-issue.selected')).toBeVisible()
   await page.locator('.review-disclosure > summary').click()
   await page.getByRole('button', { name: '全部接受' }).click()
   await expect(page.locator('[data-count="accepted"]')).toHaveText('1')
+  await expect(page.locator('.layout-page img')).toHaveAttribute('alt', /账号测试/)
+  await expect(page.locator('.layout-issue.accepted')).toBeVisible()
+  expect(previewTexts).toEqual(['帐号测试', '账号测试'])
 
   if (undoBeforeExport) {
     await page.locator('.review-disclosure > summary').click()
     await page.getByLabel('查找内容').fill('账号')
     await page.getByLabel('替换内容').fill('临时😀')
     await page.getByRole('button', { name: '替换当前', exact: true }).click()
-    await expect(page.locator('[data-source-text]')).toHaveText('临时😀测试')
+    await expect(page.locator('.layout-page img')).toHaveAttribute('alt', /临时😀测试/)
     await page.getByRole('button', { name: '撤销修改', exact: true }).click()
-    await expect(page.locator('[data-source-text]')).toHaveText('账号测试')
+    await expect(page.locator('.layout-page img')).toHaveAttribute('alt', /账号测试/)
     await expect(page.locator('[data-count="accepted"]')).toHaveText('1')
   }
 
@@ -652,7 +857,7 @@ test(`${sourceType} job persists its revision before ${exportFormat} export${und
     {
       format: exportFormat,
       revision_id: revisionRequests.at(-1)?.revision_id,
-      track_changes: true
+      track_changes: false
     }
   ])
   expect(download.suggestedFilename()).toBe('sample-modified.docx')
@@ -937,7 +1142,8 @@ test('scanned PDF exposes OCR progress, canonical result, and reconstruction exp
   await expect(page.locator('.document-identity > strong')).toHaveText(
     'scanned-page.pdf'
   )
-  await expect(page.getByText('test@example.com')).toBeVisible()
+  await expect(page.locator('.layout-page img').first()).toBeVisible()
+  await expect(page.locator('[data-original-layout], [data-text-review]')).toHaveCount(0)
 
   const downloadPromise = page.waitForEvent('download')
   await page.locator('[data-toggle-export]').click()
@@ -948,7 +1154,7 @@ test('scanned PDF exposes OCR progress, canonical result, and reconstruction exp
     {
       format: 'docx_reconstruction',
       revision_id: null,
-      track_changes: true
+      track_changes: false
     }
   ])
   expect(download.suggestedFilename()).toBe(

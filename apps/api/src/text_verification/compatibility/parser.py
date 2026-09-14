@@ -281,7 +281,7 @@ def _convert_doc_to_docx(file_path: str, work_directory: Optional[str] = None) -
 
 
 def _run_conversion_process(
-    command,
+    command: list[str],
     *,
     output_path: Path,
     cwd: Path,
@@ -320,7 +320,7 @@ def _run_conversion_process(
         raise ValueError('Converted DOCX exceeds the configured size limit')
 
 
-def _terminate_conversion_process(process) -> None:
+def _terminate_conversion_process(process: subprocess.Popen[bytes]) -> None:
     if process.poll() is not None:
         return
     if os.name == 'posix':

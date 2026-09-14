@@ -251,4 +251,9 @@ textarea:focus-visible {
   padding: 0;
 }
 
+.document-content:has(> :deep(.original-preview)) {
+  padding: 0;
+  overflow: hidden;
+}
+
 </style>

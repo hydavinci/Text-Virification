@@ -27,7 +27,7 @@
 - 右栏“撤销修改”可逐步回退单次替换、全部替换和已保存的原文编辑，全部替换作为一步撤销。撤销记录随本地会话保存，刷新后仍可使用；重新检查或更换文档会开始新的记录。旧会话仅保留正文历史时，撤销后仍会提示重新检查。
 - 接受建议后正文即时更新，撤销恢复原文；查找高亮当前修订中的匹配项，并支持上下项滚动定位。
 - 正文仅使用文字高亮，不插入占位标记；点击高亮可联动问题列表，重叠问题可重复点击切换。
-- 文件名只在顶部显示，文档标题与编辑操作合并为一栏。统一使用无行号的段落阅读视图，限制阅读宽度并保留段落间距；旧会话也统一恢复为段落视图。关闭“显示问题标记”仅隐藏问题高亮，仍显示当前修订并保留查找高亮，不改动正文或导出内容，也不代表还原 Word 原始版式。
+- 文件名只在顶部显示。Word（DOCX/DOC）、RTF、PDF 和图片在同一个分页审阅界面中展示图片、表格、页眉页脚及问题标记，无需切换原文与文字模式。接受、撤销或保存编辑后更新版式；纯文本使用段落视图。关闭“显示问题标记”只隐藏高亮，不改变修订。
 - DOCX/DOC/PDF/TXT/RTF/Markdown/CSV 原格式导出及 HTML 检查报告。
 - 图片以及扫描/混合 PDF 可重建为可编辑 DOCX，支持审阅修订和重新检查后的导出。图片不提供修改后的 PNG/JPEG 下载，Word 重建也不承诺像素级还原原版式。
 - DOCX 修订痕迹、PDF 高亮批注和文本格式修订标记。
@@ -126,10 +126,33 @@ NGINX_IMAGE=public.ecr.aws/docker/library/nginx:1.27-alpine
 
 ## 本地后端与前端开发、测试、构建
 
+### 一条命令启动（macOS）
+
+完成下方的首次依赖安装和根目录 `.env` 配置、打开 Docker Desktop 后，在仓库根目录运行：
+
+```bash
+./start-local.sh
+```
+
+脚本自动启动 PostgreSQL/Redis、构建并启动 Docker 文档渲染服务、执行数据库迁移，并在同一个终端管理 API、
+检查 Worker、维护 Worker、Beat 和前端。打开 `http://localhost:5173` 即可使用。
+这是普通本地开发启动（API 自动重载），不是 VS Code 断点附加模式；
+修改 Worker 代码后需要停止并重新运行脚本。
+
+保留这个终端，按 `Ctrl+C` 会停止本次启动的应用进程及其子进程，
+但保留 PostgreSQL/Redis、渲染服务容器和数据库数据。任何应用进程退出时，脚本会报错并停止其余应用进程。
+各服务日志在 `var/local/`，每次启动覆盖；例如另开终端运行
+`tail -f var/local/api.log var/local/worker.log`。
+
+脚本不安装依赖、不覆盖 `.env`、不自动停止其他已运行的服务。
+如果端口 8000/5173 已被占用，或本项目 Docker 应用服务仍在运行，会提示先停止冲突服务。
+不要同时手动启动另一套 Worker 或 Beat。异常强制退出留下 `var/local/run.lock` 时，
+确认之前的应用进程已停止后，再运行 `rmdir var/local/run.lock`。
+
 ### macOS 原生启动
 
 需要 Python 3.12、npm 和 Docker Desktop。应用进程在 macOS 原生运行，Docker
-只启动 PostgreSQL 与 Redis：
+运行 PostgreSQL、Redis 和文档渲染服务；本机无需单独安装 LibreOffice：
 
 ```bash
 python3.12 -m venv apps/api/.venv
@@ -183,6 +206,8 @@ PY
 ```bash
 docker compose -f infra/compose.yaml -f infra/compose.local-services.yaml \
   up -d --wait postgres redis
+docker compose --env-file .env -f infra/compose.yaml -f infra/compose.local-services.yaml \
+  up -d --build --wait renderer renderer-gateway
 apps/api/.venv/bin/alembic -c apps/api/alembic.ini upgrade head
 ```
 
@@ -212,18 +237,68 @@ npm --prefix apps/web run dev
 
 浏览器打开 `http://localhost:5173`。选中文件后可先调整检查设置，再点击“开始检查”；
 选文件不会自动提交。审阅页的导出选项和批量操作按需展开，移动端可切换文档与问题。
-查找替换直接显示在右栏顶部，下面保留问题列表和检查摘要，不再使用浮层或开关按钮。
-Ctrl/Cmd+F 聚焦查找框；手机端会先切换到右栏，输入时不自动切走，可通过“文档”
+“检查设置”在上传页保留卡片内的原入口，在审阅页显示于右上角，每页仅显示一个入口，
+均可随时打开。修改设置不会清空当前文档、
+检查结果或审阅记录；在审阅页修改后，关闭面板并点击“重新检查”应用新设置。
+检查进行中允许查看设置和切换分类，但暂时禁用修改。重新检查仅检查当前修订文字，
+不重新执行 OCR；调整 OCR 语言后需重新上传文件。
+导出菜单的“保留修订”在打开、恢复或新建工作区时默认关闭，不沿用旧会话的勾选状态；需要带修订痕迹导出时，可手动勾选。
+宽屏审阅从左到右采用“查找替换 / 正文 / 问题列表”三栏，正文占最大宽度，问题列表和检查摘要独立占一栏，不被查找工具挤占高度。
+较窄的桌面和平板屏幕缩小两侧工具栏宽度，仍保留三栏；手机端提供“文档 / 问题 / 查找替换”三个面板入口。
+Ctrl/Cmd+F 聚焦查找框；手机端会先切换到查找替换面板，输入时不自动切走，可通过“文档”
 切回正文查看匹配。查找框中 Enter 定位下一项，Shift+Enter 定位上一项。
 问题和匹配定位仅滚动各自的阅读区域，已可见的内容保持位置。
 
-同一环境只能运行一个 Beat，避免重复发布定时任务。LibreOffice 仅用于依赖
-`soffice` 的本地格式转换；OCR 依赖也是可选项，可用
+同一环境只能运行一个 Beat，避免重复发布定时任务。原版式预览中的 Word/RTF 转换
+由 Docker 内的 LibreOffice 处理。现有 `.doc` 原格式导出等原生后端转换仍依赖本机
+`textutil` 或 `soffice`；这与预览服务独立。OCR 依赖也是可选项，可用
 `apps/api/.venv/bin/python -m pip install -e "apps/api[dev,ocr]"` 安装。
 缺少这些可选组件时，相应转换、图片或扫描 PDF OCR 不可用。RapidOCR 还需要对应语言的模型；
 首次使用可能下载模型，内网部署应提前准备模型及缓存。模型或识别依赖不可用时会明确报错，
 不会返回伪造的识别结果。上传图片上限 25 MiB，并在解码前后校验格式、尺寸和资源预算。
 `LLM_API_KEY` 留空时使用纯本地规则，不调用大模型服务。
+
+### 统一版式审阅与保留边界
+
+- 上传 Word（DOCX/DOC）、RTF、PDF 或图片后，在同一文档视图中审阅分页版式与问题标记。
+  点击右侧问题或查找结果，会定位到可映射的页面区域，不再切换到纯文本视图。
+  TXT/Markdown/CSV 和直接粘贴文本继续使用段落视图。
+- 接受、撤销建议及保存正文编辑后，基于**经过身份校验的原文件副本**应用当前修订并重新渲染；
+  更新过程中隐藏旧位置标记，避免把过期坐标套用到新文字。连续修改按顺序处理，仅展示最新结果。
+  重新检查和恢复会话后继续使用保留的任务身份及源版本；预览不写入修订历史，也不改变导出授权。
+- Office 转换及分页渲染在 Docker 内完成，正文使用字体轮廓化的 SVG 矢量页面，
+  不再将整页文字转换为固定分辨率 PNG 后拉伸，缩放和高分屏显示不受该位图分辨率限制。
+  矢量页面通过图片元素显示，不插入内联 SVG；原文图片仍受其自身分辨率限制。
+  浏览器同时显示可点击的定位标记，
+  不依赖浏览器自带 PDF 工具栏，也不需要安装 Office。图片、表格、页眉页脚随文档渲染，
+  但缺失字体和特殊对象可能导致显示差异，
+  **不承诺任意 Word 文档像素级一致，也不保证未被文字解析器提取的对象内容参与检查**。
+- DOCX 原格式导出在源文件基础上修改文字。无法安全修改的图文混排内容会报错；
+  PDF 中超出原文字区域的修改也可能无法安全应用。图片、扫描件的原始图像不被文字修订覆盖，
+  此时页面明确提示修订仍在右侧，导出可编辑 DOCX 重建稿仍不承诺原版式完整还原。
+- 定位使用当前版式的文字坐标及完整文本对齐，不简单搜索问题词的第一次出现。
+  重复、缺失或无法可靠对齐的文字明确提示无法精确定位；仍可在右侧审阅，不猜测位置。
+- 预览遵守任务过期状态与源文件哈希校验；转换失败、任务过期或格式不支持时明确报错，
+  不静默显示纯文本替代。失败时保留修订并提供重试，旧页面会明确标为上次成功的预览。
+  文件上限为 25 MiB，版式预览限制 80 页、20 万字符和 25 MiB 输出；内部 JSON 传输上限为
+  64 MiB（含 Base64 源文件），单次 Office 转换限时 45 秒，完整渲染请求限时 120 秒。
+- `renderer` 使用现有后端镜像内的 LibreOffice/中文字体，不读取 `.env`、数据库或任务存储；
+  使用只读根文件系统、受限临时目录、单转换并发和无外网的内部网络。
+  启用容器 init 回收 Office 遗留的辅助子进程，避免连续转换耗尽进程配额。
+  原生开发通过仅绑定 `127.0.0.1:8010` 的 `renderer-gateway` 访问，
+  `PREVIEW_RENDERER_URL` 默认为 `http://127.0.0.1:8010`。完整 Docker 部署由 API
+  直接访问 `http://renderer:8000`，不向浏览器暴露渲染端口。
+- 本地调试覆盖配置只读挂载 `apps/api/src/text_verification` 并启用渲染服务热重载；
+  `start-local.sh` 复用已安装依赖的镜像，不因代码修改重复下载依赖。首次缺少镜像时构建；
+  修改后端依赖或 Dockerfile 后需手动以 `--build` 重建 renderer。正式部署不挂载源代码。
+
+渲染日志和本地容器停止命令（不加 `-v`，保留数据）：
+
+```bash
+docker compose --env-file .env -f infra/compose.yaml -f infra/compose.local-services.yaml \
+  logs -f renderer renderer-gateway
+docker compose --env-file .env -f infra/compose.yaml -f infra/compose.local-services.yaml down
+```
 
 ### Backend
 
@@ -292,6 +367,7 @@ Set-Location ..\..
 - `GET /api/v1/jobs/{job_id}`
 - `GET /api/v1/jobs/{job_id}/events`
 - `GET /api/v1/jobs/{job_id}/result`
+- `GET /api/v1/jobs/{job_id}/preview`
 - `POST /api/v1/jobs/{job_id}/exports`
 - `GET /api/v1/jobs/{job_id}/exports/{artifact_id}`
 - `GET /api/v1/health`

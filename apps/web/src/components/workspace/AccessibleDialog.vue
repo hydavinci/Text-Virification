@@ -96,7 +96,7 @@ function focusableElements(): HTMLElement[] {
   }
   return [...dialog.value.querySelectorAll<HTMLElement>(
     'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
-  )].filter((element) => !element.hasAttribute('hidden'))
+  )].filter((element) => !element.hasAttribute('hidden') && !element.matches(':disabled'))
 }
 </script>
 

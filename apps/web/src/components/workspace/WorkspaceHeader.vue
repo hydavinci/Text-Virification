@@ -2,10 +2,12 @@
 defineProps<{
   theme: 'light' | 'dark'
   hasResult: boolean
+  settingsOpen?: boolean
 }>()
 
 defineEmits<{
   reset: []
+  'open-settings': []
   'open-privacy': []
   'open-help': []
   'toggle-theme': []
@@ -28,6 +30,17 @@ defineEmits<{
       </span>
     </button>
     <div class="top-actions">
+      <button
+        v-if="hasResult"
+        class="settings-btn"
+        type="button"
+        data-open-settings
+        aria-haspopup="dialog"
+        :aria-expanded="settingsOpen ?? false"
+        @click="$emit('open-settings')"
+      >
+        检查设置
+      </button>
       <slot v-if="hasResult" name="exports"></slot>
       <button
         class="icon-btn"
@@ -126,6 +139,19 @@ defineEmits<{
   background: var(--surface);
   cursor: pointer;
 }
+.settings-btn {
+  padding: 9px 15px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--surface);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.settings-btn:hover { background: var(--surface-2); }
 .icon-btn { display: grid; place-items: center; color: var(--muted); }
 .icon-btn svg { width: 18px; height: 18px; }
 .icon-btn:hover { background: var(--surface-2); color: var(--text); }

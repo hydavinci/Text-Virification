@@ -9,10 +9,12 @@ import EditPreview from '../components/workspace/EditPreview.vue'
 import ExportPanel from '../components/workspace/ExportPanel.vue'
 import HelpDialog from '../components/workspace/HelpDialog.vue'
 import IssueList from '../components/workspace/IssueList.vue'
+import OriginalDocumentPreview from '../components/workspace/OriginalDocumentPreview.vue'
 import PrivacyDialog from '../components/workspace/PrivacyDialog.vue'
 import ReviewActions from '../components/workspace/ReviewActions.vue'
 import SearchReplacePanel from '../components/workspace/SearchReplacePanel.vue'
 import WorkspaceHeader from '../components/workspace/WorkspaceHeader.vue'
+import WorkspaceSettingsDialog from '../components/workspace/WorkspaceSettingsDialog.vue'
 import WorkspaceSetup from '../components/workspace/WorkspaceSetup.vue'
 import { useIssueNavigation } from '../composables/useIssueNavigation'
 import type { DocumentSearchState } from '../composables/useSearchReplace'
@@ -94,10 +96,11 @@ const enableSensitive = ref(true)
 const enableAdExtreme = ref(false)
 const ocrLanguage = ref<OcrLanguage | undefined>(undefined)
 const enableExtendedRules = ref<boolean | undefined>(undefined)
-const trackChanges = ref(true)
+const trackChanges = ref(false)
 const settingsTab = ref<'settings' | 'terms' | 'banned'>('settings')
+const settingsOpen = ref(false)
 const resultTab = ref<'issues' | 'summary'>('issues')
-const reviewPane = ref<'document' | 'issues'>('document')
+const reviewPane = ref<'document' | 'issues' | 'search'>('document')
 const textInput = ref('')
 const fileSource = ref<File | null>(null)
 const verificationWorkspace = useVerificationWorkspace()
@@ -111,6 +114,13 @@ const execution = useVerificationExecution({
   fileExecutionMode: 'jobs'
 })
 const result = computed(() => verificationWorkspace.result.value)
+const documentReveal = ref(0)
+const documentNavigationTarget = ref<'issue' | 'search'>('issue')
+const originalPreviewSource = computed(() => {
+  const source = captureFileExportAuthority()
+  return source && ['docx', 'doc', 'rtf', 'pdf', 'png', 'jpg'].includes(source.fileType)
+    ? source : null
+})
 const issueStates = verificationWorkspace.issueStates
 const selectedSuggestions = verificationWorkspace.selectedSuggestions
 const canUndoLastBatch = computed(
@@ -208,6 +218,14 @@ const activeDocumentSearch = computed(() =>
 )
 function updateDocumentSearch(state: DocumentSearchState): void {
   documentSearch.value = state
+  documentNavigationTarget.value = 'search'
+}
+
+function selectReviewIssue(issueId: string): void {
+  documentNavigationTarget.value = 'issue'
+  documentReveal.value += 1
+  if (originalPreviewSource.value) reviewPane.value = 'document'
+  issueNavigation.selectIssue(issueId)
 }
 
 const recheckedAuthorityRequiresRecheck = computed(() => {
@@ -1116,6 +1134,8 @@ function downloadText(text: string, filename: string) {
 }
 
 function resetWorkspace() {
+  documentNavigationTarget.value = 'issue'
+  trackChanges.value = false
   invalidateRecheckOperation()
   invalidateExportOperation()
   exportError.value = null
@@ -1187,7 +1207,8 @@ function restoreSession() {
   selectedSeverity.value = restored.filters.severity
   settingsTab.value = restored.ui.settingsTab
   resultTab.value = restored.ui.resultTab
-  trackChanges.value = restored.ui.trackChanges
+  // Tracking requires a fresh opt-in whenever a workspace is opened.
+  trackChanges.value = false
   selectedIssueId.value = restored.ui.selectedIssueId
   fileExportAuthority.value = restored.exportAuthority
   if (
@@ -1219,12 +1240,12 @@ async function handleKeyboard(event: KeyboardEvent) {
       typeof window.matchMedia === 'function' &&
       window.matchMedia('(max-width: 760px)').matches
     ) {
-      reviewPane.value = 'issues'
+      reviewPane.value = 'search'
     }
     await nextTick()
     const input = sidebarSearch.value?.querySelector<HTMLInputElement>('[data-search-input]')
     if (input) {
-      revealWithinPane(input, sidebarSearch.value?.closest<HTMLElement>('.issues-panel') ?? null)
+      revealWithinPane(input, sidebarSearch.value?.closest<HTMLElement>('.search-panel') ?? null)
       input.focus({ preventScroll: true })
     }
     return
@@ -1314,7 +1335,9 @@ onBeforeUnmount(() => {
     <WorkspaceHeader
       :theme="theme"
       :has-result="result !== null"
+      :settings-open="settingsOpen"
       @reset="resetWorkspace"
+      @open-settings="settingsOpen = true"
       @open-privacy="showPrivacy = true"
       @open-help="showHelp = true"
       @toggle-theme="toggleTheme"
@@ -1380,14 +1403,14 @@ onBeforeUnmount(() => {
     <WorkspaceSetup
       v-if="!result"
       v-model:text="textInput"
-      v-model:settings-tab="settingsTab"
+      :settings-open="settingsOpen"
       :options="currentOptions"
       :busy="isAnalyzing"
       :error="errorMessage"
       @update:options="applyOptions"
+      @open-settings="settingsOpen = true"
       @submit-file="handleUpload"
       @submit-text="runTextAnalysis"
-      @notify="notify"
     >
       <template #progress>
         <div v-if="isAnalyzing && !jobState" class="loading-card" role="status" aria-live="polite">
@@ -1444,34 +1467,11 @@ onBeforeUnmount(() => {
       <div class="mobile-view-switch" aria-label="审阅视图">
         <button type="button" :aria-pressed="reviewPane === 'document'" @click="reviewPane = 'document'">文档</button>
         <button type="button" :aria-pressed="reviewPane === 'issues'" @click="reviewPane = 'issues'">问题 {{ visibleIssues.length }}</button>
+        <button type="button" :aria-pressed="reviewPane === 'search'" @click="reviewPane = 'search'">查找替换</button>
       </div>
       <div class="review-grid" :data-review-pane="reviewPane">
-        <section class="document-panel">
-          <EditPreview
-            :text="currentRevisionText"
-            :title="verificationWorkspace.requiresReverification.value ? '当前手工修订' : '当前文档'"
-            :disabled="workspaceMutationLocked"
-            @save="saveFreeEdit"
-          >
-            <template #default="{ showIssueMarkers }">
-              <DocumentViewer
-                :result="result"
-                :text="currentRevisionText"
-                :issues="showIssueMarkers ? displayIssues : []"
-                :issue-states="currentIssueStates"
-                :selected-issue-id="showIssueMarkers ? selectedIssueId : null"
-                mode="sentence"
-                :data-current-revision="verificationWorkspace.requiresReverification.value ? '' : undefined"
-                :reveal-key="reviewPane"
-                :search-matches="activeDocumentSearch?.matches"
-                :active-search-match-index="activeDocumentSearch?.activeMatchIndex"
-                @select-issue="issueNavigation.selectIssue"
-              />
-            </template>
-          </EditPreview>
-        </section>
-
-        <aside class="issues-panel">
+        <aside class="search-panel" aria-label="查找替换工具">
+          <header class="tools-header"><h2>查找替换</h2></header>
           <div ref="sidebarSearch" class="sidebar-search">
             <SearchReplacePanel
               :key="result.verification_run_id"
@@ -1483,6 +1483,49 @@ onBeforeUnmount(() => {
               @undo-text-edit="undoTextEdit"
             />
           </div>
+        </aside>
+
+        <section class="document-panel">
+          <EditPreview
+            :text="currentRevisionText"
+            :title="verificationWorkspace.requiresReverification.value ? '当前手工修订' : '当前文档'"
+            :disabled="workspaceMutationLocked"
+            @save="saveFreeEdit"
+          >
+            <template #default="{ showIssueMarkers }">
+              <OriginalDocumentPreview
+                v-if="originalPreviewSource"
+                :job-id="originalPreviewSource.jobId"
+                :source-version="originalPreviewSource.sourceVersion"
+                :text="currentRevisionText"
+                :issues="showIssueMarkers ? displayIssues : []"
+                :issue-states="currentIssueStates"
+                :selected-issue-id="showIssueMarkers ? selectedIssueId : null"
+                :reveal-key="`${reviewPane}:${documentReveal}`"
+                :navigation-target="documentNavigationTarget"
+                :search-matches="activeDocumentSearch?.matches"
+                :active-search-match-index="activeDocumentSearch?.activeMatchIndex"
+                @select-issue="selectReviewIssue"
+              />
+              <DocumentViewer
+                v-else
+                :result="result"
+                :text="currentRevisionText"
+                :issues="showIssueMarkers ? displayIssues : []"
+                :issue-states="currentIssueStates"
+                :selected-issue-id="showIssueMarkers ? selectedIssueId : null"
+                mode="sentence"
+                :data-current-revision="verificationWorkspace.requiresReverification.value ? '' : undefined"
+                :reveal-key="`${reviewPane}:${documentReveal}`"
+                :search-matches="activeDocumentSearch?.matches"
+                :active-search-match-index="activeDocumentSearch?.activeMatchIndex"
+                @select-issue="selectReviewIssue"
+              />
+            </template>
+          </EditPreview>
+        </section>
+
+        <aside class="issues-panel">
           <header class="issues-header">
             <div class="side-tabs compact-tabs">
               <button :class="{ active: resultTab === 'issues' }" @click="resultTab = 'issues'">问题列表</button>
@@ -1513,7 +1556,7 @@ onBeforeUnmount(() => {
               :type-labels="typeLabels"
               :reveal-key="reviewPane"
               :disabled="workspaceMutationLocked"
-              @select-issue="issueNavigation.selectIssue"
+              @select-issue="selectReviewIssue"
               @update:selected-layer="selectedLayer = $event"
               @update:selected-severity="selectedSeverity = $event"
               @update:suggestion="selectSuggestion"
@@ -1532,10 +1575,21 @@ onBeforeUnmount(() => {
             </div>
           </div>
         </aside>
+
       </div>
     </main>
 
     <div v-if="toast" class="toast" role="status" aria-live="polite">{{ toast }}</div>
+    <WorkspaceSettingsDialog
+      v-model:settings-tab="settingsTab"
+      :open="settingsOpen"
+      :options="currentOptions"
+      :busy="isAnalyzing"
+      :has-result="result !== null"
+      @close="settingsOpen = false"
+      @update:options="applyOptions"
+      @notify="notify"
+    />
     <PrivacyDialog :open="showPrivacy" @close="showPrivacy = false" />
     <HelpDialog :open="showHelp" @close="showHelp = false" />
   </div>
@@ -1545,7 +1599,7 @@ onBeforeUnmount(() => {
 .shell { min-height: 100vh; }
 .shell.is-reviewing { height: 100dvh; min-height: 0; display: flex; flex-direction: column; }
 .shell.is-reviewing > :deep(.topbar) { flex-shrink: 0; }
-.document-panel, .issues-panel { border: 1px solid var(--border); border-radius: 10px; background: var(--surface); overflow: hidden; }
+.document-panel, .issues-panel, .search-panel { border: 1px solid var(--border); border-radius: 10px; background: var(--surface); overflow: hidden; }
 .side-tabs { display: flex; gap: 5px; padding: 4px; border-radius: 12px; background: var(--surface-2); }
 .side-tabs button { padding: 9px 17px; border: 0; border-radius: 9px; color: var(--muted); background: transparent; cursor: pointer; font-weight: 700; }
 .side-tabs button.active { color: var(--primary); background: var(--surface); box-shadow: 0 3px 10px rgba(15,23,42,.08); }
@@ -1612,8 +1666,15 @@ input:focus, select:focus { border-color: var(--primary); outline: 3px solid rgb
 .issues-panel { overflow: auto; }
 .issues-panel :deep(.issue-list-shell) { min-height: 220px; }
 .issues-panel > .issues-header { flex-shrink: 0; }
-.review-grid { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 370px); gap: 16px; }
-.document-panel, .issues-panel { min-height: 0; display: flex; flex-direction: column; }
+.review-grid { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(240px, 280px) minmax(0, 1fr) minmax(300px, 340px); grid-template-areas: "search document issues"; gap: 16px; }
+.document-panel, .issues-panel, .search-panel { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.document-panel { grid-area: document; }
+.issues-panel { grid-area: issues; }
+.search-panel { grid-area: search; overflow: auto; }
+.tools-header { flex-shrink: 0; min-height: 54px; padding: 10px 15px; display: flex; align-items: center; border-bottom: 1px solid var(--border); }
+.tools-header h2 { margin: 0; font-size: 13px; font-weight: 600; }
+.search-panel :deep(.search-replace-panel) { grid-template-columns: minmax(0, 1fr); }
+.search-panel :deep(.actions) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .issues-header { min-height: 54px; padding: 10px 15px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border); }
 .document-content, .document-editor { flex: 1; min-height: 0; margin: 0; padding: 24px 28px; overflow: auto; white-space: pre-wrap; color: var(--text); background: var(--surface); font: 15px/2 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .document-content:not(.preview) { padding: 0; }
@@ -1646,6 +1707,9 @@ input:focus, select:focus { border-color: var(--primary); outline: 3px solid rgb
 .summary-row { padding: 8px 0; display: flex; justify-content: space-between; border-bottom: 1px solid var(--border); font-size: 12px; }
 .toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); z-index: 40; padding: 11px 18px; border-radius: 10px; color: white; background: #172033; box-shadow: var(--shadow); }
 .mobile-view-switch { display: none; }
+@media (min-width: 761px) and (max-width: 1199px) {
+  .review-grid { grid-template-columns: minmax(160px, 180px) minmax(0, 1fr) minmax(200px, 240px); gap: 12px; }
+}
 @media (max-width: 760px) {
   .review-workspace { padding: 16px 12px; }
   .review-summary { align-items: flex-start; flex-direction: column; gap: 10px; }
@@ -1654,8 +1718,11 @@ input:focus, select:focus { border-color: var(--primary); outline: 3px solid rgb
   .mobile-view-switch { display: flex; padding: 3px; gap: 4px; background: var(--surface-2); border-radius: 8px; }
   .mobile-view-switch button { flex: 1; border: 0; border-radius: 6px; padding: 10px; background: transparent; cursor: pointer; font-size: 13px; }
   .mobile-view-switch button[aria-pressed='true'] { background: var(--surface); color: var(--primary); }
-  .review-grid { grid-template-columns: minmax(0, 1fr); }
-  .review-grid[data-review-pane='document'] .issues-panel, .review-grid[data-review-pane='issues'] .document-panel { display: none; }
+  .review-grid { grid-template-columns: minmax(0, 1fr); grid-template-areas: none; }
+  .document-panel, .issues-panel, .search-panel { grid-area: auto; }
+  .review-grid[data-review-pane='document'] > :not(.document-panel),
+  .review-grid[data-review-pane='issues'] > :not(.issues-panel),
+  .review-grid[data-review-pane='search'] > :not(.search-panel) { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; }

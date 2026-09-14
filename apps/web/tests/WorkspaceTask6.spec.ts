@@ -22,6 +22,18 @@ import type {
 import WorkspaceView from '../src/views/WorkspaceView.vue'
 import scannedResult from './e2e/fixtures/scanned-result'
 
+vi.mock('../src/api/originalPreview', () => ({
+  fetchReviewLayout: vi.fn(async (_jobId: string, _version: string, text: string) => ({
+    revision_applied: true, notice: null,
+    pages: [{
+      width: 600, height: 800, text, image: 'data:image/png;base64,AAAA',
+      glyphs: Array.from(text, (_, start) => ({
+        start, end: start + 1, x: 30 + start * 12, y: 50, width: 12, height: 14
+      }))
+    }]
+  }))
+}))
+
 const themeValues = new Map<string, string>()
 const themeStorage: Storage = {
   get length() {
@@ -288,20 +300,21 @@ describe('WorkspaceView Task 6 integration', () => {
       await wrapper.get('[data-action="export-modified"]').trigger('click')
       await flushPromises()
       expect(exportJob).toHaveBeenCalledWith(
-        result.document_id, 'docx_reconstruction', null, true, expect.any(Function)
+        result.document_id, 'docx_reconstruction', null, false, expect.any(Function)
       )
       expect(wrapper.text()).toContain('图片将导出为可编辑 DOCX')
       wrapper.unmount()
     }
   )
 
-  it('restores legacy compact sessions into paragraph view with sidebar search visible', async () => {
+  it('restores legacy compact file sessions into unified review with sidebar search visible', async () => {
     seedSession()
     const wrapper = mountWorkspace(verificationApi())
     await flushPromises()
 
-    expect(wrapper.get('[data-view-mode]').attributes('data-view-mode')).toBe('sentence')
-    expect(wrapper.find('.issues-panel [data-search-input]').exists()).toBe(true)
+    expect(wrapper.find('.original-preview .layout-page').exists()).toBe(true)
+    expect(wrapper.find('[data-original-layout], [data-text-review]').exists()).toBe(false)
+    expect(wrapper.find('.review-grid > .search-panel [data-search-input]').exists()).toBe(true)
     expect(wrapper.find('[data-action="toggle-search-replace"]').exists()).toBe(false)
     wrapper.unmount()
   })
@@ -427,7 +440,7 @@ describe('WorkspaceView Task 6 integration', () => {
       persistRevision.mock.results[0]?.value
         ? expect.any(String)
         : null,
-      true,
+      false,
       expect.any(Function)
     )
     expect(wrapper.text()).toContain('重建 DOCX')
@@ -535,7 +548,7 @@ describe('WorkspaceView Task 6 integration', () => {
       docxResult.document_id,
       'original_format',
       null,
-      true,
+      false,
       expect.any(Function)
     )
   })
@@ -670,7 +683,7 @@ describe('WorkspaceView Task 6 integration', () => {
         origin.document_id,
         expectedFormat,
         persistedDraft?.revision_id,
-        true,
+        false,
         expect.any(Function)
       )
     }
@@ -1029,7 +1042,7 @@ describe('WorkspaceView Task 6 integration', () => {
       textPdfResult.document_id,
       'original_format',
       null,
-      true,
+      false,
       expect.any(Function)
     )
     expect(wrapper.text()).toContain('保留 PDF 格式')
@@ -1211,7 +1224,7 @@ describe('WorkspaceView Task 6 integration', () => {
 
     await wrapper.get('.compact-tabs button:nth-child(2)').trigger('click')
     await wrapper
-      .get('.source-segment.highlighted')
+      .get('[data-issue-role="source"]')
       .trigger('click')
     await wrapper.get<HTMLInputElement>('[data-track-changes]').setValue(false)
     await flushPromises()

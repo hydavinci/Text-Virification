@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     job_lease_seconds: int = Field(default=1200, gt=900, le=3600)
     max_upload_bytes: int = Field(default=25 * 1024 * 1024, ge=1)
     cors_origins: str = "http://localhost:5173"
+    preview_renderer_url: str = "http://127.0.0.1:8010"
     llm_api_key: SecretStr = SecretStr("")
     llm_api_base: str = "https://api.openai.com/v1"
     llm_model: str = "gpt-4o-mini"
