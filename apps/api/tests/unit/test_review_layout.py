@@ -134,6 +134,40 @@ def test_mapping_does_not_choose_between_identical_header_and_body() -> None:
     assert layout.notice
 
 
+def test_heading_repeated_inside_body_is_not_mistaken_for_an_extra_header() -> None:
+    from text_verification.application.review_layout import render_review_document
+
+    heading = "Project delivery report"
+    text = f"{heading}\nThe {heading} is ready for approval."
+    with fitz.open() as pdf:
+        page = pdf.new_page()
+        page.insert_text((30, 100), text)
+        content = pdf.tobytes()
+
+    layout = render_review_document(content, "pdf", text, text)
+    assert {glyph.start for page in layout.pages for glyph in page.glyphs} == {
+        index for index, character in enumerate(text) if not character.isspace()
+    }
+    assert layout.notice is None
+
+
+def test_extra_header_remains_ambiguous_when_heading_also_occurs_inside_body() -> None:
+    from text_verification.application.review_layout import render_review_document
+
+    heading = "Project delivery report"
+    text = f"{heading}\nThe {heading} is ready for approval."
+    with fitz.open() as pdf:
+        page = pdf.new_page()
+        page.insert_text((30, 25), heading)
+        page.insert_text((30, 100), text)
+        content = pdf.tobytes()
+
+    layout = render_review_document(content, "pdf", text, text)
+    assert not any(glyph.start < len(heading) for page in layout.pages for glyph in page.glyphs)
+    assert any(glyph.start >= len(heading) for page in layout.pages for glyph in page.glyphs)
+    assert layout.notice
+
+
 def test_repeated_header_cannot_complete_a_false_body_match_across_pages() -> None:
     from text_verification.application.review_layout import render_review_document
 

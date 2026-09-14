@@ -34,6 +34,111 @@ test.beforeEach(async ({ page }) => {
   })
 })
 
+test('setup supporting text stays readable and settings controls fit on a narrow screen', async ({ page }, testInfo) => {
+  await page.goto('/')
+  await page.screenshot({ path: testInfo.outputPath('setup-desktop.png') })
+  for (const selector of ['.product-label', '.options-summary', '.privacy-note', '.dropzone small']) {
+    expect(await page.locator(selector).evaluate((element) =>
+      parseFloat(getComputedStyle(element).fontSize)
+    ), selector).toBeGreaterThanOrEqual(12)
+  }
+  await page.setViewportSize({ width: 320, height: 568 })
+  await page.locator('[data-open-settings]').click()
+  const dialog = page.getByRole('dialog', { name: '检查设置', exact: true })
+  await expect(dialog).toBeVisible()
+  expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true)
+  await dialog.getByLabel('个人信息与凭证扫描').uncheck()
+  await page.keyboard.press('Escape')
+  await expect(page.locator('[data-open-settings]')).toBeFocused()
+})
+
+test('review controls have readable labels and contrasting primary actions in both themes', async ({ page }, testInfo) => {
+  const text = '帐号测试：请核对这份文档中的文字与表达。\n保留原文结构，逐项审阅修改建议。'
+  await page.route('**/api/v1/analyze', (route) => route.fulfill({ json: {
+    success: true, filename: '交付文档.txt', source_name: '交付文档.txt', file_type: 'txt',
+    text, blocks: [block(text)], parser_name: 'compatibility-flat-text', parser_version: '1',
+    stats: stats(text), issues: [issue(text)], summary: summary(),
+    file_id: null, file_ext: null, document_id: documentId, verification_run_id: runId,
+    source_version: sourceVersion, execution_mode: 'synchronous', analysis_mode: 'local_only',
+    dictionary_versions: {}, degradation: { is_degraded: false, reasons: [] }, scenario: 'general'
+  } }))
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/')
+  await page.getByRole('button', { name: '粘贴文本' }).click()
+  await page.getByLabel('待检查文本').fill(text)
+  await page.locator('[data-submit-source]').click()
+  await page.locator('[data-issue-role="list"]').click()
+  await page.getByLabel('查找内容', { exact: true }).fill('文档')
+  for (const theme of ['light', 'dark']) {
+    if (theme === 'dark') await page.locator('[data-toggle-theme]').click()
+    await page.screenshot({ path: testInfo.outputPath(`review-${theme}.png`) })
+    const selectedCard = page.locator('.issue-card.selected')
+    await expect(selectedCard).not.toHaveCSS('box-shadow', /inset/)
+    const borders = await selectedCard.evaluate((element) => {
+      const style = getComputedStyle(element)
+      return [style.borderTop, style.borderRight, style.borderBottom, style.borderLeft]
+    })
+    expect(new Set(borders).size).toBe(1)
+    for (const selector of [
+      '.search-replace-panel label', '.filters label', '.issue-meta', '.severity', '.issue-details blockquote'
+    ]) {
+      const sizes = await page.locator(selector).evaluateAll((elements) =>
+        elements.map((element) => parseFloat(getComputedStyle(element).fontSize))
+      )
+      expect(sizes.length).toBeGreaterThan(0)
+      expect(Math.min(...sizes), selector).toBeGreaterThanOrEqual(12)
+    }
+    const actions = page.locator('.search-replace-panel .actions button, .issue-actions button')
+    for (const action of await actions.all()) {
+      expect((await action.boundingBox())!.height).toBeGreaterThanOrEqual(36)
+    }
+    const contrast = await page.locator('[data-action="replace-all"]').evaluate((element) => {
+      const style = getComputedStyle(element)
+      const luminance = (color: string) => {
+        const components = color.match(/[\d.]+/g)!.slice(0, 3).map(Number).map((value) => {
+          const channel = value / 255
+          return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4
+        })
+        return components[0] * 0.2126 + components[1] * 0.7152 + components[2] * 0.0722
+      }
+      const foreground = luminance(style.color)
+      const background = luminance(style.backgroundColor)
+      return {
+        ratio: (Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05),
+        color: style.color,
+        background: style.backgroundColor,
+        animations: element.getAnimations().map((animation) => animation.playState)
+      }
+    })
+    expect(contrast.ratio, `${theme}: ${JSON.stringify(contrast)}`).toBeGreaterThanOrEqual(4.5)
+  }
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.getByRole('button', { name: /^问题 1$/ }).click()
+  await page.screenshot({ path: testInfo.outputPath('review-mobile-dark.png') })
+  const utilityRows = await page.locator('.topbar .icon-btn').evaluateAll((buttons) =>
+    buttons.map((button) => button.getBoundingClientRect().top)
+  )
+  expect(new Set(utilityRows).size).toBe(1)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390)
+  await page.getByRole('button', { name: '文档', exact: true }).click()
+  await page.locator('[data-action="start-edit"]').click()
+  await page.locator('[data-edit-input]').fill(`${text}\n补充说明。`)
+  await page.locator('[data-action="save-edit"]').click()
+  await expect(page.locator('.blocked-reason')).toBeVisible()
+  for (const width of [320, 390]) {
+    await page.setViewportSize({ width, height: 844 })
+    const opener = page.locator('.topbar [data-open-settings]')
+    const box = (await opener.boundingBox())!
+    expect(box.x).toBeGreaterThanOrEqual(0)
+    expect(box.x + box.width).toBeLessThanOrEqual(width)
+    await opener.click()
+    await expect(page.getByRole('dialog', { name: '检查设置', exact: true })).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(opener).toBeFocused()
+  }
+  await page.screenshot({ path: testInfo.outputPath('review-mobile-edited.png') })
+})
+
 test('minimal setup preserves advanced options and remains usable at desktop and mobile widths', async ({ page }) => {
   await page.goto('/')
   await expect(page.getByRole('button', { name: /^检查设置/ })).toHaveCount(1)
@@ -214,6 +319,25 @@ test('unified layout locates an already-selected restored issue without changing
   await expect(page.locator('.layout-issue.selected')).toBeVisible()
   await expect.poll(() => page.locator('.layout-scroll').evaluate((element) => element.scrollTop))
     .toBeGreaterThan(0)
+  const fitWidth = (await page.locator('.layout-page').first().boundingBox())!.width
+  for (const scale of [25, 50, 75, 100]) {
+    await page.getByLabel('文档缩放').selectOption(String(scale))
+    await expect.poll(async () =>
+      (await page.locator('.layout-page').first().boundingBox())!.width / fitWidth
+    ).toBeCloseTo(scale / 100, 2)
+    const offset = await page.locator('.layout-scroll').evaluate((element) => {
+      const pages = element.querySelector('.layout-pages')!.getBoundingClientRect()
+      const viewportLeft = element.getBoundingClientRect().left + element.clientLeft
+      return pages.left + pages.width / 2 - (viewportLeft + element.clientWidth / 2)
+    })
+    expect(Math.abs(offset)).toBeLessThan(1)
+    await page.locator('[data-issue-role="list"]').click()
+    await expect(page.locator('.layout-issue.selected')).toBeVisible()
+  }
+  await page.getByLabel('文档缩放').selectOption('fit')
+  await expect.poll(async () =>
+    (await page.locator('.layout-page').first().boundingBox())!.width
+  ).toBeCloseTo(fitWidth, 1)
   await page.getByLabel('文档缩放').selectOption('200')
   await expect.poll(() => page.locator('.layout-scroll').evaluate((element) => element.scrollLeft))
     .toBeGreaterThan(0)

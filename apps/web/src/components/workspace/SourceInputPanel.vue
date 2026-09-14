@@ -150,7 +150,7 @@ function handleDropzoneKeydown(event: KeyboardEvent): void {
 
 <template>
   <section class="source-input-panel">
-    <div class="mode-tabs" aria-label="输入方式">
+    <div class="mode-tabs ui-tabs" aria-label="输入方式">
       <button
         data-mode="file"
         :class="{ active: mode === 'file' }"
@@ -238,7 +238,7 @@ function handleDropzoneKeydown(event: KeyboardEvent): void {
     <slot name="settings" />
     <div class="submit-row">
       <button
-        class="btn primary"
+        class="btn primary ui-button ui-button--primary"
         data-submit-source
         :disabled="busy"
         type="button"
@@ -255,40 +255,10 @@ function handleDropzoneKeydown(event: KeyboardEvent): void {
 .mode-tabs {
   width: fit-content;
   margin-bottom: 20px;
-  padding: 4px;
-  display: flex;
-  gap: 5px;
-  border-radius: 12px;
-  background: var(--surface-2);
-}
-.mode-tabs button {
-  padding: 9px 17px;
-  border: 0;
-  border-radius: 9px;
-  color: var(--muted);
-  background: transparent;
-  cursor: pointer;
-  font-weight: 700;
-}
-.mode-tabs button.active {
-  color: var(--primary);
-  background: var(--surface);
-  box-shadow: 0 3px 10px rgba(15, 23, 42, .08);
-}
-.btn {
-  padding: 9px 15px;
-  border: 1px solid transparent;
-  border-radius: 11px;
-  font-weight: 700;
-  cursor: pointer;
 }
 .btn:disabled, button:disabled {
   opacity: .55;
   cursor: not-allowed;
-}
-.btn.primary {
-  color: var(--on-primary);
-  background: var(--primary);
 }
 .dropzone {
   min-height: 220px;
@@ -299,18 +269,18 @@ function handleDropzoneKeydown(event: KeyboardEvent): void {
   justify-content: center;
   gap: 10px;
   border: 1px dashed var(--border-strong);
-  border-radius: 10px;
+  border-radius: var(--radius-panel);
   color: var(--muted);
-  background: var(--surface-2);
+  background: color-mix(in srgb, var(--primary-soft) 35%, var(--surface));
   text-align: center;
   cursor: pointer;
-  transition: .2s;
+  transition: border-color .15s;
 }
 .dropzone:hover,
 .dropzone:focus-visible {
-  border-color: #2563eb;
-  color: #2563eb;
-  outline: 3px solid rgba(37, 99, 235, .14);
+  border-color: var(--primary);
+  color: var(--primary);
+  background: var(--primary-soft);
 }
 .dropzone.dragging {
   border-style: solid;
@@ -322,21 +292,24 @@ function handleDropzoneKeydown(event: KeyboardEvent): void {
   cursor: wait;
 }
 .upload-icon {
-  width: 32px;
-  height: 32px;
+  width: 52px;
+  height: 52px;
+  padding: 12px;
+  border-radius: 14px;
+  background: var(--primary-soft);
   margin-bottom: 4px;
   color: var(--primary);
 }
-.dropzone strong { color: var(--text); font-size: 15px; font-weight: 500; }
-.dropzone small { margin-top: 8px; font-size: 11px; line-height: 1.7; }
+.dropzone strong { color: var(--text); font-size: 16px; font-weight: 500; }
+.dropzone small { margin-top: 8px; font-size: 12px; line-height: 1.7; }
 .choose-file { color: var(--primary); font-size: 13px; }
 .selected-file { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; }
 .selected-file > div { min-width: 0; }
 .selected-file strong { display: block; overflow-wrap: anywhere; font-size: 13px; font-weight: 500; }
-.selected-file small { display: block; color: var(--muted); margin-top: 4px; font-size: 11px; }
+.selected-file small { display: block; color: var(--muted); margin-top: 4px; font-size: 12px; }
 .selected-file button { flex: 0 0 auto; border: 0; padding: 8px; color: var(--muted); background: transparent; cursor: pointer; }
 .submit-row { display: flex; justify-content: flex-end; margin-top: 20px; }
-.submit-row .btn { min-height: 42px; min-width: 138px; display: flex; align-items: center; justify-content: center; gap: 20px; font-size: 13px; font-weight: 500; border-radius: 8px; }
+.submit-row .btn { min-height: 42px; min-width: 148px; gap: 20px; }
 .text-mode > label {
   display: block;
   margin-bottom: 8px;
@@ -369,8 +342,8 @@ function handleDropzoneKeydown(event: KeyboardEvent): void {
   font-size: 12px;
 }
 [role='alert'] {
-  color: #be123c;
-  font-weight: 700;
+  color: var(--danger);
+  font-weight: 500;
 }
 @media (max-width: 680px) {
   .text-footer {

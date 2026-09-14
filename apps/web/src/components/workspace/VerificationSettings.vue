@@ -71,7 +71,7 @@ function selectOcrLanguage(event: Event): void {
   <section class="settings-body" :class="{ compact }" aria-label="检查设置">
     <label class="scenario-field">
       <span>文档场景</span>
-      <select aria-label="文档场景" :value="options.scenario" @change="selectScenario">
+      <select class="ui-field" aria-label="文档场景" :value="options.scenario" @change="selectScenario">
         <option v-for="scenario in scenarios" :key="scenario.id" :value="scenario.id" :data-scenario="scenario.id">
           {{ scenario.name }}
         </option>
@@ -96,6 +96,7 @@ function selectOcrLanguage(event: Event): void {
     <label class="scenario-field">
       <span>OCR 识别语言</span>
       <select
+        class="ui-field"
         aria-label="OCR 识别语言"
         :value="options.ocrLanguage ?? 'zh'"
         @change="selectOcrLanguage"
@@ -147,32 +148,38 @@ function selectOcrLanguage(event: Event): void {
 
 <style scoped>
 .settings-body {
-  padding: 4px 20px 22px;
+  padding: 0 0 20px;
 }
 .settings-body.compact { padding: 0; }
 .ocr-note { color: var(--muted); font-size: 12px; line-height: 1.7; }
-.scenario-field { display: flex; align-items: center; gap: 12px; font-size: 13px; color: var(--muted); }
-.scenario-field select { min-width: 120px; padding: 8px 28px 8px 10px; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
+.scenario-field { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; font-size: 13px; color: var(--text); }
+.scenario-field select { min-width: 120px; max-width: 100%; }
 .settings-body h2 {
-  margin: 18px 0 10px;
+  margin: 26px 0 12px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
   font-size: 14px;
+  font-weight: 600;
 }
 .switch {
-  padding: 10px 0;
+  min-height: 44px;
+  padding: 12px 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  color: var(--muted);
+  color: var(--text);
   font-size: 13px;
 }
 .switch input {
-  width: 35px;
+  width: 20px;
   height: 20px;
+  flex-shrink: 0;
+  margin: 0;
   accent-color: var(--primary);
 }
 [role='alert'] {
-  color: #be123c;
-  font-weight: 700;
+  color: var(--danger);
+  font-weight: 500;
 }
 </style>

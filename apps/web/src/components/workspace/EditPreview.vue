@@ -91,6 +91,7 @@ watch(
       <strong class="document-title">{{ title ?? '当前文档' }}</strong>
       <button
         v-if="!editing"
+        class="ui-button"
         ref="startButton"
         type="button"
         data-action="start-edit"
@@ -101,7 +102,7 @@ watch(
       </button>
       <button
         v-if="editing"
-        class="accept"
+        class="accept ui-button ui-button--primary"
         type="button"
         data-action="save-edit"
         :disabled="conflicted || disabled"
@@ -111,7 +112,7 @@ watch(
       </button>
       <button
         v-if="editing"
-        class="reject"
+        class="reject ui-button ui-button--quiet"
         type="button"
         data-action="cancel-edit"
         @click="cancelEdit"
@@ -161,19 +162,20 @@ watch(
 }
 
 .edit-actions {
-  min-height: 45px;
-  padding: 7px 12px;
+  min-height: 58px;
+  padding: 10px 16px;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 7px;
+  gap: 10px;
   border-bottom: 1px solid var(--border);
-  background: var(--surface-2);
+  background: var(--surface);
 }
 
 .document-title {
   margin-right: auto;
   font-size: 14px;
+  font-weight: 600;
 }
 
 .marker-toggle {
@@ -183,50 +185,21 @@ watch(
   min-height: 32px;
   font-size: 12px;
   cursor: pointer;
+  color: var(--muted);
 }
 
 .marker-toggle input {
   margin: 0;
+  width: 16px;
+  height: 16px;
   accent-color: var(--primary);
-}
-
-button {
-  padding: 7px 11px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  color: var(--text);
-  background: var(--surface);
-  cursor: pointer;
-  font-size: 12px;
-  font-weight: 700;
-}
-
-button:disabled {
-  cursor: not-allowed;
-  opacity: 0.55;
-}
-
-button.accept {
-  color: #15803d;
-  background: #dcfce7;
-}
-
-button.reject {
-  color: #be123c;
-  background: #fff1f2;
-}
-
-button:focus-visible,
-input:focus-visible,
-textarea:focus-visible {
-  outline: 3px solid color-mix(in srgb, var(--primary) 35%, transparent);
-  outline-offset: 2px;
 }
 
 [data-edit-status] {
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
 }
+[data-edit-status]:empty { display: none; }
 
 .document-content,
 .document-editor {

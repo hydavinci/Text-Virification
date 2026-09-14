@@ -45,7 +45,7 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', dismissOutside
 <template>
   <div ref="panel" class="export-panel" aria-label="导出操作" @focusout="dismissOnBlur">
     <button
-      class="btn ghost"
+      class="btn ghost ui-button"
       type="button"
       data-action="recheck"
       :disabled="recheckDisabled || busy"
@@ -56,7 +56,7 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', dismissOutside
     <div class="export-disclosure">
       <button
         ref="trigger"
-        class="btn primary"
+        class="btn primary ui-button ui-button--primary"
         type="button"
         data-toggle-export
         :aria-expanded="expanded"
@@ -74,7 +74,7 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', dismissOutside
         @keydown.esc.prevent.stop="closeOptions"
       >
     <button
-      class="btn ghost"
+      class="btn ghost ui-button"
       type="button"
       data-action="export-report"
       :disabled="reportDisabled || busy"
@@ -83,7 +83,7 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', dismissOutside
       检查报告
     </button>
     <button
-      class="btn ghost"
+      class="btn ghost ui-button"
       type="button"
       data-action="export-modified"
       :disabled="modifiedDisabled || busy"
@@ -123,27 +123,6 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', dismissOutside
   gap: 8px;
   min-width: 0;
 }
-.btn {
-  border: 1px solid transparent;
-  border-radius: 8px;
-  padding: 9px 15px;
-  color: inherit;
-  background: var(--surface);
-  font: inherit;
-  font-weight: 500;
-  cursor: pointer;
-}
-.btn:disabled {
-  opacity: .55;
-  cursor: not-allowed;
-}
-.btn.primary {
-  color: var(--on-primary);
-  background: var(--primary);
-}
-.btn.ghost {
-  border-color: var(--border);
-}
 .switch {
   display: flex;
   align-items: center;
@@ -153,19 +132,21 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', dismissOutside
   font-size: 13px;
 }
 .switch input {
-  width: 35px;
-  height: 20px;
+  width: 16px;
+  height: 16px;
   accent-color: var(--primary);
 }
 .blocked-reason {
   max-width: 22rem;
   color: var(--muted);
-  line-height: 1.3;
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
 }
 .export-panel { flex-wrap: wrap; font-size: 12px; }
 .export-disclosure { position: relative; }
 .export-options { position: absolute; right: 0; top: calc(100% + 8px); z-index: 30; width: 220px; padding: 8px; display: flex; flex-direction: column; gap: 4px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow); }
-.export-options .btn { text-align: left; border: 0; padding: 11px; }
+.export-options .btn { justify-content: flex-start; border: 0; padding: 11px; box-shadow: none; }
 .export-options .btn:hover:not(:disabled) { background: var(--surface-2); }
 .export-options .switch { padding: 12px 8px 8px; border-top: 1px solid var(--border); }
 @media (max-width: 760px) {

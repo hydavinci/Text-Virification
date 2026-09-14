@@ -58,7 +58,7 @@ function setVisibleState(state: IssueState): void {
       <div class="action-groups">
       <div class="selected-actions" aria-label="当前问题操作">
         <button
-          class="btn accept small"
+          class="btn accept small ui-button ui-button--primary"
           type="button"
           data-action="accept-selected"
           :disabled="disabled || selectedIssueId === null"
@@ -67,7 +67,7 @@ function setVisibleState(state: IssueState): void {
           接受当前
         </button>
         <button
-          class="btn reject small"
+          class="btn reject small ui-button ui-button--quiet"
           type="button"
           data-action="reject-selected"
           :disabled="disabled || selectedIssueId === null"
@@ -76,7 +76,7 @@ function setVisibleState(state: IssueState): void {
           忽略当前
         </button>
         <button
-          class="btn small"
+          class="btn small ui-button"
           type="button"
           data-action="reset-selected"
           :disabled="
@@ -92,7 +92,7 @@ function setVisibleState(state: IssueState): void {
 
       <div class="batch-actions" aria-label="当前筛选结果批量操作">
         <button
-          class="btn accept small"
+          class="btn accept small ui-button ui-button--primary"
           type="button"
           data-action="accept-batch"
           :disabled="disabled || visibleIssueIds.length === 0"
@@ -101,7 +101,7 @@ function setVisibleState(state: IssueState): void {
           全部接受
         </button>
         <button
-          class="btn reject small"
+          class="btn reject small ui-button ui-button--quiet"
           type="button"
           data-action="reject-batch"
           :disabled="disabled || visibleIssueIds.length === 0"
@@ -110,7 +110,7 @@ function setVisibleState(state: IssueState): void {
           全部忽略
         </button>
         <button
-          class="btn small"
+          class="btn small ui-button"
           type="button"
           data-action="reset-batch"
           :disabled="disabled || visibleIssueIds.length === 0"
@@ -119,7 +119,7 @@ function setVisibleState(state: IssueState): void {
           重置状态
         </button>
         <button
-          class="btn small"
+          class="btn small ui-button"
           type="button"
           data-action="undo-batch"
           :disabled="disabled || !canUndoLastBatch"
@@ -154,57 +154,32 @@ function setVisibleState(state: IssueState): void {
 
 .review-counts {
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
+  gap: 10px;
+  font-variant-numeric: tabular-nums;
 }
+.review-counts > span { white-space: nowrap; }
 
 .review-counts strong {
   color: var(--text);
+  font-weight: 600;
 }
+.review-counts [data-count='pending'] { color: var(--primary); }
+.review-counts [data-count='accepted'] { color: var(--success); }
 
 .action-groups {
   flex-direction: column;
   align-items: stretch;
 }
 .review-disclosure { position: relative; }
-.review-disclosure summary { cursor: pointer; padding: 8px 12px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); font-size: 12px; }
+.review-disclosure summary { min-height: 36px; cursor: pointer; padding: 8px 12px; border: 1px solid var(--border); border-radius: var(--radius-control); background: var(--surface); font-size: 13px; line-height: 18px; box-shadow: var(--shadow-small); }
 .review-disclosure .action-groups { position: absolute; right: 0; top: calc(100% + 6px); z-index: 25; width: min(320px, calc(100vw - 32px)); padding: 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); box-shadow: var(--shadow); }
 .batch-actions { padding-top: 10px; border-top: 1px solid var(--border); }
 
-button {
-  padding: 7px 11px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  color: var(--text);
-  background: var(--surface);
-  cursor: pointer;
-  font-size: 12px;
-  font-weight: 700;
-}
-
-button.accept {
-  color: #15803d;
-  background: #dcfce7;
-}
-
-button.reject {
-  color: #be123c;
-  background: #fff1f2;
-}
-
-button:disabled {
-  cursor: not-allowed;
-  opacity: 0.5;
-}
-
-button:focus-visible {
-  outline: 3px solid color-mix(in srgb, var(--primary) 35%, transparent);
-  outline-offset: 2px;
-}
-
 .conflict {
   margin: 0;
-  color: #b45309;
-  font-size: 11px;
-  font-weight: 700;
+  color: var(--warning);
+  font-size: 12px;
+  font-weight: 500;
 }
 </style>

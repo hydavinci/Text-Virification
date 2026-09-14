@@ -29,6 +29,26 @@ function layout(text = '帐号测试'): ReviewLayout {
 beforeEach(() => vi.mocked(fetchReviewLayout).mockReset())
 
 describe('unified original document review', () => {
+  it('supports reducing and restoring the page scale without changing issue coordinates', async () => {
+    vi.mocked(fetchReviewLayout).mockResolvedValue(layout())
+    const wrapper = mount(OriginalDocumentPreview, { props })
+    await flushPromises()
+    const select = wrapper.get('select[aria-label="文档缩放"]')
+    const markStyle = wrapper.get('[data-issue-role="source"]').attributes('style')
+    for (const scale of [25, 50, 75, 100, 125, 150, 200]) {
+      expect(select.findAll('option').some((option) =>
+        option.text() === `${scale}%`
+      )).toBe(true)
+      await select.setValue(String(scale))
+      expect(wrapper.get('.layout-pages').attributes('style')).toContain(`width: ${scale}%`)
+      expect(wrapper.get('[data-issue-role="source"]').attributes('style')).toBe(markStyle)
+    }
+    await select.setValue('fit')
+    expect(wrapper.get('.layout-pages').attributes('style')).toContain('width: 100%')
+    expect(wrapper.get('.layout-page img').attributes('src')).toBe('data:image/png;base64,AAAA')
+    wrapper.unmount()
+  })
+
   it('shows page images and clickable issue marks together without PDF viewer modes', async () => {
     vi.mocked(fetchReviewLayout).mockResolvedValue(layout())
     const wrapper = mount(OriginalDocumentPreview, { props })

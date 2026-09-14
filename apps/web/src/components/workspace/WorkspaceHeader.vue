@@ -32,7 +32,7 @@ defineEmits<{
     <div class="top-actions">
       <button
         v-if="hasResult"
-        class="settings-btn"
+        class="settings-btn ui-button"
         type="button"
         data-open-settings
         aria-haspopup="dialog"
@@ -42,6 +42,7 @@ defineEmits<{
         检查设置
       </button>
       <slot v-if="hasResult" name="exports"></slot>
+      <div class="utility-actions">
       <button
         class="icon-btn"
         type="button"
@@ -73,6 +74,7 @@ defineEmits<{
         <svg v-if="theme === 'light'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M20.5 13.5A8.5 8.5 0 0 1 10.5 3 8.5 8.5 0 1 0 20.5 13.5Z" /></svg>
         <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="4" /><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5" /></svg>
       </button>
+      </div>
     </div>
   </header>
 </template>
@@ -95,33 +97,35 @@ defineEmits<{
   display: flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: 11px;
+  gap: 10px;
   border: 0;
   background: none;
   cursor: pointer;
   text-align: left;
 }
 .brand-mark {
-  width: 30px;
-  height: 30px;
+  width: 34px;
+  height: 34px;
   display: grid;
   place-items: center;
-  border-radius: 8px;
-  color: white;
+  border-radius: 10px;
+  color: var(--on-primary);
   font-weight: 600;
-  background: #3264d7;
+  background: var(--primary);
+  box-shadow: var(--shadow-small);
 }
 .brand strong,
 .brand small {
   display: block;
 }
 .brand strong {
-  font-size: 14px;
+  font-size: 15px;
+  letter-spacing: .04em;
 }
 .brand small {
   margin-top: 1px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 .top-actions {
   display: flex;
@@ -130,41 +134,43 @@ defineEmits<{
   justify-content: flex-end;
   gap: 8px;
 }
+.utility-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-left: 8px;
+  border-left: 1px solid var(--border);
+}
 .icon-btn {
-  width: 32px;
-  height: 32px;
+  width: 36px;
+  height: 36px;
   flex: 0 0 auto;
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--radius-control);
   background: var(--surface);
   cursor: pointer;
 }
 .settings-btn {
-  padding: 9px 15px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  color: var(--text);
-  background: var(--surface);
-  font: inherit;
-  font-size: 12px;
-  font-weight: 500;
   white-space: nowrap;
-  cursor: pointer;
 }
-.settings-btn:hover { background: var(--surface-2); }
 .icon-btn { display: grid; place-items: center; color: var(--muted); }
 .icon-btn svg { width: 18px; height: 18px; }
 .icon-btn:hover { background: var(--surface-2); color: var(--text); }
 @media (max-width: 760px) {
   .topbar {
     padding: 8px 13px;
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    gap: 8px;
   }
-  .top-actions {
-    flex: 1 1 auto;
-    flex-wrap: wrap;
-    justify-content: flex-end;
-  }
+  .brand { grid-column: 1; grid-row: 1; justify-self: start; }
+  .top-actions { display: contents; }
+  .utility-actions { grid-column: 2 / -1; grid-row: 1; justify-self: end; border: 0; padding: 0; }
+  .settings-btn { grid-column: 1; grid-row: 2; justify-self: end; }
+  .top-actions > :deep(.export-panel) { display: contents; }
+  .top-actions :deep(.export-panel > [data-action='recheck']) { grid-column: 2; grid-row: 2; }
+  .top-actions :deep(.export-disclosure) { grid-column: 3; grid-row: 2; }
+  .top-actions :deep(.blocked-reason) { grid-column: 1 / -1; grid-row: 3; justify-self: end; max-width: 100%; }
 }
 @media (max-width: 420px) {
   .brand small {

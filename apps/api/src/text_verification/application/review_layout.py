@@ -77,9 +77,12 @@ def _map_glyphs(text: str, glyphs: list[_Glyph], pages: list[LayoutPage]) -> boo
     occurrences = Counter(identity for identity in identities if identity)
     if len(rendered) * len(occurrences) > MAX_MAPPING_WORK:
         return False
-    # Extra rendered occurrences may be headers completing an otherwise unique body match.
+    # A heading may also occur inside a body paragraph; only additional rendered
+    # occurrences can indicate headers completing an otherwise unique body match.
     ambiguous = {
-        identity for identity, count in occurrences.items() if rendered.count(identity) > count
+        identity for identity, count in occurrences.items()
+        if (rendered_count := rendered.count(identity)) > count
+        and rendered_count > source.count(identity)
     }
     excluded: set[int] = set()
     cursor = 0

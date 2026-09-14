@@ -132,7 +132,7 @@ function focusableElements(): HTMLElement[] {
   display: grid;
   place-items: center;
   padding: 20px;
-  background: rgba(2, 6, 23, .55);
+  background: rgba(15, 23, 42, .38);
 }
 .modal {
   width: min(560px, 100%);
@@ -140,12 +140,14 @@ function focusableElements(): HTMLElement[] {
   padding: 28px;
   position: relative;
   overflow: auto;
-  border-radius: 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
   background: var(--surface);
   box-shadow: var(--shadow);
 }
 .modal :deep(h2) {
   margin-top: 0;
+  padding-right: 28px;
 }
 .modal :deep(p) {
   color: var(--muted);
@@ -155,11 +157,22 @@ function focusableElements(): HTMLElement[] {
   position: absolute;
   right: 14px;
   top: 14px;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
   border: 0;
-  background: none;
+  border-radius: var(--radius-control);
+  color: var(--muted);
+  background: var(--surface-2);
   font-size: 24px;
+  line-height: 1;
   cursor: pointer;
 }
 .drawer { padding: 0; place-items: stretch end; background: rgba(15, 23, 42, .25); }
-.drawer .modal { width: min(440px, 100vw); height: 100dvh; max-height: 100dvh; border-radius: 0; border-left: 1px solid var(--border); padding: 32px 20px; }
+.modal-close:hover { color: var(--text); }
+.drawer .modal { width: min(460px, 100vw); height: 100dvh; max-height: 100dvh; border-radius: 0; padding: 32px 24px; }
+@media (max-width: 480px) {
+  .drawer .modal { padding: 28px 18px; }
+}
 </style>

@@ -79,6 +79,7 @@ function updateSuggestion(event: Event): void {
     <label v-if="alternatives.length" class="suggestion-picker">
       <span>选择修改建议</span>
       <select
+        class="ui-field"
         :value="
           selectableSuggestions.findIndex(
             (suggestion) => suggestion === effectiveSuggestion
@@ -125,36 +126,41 @@ function updateSuggestion(event: Event): void {
 <style scoped>
 .diff {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
-  margin: 11px 0;
-  font-weight: 800;
+  margin: 14px 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-control);
+  background: var(--surface-2);
+  font-size: 14px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
 }
 
 .diff del {
-  color: #dc2626;
+  color: var(--danger);
 }
 
 [data-suggestion] {
-  color: #059669;
+  color: var(--success);
 }
 
 .suggestion-picker {
   display: grid;
-  gap: 4px;
+  gap: 6px;
   margin: 8px 0;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .suggestion-picker select {
   max-width: 100%;
-  padding: 5px;
 }
 
 .alternatives {
   margin: 10px 0;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .alternatives ul {
@@ -168,25 +174,31 @@ function updateSuggestion(event: Event): void {
 
 .alternatives small {
   margin-left: 6px;
-  color: #2563eb;
-  font-weight: 800;
+  color: var(--primary);
+  font-size: 12px;
+  font-weight: 500;
 }
 
 p {
   margin: 7px 0;
   font-size: 12px;
+  line-height: 1.8;
+  overflow-wrap: anywhere;
 }
 
 blockquote {
   margin: 8px 0;
-  padding: 8px 10px;
-  border-left: 2px solid var(--border);
+  padding: 10px 12px;
+  border-left: 2px solid var(--border-strong);
+  border-radius: 0 6px 6px 0;
   color: var(--muted);
   background: var(--surface-2);
-  font-size: 11px;
+  font-size: 12px;
+  line-height: 1.8;
+  overflow-wrap: anywhere;
 }
 
 .review-note {
-  color: #7c3aed;
+  color: var(--primary);
 }
 </style>

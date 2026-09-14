@@ -470,9 +470,11 @@ watch(
 <style scoped>
 .document-viewer {
   position: relative;
+  display: grid;
   min-height: 100%;
+  padding: 20px;
   color: var(--text);
-  background: var(--surface);
+  background: var(--canvas);
   font-family: inherit;
   font-size: 16px;
   line-height: 1.9;
@@ -483,10 +485,18 @@ watch(
   width: 100%;
   max-width: 52rem;
   min-width: 0;
+  min-height: 100%;
   margin: 0 auto;
   padding: 32px clamp(20px, 3vw, 40px);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: var(--shadow-paper);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+@media (max-width: 760px) {
+  .document-viewer { padding: 10px; }
+  .source-lines, .continuous-source { padding: 24px 18px; }
 }
 
 .source-line {

@@ -25,7 +25,7 @@ const layout = ref<ReviewLayout | null>(null)
 const loading = ref(false)
 const error = ref<string | null>(null)
 const root = ref<HTMLElement | null>(null)
-const zoom = ref(100)
+const zoom = ref<number | 'fit'>('fit')
 let controller: AbortController | null = null
 let generation = 0
 let running = false
@@ -113,8 +113,12 @@ onBeforeUnmount(() => {
       <span v-if="loading" role="status">正在更新文档版式…</span>
       <span v-else-if="layout?.revision_applied && !error" role="status">已显示当前修订</span>
       <label>缩放
-        <select v-model.number="zoom" aria-label="文档缩放">
-          <option :value="100">适合宽度</option>
+        <select class="ui-field" v-model.number="zoom" aria-label="文档缩放">
+          <option value="fit">适合宽度</option>
+          <option :value="25">25%</option>
+          <option :value="50">50%</option>
+          <option :value="75">75%</option>
+          <option :value="100">100%</option>
           <option :value="125">125%</option>
           <option :value="150">150%</option>
           <option :value="200">200%</option>
@@ -127,10 +131,10 @@ onBeforeUnmount(() => {
     </p>
     <div v-if="error" class="preview-state" role="alert">
       <p>{{ error }} 当前修订仍保留；下方如有页面，是上次成功的预览。</p>
-      <button type="button" data-retry-preview @click="load">重试预览</button>
+      <button class="ui-button" type="button" data-retry-preview @click="load">重试预览</button>
     </div>
     <div class="layout-scroll" tabindex="0" aria-label="文档页面">
-      <div class="layout-pages" :style="{ width: `${zoom}%` }">
+      <div class="layout-pages" :style="{ width: `${zoom === 'fit' ? 100 : zoom}%` }">
         <figure v-for="(page, pageIndex) in pages" :key="pageIndex" class="layout-page"
           :style="{ aspectRatio: `${page.width} / ${page.height}` }"
           :data-page="pageIndex + 1">
@@ -158,17 +162,16 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .original-preview { display: flex; flex-direction: column; height: 100%; min-height: 0; white-space: normal; }
-.layout-toolbar { display: flex; flex-shrink: 0; align-items: center; gap: 12px; padding: 8px 12px; font-size: 12px; border-bottom: 1px solid var(--border); color: var(--muted); }
+.layout-toolbar { display: flex; flex-shrink: 0; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 8px 16px; font-size: 12px; border-bottom: 1px solid var(--border); color: var(--muted); background: var(--surface); }
 .layout-toolbar label { margin-left: auto; white-space: nowrap; }
-.layout-toolbar select { margin-left: 6px; padding: 4px; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 5px; }
+.layout-toolbar select { margin-left: 6px; min-height: 32px; padding-block: 6px; }
 .preview-note, .preview-state { flex-shrink: 0; margin: 0; padding: 8px 12px; font-size: 12px; line-height: 1.6; color: var(--muted); border-bottom: 1px solid var(--border); }
-.preview-state { color: #b91c1c; }
-.preview-state button { padding: 5px 10px; border: 1px solid var(--border); border-radius: 6px; cursor: pointer; }
-.layout-scroll { flex: 1; min-height: 0; overflow: auto; background: var(--surface-2); padding: 16px; }
-.layout-pages { display: flex; flex-direction: column; align-items: center; gap: 30px; padding-bottom: 24px; }
-.layout-page { position: relative; flex: none; width: 100%; margin: 0; background: white; box-shadow: 0 1px 5px #0002; }
+.preview-state { color: var(--danger); background: var(--danger-soft); }
+.layout-scroll { flex: 1; min-height: 0; overflow: auto; background: var(--canvas); padding: 24px; }
+.layout-pages { display: flex; flex-direction: column; align-items: center; gap: 38px; margin-inline: auto; padding-bottom: 28px; }
+.layout-page { position: relative; flex: none; width: 100%; margin: 0; background: white; box-shadow: var(--shadow-paper); }
 .layout-page img { display: block; width: 100%; height: 100%; }
-.layout-page figcaption { position: absolute; top: 100%; width: 100%; padding: 5px; text-align: center; font-size: 11px; color: var(--muted); }
+.layout-page figcaption { position: absolute; top: 100%; width: 100%; padding: 8px; text-align: center; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .layout-issue, .layout-search { position: absolute; border: 0; padding: 0; border-radius: 2px; }
 .layout-issue { background: #f59e0b26; border-bottom: 2px solid #f59e0b; cursor: pointer; }
 .layout-issue.error { background: #ef444426; border-color: #ef4444; }
@@ -177,4 +180,7 @@ onBeforeUnmount(() => {
 .layout-issue.selected, .layout-issue:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; z-index: 2; }
 .layout-search { pointer-events: none; background: #facc1555; outline: 1px solid #eab308; }
 .layout-search.active { background: #fb923c66; outline: 2px solid #ea580c; }
+@media (max-width: 760px) {
+  .layout-scroll { padding: 12px; }
+}
 </style>

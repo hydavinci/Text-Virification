@@ -51,6 +51,7 @@ watch(
     <label>
       <span>查找</span>
       <input
+        class="ui-field"
         v-model="search.query.value"
         data-search-input
         aria-label="查找内容"
@@ -62,6 +63,7 @@ watch(
     <label>
       <span>替换为</span>
       <input
+        class="ui-field"
         v-model="search.replacement.value"
         data-replacement-input
         aria-label="替换内容"
@@ -92,6 +94,7 @@ watch(
 
     <div class="actions">
       <button
+        class="ui-button"
         type="button"
         data-action="search-previous"
         :disabled="disabled || search.matches.value.length === 0"
@@ -100,6 +103,7 @@ watch(
         上一个
       </button>
       <button
+        class="ui-button"
         type="button"
         data-action="search-next"
         :disabled="disabled || search.matches.value.length === 0"
@@ -108,6 +112,7 @@ watch(
         下一个
       </button>
       <button
+        class="ui-button"
         type="button"
         data-action="replace-current"
         :disabled="disabled || search.matches.value.length === 0"
@@ -116,7 +121,7 @@ watch(
         替换当前
       </button>
       <button
-        class="primary"
+        class="primary ui-button ui-button--primary"
         type="button"
         data-action="replace-all"
         :disabled="disabled || search.matches.value.length === 0"
@@ -126,7 +131,7 @@ watch(
       </button>
     </div>
     <button
-      class="undo-text-edit"
+      class="undo-text-edit ui-button ui-button--quiet"
       type="button"
       data-action="undo-text-edit"
       title="撤销上一次替换或已保存的原文编辑"
@@ -140,31 +145,27 @@ watch(
 
 <style scoped>
 .search-replace-panel {
-  padding: 12px;
+  padding: 16px 12px;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   align-items: end;
-  gap: 10px;
+  gap: 14px;
   background: var(--surface);
 }
 
 label {
   min-width: 0;
   display: grid;
-  gap: 4px;
+  gap: 6px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
+  font-weight: 500;
 }
 
 input[type='text'],
 input:not([type]) {
   min-width: 0;
   width: 100%;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  color: var(--text);
-  background: var(--surface-2);
 }
 
 .case-sensitive {
@@ -173,6 +174,7 @@ input:not([type]) {
   align-self: center;
   gap: 6px;
 }
+.case-sensitive input { width: 16px; height: 16px; margin: 0; }
 
 .status {
   min-width: 0;
@@ -180,6 +182,10 @@ input:not([type]) {
   align-self: center;
   color: var(--muted);
   font-size: 12px;
+  padding: 8px 10px;
+  border-radius: var(--radius-control);
+  background: var(--surface-2);
+  font-variant-numeric: tabular-nums;
 }
 
 .actions {
@@ -187,38 +193,12 @@ input:not([type]) {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   align-items: center;
-  gap: 6px;
+  gap: 8px;
 }
 
 .undo-text-edit {
   grid-column: 1 / -1;
 }
 
-button {
-  padding: 7px 2px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  color: var(--text);
-  background: var(--surface);
-  cursor: pointer;
-  font-size: 12px;
-  font-weight: 700;
-}
-
-button.primary {
-  border-color: transparent;
-  color: white;
-  background: linear-gradient(135deg, var(--primary), var(--primary-2));
-}
-
-button:disabled {
-  cursor: not-allowed;
-  opacity: 0.5;
-}
-
-button:focus-visible,
-input:focus-visible {
-  outline: 3px solid color-mix(in srgb, var(--primary) 35%, transparent);
-  outline-offset: 2px;
-}
+.actions button { padding-inline: 4px; }
 </style>

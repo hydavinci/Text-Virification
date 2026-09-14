@@ -1,30 +1,53 @@
 :root {
   color-scheme: light;
-  --primary: #3264d7;
+  --primary: #315bce;
+  --primary-hover: #274cb4;
   --on-primary: #ffffff;
-  --primary-2: #3264d7;
-  --bg: #f8f9fb;
+  --primary-soft: #edf2ff;
+  --primary-2: var(--primary);
+  --bg: #f5f7fb;
   --surface: #ffffff;
-  --surface-2: #f5f6f8;
-  --border: #e5e7eb;
-  --border-strong: #c9ced7;
-  --text: #202632;
-  --muted: #647080;
-  --shadow: 0 8px 28px rgba(20, 30, 50, .08);
+  --surface-2: #f3f5f9;
+  --canvas: #edf0f6;
+  --border: #e2e7f0;
+  --border-strong: #bcc7d9;
+  --text: #253149;
+  --muted: #63718a;
+  --success: #147d64;
+  --success-soft: #edf8f3;
+  --danger: #b43c50;
+  --danger-soft: #fdf0f2;
+  --warning: #946013;
+  --warning-soft: #fbf4e8;
+  --radius-control: 8px;
+  --radius-panel: 14px;
+  --shadow-small: 0 1px 3px rgba(28, 43, 73, .05);
+  --shadow-paper: 0 2px 5px rgba(28, 43, 73, .04), 0 12px 30px rgba(28, 43, 73, .06);
+  --shadow: 0 12px 40px rgba(28, 43, 73, .1), 0 2px 6px rgba(28, 43, 73, .03);
 }
 html[data-theme='dark'] {
   color-scheme: dark;
-  --primary: #8aafff;
-  --on-primary: #101828;
-  --primary-2: #8aafff;
-  --bg: #13161c;
-  --surface: #1b1f27;
-  --surface-2: #222731;
-  --border: #323945;
-  --border-strong: #525d6d;
-  --text: #e6eaf0;
-  --muted: #a4afbf;
-  --shadow: 0 8px 28px rgba(0, 0, 0, .2);
+  --primary: #a5bfff;
+  --primary-hover: #bfd1ff;
+  --on-primary: #142440;
+  --primary-soft: #243451;
+  --bg: #111722;
+  --surface: #1a2230;
+  --surface-2: #222d3e;
+  --canvas: #141b27;
+  --border: #303d52;
+  --border-strong: #536581;
+  --text: #e5ebf5;
+  --muted: #a4aec1;
+  --success: #76d6b5;
+  --success-soft: #193d36;
+  --danger: #ff9fa7;
+  --danger-soft: #44252f;
+  --warning: #edc281;
+  --warning-soft: #3b3021;
+  --shadow-small: 0 1px 3px rgba(0, 0, 0, .15);
+  --shadow-paper: 0 4px 20px rgba(0, 0, 0, .2);
+  --shadow: 0 12px 40px rgba(0, 0, 0, .3);
 }
 * { box-sizing: border-box; }
 body {
@@ -33,6 +56,8 @@ body {
   background: var(--bg);
   color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
   -webkit-font-smoothing: antialiased;
 }
 button, input, textarea, select { font: inherit; }
@@ -40,3 +65,43 @@ button { color: inherit; }
 button:disabled { cursor: not-allowed; }
 :focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
 button, a, input, select, textarea { -webkit-tap-highlight-color: transparent; }
+input[type='checkbox'] { accent-color: var(--primary); }
+.ui-button,
+.ui-field {
+  min-height: 36px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  color: var(--text);
+  background: var(--surface);
+  font: inherit;
+  font-size: 13px;
+  line-height: 18px;
+  transition: border-color .15s, box-shadow .15s;
+}
+.ui-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 12px;
+  font-weight: 500;
+  cursor: pointer;
+  box-shadow: var(--shadow-small);
+}
+.ui-button:hover:not(:disabled) { background: var(--surface-2); border-color: var(--border-strong); }
+.ui-button--primary { border-color: transparent; color: var(--on-primary); background: var(--primary); }
+.ui-button--primary:hover:not(:disabled) { border-color: transparent; background: var(--primary-hover); }
+.ui-button--quiet { border-color: transparent; background: transparent; box-shadow: none; color: var(--muted); }
+.ui-button--quiet:hover:not(:disabled) { border-color: transparent; color: var(--text); }
+.ui-button:disabled { opacity: .5; cursor: not-allowed; box-shadow: none; }
+.ui-field { min-width: 0; padding: 8px 10px; }
+.ui-field:hover:not(:disabled) { border-color: var(--border-strong); }
+.ui-field:focus-visible { border-color: var(--primary); }
+.ui-field:disabled { opacity: .6; }
+.ui-tabs { display: flex; gap: 4px; padding: 4px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); }
+.ui-tabs button { min-height: 32px; padding: 6px 12px; border: 0; border-radius: 6px; color: var(--muted); background: transparent; font-size: 13px; line-height: 20px; font-weight: 500; cursor: pointer; }
+.ui-tabs button:hover:not(:disabled) { color: var(--text); }
+.ui-tabs button.active { color: var(--text); background: var(--surface); box-shadow: var(--shadow-small); }
+@media (prefers-reduced-motion: reduce) {
+  .ui-button, .ui-field { transition: none; }
+}

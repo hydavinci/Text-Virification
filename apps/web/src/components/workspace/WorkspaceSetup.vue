@@ -53,7 +53,7 @@ const enabledChecks = computed(() => [
                 />
               </fieldset>
               <button
-                class="settings-trigger"
+                class="settings-trigger ui-button ui-button--quiet"
                 type="button"
                 data-open-settings
                 aria-haspopup="dialog"
@@ -81,19 +81,19 @@ const enabledChecks = computed(() => [
 </template>
 
 <style scoped>
-.setup { max-width: 760px; margin: 0 auto; padding: 56px 24px 32px; }
-.setup-heading { margin-bottom: 30px; text-align: center; }
-.product-label { font-size: 11px; font-weight: 500; letter-spacing: .12em; color: var(--muted); }
-h1 { margin: 14px 0 12px; font-size: clamp(25px, 3vw, 32px); font-weight: 600; letter-spacing: -.035em; }
-.setup-heading p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.8; }
-.input-card { padding: 28px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); box-shadow: 0 2px 8px rgba(15, 23, 42, .025); }
-.setup-options { min-width: 0; margin: 22px 0 0; padding: 0; border: 0; }
+.setup { max-width: 800px; margin: 0 auto; padding: 48px 24px 32px; }
+.setup-heading { margin-bottom: 28px; text-align: center; }
+.product-label { display: inline-flex; align-items: center; gap: 8px; padding: 5px 12px; border-radius: 20px; background: var(--primary-soft); font-size: 12px; font-weight: 500; letter-spacing: .08em; color: var(--primary); }
+.product-label::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+h1 { margin: 16px 0 12px; font-size: clamp(27px, 3vw, 36px); line-height: 1.35; font-weight: 600; letter-spacing: -.035em; }
+.setup-heading p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.8; }
+.input-card { padding: 28px; border: 1px solid var(--border); border-radius: 18px; background: var(--surface); box-shadow: var(--shadow-paper); }
+.setup-options { min-width: 0; margin: 24px 0 0; padding: 20px 0 0; border: 0; border-top: 1px solid var(--border); }
 .options-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .scenario-control { min-width: 0; margin: 0; padding: 0; border: 0; }
-.settings-trigger { display: flex; align-items: center; gap: 8px; padding: 8px 0 8px 8px; border: 0; color: var(--muted); background: transparent; font-size: 12px; cursor: pointer; white-space: nowrap; }
-.settings-trigger:hover { color: var(--primary); }
-.options-summary { margin: 12px 0 0; color: var(--muted); font-size: 11px; line-height: 1.8; }
-.privacy-note { margin: 18px 0 0; color: var(--muted); text-align: center; font-size: 11px; line-height: 1.9; }
+.settings-trigger { white-space: nowrap; }
+.options-summary { margin: 12px 0 0; color: var(--muted); font-size: 12px; line-height: 1.8; }
+.privacy-note { margin: 20px 0 0; color: var(--muted); text-align: center; font-size: 12px; line-height: 1.9; }
 @media (max-width: 600px) {
   .setup { padding: 32px 16px 24px; }
   .input-card { padding: 18px; }

@@ -164,6 +164,7 @@ function downloadExample(): void {
       <div class="term-form">
         <label class="sr-only" for="term-original">原文写法</label>
         <input
+          class="ui-field"
           id="term-original"
           v-model="termOriginal"
           placeholder="原文写法"
@@ -172,13 +173,14 @@ function downloadExample(): void {
         <span aria-hidden="true">→</span>
         <label class="sr-only" for="term-standard">规范写法</label>
         <input
+          class="ui-field"
           id="term-standard"
           v-model="termStandard"
           placeholder="规范写法"
           @keyup.enter="addGlossary"
         />
         <button
-          class="btn primary small"
+          class="btn primary small ui-button ui-button--primary"
           data-action="add-glossary"
           type="button"
           @click="addGlossary"
@@ -194,13 +196,14 @@ function downloadExample(): void {
       <div class="term-form">
         <label class="sr-only" for="banned-word">输入禁用词</label>
         <input
+          class="ui-field"
           id="banned-word"
           v-model="bannedInput"
           placeholder="输入禁用词"
           @keyup.enter="addBannedWord"
         />
         <button
-          class="btn primary small"
+          class="btn primary small ui-button ui-button--primary"
           data-action="add-banned"
           type="button"
           @click="addBannedWord"
@@ -211,7 +214,7 @@ function downloadExample(): void {
     </template>
 
     <button
-      class="import-btn"
+      class="import-btn ui-button"
       data-action="import"
       type="button"
       @click="openImportPicker"
@@ -303,16 +306,18 @@ function downloadExample(): void {
   border: 0;
 }
 .settings-body {
-  padding: 4px 20px 22px;
+  padding: 0 0 20px;
 }
 .settings-body h2 {
   margin: 18px 0 10px;
   font-size: 14px;
+  font-weight: 600;
 }
 .muted,
 .empty {
   color: var(--muted);
-  font-size: 12px;
+  font-size: 13px;
+  line-height: 1.8;
 }
 .term-form {
   display: flex;
@@ -322,42 +327,14 @@ function downloadExample(): void {
 .term-form input {
   min-width: 0;
   flex: 1;
-  padding: 9px 10px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  color: var(--text);
-  background: var(--surface-2);
 }
 .term-form input:focus {
   border-color: var(--primary);
   outline: 3px solid rgba(37, 99, 235, .1);
 }
-.btn {
-  padding: 9px 15px;
-  border: 1px solid transparent;
-  border-radius: 11px;
-  font-weight: 700;
-  cursor: pointer;
-}
-.btn.small {
-  padding: 7px 11px;
-  font-size: 12px;
-}
-.btn.primary {
-  color: white;
-  background: linear-gradient(135deg, var(--primary), var(--primary-2));
-  box-shadow: 0 7px 18px rgba(37, 99, 235, .2);
-}
 .import-btn {
   display: inline-block;
   margin: 12px 0;
-  padding: 6px 10px;
-  border: 1px dashed var(--border);
-  border-radius: 8px;
-  color: var(--primary);
-  background: transparent;
-  font-size: 12px;
-  cursor: pointer;
 }
 .import-btn:focus-visible {
   outline: 3px solid rgba(37, 99, 235, .14);
@@ -371,7 +348,7 @@ function downloadExample(): void {
   font-size: 12px;
 }
 .link-btn.danger {
-  color: #dc2626;
+  color: var(--danger);
 }
 .chip-list,
 .banned-list {
@@ -389,11 +366,11 @@ function downloadExample(): void {
   font-size: 12px;
 }
 .term-chip .original {
-  color: #dc2626;
+  color: var(--danger);
   font-weight: 700;
 }
 .term-chip .standard {
-  color: #059669;
+  color: var(--success);
   font-weight: 700;
 }
 .term-chip button,

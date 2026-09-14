@@ -111,6 +111,7 @@ watch(
       <label>
         <span>检查层级</span>
         <select
+          class="ui-field"
           :value="selectedLayer"
           aria-label="检查层级"
           :disabled="disabled"
@@ -129,6 +130,7 @@ watch(
       <label>
         <span>问题级别</span>
         <select
+          class="ui-field"
           :value="selectedSeverity"
           aria-label="问题级别"
           :disabled="disabled"
@@ -190,7 +192,7 @@ watch(
 
         <div v-if="selectedIssueId === issue.issue_id" class="issue-actions" aria-label="问题处理">
           <button
-            class="accept"
+            class="accept ui-button ui-button--primary"
             type="button"
             :disabled="disabled"
             @click="emit('set-state', issue.issue_id, 'accepted')"
@@ -198,7 +200,7 @@ watch(
             接受
           </button>
           <button
-            class="reject"
+            class="reject ui-button ui-button--quiet"
             type="button"
             :disabled="disabled"
             @click="emit('set-state', issue.issue_id, 'rejected')"
@@ -206,7 +208,7 @@ watch(
             忽略
           </button>
           <button
-            class="undo"
+            class="undo ui-button ui-button--quiet"
             type="button"
             :disabled="disabled"
             @click="emit('set-state', issue.issue_id, 'pending')"
@@ -233,46 +235,43 @@ watch(
 .filters {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 8px;
-  padding: 10px;
+  gap: 10px;
+  padding: 14px 12px;
   border-bottom: 1px solid var(--border);
 }
 
 .filters label {
   display: grid;
-  gap: 3px;
+  gap: 6px;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .filters select {
   min-width: 0;
   width: 100%;
-  padding: 8px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  color: var(--text);
-  background: var(--surface);
-  font-size: 12px;
+  padding-inline: 6px;
 }
 
 .issue-list {
   flex: 1;
   min-height: 0;
-  padding: 10px;
+  padding: 12px;
   overflow: auto;
 }
 
 .issue-card {
-  margin-bottom: 9px;
-  padding: 13px;
+  margin-bottom: 10px;
+  padding: 14px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 10px;
   background: var(--surface);
+  transition: border-color .15s, box-shadow .15s;
 }
+.issue-card:hover { border-color: var(--border-strong); }
 
 .issue-card.accepted {
-  background: color-mix(in srgb, #22c55e 5%, var(--surface));
+  background: var(--success-soft);
 }
 
 .issue-card.rejected {
@@ -281,7 +280,8 @@ watch(
 
 .issue-card.selected {
   border-color: var(--primary);
-  background: color-mix(in srgb, var(--primary) 3%, var(--surface));
+  background: var(--surface);
+  box-shadow: var(--shadow-small);
 }
 
 .issue-select {
@@ -298,58 +298,38 @@ watch(
   text-align: left;
 }
 
-.issue-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; color: var(--muted); font-size: 11px; }
-.severity { margin-left: auto; font-size: 10px; }
-.error .severity { color: #c23b3b; }
-.warning .severity { color: #a36710; }
-.info .severity { color: var(--primary); }
-.issue-message { color: var(--text); font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.issue-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; color: var(--muted); font-size: 12px; }
+.severity { margin-left: auto; padding: 2px 7px; border-radius: 5px; font-size: 12px; }
+.error .severity { color: var(--danger); background: var(--danger-soft); }
+.warning .severity { color: var(--warning); background: var(--warning-soft); }
+.info .severity { color: var(--primary); background: var(--primary-soft); }
+.issue-message { color: var(--text); font-size: 14px; font-weight: 500; line-height: 1.65; overflow-wrap: anywhere; }
 .issue-original { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--muted); }
 
 .issue-select:focus-visible {
   border-radius: 7px;
-  outline: 3px solid #2563eb;
+  outline: 2px solid var(--primary);
   outline-offset: 3px;
 }
 
 .issue-actions {
   display: flex;
-  gap: 7px;
-  margin-top: 10px;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
 }
-
-.issue-actions button {
-  padding: 5px 10px;
-  border: 0;
-  border-radius: 7px;
-  cursor: pointer;
-  font-size: 11px;
-  font-weight: 800;
-}
-
-.issue-actions button:focus-visible {
-  outline: 3px solid #2563eb;
-  outline-offset: 2px;
-}
-
-.issue-actions .accept {
-  color: #15803d;
-  background: #dcfce7;
-}
-
-.issue-actions .reject {
-  color: #be123c;
-  background: #fff1f2;
-}
-
-.issue-actions .undo {
-  color: var(--muted);
-  background: var(--surface-2);
-}
+.issue-actions button { padding-inline: 10px; }
 
 .empty-state {
-  padding: 40px 10px;
+  margin: 12px 0;
+  padding: 32px 14px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 10px;
   color: var(--muted);
+  font-size: 13px;
+  line-height: 1.8;
   text-align: center;
 }
 </style>
