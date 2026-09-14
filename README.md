@@ -1,189 +1,88 @@
-# Text Verification
+# Text Verification · 啄木鸟
 
-面向企业内网的中英文文档预检平台，目标是统一提供错别字检查、格式检查、行业敏感词检测与替换、文件上传、在线审阅和结果导出。
+## 项目说明
 
-> 当前状态：可用的文档预检版本。已经实现七种文档格式、PNG/JPEG 图片和直接文本检查、六层规则引擎、
-> 自定义术语与禁用词、合规扫描、三栏在线审阅、原版式矢量预览、查找替换、修订导出、HTML 报告和可选的大模型
-> 语义复核。文件检查使用 PostgreSQL、Redis/Celery 与 SSE 任务流水线，保留 24 小时过期清理。
+面向企业内网的中英文文档预检工具，提供文件上传、文字检查、在线审阅和结果导出。
+可以仅使用本地规则，也可以配置 OpenAI 兼容接口进行语义复核。
 
-## 已实现与未实现
-
-### 已实现
-
-- DOCX、DOC、PDF、TXT、RTF、Markdown、CSV、PNG、JPG/JPEG 文件上传，以及直接粘贴文本。
-- 图片和扫描 PDF 可选择中英文（默认）、英文或日文 OCR；日文仅提供文字识别，不包含日文纠错规则。OCR 语言按任务保存，不会改变其他任务的识别配置。
-- 图片 OCR 保留段落、标题、表格和非文字图像区域；有格线的图片表格可保留空单元格，字号按图片 DPI 换算。
-- FastAPI API、PostgreSQL 任务与事件持久化。
-- Redis + Celery 异步任务调度。
-- SSE 进度事件推送。
-- 每个任务使用独立 UUID 目录存储上传文件。
-- 24 小时过期清理。
-- Vue 3 响应式三栏审阅界面、亮/暗主题和会话恢复；上传页、审阅页和设置面板统一控件、字号与间距。
-- 中文错别字、英文拼写、异形词、全半角、标点、语法、表达、数字格式和术语一致性检查。
-- “扩展检查”默认关闭，可按需启用中英文间距、多余空格/空行和长句提示；仍遵守所选场景过滤，长句只提示人工调整，不自动替换。
-- 身份证、手机号、邮箱、银行卡、密钥、敏感表述及广告法极限词检查。
-- 六种文档场景、自定义术语表、禁用词库及批量导入。
-- 问题接受、忽略、撤销、批量操作、正文编辑和查找替换；可切换显示问题标记。
-- 左侧查找替换面板中的“撤销修改”可逐步回退单次替换、全部替换和已保存的原文编辑，全部替换作为一步撤销。撤销记录随本地会话保存，刷新后仍可使用；重新检查或更换文档会开始新的记录。旧会话仅保留正文历史时，撤销后仍会提示重新检查。
-- 接受建议后正文即时更新，撤销恢复原文；查找高亮当前修订中的匹配项，并支持上下项滚动定位。
-- 正文仅使用文字高亮，不插入占位标记；点击高亮可联动问题列表，重叠问题可重复点击切换。
-- 文件名只在顶部显示。Word（DOCX/DOC）、RTF、PDF 和图片在同一个分页审阅界面中展示图片、表格、页眉页脚及问题标记，无需切换原文与文字模式。接受、撤销或保存编辑后更新版式；纯文本使用段落视图。关闭“显示问题标记”只隐藏高亮，不改变修订。
-- 分页预览提供“适合宽度”和 25%、50%、75%、100%、125%、150%、200% 缩放；缩小时页面居中，问题标记随页面同步缩放。
-- DOCX/DOC/PDF/TXT/RTF/Markdown/CSV 原格式导出及 HTML 检查报告。
-- 图片以及扫描/混合 PDF 可重建为可编辑 DOCX，支持审阅修订和重新检查后的导出。图片不提供修改后的 PNG/JPEG 下载，Word 重建也不承诺像素级还原原版式。
-- DOCX 修订痕迹、PDF 高亮批注和文本格式修订标记。
-- 可选的 OpenAI 兼容语义复核；未配置密钥时自动使用纯本地规则。
-
-### 后续演进
-
-- 共享词库数据库管理、版本及回滚。
-- 基于 `DocumentModel` 精确块定位的审阅决策持久化。
-
-## 技术架构与请求数据流
-
-```text
-Browser → nginx → FastAPI → PostgreSQL
-                     ├── Redis/Celery → Job Storage
-                     └── renderer → LibreOffice / SVG 分页预览
-```
-
-- `apps/web` 提供 Vue 3 审阅前端和 nginx 静态站点/反向代理。
-- `apps/api` 提供 FastAPI API、Celery Worker、Alembic 迁移和后端测试。
-- PostgreSQL 是任务与事件的持久化来源；Redis 负责队列；Worker 执行统一文档解析、OCR 与规则检查流水线。
-- 浏览器文件上传通过异步任务接口检查、接收 SSE 进度并导出；文本检查保留同步预检接口。PNG/JPEG 只在异步任务接口支持，同步兼容接口不接收图片。
-- 分页预览由 API 校验源文件身份后调用隔离的 Docker 渲染服务；原生开发通过本机 `renderer-gateway` 连接该服务，浏览器不直接访问渲染端口。
-
-## Monorepo 目录说明
-
-| 路径 | 说明 |
+| 能力 | 说明 |
 | --- | --- |
-| `apps/api` | FastAPI、Celery、Alembic、backend tests |
-| `apps/web` | Vue 3、SSE client、nginx、frontend tests |
-| `infra` | Docker Compose development stack |
-| `resources/dictionaries` | compliance-owned dictionary resources not yet wired into the Stub |
-| `docs/architecture` | product and architecture decisions |
-| `docs/development` | implementation plans and engineering history |
+| 输入 | DOCX、DOC、PDF、TXT、RTF、Markdown、CSV、PNG、JPG/JPEG，以及直接粘贴文本 |
+| 文字检查 | 错别字、英文拼写、异形词、全半角、标点、语法、表达、数字格式和术语一致性 |
+| 可选检查 | 中英文间距、空格/空行、长句提示、个人信息与凭证、敏感表述、广告极限词 |
+| 自定义设置 | 六种文档场景、自定义术语、禁用词及批量导入 |
+| OCR | 图片和扫描 PDF 的中英文、英文或日文识别；日文仅识别，不提供日文纠错 |
+| 在线审阅 | 查找替换、问题定位、接受/忽略/撤销、批量操作、正文编辑、亮暗主题及会话恢复 |
+| 原版式预览 | Word、RTF、PDF 和图片的统一分页视图，使用 SVG 矢量页面展示文字与定位标记 |
+| 导出 | 支持的文档原格式、HTML 检查报告，以及图片/扫描件的可编辑 DOCX 重建稿 |
 
-## Docker Compose 快速启动
+**使用边界**
 
-在仓库根目录执行：
+- 单文件最大 25 MiB；任务和上传文件默认保留 24 小时。
+- 版式预览最多 80 页、20 万字符、25 MiB 输出。
+- 原版式预览保留可渲染的图片、表格和页眉页脚，但不承诺任意 Word 文档像素级一致；未被解析器提取的对象内容不一定参与检查。
+- 图片和扫描件的原始像素不会被文字修订覆盖；DOCX 重建稿也不保证完整还原原版式。
+- 定位不可靠或修改无法安全应用时明确提示，不猜测位置、不静默改成纯文本导出。
+- 检查结果是辅助提示，仍需人工审阅。共享词库管理和完整的服务端审阅决策持久化仍属后续演进方向。
 
-```powershell
-if (!(Test-Path .env)) { Copy-Item .env.example .env }
-docker compose --env-file .env -f infra/compose.yaml up --build -d
-docker compose --env-file .env -f infra/compose.yaml exec api pytest
-docker compose --env-file .env -f infra/compose.yaml logs -f api worker maintenance-worker
-docker compose --env-file .env -f infra/compose.yaml down
-```
+## 使用说明
 
-macOS/Linux 在仓库根目录执行：
+### 本地调试：一条命令启动
 
-```bash
-test -f .env || cp .env.example .env
-docker compose --env-file .env -f infra/compose.yaml up --build -d
-```
-
-Compose 为所有后端容器明确使用内置的 `postgres`、`redis` 和
-`/var/lib/text-verification/jobs`，不会把原生开发 `.env` 中的 `localhost` 或
-macOS 存储路径带入容器。其他设置（包括密钥）仍从 `.env` 读取；原生开发配置无需覆盖。
-`CELERY_BROKER_URL` 留空时使用内置 Redis，非空时仍使用显式配置的 broker。
-
-如果构建在 Docker Hub 基础镜像元数据阶段超时，可在 `.env` 中添加以下构建变量，
-改用 Amazon ECR Public 上的 Docker 官方镜像；这不是任意第三方镜像站，也不会上传项目代码：
-
-```dotenv
-PYTHON_IMAGE=public.ecr.aws/docker/library/python:3.12-slim
-NODE_IMAGE=public.ecr.aws/docker/library/node:22-slim
-NGINX_IMAGE=public.ecr.aws/docker/library/nginx:1.27-alpine
-```
-
-然后重新执行上述命令，保留 `--env-file .env`，确保根目录构建变量参与 Compose 插值；
-服务的 `env_file` 仅负责容器运行时环境，不能代替该参数。
-该方式仍需能访问 ECR Public 和构建所需的软件包源，
-不代表离线构建。PostgreSQL/Redis 默认仍从 Docker Hub 拉取；已有本地镜像时可以复用。
-删除这三个变量即可恢复 Docker Hub 默认来源。仅使用旧应用镜像启动不会包含当前代码修改。
-停止项目使用 `docker compose --env-file .env -f infra/compose.yaml down`，
-不要添加 `-v`，以保留数据库。
-
-- 应用地址：`http://localhost:8080`
-- 健康检查：`http://localhost:8080/api/v1/health`
-- `APP_ENV` 设置为 `production`、`staging` 或 `deployed` 时，
-  `RECHECK_GRANT_SECRET` 必须是至少 32 个 UTF-8 字节的部署密钥；API 与
-  Worker 会在启动时拒绝空值或短值。开发/测试环境可显式使用
-  `APP_ENV=development` 或 `APP_ENV=test`。
-- `RECHECK_GRANT_TTL_SECONDS` 控制重新检查授权的有效期，默认 900 秒。
-- `migrate` 服务只负责执行 Alembic，成功后退出；`maintenance-worker` 独占清理和租约救援队列。
-
-### Worker 滚动升级队列
-
-- 旧版 Worker 命令：`celery -A text_verification.workers.celery_app:celery_app worker --queues=celery`
-- 新版 Worker 命令：设置 `TEXT_VERIFICATION_WORKER_ROLE=verification`、`TEXT_VERIFICATION_WORKER_QUEUES=celery,verification-v2`、`TEXT_VERIFICATION_WORKER_CONCURRENCY=2` 后运行 `text-verification-worker`。
-- 维护 Worker 命令：设置 `TEXT_VERIFICATION_WORKER_ROLE=maintenance`、`TEXT_VERIFICATION_WORKER_QUEUES=maintenance-v2`、`TEXT_VERIFICATION_WORKER_CONCURRENCY=1` 后运行 `text-verification-worker`。
-- 新 API 创建的文件异步任务（包括图片）、任务重试和租约救援重新投递统一进入 `verification-v2`。
-- 新版 Worker 同时消费 `celery` 与 `verification-v2`，因此可排空升级前已发布的旧任务；旧版 Worker 只消费 `celery`，不会取得新版任务。
-- Beat 将清理与租约救援任务发布到 `maintenance-v2`，由单并发维护 Worker 处理，避免文档队列饥饿或旧 Worker 错误重投递。
-- 滚动顺序：先启动新版普通 Worker 和维护 Worker，再切换到新版 Beat，随后部署新版 API；确认旧 `celery` 队列排空后再停止旧版 Worker。滚动期间只保留一个 Beat 实例。
-- 新版 Worker 的角色、队列、并发数和预取数在启动前强制校验。缺失角色、未知角色、错误队列、维护 Worker 并发不为 1、autoscale 或直接运行含糊的 `celery ... worker` 命令都会在消费任务前退出。Beat 不执行 Worker 角色校验。
-- Redis broker 的“发布确认”表示 Redis 已接受入队命令，并非 AMQP publisher confirm。发布重试保持启用；如设置 `CELERY_BROKER_URL=amqp://...`，Celery 才启用 `confirm_publish`。
-
-## 本地后端与前端开发、测试、构建
-
-### 一条命令启动（macOS）
-
-完成下方的首次依赖安装和根目录 `.env` 配置、打开 Docker Desktop 后，在仓库根目录运行：
+完成下面的首次配置并打开 Docker Desktop 后，在仓库根目录运行：
 
 ```bash
 ./start-local.sh
 ```
 
-脚本自动启动 PostgreSQL/Redis 和 Docker 文档渲染服务（缺少镜像时构建）、执行数据库迁移，并在同一个终端管理 API、
-检查 Worker、维护 Worker、Beat 和前端。打开 `http://localhost:5173` 即可使用。
-这是普通本地开发启动（API 自动重载），不是 VS Code 断点附加模式；
-修改 Worker 代码后需要停止并重新运行脚本。
+| 地址 | 用途 |
+| --- | --- |
+| `http://localhost:5173` | 前端页面 |
+| `http://127.0.0.1:8000/docs` | API 文档 |
+| `http://127.0.0.1:8000/api/v1/health` | API 健康检查 |
+| `http://127.0.0.1:8010` | 仅供本机 API 使用的渲染网关，不是前端页面 |
 
-保留这个终端，按 `Ctrl+C` 会停止本次启动的应用进程及其子进程，
-但保留 PostgreSQL/Redis、渲染服务容器和数据库数据。任何应用进程退出时，脚本会报错并停止其余应用进程。
-各服务日志在 `var/local/`，每次启动覆盖；例如另开终端运行
-`tail -f var/local/api.log var/local/worker.log`。
+脚本启动 PostgreSQL、Redis 和 Docker 渲染服务，执行数据库迁移，并管理本机 API、
+检查 Worker、维护 Worker、Beat 和前端进程。缺少渲染镜像时构建，已有镜像时复用。
 
-脚本不安装依赖、不覆盖 `.env`、不自动停止其他已运行的服务。
-如果端口 8000/5173 已被占用，或本项目 Docker 应用服务仍在运行，会提示先停止冲突服务。
-不要同时手动启动另一套 Worker 或 Beat。异常强制退出留下 `var/local/run.lock` 时，
-确认之前的应用进程已停止后，再运行 `rmdir var/local/run.lock`。
+保留启动终端，按 `Ctrl+C` 停止本次启动的应用进程；数据库、Redis 和渲染容器继续运行，
+数据不会被删除。日志位于 `var/local/`，每次启动覆盖：
 
-### macOS 原生启动
+```bash
+tail -f var/local/api.log var/local/worker.log
+```
 
-需要 Python 3.12、npm 和 Docker Desktop。应用进程在 macOS 原生运行，Docker
-运行 PostgreSQL、Redis 和文档渲染服务；本机无需单独安装 LibreOffice：
+不要同时启动另一套 Worker 或 Beat。若 8000/5173 端口被占用，或完整 Docker 应用仍在运行，
+先停止冲突服务。若异常退出留下 `var/local/run.lock`，确认旧进程已经停止后再执行
+`rmdir var/local/run.lock`。
+
+### 首次配置（macOS）
+
+准备 Python 3.12、npm 和 Docker Desktop，然后在仓库根目录执行：
 
 ```bash
 python3.12 -m venv apps/api/.venv
 apps/api/.venv/bin/python -m pip install -e "apps/api[dev]"
 npm --prefix apps/web ci
+test -f .env || cp .env.example .env
 mkdir -p var/jobs
 ```
 
-`infra/compose.local-services.yaml` 将 PostgreSQL、Redis 和渲染网关分别映射到
-`127.0.0.1:5432`、`127.0.0.1:6379` 和 `127.0.0.1:8010`，只供本机访问。
+本机运行应用时需要调整 `.env`，**不要覆盖已有配置**：
 
-先在仓库根目录创建 `.env`，再启动服务。该文件已被 Git 忽略；如果文件已存在，不要
-覆盖，应确认相关配置使用以下本机地址和存储路径（将示例绝对路径中的用户名和仓库
-位置替换为实际值）：
+| 配置项 | 本地开发设置 |
+| --- | --- |
+| `APP_ENV` | `development` |
+| `DATABASE_URL` | 保留 `.env.example` 中的数据库用户名、密码和库名，将主机 `postgres` 改为 `127.0.0.1`，端口为 `5432` |
+| `REDIS_URL` | `redis://127.0.0.1:6379/0` |
+| `CELERY_BROKER_URL` | 留空，使用 `REDIS_URL` |
+| `STORAGE_ROOT` | 当前仓库下 `var/jobs` 的绝对路径 |
+| `CORS_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` |
+| `PREVIEW_RENDERER_URL` | `http://127.0.0.1:8010` |
+| `RECHECK_GRANT_SECRET` | 至少 32 个 UTF-8 字节的随机密钥，文件重新检查需要使用 |
+| `LLM_API_KEY` | 留空使用本地规则；启用语义复核时再配置 |
 
-```dotenv
-APP_ENV=development
-DATABASE_URL=postgresql+psycopg://text_verification:text_verification@localhost:5432/text_verification
-REDIS_URL=redis://localhost:6379/0
-CELERY_BROKER_URL=
-STORAGE_ROOT=/Users/<username>/Work/Text-Virification/var/jobs
-CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
-PREVIEW_RENDERER_URL=http://127.0.0.1:8010
-LLM_API_KEY=
-```
-
-本地文件重新检查也需要 `RECHECK_GRANT_SECRET`，缺少或不足 32 个 UTF-8 字节时，
-接口会返回 503。以下命令仅在密钥为空时生成随机密钥并写入已忽略的 `.env`，
-不会输出密钥或覆盖已有有效值：
+下面的命令仅在密钥为空时生成并写入 `.env`，不输出密钥：
 
 ```bash
 apps/api/.venv/bin/python - <<'PY'
@@ -198,292 +97,273 @@ elif len(secret.encode("utf-8")) < 32:
 PY
 ```
 
-修改该配置后需重启 API；仅刷新浏览器不会重新加载后端配置。不要将密钥提交到 Git。
+`.env` 已被 Git 忽略，不要提交密钥。修改后端环境配置后需重启 API；只刷新浏览器不会生效。
 
-完整 Docker Compose 启动会覆盖容器内的数据库、Redis 和存储地址；
-原生进程仍读取根目录 `.env`，应保留上述本机地址，不能使用容器服务名。
-
-从仓库根目录启动基础服务并执行迁移，以读取同一份根目录 `.env`。
-迁移脚本路径相对于 `alembic.ini`，不依赖当前工作目录：
+图片和扫描 PDF 检查还需安装 OCR 可选依赖：
 
 ```bash
-docker compose -f infra/compose.yaml -f infra/compose.local-services.yaml \
-  up -d --wait postgres redis
+apps/api/.venv/bin/python -m pip install -e "apps/api[dev,ocr]"
+```
+
+首次 OCR 可能下载对应语言的模型，内网环境应提前准备模型及缓存。
+Word/RTF 预览转换由 Docker 内的 LibreOffice 完成，本机无需为预览单独安装 Office。
+部分原生 `.doc` 导出转换仍依赖本机 `textutil` 或 `soffice`。
+
+### 完整 Docker 启动
+
+此方式与本地原生启动二选一，不要同时运行两套应用。
+首次创建 `.env` 后配置 `RECHECK_GRANT_SECRET`；生产、预发布等部署环境会拒绝空密钥或过短密钥。
+
+```bash
+test -f .env || cp .env.example .env
+docker compose --env-file .env -f infra/compose.yaml up --build -d
+```
+
+打开 `http://localhost:8080`。Compose 自动使用容器内的数据库、Redis 和存储地址，
+无需把原生开发 `.env` 中的本机地址手动改回容器服务名。
+若 Docker Hub 基础镜像无法拉取，可参考 `.env.example` 中的
+`PYTHON_IMAGE`、`NODE_IMAGE`、`NGINX_IMAGE` 镜像源配置。
+
+查看日志或停止容器：
+
+```bash
+docker compose --env-file .env -f infra/compose.yaml logs -f api worker renderer
+docker compose --env-file .env -f infra/compose.yaml down
+```
+
+停止本地调试留下的基础服务时，使用相同命令并追加
+`-f infra/compose.local-services.yaml`，放在 `down` 之前。
+**不要添加 `-v` 或 `--volumes`，否则会删除数据库和上传任务数据。**
+
+### 页面操作
+
+1. 上传文件或粘贴文本，选择文档场景、检查项、术语和禁用词，再点击“开始检查”。选中文件不会自动提交。
+2. 在三栏工作区审阅结果：左侧查找替换，中间正文，右侧问题列表或检查摘要。手机端通过三个面板入口切换。
+3. 点击问题定位原文，选择建议并接受、忽略或撤销；“编辑正文”用于自由修改。“撤销修改”位于查找替换面板。
+4. 手工编辑或替换后按提示重新检查。修改检查设置不会清空文档，但需要点击“重新检查”才会应用新设置。
+5. 从顶部导出菜单下载文件或报告。“保留修订”在打开、恢复或新建工作区时默认关闭，需要时手动勾选。
+6. 更换文件前先导出需要保留的结果，再点击左上角“啄木鸟”返回新建检查；该操作会清空当前工作区。
+
+**设置入口**：上传页在输入卡片内，审阅页在右上角，每页只有一个入口。
+检查过程中可以查看设置，但不能修改。重新检查使用当前修订文字，不重新执行 OCR；
+更换 OCR 语言后需要重新上传文件。
+
+**查找快捷键**：Ctrl/Cmd+F 聚焦查找框，Enter 定位下一项，Shift+Enter 定位上一项。
+手机端会先切换到查找替换面板。定位只滚动对应阅读区域。
+
+**分页缩放**：支持适合宽度及 25%、50%、75%、100%、125%、150%、200%。
+当前百分比以适合宽度为基准，100% 与当前容器的适合宽度等效，并非打印尺寸的 1:1 比例。
+缩小时页面居中，缩放不会改变原文和导出文件。
+
+**定位提示**：“部分文字无法精确定位”表示预览文字与页面坐标未完全匹配，
+不代表文件损坏或检查失败，也不表示所有问题都无法定位。
+正常的标题/正文重复不会仅因重复出现而被误判；真正存在额外重复或无法可靠对齐时，
+仍需结合右侧原文和上下文审阅。
+
+## 项目架构
+
+### 运行结构
+
+```text
+浏览器（Vue 3）
+    |
+    | /api：开发时由 Vite 代理，Docker 部署时由 nginx 代理
+    v
+FastAPI
+    +-- PostgreSQL：任务、事件、结果及检查参数
+    +-- Redis / Celery：检查任务队列
+    |       +-- 检查 Worker：文档解析、OCR、规则检查、可选语义复核
+    |       +-- 维护 Worker：过期清理、租约救援
+    |       +-- Beat：定时发布维护任务，同一环境仅运行一个实例
+    +-- Job Storage：每个任务独立目录保存源文件和产物
+    +-- renderer：LibreOffice 转换、SVG 分页图像及文字坐标
+```
+
+文本检查走同步 `POST /api/v1/analyze`；文件上传走异步 `POST /api/v1/jobs`，
+通过 SSE 获取进度，再读取任务结果。设置以任务参数快照传递，不通过修改全局变量影响其他任务。
+
+分页预览走 `POST /api/v1/jobs/{job_id}/preview/layout`，请求包含源版本
+`source_version` 和当前修订全文 `text`。API 校验源文件身份后，在临时副本上应用修订并渲染；
+预览不覆盖原文件，也不保存审阅决策。
+
+渲染服务使用只读根文件系统、受限临时目录、内部网络和单转换并发，不读取 `.env`、
+数据库或任务存储；容器 init 回收 Office 辅助进程。
+本地 API 通过仅绑定 `127.0.0.1:8010` 的网关访问它，完整 Docker 部署由 API 直接访问 renderer。
+
+### 代码目录
+
+| 路径 | 职责 |
+| --- | --- |
+| `apps/web/src/components/workspace/` | 上传、检查设置、文档预览、问题列表、导出等界面 |
+| `apps/web/src/views/WorkspaceView.vue` | 工作区状态与交互编排 |
+| `apps/web/src/api/`、`composables/` | 请求转换、审阅状态、查找替换和会话恢复 |
+| `apps/api/src/text_verification/api/` | API 路由和输入处理 |
+| `apps/api/src/text_verification/domain/` | 文档、问题、检查参数及接口约定 |
+| `apps/api/src/text_verification/application/` | 检查流水线、任务与预览业务流程 |
+| `apps/api/src/text_verification/parsers/`、`document_processing/` | 文档解析与 OCR |
+| `apps/api/src/text_verification/checkers/`、`compatibility/analyzer.py` | 检查器及现有规则实现 |
+| `apps/api/src/text_verification/resources/dictionaries/` | 实际运行时使用的内置词库 |
+| `apps/api/src/text_verification/exporters/`、`infrastructure/` | 导出、数据库和文件存储实现 |
+| `infra/` | Docker Compose 和渲染网关配置 |
+| `apps/web/tests/`、`apps/api/tests/` | 前后端测试 |
+
+架构背景见 [平台架构设计](docs/architecture/document-verification-platform.md)；
+目录约定见 [仓库组织说明](docs/architecture/repository-layout-and-documentation.md)。
+`docs/development/` 和 `docs/superpowers/` 保留历史实施记录，具体运行行为以当前代码为准。
+
+## 扩展检查设置
+
+### 先确定要改哪一层
+
+| 目标 | 操作入口 |
+| --- | --- |
+| 仅为当前工作区添加术语或禁用词 | 直接使用“检查设置 → 术语 / 禁用词”，无需修改代码 |
+| 修改内置敏感词或广告极限词 | 修改后端运行时词库 JSON，保持现有结构 |
+| 修改选项文案、布局或默认勾选状态 | 修改前端组件和状态默认值，并核对后端默认值 |
+| 调整已有文档场景的检查范围 | 修改 `SCENARIO_CONFIG` 的规则过滤配置 |
+| 新增独立检查开关或规则 | 接通界面、请求、参数模型、任务上下文和规则执行链 |
+
+以下前端路径以 `apps/web/src/` 为前缀，后端路径以
+`apps/api/src/text_verification/` 为前缀。
+
+| 内容 | 主要文件 |
+| --- | --- |
+| 检查设置抽屉和分类 | 前端 `components/workspace/WorkspaceSettingsDialog.vue` |
+| 场景、OCR 语言及检查开关 | 前端 `components/workspace/VerificationSettings.vue` |
+| 术语与禁用词编辑 | 前端 `components/workspace/TerminologyEditor.vue`、`composables/useTerminology.ts` |
+| 设置类型 | 前端 `types/verification.ts` 的 `AnalyzeOptions` |
+| 页面默认值、应用设置、重置和恢复 | 前端 `views/WorkspaceView.vue` |
+| 参数校验、快照及请求字段转换 | 前端 `api/analyzeOptions.ts` |
+| 会话保存与旧版本兼容 | 前端 `composables/useWorkspaceSession.ts` |
+| 后端参数与默认值 | 后端 `domain/verification.py` 的 `VerificationOptions` |
+| 场景及现有检查规则 | 后端 `compatibility/analyzer.py` |
+
+当前有效默认值：
+
+| 设置 | 前端字段 / 后端字段 | 默认值 |
+| --- | --- | --- |
+| 文档场景 | `scenario` / `scenario` | `general`，通用文档 |
+| 扩展检查 | `enableExtendedRules` / `enable_extended_rules` | 关闭 |
+| OCR 语言 | `ocrLanguage` / `ocr_language` | `zh`，中英文 |
+| 个人信息与凭证 | `enableSecurity` / `enable_security` | 开启 |
+| 敏感表述 | `enableSensitive` / `enable_sensitive` | 开启 |
+| 广告极限词 | `enableAdExtreme` / `enable_ad_extreme` | 关闭 |
+
+注意：主页面的 OCR 和扩展检查初始值允许为 `undefined`，由界面和请求转换采用默认值。
+修改默认行为时，还应同步 `useTerminology.ts` 的默认值合并逻辑、后端接口默认参数和旧会话恢复逻辑，
+不能只修改复选框外观。
+
+### 修改词库或文档场景
+
+运行时默认读取：
+
+```text
+apps/api/src/text_verification/resources/dictionaries/sensitive_rules.json
+apps/api/src/text_verification/resources/dictionaries/ad_extreme_words.json
+```
+
+根目录 `resources/dictionaries/` 中的同类资源不是运行时默认读取路径。
+词库由 `infrastructure/dictionary_loader.py` 加载，结构由 `domain/dictionaries.py` 校验；
+请沿用现有字段与条目结构，不随意增加未知字段。词库版本根据内容哈希计算，
+读取时会识别内容变化。部署为镜像时仍需把更新后的资源构建并部署进去。
+
+已有场景的行为定义在 `compatibility/analyzer.py` 的 `SCENARIO_CONFIG`：
+`skip_types` 表示跳过的问题类型；`downgrade_types` 当前会过滤这些类型中 `info` 级别的提示，
+并非统一降低所有问题的严重程度。
+新增场景还需同步后端 `domain/verification.py` 的 `Scenario`，
+以及前端 `types/verification.ts`、`VerificationSettings.vue`、
+`api/analyzeOptions.ts` 的场景列表和 `useVerificationWorkspace.ts` 的 `isScenario()` 校验。
+
+### 新增检查开关：完整操作顺序
+
+可以参照现有 `enableExtendedRules` / `enable_extended_rules` 的实现。
+下面以 `enableCustomCheck` / `enable_custom_check` 为示例字段名，**该字段目前并不存在**。
+
+1. **定义参数和默认值。** 在前端 `AnalyzeOptions`、后端 `VerificationOptions` 中增加字段，
+   为新增检查选择明确且兼容旧任务的默认值，通常默认关闭。后端参数模型拒绝未知字段，
+   不能只让前端发送一个新参数。
+2. **增加界面并接通状态。** 在 `VerificationSettings.vue` 增加开关，通过
+   `update:options` 更新。在 `WorkspaceView.vue` 同步初始状态、`currentOptions`、
+   `applyOptions()`、重置和恢复路径；在 `useTerminology.ts` 保留该字段，
+   避免添加术语时丢失其他设置。
+3. **接通请求和会话。** 更新 `api/analyzeOptions.ts` 的
+   `createAnalyzeOptionsSnapshot()`、`appendAnalyzeOptions()` 和序列化大小计算，
+   将前端 camelCase 字段转换为后端 snake_case 字段。
+   同步 `useWorkspaceSession.ts` 的字段白名单、校验及旧会话兼容，不能因旧会话缺少新字段而直接丢弃会话。
+4. **覆盖所有后端入口。** 更新 `api/routes/compatibility.py` 的同步检查、
+   `api/routes/jobs.py` 的文件上传及重新检查参数，并更新
+   `compatibility/service.py` 的 `build_verification_options()`。
+   三条路径必须得到一致的设置，不能只让“粘贴文本”生效而文件上传不生效。
+5. **传入规则执行链。** 更新 `domain/ports.py` 的 `CheckContext` 和
+   `CheckContext.from_options()`，再更新 `checkers/compatibility_checker.py`
+   中的参数协议与调用分支，将开关传给 `TextAnalyzer`。
+   扩展检查开启、无进度观察者、有进度观察者这三个分支都要覆盖，避免不同执行路径丢失参数。
+   不要用模块级全局变量保存用户开关。
+6. **实现检查规则。** 在 `compatibility/analyzer.py` 中实现并按开关调用规则；
+   同步相关的同步/异步调用参数。返回稳定的 `rule_id`、问题类型、原文、建议和位置。
+   若新增问题类型，还需更新 `TYPE_TO_LAYER`、场景过滤和前端 `WorkspaceView.vue` 的 `typeLabels`。
+   问题位置应基于 `DocumentModel.text` 的 Unicode 码点偏移，不要使用前端 UTF-16 长度代替。
+7. **验证快照、恢复和生效时机。** 确认任务保存并重新读取参数后开关仍然有效，
+   老任务缺少该字段时采用兼容默认值；刷新会话不丢失设置。
+   审阅期间修改设置仍应在“重新检查”后生效，不修改当前检查结果。
+
+参数流转可概括为：
+
+```text
+VerificationSettings.vue
+  → WorkspaceView.vue / AnalyzeOptions
+  → api/analyzeOptions.ts
+  → API 路由 / VerificationOptions
+  → CheckContext.from_options()
+  → CompatibilityChecker
+  → TextAnalyzer
+```
+
+任务参数通过 `encode_verification_options()` / `decode_verification_options()` 编解码。
+新增有默认值的字段不应让历史任务无法读取；如果还要改变持久化结构或历史语义，
+应另外评估迁移，而不是覆盖旧任务参数。
+
+较大的独立检查模块可以实现 `domain/ports.py` 的 `Checker` 接口，
+在 `application/factory.py` 的 `CheckerRegistry` 中注册，不必把所有逻辑继续堆进 `TextAnalyzer`。
+它同样需要通过任务上下文接收设置。
+
+**扩展 OCR 语言**还需同步前后端语言白名单、`VerificationOptions` 与 API 参数校验、
+`application/verification_pipeline.py`、`parsers/image_parser.py`、
+`parsers/pdf_parser.py` 和 `document_processing/ocr_provider.py`，
+并准备对应 OCR 模型。只增加下拉选项不会自动获得新语言识别或纠错能力。
+
+### 验证与让修改生效
+
+优先覆盖：默认关闭、开启后命中、关闭后不命中、场景过滤、Unicode 偏移、
+文件与直接文本的一致性、重新检查、会话恢复，以及接受/撤销后的导出行为。
+已有测试可作为新增用例的起点，在仓库根目录运行：
+
+```bash
+npm --prefix apps/web run test -- \
+  tests/VerificationSettings.spec.ts tests/analyzeOptions.spec.ts \
+  tests/WorkspaceView.spec.ts tests/WorkspaceSession.spec.ts \
+  tests/TerminologyEditor.spec.ts tests/useTerminology.spec.ts
+npm --prefix apps/web run build
+apps/api/.venv/bin/python -m pytest \
+  apps/api/tests/unit/domain/test_verification_options.py \
+  apps/api/tests/unit/compatibility/test_extended_rules.py \
+  apps/api/tests/unit/application/test_verification_pipeline.py \
+  apps/api/tests/unit/infrastructure/test_dictionary_loader.py -q
+```
+
+涉及 API 参数或任务持久化时，再覆盖 `apps/api/tests/integration/` 中的
+`test_create_job.py`、`test_compatibility_api.py` 和 `test_job_recheck_routes.py`。
+数据库集成测试需要配置独立的 `TEST_DATABASE_URL` 并连接真实 PostgreSQL，
+不要指向业务数据库，也不要用 SQLite 代替。
+涉及浏览器交互时运行 `apps/web/tests/e2e/workspace-lifecycle.spec.ts`。
+
+本地前端、API 和渲染服务支持热重载；**检查 Worker 不会自动重载规则代码**，
+修改检查逻辑或依赖后应停止并重新运行 `./start-local.sh`。
+修改后端依赖或 Dockerfile 后，先重建渲染服务：
+
+```bash
 docker compose --env-file .env -f infra/compose.yaml -f infra/compose.local-services.yaml \
   up -d --build --wait renderer renderer-gateway
-apps/api/.venv/bin/alembic -c apps/api/alembic.ini upgrade head
 ```
 
-随后从仓库根目录分别启动 API、两个 Worker 和唯一的 Beat 实例，以便它们读取根目录
-`.env`：
-
-```bash
-apps/api/.venv/bin/uvicorn text_verification.main:app \
-  --reload --host 127.0.0.1 --port 8000
-
-TEXT_VERIFICATION_WORKER_ROLE=verification \
-TEXT_VERIFICATION_WORKER_QUEUES=celery,verification-v2 \
-TEXT_VERIFICATION_WORKER_CONCURRENCY=2 \
-  apps/api/.venv/bin/text-verification-worker
-
-TEXT_VERIFICATION_WORKER_ROLE=maintenance \
-TEXT_VERIFICATION_WORKER_QUEUES=maintenance-v2 \
-TEXT_VERIFICATION_WORKER_CONCURRENCY=1 \
-  apps/api/.venv/bin/text-verification-worker
-
-apps/api/.venv/bin/celery \
-  -A text_verification.workers.celery_app:celery_app \
-  beat --loglevel=INFO --schedule=var/celerybeat-schedule
-
-npm --prefix apps/web run dev
-```
-
-浏览器打开 `http://localhost:5173`。
-
-### 审阅界面与常用操作
-
-选中文件后可先调整检查设置，再点击“开始检查”；选文件不会自动提交。
-也可以切换到“粘贴文本”直接检查。上传页、审阅页和设置面板使用统一的控件与排版，
-支持亮色和深色主题。正文使用独立的纸张画布，选中的问题卡片使用四边等宽的强调色边框。
-
-| 区域 | 功能 |
-| --- | --- |
-| 左侧：查找替换 | 查找当前修订、替换当前或全部匹配、撤销文字修改 |
-| 中间：正文 | 查看原版式或文本段落、缩放分页预览、显示问题标记、编辑正文 |
-| 右侧：问题列表 / 检查摘要 | 筛选与定位问题、选择建议、接受、忽略及撤销 |
-| 顶部操作区 | 检查设置、重新检查、导出；帮助、隐私说明及主题切换 |
-
-宽屏及较窄的桌面、平板屏幕保持“查找替换 / 正文 / 问题列表”三栏，正文占最大宽度。
-手机端提供“文档 / 问题 / 查找替换”三个面板入口；顶部辅助按钮保持成组排列，
-导出受限等状态说明单独换行，不挤出检查设置入口。
-
-“检查设置”在上传页保留卡片内的原入口，在审阅页显示于右上角，每页仅显示一个入口，
-均可随时打开。修改设置不会清空当前文档、
-检查结果或审阅记录；在审阅页修改后，关闭面板并点击“重新检查”应用新设置。
-检查进行中允许查看设置和切换分类，但暂时禁用修改。重新检查仅检查当前修订文字，
-不重新执行 OCR；调整 OCR 语言后需重新上传文件。
-导出菜单的“保留修订”在打开、恢复或新建工作区时默认关闭，不沿用旧会话的勾选状态；需要带修订痕迹导出时，可手动勾选。
-Ctrl/Cmd+F 聚焦查找框；手机端会先切换到查找替换面板，输入时不自动切走，可通过“文档”
-切回正文查看匹配。查找框中 Enter 定位下一项，Shift+Enter 定位上一项。
-问题和匹配定位仅滚动各自的阅读区域，已可见的内容保持位置。
-
-需要更换文件时，先导出需要保留的结果，再点击左上角“啄木鸟”返回新建检查页面；
-该操作会清空当前工作区。
-
-### 可选组件与运行约束
-
-同一环境只能运行一个 Beat，避免重复发布定时任务。原版式预览中的 Word/RTF 转换
-由 Docker 内的 LibreOffice 处理。现有 `.doc` 原格式导出等原生后端转换仍依赖本机
-`textutil` 或 `soffice`；这与预览服务独立。OCR 依赖也是可选项，可用
-`apps/api/.venv/bin/python -m pip install -e "apps/api[dev,ocr]"` 安装。
-缺少这些可选组件时，相应转换、图片或扫描 PDF OCR 不可用。RapidOCR 还需要对应语言的模型；
-首次使用可能下载模型，内网部署应提前准备模型及缓存。模型或识别依赖不可用时会明确报错，
-不会返回伪造的识别结果。上传图片上限 25 MiB，并在解码前后校验格式、尺寸和资源预算。
-`LLM_API_KEY` 留空时使用纯本地规则，不调用大模型服务。
-
-### 统一版式审阅与保留边界
-
-- 上传 Word（DOCX/DOC）、RTF、PDF 或图片后，在同一文档视图中审阅分页版式与问题标记。
-  点击右侧问题或查找结果，会定位到可映射的页面区域，不再切换到纯文本视图。
-  TXT/Markdown/CSV 和直接粘贴文本继续使用段落视图。
-- 接受、撤销建议及保存正文编辑后，基于**经过身份校验的原文件副本**应用当前修订并重新渲染；
-  更新过程中隐藏旧位置标记，避免把过期坐标套用到新文字。连续修改按顺序处理，仅展示最新结果。
-  重新检查和恢复会话后继续使用保留的任务身份及源版本；预览不写入修订历史，也不改变导出授权。
-- Office 转换及分页渲染在 Docker 内完成，正文使用字体轮廓化的 SVG 矢量页面，
-  不再将整页文字转换为固定分辨率 PNG 后拉伸，缩放和高分屏显示不受该位图分辨率限制。
-  矢量页面通过图片元素显示，不插入内联 SVG；原文图片仍受其自身分辨率限制。
-  浏览器同时显示可点击的定位标记，
-  不依赖浏览器自带 PDF 工具栏，也不需要安装 Office。图片、表格、页眉页脚随文档渲染，
-  但缺失字体和特殊对象可能导致显示差异，
-  **不承诺任意 Word 文档像素级一致，也不保证未被文字解析器提取的对象内容参与检查**。
-- 默认使用“适合宽度”，可切换到 25%、50%、75%、100%、125%、150% 或 200%。
-  当前百分比以适合宽度为基准：100% 与当前容器的适合宽度等效，并非打印尺寸的 1:1 比例。
-  缩小后页面居中；放大后可在文档区域滚动，问题定位同时处理横向和纵向滚动。
-  缩放只影响预览，不改变原文内容或导出文件。
-- DOCX 原格式导出在源文件基础上修改文字。无法安全修改的图文混排内容会报错；
-  PDF 中超出原文字区域的修改也可能无法安全应用。图片、扫描件的原始图像不被文字修订覆盖，
-  此时页面明确提示修订仍在右侧，导出可编辑 DOCX 重建稿仍不承诺原版式完整还原。
-- 定位使用当前版式的文字坐标及完整文本对齐，不简单搜索问题词的第一次出现。
-  判断重复歧义时会比较原文与渲染文本中的全部出现次数；标题在正文中再次出现等正常重复
-  不会仅因超出独立段落的计数而被误判为额外页眉。
-  真正存在额外重复、缺失或无法可靠对齐的文字仍会提示无法精确定位，不猜测位置。
-  “部分文字无法精确定位”表示预览坐标未完全匹配，不代表文件损坏或检查失败，
-  也不表示所有问题都无法定位；可继续结合右侧原文和上下文审阅。
-- 预览遵守任务过期状态与源文件哈希校验；转换失败、任务过期或格式不支持时明确报错，
-  不静默显示纯文本替代。失败时保留修订并提供重试，旧页面会明确标为上次成功的预览。
-  文件上限为 25 MiB，版式预览限制 80 页、20 万字符和 25 MiB 输出；内部 JSON 传输上限为
-  64 MiB（含 Base64 源文件），单次 Office 转换限时 45 秒，完整渲染请求限时 120 秒。
-- `renderer` 使用现有后端镜像内的 LibreOffice/中文字体，不读取 `.env`、数据库或任务存储；
-  使用只读根文件系统、受限临时目录、单转换并发和无外网的内部网络。
-  启用容器 init 回收 Office 遗留的辅助子进程，避免连续转换耗尽进程配额。
-  原生开发通过仅绑定 `127.0.0.1:8010` 的 `renderer-gateway` 访问，
-  `PREVIEW_RENDERER_URL` 默认为 `http://127.0.0.1:8010`。完整 Docker 部署由 API
-  直接访问 `http://renderer:8000`，不向浏览器暴露渲染端口。
-- 本地调试覆盖配置只读挂载 `apps/api/src/text_verification` 并启用渲染服务热重载；
-  `start-local.sh` 复用已安装依赖的镜像，不因代码修改重复下载依赖。首次缺少镜像时构建；
-  修改后端依赖或 Dockerfile 后需手动以 `--build` 重建 renderer。正式部署不挂载源代码。
-
-渲染日志和本地容器停止命令（不加 `-v`，保留数据）：
-
-```bash
-docker compose --env-file .env -f infra/compose.yaml -f infra/compose.local-services.yaml \
-  logs -f renderer renderer-gateway
-docker compose --env-file .env -f infra/compose.yaml -f infra/compose.local-services.yaml down
-```
-
-### Backend
-
-#### VS Code 本地断点调试
-
-仓库的 `.vscode/launch.json` 提供 `Local API (attach)`、
-`Local Worker (attach)` 和组合入口 `Local API + Worker`。
-先按上述步骤启动本地数据库和前端；以下调试命令替代普通 API 和检查 Worker 命令，
-不要同时启动两套进程。维护 Worker 和 Beat 仍按上面的方式运行。
-
-首次使用时，在现有虚拟环境中安装调试器：
-
-```bash
-uv pip install --python apps/api/.venv/bin/python "debugpy>=1.8,<2"
-```
-
-从仓库根目录在两个终端分别启动：
-
-```bash
-apps/api/.venv/bin/python -Xfrozen_modules=off -m debugpy \
-  --listen 127.0.0.1:5678 \
-  -m uvicorn text_verification.main:app \
-  --reload --host 127.0.0.1 --port 8000
-```
-
-```bash
-TEXT_VERIFICATION_WORKER_ROLE=verification \
-TEXT_VERIFICATION_WORKER_QUEUES=celery,verification-v2 \
-TEXT_VERIFICATION_WORKER_CONCURRENCY=2 \
-apps/api/.venv/bin/python -Xfrozen_modules=off -m debugpy \
-  --listen 127.0.0.1:5679 \
-  -m celery -A text_verification.workers.celery_app:celery_app worker \
-  --loglevel=INFO --queues=celery,verification-v2 --concurrency=2 \
-  --prefetch-multiplier=1 --hostname=verification@%h --pool=solo
-```
-
-在 VS Code 中打开仓库根目录，安装 Python Debugger 扩展后选择对应入口并按 F5。
-直接文本检查在 API 中执行，文件解析和检查在 Worker 中执行。
-Worker 使用仅用于本地调试的 `solo` 池逐个执行任务，保留项目要求的角色、队列和并发参数；
-断点暂停时文件任务会等待，修改 Worker 代码后需要重启该进程。
-调试端口仅监听本机，未附加调试器时应用也可以正常使用。
-
-#### 后端命令
-
-```powershell
-py -3.12 -m venv apps\api\.venv
-& .\apps\api\.venv\Scripts\python.exe -m pip install -e "apps\api[dev]"
-& .\apps\api\.venv\Scripts\python.exe -m pytest apps\api\tests -v
-& .\apps\api\.venv\Scripts\python.exe -m ruff check apps\api
-& .\apps\api\.venv\Scripts\python.exe -m mypy apps\api\src
-```
-
-### Frontend
-
-```powershell
-Set-Location apps\web
-npm ci
-npm test
-npm run build
-Set-Location ..\..
-```
-
-## API 与 SSE 端点
-
-- `POST /api/v1/jobs`
-- `GET /api/v1/jobs/{job_id}`
-- `GET /api/v1/jobs/{job_id}/events`
-- `GET /api/v1/jobs/{job_id}/result`
-- `GET /api/v1/jobs/{job_id}/preview`
-- `POST /api/v1/jobs/{job_id}/preview/layout`
-- `POST /api/v1/jobs/{job_id}/exports`
-- `GET /api/v1/jobs/{job_id}/exports/{artifact_id}`
-- `GET /api/v1/health`
-- `POST /api/v1/analyze`
-- `POST /api/v1/export`
-- `POST /api/v1/export-original`
-- `GET /api/v1/scenarios`
-- `GET /api/v1/formats`
-
-`POST /api/v1/jobs` 使用 multipart 上传，并接受与同步检查相同的
-`scenario`、`enable_security`、`enable_sensitive`、`enable_ad_extreme`、
-`custom_glossary`（JSON 数组）和 `banned_words`（JSON 数组）字段。服务端将经过
-边界和大小校验的不可变配置快照随任务持久化；任务响应、SSE、日志和错误不会回显
-自定义术语或禁用词列表。
-
-`POST /api/v1/jobs/{job_id}/preview/layout` 接收包含 `source_version` 和当前修订全文
-`text` 的 JSON，返回分页图像及文字定位坐标。它不会保存审阅决策或覆盖原文件，
-仍受任务生命周期、源版本校验和预览资源限制约束。
-
-## 文件限制、保留与安全边界
-
-- 支持文件类型：`.docx`、`.doc`、`.pdf`、`.txt`、`.rtf`、`.md`、`.csv`、`.png`、`.jpg`、`.jpeg`
-- 上传大小上限：精确为 25 MiB
-- 保留策略：任务和上传文件保留 24 小时
-- 校验边界：内容类型与文件签名双重检查，MIME 一致性检查
-- DOCX 安全：限制 ZIP 结构与解压风险
-- 存储策略：每个任务使用独立 UUID 目录，服务端生成文件名，不暴露服务器文件系统路径
-- 状态保护：终态任务不会被后续事件回退覆盖
-- 清理策略：后台会清理过期任务与陈旧孤儿文件
-
-## Alembic 数据库迁移
-
-```powershell
-docker compose -f infra/compose.yaml run --rm migrate alembic upgrade head
-docker compose -f infra/compose.yaml run --rm migrate alembic downgrade -1
-```
-
-PostgreSQL 集成测试要求设置 `TEST_DATABASE_URL`；Live 测试要求设置 `LIVE_API_URL`；SQLite 不是替代方案。
-
-迁移 `0009_add_job_verification_options` 为旧写入保留 `{}` JSONB 服务端默认值；
-旧任务由新 Worker 映射为默认检查配置。
-
-```powershell
-$env:LIVE_API_URL='http://localhost:8080'
-& .\apps\api\.venv\Scripts\python.exe -m pytest `
-  apps\api\tests\e2e\test_upload_lifecycle.py -v
-```
-
-## 词库资源及维护说明
-
-`resources/dictionaries` 中的词库资源由合规或法务团队维护：
-
-- `advertising-extreme-terms.zh-cn.json`
-- `compliance-sensitive-rules.zh-cn.json`
-
-交互式检查接口已加载包内运行时词表。合规词表变更需同步更新运行时副本并执行规则测试。
-运行时 JSON 词库兼容旧项目的可选 `version`、`description` 元数据，仍严格校验类别和条目、
-拒绝未知字段；实际加载版本以文件内容哈希为准，内容变化会触发热加载，不依赖手写版本号。
-
-## 环境限制与后续路线图
-
-### 当前环境限制
-
-- Docker / Compose 验证依赖宿主机可用 Docker。
-- PostgreSQL 相关集成测试必须连接真实 PostgreSQL。
-- 不允许使用 SQLite 代替 PostgreSQL 合约验证。
-
-### 后续路线图
-
-- 共享词库管理能力
-- 精确块级替换与审阅决策持久化
-- 生产加固与可观测性完善
-
-## 停止与重置
-
-```powershell
-docker compose -f infra/compose.yaml down
-docker compose -f infra/compose.yaml down --volumes
-```
-
-第一条命令保留 `postgres-data` 与 `job-data`；第二条命令会永久删除开发数据库和上传任务数据。
-
-## 文档链接
-
-- [平台架构设计](docs/architecture/document-verification-platform.md)
-- [仓库重组设计](docs/architecture/repository-layout-and-documentation.md)
-- [平台基础实施记录](docs/development/platform-foundation-plan.md)
+完整 Docker 部署不挂载本地源代码，修改后需要重新构建并部署对应服务。
