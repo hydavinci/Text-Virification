@@ -11,6 +11,8 @@ const props = defineProps<{
   busy: boolean
   error: string | null
   settingsOpen: boolean
+  recoveredFile?: { name: string; size: number } | null
+  recoverable?: boolean
 }>()
 const emit = defineEmits<{
   'update:options': [options: AnalyzeOptions]
@@ -18,6 +20,8 @@ const emit = defineEmits<{
   'open-settings': []
   'submit-file': [file: File]
   'submit-text': [text: string]
+  'resume-job': []
+  'clear-job': []
 }>()
 const enabledChecks = computed(() => [
   props.options.enableSecurity && '个人信息',
@@ -38,9 +42,13 @@ const enabledChecks = computed(() => [
         :text="text"
         :busy="busy"
         :server-error="error"
+        :recovered-file="recoveredFile"
+        :recoverable="recoverable"
         @update:text="emit('update:text', $event)"
         @submit-file="emit('submit-file', $event)"
         @submit-text="emit('submit-text', $event)"
+        @resume-job="emit('resume-job')"
+        @clear-job="emit('clear-job')"
       >
         <template #settings>
           <div class="setup-options">
@@ -72,23 +80,23 @@ const enabledChecks = computed(() => [
               <span v-if="options.ocrLanguage === 'ja'"> · 日文 OCR</span>
             </p>
           </div>
+          <slot name="progress" />
         </template>
       </SourceInputPanel>
-      <slot name="progress" />
     </section>
     <p class="privacy-note">仅为完成检查处理文档 · 任务数据默认保留 24 小时 · 请勿上传涉密文件</p>
   </main>
 </template>
 
 <style scoped>
-.setup { max-width: 800px; margin: 0 auto; padding: 48px 24px 32px; }
-.setup-heading { margin-bottom: 28px; text-align: center; }
+.setup { max-width: 800px; margin: 0 auto; padding: 24px 24px 20px; }
+.setup-heading { margin-bottom: 18px; text-align: center; }
 .product-label { display: inline-flex; align-items: center; gap: 8px; padding: 5px 12px; border-radius: 20px; background: var(--primary-soft); font-size: 12px; font-weight: 500; letter-spacing: .08em; color: var(--primary); }
 .product-label::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-h1 { margin: 16px 0 12px; font-size: clamp(27px, 3vw, 36px); line-height: 1.35; font-weight: 600; letter-spacing: -.035em; }
+h1 { margin: 10px 0 8px; font-size: clamp(25px, 3vw, 32px); line-height: 1.35; font-weight: 600; letter-spacing: -.035em; }
 .setup-heading p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.8; }
-.input-card { padding: 28px; border: 1px solid var(--border); border-radius: 18px; background: var(--surface); box-shadow: var(--shadow-paper); }
-.setup-options { min-width: 0; margin: 24px 0 0; padding: 20px 0 0; border: 0; border-top: 1px solid var(--border); }
+.input-card { padding: 20px; border: 1px solid var(--border); border-radius: 18px; background: var(--surface); box-shadow: var(--shadow-paper); }
+.setup-options { min-width: 0; margin: 16px 0 0; padding: 14px 0 0; border: 0; border-top: 1px solid var(--border); }
 .options-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .scenario-control { min-width: 0; margin: 0; padding: 0; border: 0; }
 .settings-trigger { white-space: nowrap; }

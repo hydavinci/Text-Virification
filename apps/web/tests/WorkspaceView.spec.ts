@@ -9,11 +9,12 @@ import OriginalDocumentPreview from '../src/components/workspace/OriginalDocumen
 import EditPreview from '../src/components/workspace/EditPreview.vue'
 import ExportPanel from '../src/components/workspace/ExportPanel.vue'
 import IssueList from '../src/components/workspace/IssueList.vue'
-import ReviewActions from '../src/components/workspace/ReviewActions.vue'
 import SearchReplacePanel from '../src/components/workspace/SearchReplacePanel.vue'
 import TerminologyEditor from '../src/components/workspace/TerminologyEditor.vue'
 import VerificationSettings from '../src/components/workspace/VerificationSettings.vue'
 import { WORKSPACE_SESSION_VERSION } from '../src/composables/useWorkspaceSession'
+import { PENDING_JOB_KEY } from '../src/composables/usePendingJob'
+import type { useVerificationWorkspace } from '../src/composables/useVerificationWorkspace'
 import type {
   AnalyzeOptions,
   VerificationIssue,
@@ -220,26 +221,46 @@ function buildConflictIssues(
 function canonicalWorkspace(wrapper: ReturnType<typeof mount>) {
   return (
     wrapper.vm as unknown as {
-      verificationWorkspace: {
-        result: { readonly value: VerificationResult | null }
-        currentRevision: { readonly value: unknown }
-        modifiedText: { readonly value: string }
-        issueStates: {
-          readonly value: Readonly<Record<string, string>>
-        }
-        selectedSuggestions: {
-          readonly value: Readonly<Record<string, string | null>>
-        }
-        hasReplacementConflicts: { readonly value: boolean }
-        canUndoLastBatch: { readonly value: boolean }
-        requiresReverification: { readonly value: boolean }
-        visibleIssues: { readonly value: readonly VerificationIssue[] }
-      }
+      verificationWorkspace: ReturnType<typeof useVerificationWorkspace>
     }
   ).verificationWorkspace
 }
 
 describe('WorkspaceView', () => {
+  it('reviews individual issues and updates counts without a top action menu', async () => {
+    const payload = buildWorkspaceResult([buildWorkspaceIssue()])
+    const wrapper = mount(WorkspaceView, {
+      global: { provide: {
+        [jobsApiKey as symbol]: { createJob: vi.fn(), subscribe: vi.fn(() => vi.fn()) },
+        [verificationApiKey as symbol]: {
+          analyzeFile: vi.fn(), analyzeText: vi.fn().mockResolvedValue(payload),
+          exportReport: vi.fn(), exportOriginal: vi.fn()
+        }
+      } }
+    })
+    wrapper.getComponent(SourceInputPanel).vm.$emit('submit-text', payload.text)
+    await flushPromises()
+
+    expect(wrapper.get('.review-summary').find('details, button').exists()).toBe(false)
+    expect(wrapper.get('[data-count="pending"]').text()).toBe('1')
+    await wrapper.get('[data-issue-role="list"]').trigger('click')
+    await wrapper.get('.issue-actions .accept').trigger('click')
+    expect(wrapper.get('[data-count="accepted"]').text()).toBe('1')
+    expect(wrapper.get('[data-count="pending"]').text()).toBe('0')
+    expect(wrapper.get('[data-source-text]').element.textContent).toBe('修改丁')
+
+    await wrapper.get('.issue-actions .reject').trigger('click')
+    expect(wrapper.get('[data-count="accepted"]').text()).toBe('0')
+    expect(wrapper.get('[data-count="rejected"]').text()).toBe('1')
+    expect(wrapper.get('[data-source-text]').element.textContent).toBe('甲乙丙丁')
+
+    await wrapper.get('.issue-actions .undo').trigger('click')
+    expect(wrapper.get('[data-count="pending"]').text()).toBe('1')
+    expect(wrapper.get('[data-count="rejected"]').text()).toBe('0')
+    expect(wrapper.get('[data-source-text]').element.textContent).toBe('甲乙丙丁')
+    wrapper.unmount()
+  })
+
   it('defaults export tracking off on restore and new documents while allowing explicit opt-in', async () => {
     const payload = buildWorkspaceResult([])
     const global = { provide: {
@@ -330,7 +351,7 @@ describe('WorkspaceView', () => {
       enableExtendedRules: true,
       glossary: [{ original: 'AI', standard: '人工智能' }],
       bannedWords: ['最好']
-    })
+    }, expect.any(AbortSignal))
     expect(restored.get('[data-source-text]').text()).toBe('修改丁')
     restored.unmount()
   })
@@ -529,8 +550,8 @@ describe('WorkspaceView', () => {
     expect(wrapper.get('[data-source-text]').element.textContent).toBe('😀新增\n内容')
     expect(wrapper.find(`[data-issue-role="source"][data-issue-id="${last.issue_id}"]`).exists()).toBe(true)
     expect(wrapper.find('.active-search-match').exists()).toBe(false)
-    wrapper.getComponent(ReviewActions).vm.$emit('undo-issue', last.issue_id)
-    wrapper.getComponent(ReviewActions).vm.$emit('undo-issue', first.issue_id)
+    wrapper.getComponent(IssueList).vm.$emit('set-state', last.issue_id, 'pending')
+    wrapper.getComponent(IssueList).vm.$emit('set-state', first.issue_id, 'pending')
     await flushPromises()
     expect(wrapper.get('[data-source-text]').element.textContent).toBe('甲乙丙丁')
     expect(wrapper.get('.active-search-match').text()).toBe('丁')
@@ -544,6 +565,150 @@ describe('WorkspaceView', () => {
 
   beforeEach(() => {
     sessionStorage.clear()
+  })
+
+  it.each(['edit', 'pagehide'] as const)(
+    'retains completed task recovery after quota failure until a later %s snapshot is durable',
+    async (saveTrigger) => {
+      const payload = { ...buildWorkspaceResult([]), execution_mode: 'asynchronous' as const }
+      const completedJob = buildJobRead({
+        job_id: payload.document_id,
+        status: 'completed', stage: 'completed', progress: 100,
+        created_at: new Date().toISOString(),
+        expires_at: new Date(Date.now() + 60_000).toISOString()
+      })
+      const api: JobsApi = {
+        createJob: vi.fn().mockResolvedValue(completedJob),
+        getJob: vi.fn().mockResolvedValue(completedJob),
+        getResult: vi.fn().mockResolvedValue(payload),
+        subscribe: vi.fn(() => vi.fn())
+      }
+      let rejectDocumentWrites = true
+      const storagePrototype = Object.getPrototypeOf(window.sessionStorage) as Storage
+      const setItem = storagePrototype.setItem
+      const storageWrite = vi.spyOn(storagePrototype, 'setItem').mockImplementation(function (
+        this: Storage, key: string, value: string
+      ) {
+        if (key === 'text-verification-session' && rejectDocumentWrites) {
+          throw new DOMException('synthetic quota', 'QuotaExceededError')
+        }
+        setItem.call(this, key, value)
+      })
+      const views: ReturnType<typeof mount>[] = []
+      const mountView = () => {
+        const view = mount(WorkspaceView, { global: { provide: { [jobsApiKey as symbol]: api } } })
+        views.push(view)
+        return view
+      }
+      try {
+        const first = mountView()
+        await selectFile(first, new File(['synthetic'], 'sample.txt'))
+        await flushPromises()
+        expect(canonicalWorkspace(first).result.value?.text).toBe(payload.text)
+        expect(sessionStorage.getItem('text-verification-session')).toBeNull()
+        expect(sessionStorage.getItem(PENDING_JOB_KEY)).not.toBeNull()
+        first.unmount()
+
+        const recovered = mountView()
+        await flushPromises()
+        expect(api.createJob).toHaveBeenCalledOnce()
+        expect(api.getJob).toHaveBeenCalledOnce()
+        expect(canonicalWorkspace(recovered).result.value?.text).toBe(payload.text)
+        expect(sessionStorage.getItem(PENDING_JOB_KEY)).not.toBeNull()
+
+        rejectDocumentWrites = false
+        const expectedText = saveTrigger === 'edit' ? '已保存的人工修改' : payload.text
+        if (saveTrigger === 'edit') {
+          canonicalWorkspace(recovered).saveManualEdit(expectedText)
+        } else {
+          window.dispatchEvent(new Event('pagehide'))
+        }
+        await flushPromises()
+        expect(JSON.parse(sessionStorage.getItem('text-verification-session')!).workspace.currentRevision.text).toBe(expectedText)
+        expect(sessionStorage.getItem(PENDING_JOB_KEY)).toBeNull()
+        recovered.unmount()
+
+        const restored = mountView()
+        await flushPromises()
+        expect(canonicalWorkspace(restored).currentRevision.value?.text).toBe(expectedText)
+        expect(api.getJob).toHaveBeenCalledOnce()
+        expect(api.createJob).toHaveBeenCalledOnce()
+      } finally {
+        views.forEach((view) => view.unmount())
+        storageWrite.mockRestore()
+      }
+    }
+  )
+
+  it.each(['queued', 'checking_chinese', 'completed', 'failed'] as const)(
+    'recovers a %s job after reload without a second upload',
+    async (status) => {
+      const payload = buildWorkspaceResult([])
+      const initialJob = buildJobRead({
+        job_id: payload.document_id,
+        created_at: new Date().toISOString(),
+        expires_at: new Date(Date.now() + 60_000).toISOString()
+      })
+      const recoveredJob = { ...initialJob, status, stage: status, progress: status === 'completed' ? 100 : 0 }
+      const api: JobsApi = {
+        createJob: vi.fn().mockResolvedValue(initialJob),
+        getJob: vi.fn().mockResolvedValue(recoveredJob),
+        getResult: vi.fn().mockResolvedValue({ ...payload, execution_mode: 'asynchronous' }),
+        subscribe: vi.fn(() => vi.fn())
+      }
+      const mountView = () => mount(WorkspaceView, {
+        global: { provide: { [jobsApiKey as symbol]: api } }
+      })
+      const first = mountView()
+      await selectFile(first, new File(['synthetic'], 'sample.txt'))
+      await flushPromises()
+      expect(sessionStorage.getItem(PENDING_JOB_KEY)).not.toBeNull()
+      first.unmount()
+      const restored = mountView()
+      await flushPromises()
+      expect(api.createJob).toHaveBeenCalledOnce()
+      expect(api.getJob).toHaveBeenCalledOnce()
+      if (status === 'completed') {
+        expect(canonicalWorkspace(restored).result.value?.text).toBe(payload.text)
+        expect(sessionStorage.getItem(PENDING_JOB_KEY)).toBeNull()
+      } else if (status === 'failed') {
+        expect(restored.find('[role="alert"]').exists()).toBe(true)
+        expect(sessionStorage.getItem(PENDING_JOB_KEY)).toBeNull()
+      } else {
+        expect(restored.get('[data-selected-file]').text()).toContain('sample.txt')
+        expect(restored.find('[data-dropzone]').exists()).toBe(false)
+        expect(restored.find('progress').exists()).toBe(true)
+      }
+      restored.unmount()
+    }
+  )
+
+  it('keeps recovered metadata after a network error and retries only the lookup', async () => {
+    const job = buildJobRead({
+      created_at: new Date().toISOString(),
+      expires_at: new Date(Date.now() + 60_000).toISOString()
+    })
+    const api: JobsApi = {
+      createJob: vi.fn().mockResolvedValue(job),
+      getJob: vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValue(job),
+      getResult: vi.fn(),
+      subscribe: vi.fn(() => vi.fn())
+    }
+    const mountView = () => mount(WorkspaceView, { global: { provide: { [jobsApiKey as symbol]: api } } })
+    const first = mountView()
+    await selectFile(first, new File(['synthetic'], 'sample.txt'))
+    await flushPromises()
+    first.unmount()
+    const restored = mountView()
+    await flushPromises()
+    expect(restored.get('[role="alert"]').text()).toContain('offline')
+    expect(restored.get('[data-selected-file]').text()).toContain('sample.txt')
+    await restored.get('[data-submit-source]').trigger('click')
+    await flushPromises()
+    expect(api.getJob).toHaveBeenCalledTimes(2)
+    expect(api.createJob).toHaveBeenCalledOnce()
+    expect(restored.get('[data-submit-source]').attributes('disabled')).toBeDefined()
+    restored.unmount()
   })
 
   it('connects source and issue-list selection through stable issue ids', async () => {
@@ -670,7 +835,7 @@ describe('WorkspaceView', () => {
       enableExtendedRules: true,
       glossary: [{ original: 'AI', standard: '人工智能' }],
       bannedWords: ['最好']
-    } satisfies AnalyzeOptions)
+    } satisfies AnalyzeOptions, expect.any(AbortSignal))
   })
 
   it('synchronously ignores a second text submission while analysis is pending', async () => {
@@ -694,6 +859,7 @@ describe('WorkspaceView', () => {
       }
     })
     const input = wrapper.getComponent(SourceInputPanel)
+    expect(wrapper.find('progress').exists()).toBe(false)
 
     input.vm.$emit('submit-text', '检查文本')
     input.vm.$emit('submit-text', '第二次')
@@ -703,11 +869,17 @@ describe('WorkspaceView', () => {
     expect(analyzeText).toHaveBeenCalledTimes(1)
     expect(analyzeText).toHaveBeenCalledWith(
       '检查文本',
-      expect.any(Object)
+      expect.any(Object),
+      expect.any(AbortSignal)
     )
+    expect(input.get('progress').attributes('value')).toBeUndefined()
+    expect(wrapper.find('.loading-card').exists()).toBe(false)
 
     pending.reject(new Error('finish'))
     await flushPromises()
+    expect(wrapper.find('progress').exists()).toBe(false)
+    expect(wrapper.get('[role="alert"]').text()).toContain('finish')
+    wrapper.unmount()
   })
 
   it('synchronously ignores a second file submission while async job creation is pending', async () => {
@@ -742,14 +914,15 @@ describe('WorkspaceView', () => {
 
     expect(confirm).not.toHaveBeenCalled()
     expect(createJob).toHaveBeenCalledTimes(1)
-    expect(createJob).toHaveBeenCalledWith(first, expect.any(Object))
+    expect(createJob).toHaveBeenCalledWith(first, expect.any(Object), expect.any(AbortSignal))
     expect(analyzeFile).not.toHaveBeenCalled()
+    expect(input.get('progress').attributes('value')).toBeUndefined()
 
     pending.reject(new Error('finish'))
     await flushPromises()
   })
 
-  it('uploads an allowed file and displays durable progress', async () => {
+  it('places durable progress between settings and submit without technical details', async () => {
     const createJob = vi.fn().mockResolvedValue(buildJobRead())
     const pendingResult = createDeferred<VerificationResult>()
     const subscribe = vi.fn((_jobId, onEvent) => {
@@ -787,13 +960,20 @@ describe('WorkspaceView', () => {
     await selectFile(wrapper, file)
     await flushPromises()
 
-    expect(createJob).toHaveBeenCalledWith(file, expect.any(Object))
+    expect(createJob).toHaveBeenCalledWith(file, expect.any(Object), expect.any(AbortSignal))
     expect(wrapper.text()).toContain('sample.txt')
     expect(wrapper.text()).toContain('100%')
     expect(wrapper.text()).toContain('处理完成')
-    expect(wrapper.text()).toContain('completed')
-    expect(wrapper.get('[data-job-stage]').text()).toBe('completed')
-    expect(wrapper.get('progress').attributes('aria-label')).toBe('Job progress')
+    expect(wrapper.text()).not.toContain('Job progress')
+    expect(wrapper.find('[data-job-stage]').exists()).toBe(false)
+    const source = wrapper.getComponent(SourceInputPanel)
+    const progress = source.get('progress')
+    expect(progress.attributes('aria-label')).toBe('检查进度')
+    expect(progress.attributes('value')).toBe('100')
+    expect(source.get('.setup-options').element.compareDocumentPosition(progress.element)
+      & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(progress.element.compareDocumentPosition(source.get('[data-submit-source]').element)
+      & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     expect(wrapper.get('[role="status"]').attributes('aria-live')).toBe('polite')
   })
 
@@ -861,10 +1041,10 @@ describe('WorkspaceView', () => {
       enableAdExtreme: false,
       glossary: [],
       bannedWords: []
-    })
+    }, expect.any(AbortSignal))
     expect(getResult).toHaveBeenCalledTimes(1)
     expect(getResult).toHaveBeenCalledWith(
-      result.document_id
+      result.document_id, expect.any(AbortSignal)
     )
     expect(close).toHaveBeenCalledTimes(1)
     expect(canonicalWorkspace(wrapper).result.value).toEqual(result)
@@ -953,7 +1133,7 @@ describe('WorkspaceView', () => {
     await selectFile(wrapper, exactLimit)
     await flushPromises()
 
-    expect(createJob).toHaveBeenCalledWith(exactLimit, expect.any(Object))
+    expect(createJob).toHaveBeenCalledWith(exactLimit, expect.any(Object), expect.any(AbortSignal))
     expect(wrapper.find('[role="alert"]').exists()).toBe(false)
   })
 
@@ -1062,7 +1242,8 @@ describe('WorkspaceView', () => {
     await flushPromises()
 
     expect(wrapper.text()).toContain('处理完成')
-    expect(wrapper.text()).toContain('completed')
+    expect(wrapper.get('progress').attributes('value')).toBe('100')
+    expect(wrapper.get('progress').attributes('aria-valuetext')).toContain('处理完成')
     expect(wrapper.text()).not.toContain('无法接收任务进度，请稍后重试。')
   })
 
@@ -1105,12 +1286,15 @@ describe('WorkspaceView', () => {
     const second = new File(['second'], 'second.txt', { type: 'text/plain' })
     const input = wrapper.getComponent(SourceInputPanel)
 
+    await input.get('[data-dropzone]').trigger('drop', {
+      dataTransfer: { files: [first] }
+    })
     input.vm.$emit('submit-file', first)
     input.vm.$emit('submit-file', second)
     await flushPromises()
 
     expect(createJob).toHaveBeenCalledTimes(1)
-    expect(createJob).toHaveBeenCalledWith(first, expect.any(Object))
+    expect(createJob).toHaveBeenCalledWith(first, expect.any(Object), expect.any(AbortSignal))
     expect(subscribe).not.toHaveBeenCalled()
 
     pending.resolve(buildJobRead({ source_name: 'first.txt' }))
@@ -1276,7 +1460,7 @@ describe('WorkspaceView', () => {
     })
     expect(workspace.requiresReverification.value).toBe(true)
     expect(workspace.visibleIssues.value).toEqual([])
-    expect(wrapper.getComponent(ReviewActions).props('selectedIssueId')).toBeNull()
+    expect(wrapper.findComponent(IssueList).exists()).toBe(false)
     expect(wrapper.findAll('[data-issue-id]')).toHaveLength(0)
     expect(wrapper.text()).toContain('X😀X')
     await search.get('[data-search-input]').setValue('X')
@@ -1319,8 +1503,9 @@ describe('WorkspaceView', () => {
       .getComponent(SourceInputPanel)
       .vm.$emit('submit-text', '甲乙丙丁')
     await flushPromises()
-    await wrapper.get('[data-action="accept-batch"]').trigger('click')
     const workspace = canonicalWorkspace(wrapper)
+    workspace.setIssueStates([issue.issue_id], 'accepted')
+    await flushPromises()
     const revision = workspace.currentRevision.value
     const states = workspace.issueStates.value
 
@@ -1709,7 +1894,7 @@ describe('WorkspaceView', () => {
     wrapper.unmount()
   })
 
-  it('accepts an overlapping batch atomically and undoes the exact batch', async () => {
+  it('reflects legacy batch conflicts and their resolution without batch controls', async () => {
     const payload = buildWorkspaceResult(
       buildConflictIssues('crossing'),
       'abcdef'
@@ -1738,7 +1923,8 @@ describe('WorkspaceView', () => {
     const workspace = canonicalWorkspace(wrapper)
     const sourceRevision = workspace.currentRevision.value
 
-    await wrapper.get('[data-action="accept-batch"]').trigger('click')
+    workspace.setIssueStates(payload.issues.map((issue) => issue.issue_id), 'accepted')
+    await flushPromises()
 
     expect(workspace.currentRevision.value).toBe(sourceRevision)
     expect(workspace.modifiedText.value).toBe('abcdef')
@@ -1746,27 +1932,22 @@ describe('WorkspaceView', () => {
     expect(wrapper.get('[data-source-text]').element.textContent).toBe('abcdef')
     expect(wrapper.findAll('[data-issue-role="source"]')).toHaveLength(0)
     expect(workspace.canUndoLastBatch.value).toBe(true)
-    expect(wrapper.text()).toContain('撤销批量操作')
-
-    const undo = wrapper
-      .findAll('button')
-      .find((button) => button.text() === '撤销批量操作')
-    if (!undo) {
-      throw new Error('Expected canonical batch undo control.')
-    }
-    await undo.trigger('click')
+    expect(wrapper.get('.review-summary [role="alert"]').text()).toContain('2')
+    expect(wrapper.get('.review-summary').find('button, details').exists()).toBe(false)
+    workspace.undoLastBatch()
+    await flushPromises()
 
     expect(workspace.issueStates.value).toEqual({})
     expect(workspace.currentRevision.value).toBe(sourceRevision)
     expect(workspace.hasReplacementConflicts.value).toBe(false)
     expect(wrapper.findAll('[data-issue-role="source"]')).toHaveLength(payload.issues.length)
     expect(workspace.canUndoLastBatch.value).toBe(false)
-    expect(
-      wrapper.get('[data-action="undo-batch"]').attributes('disabled')
-    ).toBeDefined()
+    expect(wrapper.find('.review-summary [role="alert"]').exists()).toBe(false)
+    expect(wrapper.get('[data-count="pending"]').text()).toBe('2')
+    wrapper.unmount()
   })
 
-  it('undoes reset-all before the preceding accept-all batch', async () => {
+  it('keeps other accepted decisions when undoing one issue from its card', async () => {
     const first = buildWorkspaceIssue({
       start: 0,
       end: 1,
@@ -1809,37 +1990,24 @@ describe('WorkspaceView', () => {
     await flushPromises()
     const workspace = canonicalWorkspace(wrapper)
 
-    await wrapper.get('[data-action="accept-batch"]').trigger('click')
-    const reset = wrapper
-      .findAll('button')
-      .find((button) => button.text() === '重置状态')
-    if (!reset) {
-      throw new Error('Expected reset-all control.')
-    }
-    await reset.trigger('click')
-
-    expect(workspace.issueStates.value).toEqual({
-      [first.issue_id]: 'pending',
-      [second.issue_id]: 'pending'
-    })
-
-    const undo = wrapper
-      .findAll('button')
-      .find((button) => button.text() === '撤销批量操作')
-    if (!undo) {
-      throw new Error('Expected canonical batch undo control.')
-    }
-    await undo.trigger('click')
+    await wrapper.get(`[data-issue-role="list"][data-issue-id="${first.issue_id}"]`).trigger('click')
+    await wrapper.get('.issue-actions .accept').trigger('click')
+    await wrapper.get(`[data-issue-role="list"][data-issue-id="${second.issue_id}"]`).trigger('click')
+    await wrapper.get('.issue-actions .accept').trigger('click')
+    expect(wrapper.get('[data-source-text]').element.textContent).toBe('A乙C丁')
+    await wrapper.get('.issue-actions .undo').trigger('click')
 
     expect(workspace.issueStates.value).toEqual({
       [first.issue_id]: 'accepted',
-      [second.issue_id]: 'accepted'
+      [second.issue_id]: 'pending'
     })
-    expect(workspace.canUndoLastBatch.value).toBe(true)
+    expect(wrapper.get('[data-count="accepted"]').text()).toBe('1')
+    expect(wrapper.get('[data-count="pending"]').text()).toBe('1')
+    expect(wrapper.get('[data-source-text]').element.textContent).toBe('A乙丙丁')
     wrapper.unmount()
   })
 
-  it('restores session decisions without restoring batch undo eligibility', async () => {
+  it('restores individual session decisions without exposing batch controls', async () => {
     const issue = buildWorkspaceIssue({
       start: 1,
       end: 2,
@@ -1869,8 +2037,8 @@ describe('WorkspaceView', () => {
       .getComponent(SourceInputPanel)
       .vm.$emit('submit-text', 'abc')
     await flushPromises()
-    await first.get('[data-action="accept-batch"]').trigger('click')
-    expect(canonicalWorkspace(first).canUndoLastBatch.value).toBe(true)
+    await first.get('[data-issue-role="list"]').trigger('click')
+    await first.get('.issue-actions .accept').trigger('click')
     first.unmount()
 
     const restored = mount(WorkspaceView, { global })
@@ -1880,9 +2048,8 @@ describe('WorkspaceView', () => {
       [issue.issue_id]: 'accepted'
     })
     expect(canonicalWorkspace(restored).canUndoLastBatch.value).toBe(false)
-    expect(
-      restored.get('[data-action="undo-batch"]').attributes('disabled')
-    ).toBeDefined()
+    expect(restored.get('.review-summary').find('details, button').exists()).toBe(false)
+    expect(restored.get('[data-count="accepted"]').text()).toBe('1')
     restored.unmount()
   })
 
@@ -2047,7 +2214,8 @@ describe('WorkspaceView', () => {
       await flushPromises()
       const workspace = canonicalWorkspace(wrapper)
       const sourceRevision = workspace.currentRevision.value
-      await wrapper.get('[data-action="accept-batch"]').trigger('click')
+      workspace.setIssueStates(payload.issues.map((issue) => issue.issue_id), 'accepted')
+      await flushPromises()
 
       const exportButton = wrapper.get<HTMLButtonElement>(
         '[data-action="export-modified"]'

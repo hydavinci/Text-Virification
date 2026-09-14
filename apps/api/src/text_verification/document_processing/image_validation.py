@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -85,6 +86,11 @@ def validate_image_file(
             raise ImageValidationError(
                 "Image exceeds the configured decoded image byte limit."
             )
+        dpi = float(pixmap.yres) if pixmap.yres > 0 else 72.0
+        normalized = normalize_image_pixmap(pixmap)
+        if normalized is not pixmap:
+            pixmap = normalized
+            content = pixmap.tobytes("png")
         return ValidatedImage(
             content=content,
             width=width,
@@ -92,10 +98,38 @@ def validate_image_file(
             samples=bytes(pixmap.samples),
             stride=pixmap.stride,
             channels=pixmap.n,
-            dpi=float(pixmap.yres) if pixmap.yres > 0 else 72.0,
+            dpi=dpi,
         )
     finally:
         del pixmap
+
+
+def normalize_image_pixmap(pixmap: Any) -> Any:
+    """Return RGB pixels, compositing premultiplied alpha onto white paper."""
+    if pixmap.colorspace is None:
+        raise ImageValidationError("Image has no supported color space.")
+    if pixmap.colorspace.n != 3:
+        pixmap = _PYMUPDF.Pixmap(_PYMUPDF.csRGB, pixmap)
+    if not pixmap.alpha:
+        return pixmap
+    np: Any = importlib.import_module("numpy")
+    pixels = np.frombuffer(pixmap.samples_mv, dtype=np.uint8).reshape(
+        pixmap.height, pixmap.width, 4
+    )
+    normalized = _PYMUPDF.Pixmap(
+        _PYMUPDF.csRGB, _PYMUPDF.IRect(0, 0, pixmap.width, pixmap.height), False
+    )
+    rgb = np.frombuffer(normalized.samples_mv, dtype=np.uint8).reshape(
+        pixmap.height, pixmap.width, 3
+    )
+    # MuPDF color samples are already multiplied by alpha; no float raster is needed.
+    for start in range(0, pixmap.height, 128):
+        stripe = pixels[start:start + 128]
+        white = 255 - stripe[:, :, 3]
+        for channel in range(3):
+            np.add(stripe[:, :, channel], white, out=rgb[start:start + 128, :, channel])
+    normalized.set_dpi(pixmap.xres, pixmap.yres)
+    return normalized
 
 
 def _image_header(content: bytes) -> tuple[FileType, int, int]:

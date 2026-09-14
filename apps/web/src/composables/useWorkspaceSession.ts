@@ -1,6 +1,6 @@
 import { computed, ref } from 'vue'
 
-import { createAnalyzeOptionsSnapshot } from '../api/analyzeOptions'
+import { createAnalyzeOptionsSnapshot, createDefaultAnalyzeOptions } from '../api/analyzeOptions'
 import type {
   AnalyzeOptions,
   FileType,
@@ -16,6 +16,7 @@ import { MAX_VERIFICATION_ISSUES } from '../validation/verificationLimits'
 
 export const WORKSPACE_SESSION_VERSION = 7
 export const WORKSPACE_SESSION_KEY = 'text-verification-session'
+export const WORKSPACE_SESSION_UI_KEY = `${WORKSPACE_SESSION_KEY}-ui`
 export const MAX_WORKSPACE_SESSION_RAW_BYTES = 32 * 1024 * 1024
 export const MAX_WORKSPACE_RESULT_BLOCKS = 20_000
 export const MAX_WORKSPACE_RESULT_ISSUES = MAX_VERIFICATION_ISSUES
@@ -203,6 +204,68 @@ export function useWorkspaceSession(
   const warningState = ref<string | null>(null)
   const maxRawBytes =
     limits.maxRawBytes ?? MAX_WORKSPACE_SESSION_RAW_BYTES
+  let savedRevision: string | null = null
+  let savedResult: VerificationResult | null = null
+  let savedIssueIds = new Set<string>()
+  let lastUiRaw: string | null = null
+  let savedDocumentBytes = 0
+
+  function remember(prepared: PreparedSession): void {
+    savedRevision = prepared.workspace.currentRevision.revision_id
+    savedResult = workspace.result.value
+    savedIssueIds = new Set(prepared.workspace.safeIssues.map((issue) => issue.issue_id))
+    lastUiRaw = null
+  }
+
+  function prepareUi(value: unknown): Pick<WorkspaceSessionUiState, 'options' | 'filters' | 'viewMode' | 'ui'> | null {
+    if (!isRecord(value) || !hasExactKeys(value, ['options', 'filters', 'viewMode', 'ui'])) return null
+    const options = preparedOptions(value.options)
+    if (
+      options === null ||
+      !isRecord(value.filters) || !hasExactKeys(value.filters, FILTER_KEYS) ||
+      typeof value.filters.layer !== 'string' || !LAYERS.has(value.filters.layer) ||
+      typeof value.filters.severity !== 'string' || !SEVERITIES.has(value.filters.severity) ||
+      (value.viewMode !== 'sentence' && value.viewMode !== 'continuous') ||
+      !isRecord(value.ui) || !hasExactKeys(value.ui, UI_KEYS) || !isUiState(value.ui) ||
+      (value.ui.selectedIssueId !== null &&
+        (workspace.requiresReverification.value || !savedIssueIds.has(value.ui.selectedIssueId)))
+    ) return null
+    return {
+      options,
+      filters: { layer: value.filters.layer as IssueLayerFilter, severity: value.filters.severity as WorkspaceSeverityFilter },
+      viewMode: value.viewMode,
+      ui: { ...value.ui }
+    }
+  }
+
+  function saveUi(state: WorkspaceSessionUiState): boolean {
+    if (workspace.result.value !== savedResult ||
+      workspace.currentRevision.value?.revision_id !== savedRevision || savedResult === null) {
+      return save(state)
+    }
+    const ui = prepareUi({ options: state.options, filters: state.filters, viewMode: state.viewMode, ui: state.ui })
+    if (ui === null) {
+      warningState.value = '当前工作区状态无效，无法保存会话。'
+      return false
+    }
+    try {
+      const raw = JSON.stringify({
+        version: 1, documentId: savedResult.document_id,
+        runId: savedResult.verification_run_id, revisionId: savedRevision, state: ui
+      })
+      if (!isWorkspaceSessionRawSizeAllowed(raw, Math.min(maxRawBytes - savedDocumentBytes, 128 * 1024))) {
+        warningState.value = '当前工作区状态超过会话大小限制，无法保存会话。'
+        return false
+      }
+      if (raw !== lastUiRaw) storage.setItem(WORKSPACE_SESSION_UI_KEY, raw)
+      lastUiRaw = raw
+      warningState.value = null
+      return true
+    } catch {
+      warningState.value = '浏览器存储空间不足或不可用，无法保存会话；当前编辑仍保留在内存中。'
+      return false
+    }
+  }
 
   function save(state: WorkspaceSessionUiState): boolean {
     const result = workspace.result.value
@@ -242,10 +305,13 @@ export function useWorkspaceSession(
         warningState.value = '当前工作区状态超过会话大小限制，无法保存会话。'
         return false
       }
+      storage.removeItem(WORKSPACE_SESSION_UI_KEY)
       storage.setItem(
         WORKSPACE_SESSION_KEY,
         serialized
       )
+      remember(prepared)
+      savedDocumentBytes = new TextEncoder().encode(serialized).byteLength
       warningState.value = null
       return true
     } catch {
@@ -291,7 +357,27 @@ export function useWorkspaceSession(
         return null
       }
       workspace.commitWorkspaceRestore(prepared.workspace)
+      remember(prepared)
+      savedDocumentBytes = new TextEncoder().encode(raw).byteLength
       warningState.value = null
+      try {
+        const uiRaw = storage.getItem(WORKSPACE_SESSION_UI_KEY)
+        if (uiRaw !== null) {
+          if (!isWorkspaceSessionRawSizeAllowed(uiRaw, Math.min(maxRawBytes - savedDocumentBytes, 128 * 1024))) throw new Error()
+          const overlay: unknown = JSON.parse(uiRaw)
+          if (!isRecord(overlay) ||
+            !hasExactKeys(overlay, ['version', 'documentId', 'runId', 'revisionId', 'state']) ||
+            overlay.version !== 1 || overlay.documentId !== savedResult?.document_id ||
+            overlay.runId !== savedResult?.verification_run_id || overlay.revisionId !== savedRevision) throw new Error()
+          const ui = prepareUi(overlay.state)
+          if (ui === null) throw new Error()
+          prepared.state = { ...prepared.state, ...ui }
+          lastUiRaw = uiRaw
+        }
+      } catch {
+        try { storage.removeItem(WORKSPACE_SESSION_UI_KEY) } catch { /* Keep the valid document snapshot. */ }
+        warningState.value = '界面偏好记录无效或不可用，已恢复文档及上次保存的设置。'
+      }
       return prepared.state
     } catch {
       warningState.value = '已保存的工作区会话损坏，未恢复任何状态。'
@@ -301,8 +387,13 @@ export function useWorkspaceSession(
   }
 
   function clear(): void {
+    savedResult = null
+    savedRevision = null
+    lastUiRaw = null
+    savedDocumentBytes = 0
     try {
       storage.removeItem(WORKSPACE_SESSION_KEY)
+      storage.removeItem(WORKSPACE_SESSION_UI_KEY)
       warningState.value = null
     } catch {
       warningState.value = '无法清除浏览器会话存储。'
@@ -312,6 +403,7 @@ export function useWorkspaceSession(
   return {
     warning: computed(() => warningState.value),
     save,
+    saveUi,
     restore,
     clear
   }
@@ -528,12 +620,8 @@ function prepareLegacySession(
     workspace: preparedWorkspace,
     state: {
       options: {
-        scenario: preparedWorkspace.result.scenario,
-        enableSecurity: true,
-        enableSensitive: true,
-        enableAdExtreme: false,
-        glossary: [],
-        bannedWords: []
+        ...createDefaultAnalyzeOptions(),
+        scenario: preparedWorkspace.result.scenario
       },
       filters: {
         layer: 'all',
@@ -556,6 +644,7 @@ function prepareLegacySession(
 function removeInvalidSession(storage: Storage): void {
   try {
     storage.removeItem(WORKSPACE_SESSION_KEY)
+    storage.removeItem(WORKSPACE_SESSION_UI_KEY)
   } catch {
     // The visible restore warning remains authoritative.
   }

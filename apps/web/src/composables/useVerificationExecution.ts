@@ -38,6 +38,8 @@ export interface UseVerificationExecutionDependencies {
   jobsApi: JobsApi
   verificationApi?: VerificationApi | null
   fileExecutionMode?: 'direct' | 'jobs'
+  requestTimeoutMs?: number
+  progressTimeoutMs?: number
 }
 
 export type VerificationResultTransform = (
@@ -51,7 +53,9 @@ export type RecheckResultTransform = (
 export function useVerificationExecution({
   jobsApi,
   verificationApi = null,
-  fileExecutionMode = 'direct'
+  fileExecutionMode = 'direct',
+  requestTimeoutMs = 120_000,
+  progressTimeoutMs = 120_000
 }: UseVerificationExecutionDependencies) {
   const state = ref<VerificationExecutionState>('idle')
   const result = ref<VerificationResult | null>(null)
@@ -70,6 +74,26 @@ export function useVerificationExecution({
   let terminalObserved = false
   let resultFetchStarted = false
   let unsubscribe: (() => void) | null = null
+  let controller: AbortController | null = null
+  let deadline: ReturnType<typeof setTimeout> | null = null
+
+  function clearDeadline(): void {
+    if (deadline !== null) clearTimeout(deadline)
+    deadline = null
+  }
+
+  function armDeadline(generation: number, milliseconds: number): void {
+    clearDeadline()
+    deadline = setTimeout(() => {
+      finishWithError(generation, 'failed', new Error(
+        job.value?.job_id || restoredJobId.value
+          ? '连接等待超时，后台任务可能仍在运行。请重试连接以获取结果。'
+          : '请求等待超时，已停止等待响应，但不会取消后台处理；重新提交可能创建新的任务。'
+      ))
+      // Invalidate even dependencies that do not honor AbortSignal.
+      requestGeneration += 1
+    }, milliseconds)
+  }
 
   function closeSubscription(): void {
     const close = unsubscribe
@@ -86,6 +110,8 @@ export function useVerificationExecution({
     closeSubscription()
     requestGeneration += 1
     requestActive = true
+    controller = new AbortController()
+    armDeadline(requestGeneration, requestTimeoutMs)
     terminalObserved = false
     resultFetchStarted = false
     state.value = 'submitting'
@@ -116,6 +142,8 @@ export function useVerificationExecution({
       return
     }
     closeSubscription()
+    clearDeadline()
+    controller?.abort()
     requestActive = false
     terminalObserved = true
     state.value = nextState
@@ -134,6 +162,7 @@ export function useVerificationExecution({
     requestActive = false
     terminalObserved = true
     job.value = null
+    clearDeadline()
     restoredJobId.value = null
     result.value = payload
     state.value = 'completed'
@@ -179,7 +208,7 @@ export function useVerificationExecution({
       const snapshot = createAnalyzeOptionsSnapshot(options)
       await runDirect(
         generation,
-        () => verificationApi.analyzeText(text, snapshot),
+        () => verificationApi.analyzeText(text, snapshot, controller?.signal),
         transformResult
       )
     } catch (caught) {
@@ -210,7 +239,8 @@ export function useVerificationExecution({
       const response = await verificationApi.recheckJob(
         jobId,
         text,
-        snapshot
+        snapshot,
+        controller?.signal
       )
       if (!isCurrent(generation)) {
         return
@@ -239,7 +269,7 @@ export function useVerificationExecution({
       if (verificationApi && fileExecutionMode === 'direct') {
         await runDirect(
           generation,
-          () => verificationApi.analyzeFile(file, snapshot),
+          () => verificationApi.analyzeFile(file, snapshot, controller?.signal),
           identityResult
         )
         return
@@ -255,7 +285,27 @@ export function useVerificationExecution({
     file: File,
     options: AnalyzeOptions
   ): Promise<void> {
-    const createdJob = await jobsApi.createJob(file, options)
+    const createdJob = await jobsApi.createJob(file, options, controller?.signal)
+    subscribeToJob(createdJob, generation)
+  }
+
+  async function resumeJob(jobId: string): Promise<void> {
+    const generation = beginRequest()
+    if (generation === null) return
+    restoredJobId.value = jobId
+    try {
+      const existing = await jobsApi.getJob(jobId, controller?.signal)
+      subscribeToJob(existing, generation)
+    } catch (caught) {
+      finishWithError(
+        generation,
+        caught instanceof JobResultExpiredError ? 'expired' : 'failed',
+        toError(caught)
+      )
+    }
+  }
+
+  function subscribeToJob(createdJob: JobRead, generation: number): void {
     if (!isCurrent(generation)) {
       return
     }
@@ -278,6 +328,7 @@ export function useVerificationExecution({
     }
 
     state.value = 'processing'
+    armDeadline(generation, progressTimeoutMs)
     const close = jobsApi.subscribe(
       createdJob.job_id,
       (event) => handleProgress(event, generation),
@@ -315,10 +366,12 @@ export function useVerificationExecution({
 
     if (!isTerminalJobStatus(event.status)) {
       state.value = 'processing'
+      armDeadline(generation, progressTimeoutMs)
       return
     }
 
     terminalObserved = true
+    clearDeadline()
     closeSubscription()
     if (event.status === 'failed') {
       requestActive = false
@@ -347,14 +400,16 @@ export function useVerificationExecution({
       return
     }
     resultFetchStarted = true
+    armDeadline(generation, requestTimeoutMs)
     try {
-      const payload = await jobsApi.getResult(jobId)
+      const payload = await jobsApi.getResult(jobId, controller?.signal)
       if (!isCurrent(generation)) {
         return
       }
       result.value = requireVerificationResultSnapshot(payload)
       state.value = 'completed'
       requestActive = false
+      clearDeadline()
     } catch (caught) {
       const nextError = toError(caught)
       if (caught instanceof JobResultExpiredError) {
@@ -412,6 +467,9 @@ export function useVerificationExecution({
 
   function reset(): void {
     requestGeneration += 1
+    clearDeadline()
+    controller?.abort()
+    controller = null
     closeSubscription()
     requestActive = false
     terminalObserved = false
@@ -473,6 +531,7 @@ export function useVerificationExecution({
     analyzeText,
     recheckJob,
     analyzeFile,
+    resumeJob,
     restoreJobContext,
     reset,
     dispose

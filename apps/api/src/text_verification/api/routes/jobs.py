@@ -27,6 +27,7 @@ from fastapi import (
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session, sessionmaker
+from starlette.concurrency import run_in_threadpool
 
 from text_verification.api.body_readers import (
     MAX_JSON_BODY_OVERHEAD_BYTES,
@@ -241,7 +242,7 @@ async def recheck_job_text(
             enable_sensitive=payload.enable_sensitive,
             enable_ad_extreme=payload.enable_ad_extreme,
         )
-        outcome = service.recheck(job_id, payload.text, options)
+        outcome = await run_in_threadpool(service.recheck, job_id, payload.text, options)
     except AnalysisInputError as error:
         raise _typed_http_error(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -287,7 +288,7 @@ async def create_review_revision(
         max_string_utf8_bytes=max_revision_bytes,
     )
     try:
-        return service.persist(job_id, payload)
+        return await run_in_threadpool(service.persist, job_id, payload)
     except VerificationError as error:
         raise _revision_http_error(error) from error
 
@@ -310,6 +311,15 @@ async def create_job_export(
         JobExportRequest,
         max_bytes=MAX_JOB_EXPORT_REQUEST_BYTES,
     )
+    return await run_in_threadpool(_create_job_export, job_id, payload, repository, service)
+
+
+def _create_job_export(
+    job_id: UUID,
+    payload: JobExportRequest,
+    repository: JobRepository,
+    service: ReconstructionExportService,
+) -> ExportArtifactReference:
     job = repository.get_job(job_id)
     if job is None:
         raise _http_error(status.HTTP_404_NOT_FOUND, JOB_NOT_FOUND_CODE, "Job was not found.")
@@ -657,7 +667,9 @@ async def _job_event_stream(
         if await request.is_disconnected():
             return
 
-        events, job = _poll_job_state(session_factory, job_id, after_sequence)
+        events, job = await run_in_threadpool(
+            _poll_job_state, session_factory, job_id, after_sequence
+        )
         emitted = False
         for event in events:
             yield _format_progress_event(event)

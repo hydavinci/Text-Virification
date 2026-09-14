@@ -47,7 +47,7 @@ def test_database_url() -> str:
     return database_url
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture
 def test_database_schema_name() -> str:
     return f"test_job_repository_{uuid4().hex}"
 
@@ -60,7 +60,7 @@ def _schema_database_url(database_url: str, schema_name: str) -> str:
     )
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture
 def alembic_config(
     test_database_url: str, test_database_schema_name: str
 ) -> Config:
@@ -73,7 +73,7 @@ def alembic_config(
     return config
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture
 def db_engine(
     test_database_url: str,
     test_database_schema_name: str,
@@ -103,18 +103,9 @@ def db_session_factory(db_engine: Engine) -> sessionmaker[Session]:
 
 
 @pytest.fixture
-def db_session(db_session_factory: sessionmaker[Session], db_engine: Engine) -> Iterator[Session]:
+def db_session(db_session_factory: sessionmaker[Session]) -> Iterator[Session]:
     session = db_session_factory()
     try:
         yield session
     finally:
         session.close()
-        with db_engine.begin() as connection:
-            connection.execute(
-                text(
-                    "TRUNCATE TABLE "
-                    "export_artifacts, review_revisions, verification_issues, "
-                    "verification_runs, document_blocks, documents, job_events, jobs "
-                    "RESTART IDENTITY CASCADE"
-                )
-            )

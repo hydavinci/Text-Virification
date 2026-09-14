@@ -9,8 +9,10 @@ from text_verification.document_processing.errors import OcrLayoutError, OcrUnav
 from text_verification.document_processing.image_validation import ValidatedImage
 from text_verification.document_processing.layout import (
     OcrLayoutBox,
+    OcrLineGroupingBudget,
     OcrTable,
     OcrTableCell,
+    group_ocr_lines,
 )
 
 
@@ -18,6 +20,7 @@ def detect_grid_tables(
     image: ValidatedImage,
     boxes: tuple[OcrLayoutBox, ...],
     *,
+    language: str = "zh",
     max_cells: int = 5_000,
     max_candidate_checks: int = 250_000,
 ) -> tuple[OcrTable, ...]:
@@ -56,6 +59,7 @@ def detect_grid_tables(
     consumed: set[int] = set()
     cell_count = 0
     candidate_checks = 0
+    grouping_budget = OcrLineGroupingBudget(max_candidate_checks)
     regions = sorted(
         (cv2.boundingRect(contour) for contour in contours),
         key=lambda region: (region[1], region[0]),
@@ -96,13 +100,16 @@ def detect_grid_tables(
         for row in range(len(ys) - 1):
             row_cells: list[OcrTableCell] = []
             for column in range(len(xs) - 1):
-                members = tuple(sorted(
-                    assigned.get((row, column), []),
-                    key=lambda box: (box.bbox[1], box.bbox[0]),
-                ))
+                lines = group_ocr_lines(
+                    tuple(assigned.get((row, column), [])),
+                    language=language,
+                    max_candidate_checks=max_candidate_checks,
+                    budget=grouping_budget,
+                )
+                members = tuple(box for line in lines for box in line.boxes)
                 row_cells.append(OcrTableCell(
                     page=boxes[0].page,
-                    text=" ".join(box.text for box in members),
+                    text=" ".join(line.text for line in lines),
                     bbox=(xs[column], ys[row], xs[column + 1], ys[row + 1]),
                     confidence=_confidence(members),
                     table_index=table_index, row_index=row, cell_index=column,

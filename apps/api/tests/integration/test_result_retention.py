@@ -4,6 +4,7 @@ from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from pathlib import Path
 from threading import Event
 from uuid import UUID, uuid4
@@ -21,6 +22,7 @@ from text_verification.domain.documents import FileType, TextBlock
 from text_verification.domain.issues import Issue, IssueSeverity
 from text_verification.domain.jobs import JobProgressStage, JobStatus
 from text_verification.domain.verification import (
+    RevisionProvenanceKind,
     Scenario,
     VerificationAnalysisMode,
     VerificationDegradation,
@@ -28,6 +30,8 @@ from text_verification.domain.verification import (
     VerificationResult,
     VerificationStatistics,
     VerificationSummary,
+    VerifiedRevisionBaseResult,
+    VerifiedRevisionProvenance,
 )
 from text_verification.infrastructure.orm import (
     DocumentRow,
@@ -297,6 +301,17 @@ def _seed_completed_aggregate(
         revision_number=1,
         text=result.text,
         created_at=created_at,
+        verified_provenance=VerifiedRevisionProvenance(
+            kind=RevisionProvenanceKind.ORIGINAL_RESULT,
+            job_id=job_id,
+            base_result=VerifiedRevisionBaseResult(
+                document_id=result.document_id,
+                verification_run_id=run_id,
+                source_version=result.source_version,
+                text_sha256=sha256(result.text.encode()).hexdigest(),
+            ),
+            revision_text_sha256=sha256(result.text.encode()).hexdigest(),
+        ),
     )
     results.commit()
     artifact_id = uuid4()

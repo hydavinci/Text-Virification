@@ -580,7 +580,7 @@ describe('DocumentViewer', () => {
     ).toContain('rejected')
   })
 
-  it('reveals the newly selected source control within its document pane', async () => {
+  it('centers the newly selected source control within its document pane', async () => {
     const issue = buildIssue()
     const result = buildResult('甲乙丙丁', [issue])
     const pane = document.createElement('div')
@@ -590,14 +590,18 @@ describe('DocumentViewer', () => {
       attachTo: pane,
       props: { result, issues: result.issues, selectedIssueId: null }
     })
+    Object.defineProperty(pane, 'clientHeight', { value: 200 })
+    pane.scrollTop = 100
+    vi.spyOn(pane, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 100, 300, 200))
+    vi.spyOn(
+      wrapper.get(`[data-issue-id="${issue.issue_id}"]`).element,
+      'getBoundingClientRect'
+    ).mockReturnValue(new DOMRect(0, 270, 20, 20))
 
     await wrapper.setProps({ selectedIssueId: issue.issue_id })
     await wrapper.vm.$nextTick()
 
-    expect(reveal).toHaveBeenCalledWith(
-      wrapper.get(`[data-issue-id="${issue.issue_id}"]`).element,
-      pane
-    )
+    expect(pane.scrollTop).toBe(180)
     wrapper.unmount()
     pane.remove()
   })
@@ -618,7 +622,9 @@ describe('DocumentViewer', () => {
 
     expect(reveal).toHaveBeenCalledWith(
       wrapper.get(`[data-issue-id="${issue.issue_id}"]`).element,
-      null
+      null,
+      false,
+      'center'
     )
   })
 

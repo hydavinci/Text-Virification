@@ -231,6 +231,7 @@ test('review settings stay accessible on desktop and mobile and apply only on re
   await page.getByLabel('待检查文本').fill(text)
   await page.locator('[data-submit-source]').click()
   await expect(page.locator('.review-grid')).toBeVisible()
+  await expect(page.locator('.review-summary button, .review-summary summary')).toHaveCount(0)
   await expect(page.locator('.review-grid > .search-panel [data-search-input]')).toHaveCount(1)
   await expect(page.locator('.issues-panel [data-search-input]')).toHaveCount(0)
   const opener = page.locator('.topbar [data-open-settings]')
@@ -319,6 +320,21 @@ test('unified layout locates an already-selected restored issue without changing
   await expect(page.locator('.layout-issue.selected')).toBeVisible()
   await expect.poll(() => page.locator('.layout-scroll').evaluate((element) => element.scrollTop))
     .toBeGreaterThan(0)
+  const documentScroll = await page.evaluate(() => window.scrollY)
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (attempt > 0) {
+      await page.locator('.layout-scroll').evaluate((element) => {
+        element.scrollTop -= element.clientHeight / 4
+      })
+      await page.locator('[data-issue-role="list"]').click()
+    }
+    await expect.poll(() => page.locator('.layout-scroll').evaluate((element) => {
+      const target = element.querySelector('.layout-issue.selected')!.getBoundingClientRect()
+      const center = element.getBoundingClientRect().top + element.clientTop + element.clientHeight / 2
+      return Math.abs((target.top + target.bottom) / 2 - center)
+    })).toBeLessThan(2)
+    expect(await page.evaluate(() => window.scrollY)).toBe(documentScroll)
+  }
   const fitWidth = (await page.locator('.layout-page').first().boundingBox())!.width
   for (const scale of [25, 50, 75, 100]) {
     await page.getByLabel('文档缩放').selectOption(String(scale))
@@ -544,9 +560,11 @@ for (const [width, height] of [
     expect(await content.evaluate((element) => element.scrollTop)).toBe(visibleMatchScroll)
     expect(await page.evaluate(() => window.scrollY)).toBe(pageScrollBeforeSearchNavigation)
 
-    await page.locator('.review-disclosure > summary').click()
-    await page.locator('[data-action="accept-selected"]').click()
-    await page.locator('.review-disclosure > summary').click()
+    if (width <= 760) {
+      await page.getByRole('button', { name: '问题 1', exact: true }).click()
+    }
+    await page.locator('.issue-actions').getByRole('button', { name: '接受', exact: true }).click()
+    await showDocument()
     await expect(page.locator('[data-source-text]')).toHaveText(`${prefix}中国账号测试 热点`)
     await focusSearch()
     await search.fill('中国账号')
@@ -565,9 +583,11 @@ for (const [width, height] of [
     await highlight.focus()
     await page.keyboard.press('Enter')
     await expect(highlight).toHaveAttribute('aria-current', 'true')
-    await page.locator('.review-disclosure > summary').click()
-    await page.locator('[data-action="reset-selected"]').click()
-    await page.locator('.review-disclosure > summary').click()
+    if (width <= 760) {
+      await page.getByRole('button', { name: '问题 1', exact: true }).click()
+    }
+    await page.locator('.issue-actions').getByRole('button', { name: '撤销', exact: true }).click()
+    await showDocument()
     await expect(page.locator('[data-source-text]')).toHaveText(text)
     await expect(page.locator('.search-match')).toHaveCount(0)
     await focusSearch()
@@ -664,6 +684,94 @@ function stats(text: string) {
   }
 }
 
+for (const status of ['queued', 'checking_chinese', 'completed', 'network-error', 'failed'] as const) {
+  test(`pending ${status} task survives reload without duplicate upload`, async ({ page }) => {
+    let uploads = 0
+    let lookups = 0
+    const queued = {
+      job_id: jobId, source_name: 'synthetic.txt', file_type: 'txt', size_bytes: 12,
+      status: 'queued', stage: 'queued', progress: 0,
+      error_code: null, error_message: null, error_stage: null, error_retryable: null,
+      created_at: new Date().toISOString(),
+      expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString()
+    }
+    await page.addInitScript(() => {
+      class SyntheticEventSource extends EventTarget {
+        readyState = 1
+        onerror: ((event: Event) => void) | null = null
+        close() { this.readyState = 2 }
+      }
+      Object.defineProperty(window, 'EventSource', { value: SyntheticEventSource, configurable: true })
+    })
+    await page.route('**/api/v1/jobs', async (route) => {
+      uploads += 1
+      await route.fulfill({ json: queued })
+    })
+    await page.route(`**/api/v1/jobs/${jobId}`, async (route) => {
+      lookups += 1
+      if (status === 'network-error' && lookups === 1) {
+        await route.fulfill({ status: 503, json: { detail: 'synthetic offline' } })
+        return
+      }
+      const next = status === 'network-error' ? 'queued' : status
+      await route.fulfill({ json: {
+        ...queued, status: next, stage: next, progress: next === 'completed' ? 100 : 0
+      } })
+    })
+    const text = '帐号测试'
+    await page.route(`**/api/v1/jobs/${jobId}/result`, async (route) => {
+      await route.fulfill({ json: {
+        success: true, filename: 'synthetic.txt', source_name: 'synthetic.txt',
+        file_type: 'txt', text, blocks: [block(text)],
+        parser_name: 'compatibility-flat-text', parser_version: '1',
+        stats: stats(text), issues: [issue(text)], summary: summary(),
+        file_id: null, file_ext: null, document_id: jobId, verification_run_id: runId,
+        source_version: sourceVersion, execution_mode: 'asynchronous', analysis_mode: 'local_only',
+        dictionary_versions: {}, degradation: { is_degraded: false, reasons: [] }, scenario: 'general'
+      } })
+    })
+    await page.goto('/')
+    for (const viewport of [{ width: 1280, height: 720 }, { width: 1366, height: 768 }]) {
+      await page.setViewportSize(viewport)
+      await page.locator('input[type="file"]').evaluate((input) => {
+        const transfer = new DataTransfer()
+        transfer.items.add(new File(['帐号测试'], 'synthetic.txt', { type: 'text/plain' }))
+        ;(input as HTMLInputElement).files = transfer.files
+        input.dispatchEvent(new Event('change', { bubbles: true }))
+      })
+      await expect(page.locator('[data-dropzone]')).toHaveCount(0)
+      const bounds = await page.locator('[data-submit-source]').boundingBox()
+      expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(viewport.height)
+      expect(await page.evaluate(() => window.scrollY)).toBe(0)
+    }
+    await page.locator('[data-submit-source]').click()
+    await expect(page.getByRole('progressbar', { name: '检查进度' })).toHaveAttribute('value', '0')
+    await expect.poll(() => page.evaluate(() => sessionStorage.getItem('text-verification-pending-job'))).not.toBeNull()
+    await page.reload()
+    if (status === 'completed') {
+      await expect(page.getByText('发现问题')).toBeVisible()
+    } else if (status === 'failed') {
+      await expect(page.getByRole('alert')).toBeVisible()
+    } else {
+      await expect(page.locator('[data-selected-file]')).toContainText('synthetic.txt')
+      await expect(page.locator('[data-dropzone]')).toHaveCount(0)
+      if (status === 'network-error') {
+        await expect(page.getByRole('alert')).toBeVisible()
+        await page.getByRole('button', { name: '重试连接' }).click()
+      }
+      await expect(page.getByRole('progressbar', { name: '检查进度' })).toBeVisible()
+      await expect(page.locator('[data-submit-source]')).toBeDisabled()
+      const bounds = await page.locator('[data-submit-source]').boundingBox()
+      expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(768)
+    }
+    expect(uploads).toBe(1)
+    expect(lookups).toBe(status === 'network-error' ? 2 : 1)
+    if (status === 'completed' || status === 'failed') {
+      expect(await page.evaluate(() => sessionStorage.getItem('text-verification-pending-job'))).toBeNull()
+    }
+  })
+}
+
 test('direct text review, free edit, and versioned reload restore', async ({
   page
 }) => {
@@ -710,10 +818,9 @@ test('direct text review, free edit, and versioned reload restore', async ({
   await input.fill(text)
   await input.press('Control+Enter')
   await expect(page.getByText('发现问题')).toBeVisible()
-  await page.locator('.review-disclosure > summary').click()
-  await page.getByRole('button', { name: '全部接受' }).click()
+  await page.locator('[data-issue-role="list"]').click()
+  await page.locator('.issue-actions').getByRole('button', { name: '接受', exact: true }).click()
   await expect(page.locator('[data-count="accepted"]')).toHaveText('1')
-  await page.locator('.review-disclosure > summary').click()
   await page.setViewportSize({ width: 390, height: 900 })
   await page.getByRole('button', { name: '问题 1', exact: true }).click()
   await expect(page.locator('.issues-panel')).toBeVisible()
@@ -932,15 +1039,13 @@ test(`${sourceType} job persists its revision before ${exportFormat} export${und
   await expect(page.locator('.layout-page img')).toBeVisible()
   await page.locator('[data-issue-role="list"]').first().click()
   await expect(page.locator('.layout-issue.selected')).toBeVisible()
-  await page.locator('.review-disclosure > summary').click()
-  await page.getByRole('button', { name: '全部接受' }).click()
+  await page.locator('.issue-actions').getByRole('button', { name: '接受', exact: true }).click()
   await expect(page.locator('[data-count="accepted"]')).toHaveText('1')
   await expect(page.locator('.layout-page img')).toHaveAttribute('alt', /账号测试/)
   await expect(page.locator('.layout-issue.accepted')).toBeVisible()
   expect(previewTexts).toEqual(['帐号测试', '账号测试'])
 
   if (undoBeforeExport) {
-    await page.locator('.review-disclosure > summary').click()
     await page.getByLabel('查找内容').fill('账号')
     await page.getByLabel('替换内容').fill('临时😀')
     await page.getByRole('button', { name: '替换当前', exact: true }).click()
@@ -1257,9 +1362,37 @@ test('scanned PDF exposes OCR progress, canonical result, and reconstruction exp
     .locator('input[type="file"]')
     .setInputFiles('tests/e2e/fixtures/scanned-page.pdf')
   await page.locator('[data-submit-source]').click()
-  await expect(
-    page.getByText('Status: parsing · 40% · 正在执行扫描件 OCR')
-  ).toBeVisible()
+  const progress = page.getByRole('progressbar', { name: '检查进度' })
+  await expect(progress).toBeVisible()
+  await expect(progress).toHaveAttribute('value', '40')
+  await expect(progress).toHaveAttribute('aria-valuetext', '40% · 正在执行扫描件 OCR')
+  await expect(page.getByRole('heading', { name: 'Job progress' })).toHaveCount(0)
+  for (const width of [1440, 390, 320]) {
+    await page.setViewportSize({ width, height: 900 })
+    const bounds = await page.locator('.source-input-panel').evaluate((element) => {
+      const settings = element.querySelector('.setup-options')!.getBoundingClientRect()
+      const progress = element.querySelector('progress')!.getBoundingClientRect()
+      const submit = element.querySelector('[data-submit-source]')!.getBoundingClientRect()
+      return {
+        settingsBottom: settings.bottom,
+        settingsLeft: settings.left,
+        settingsWidth: settings.width,
+        progressTop: progress.top,
+        progressBottom: progress.bottom,
+        progressLeft: progress.left,
+        progressWidth: progress.width,
+        progressHeight: progress.height,
+        submitTop: submit.top
+      }
+    })
+    expect(bounds.progressTop).toBeGreaterThanOrEqual(bounds.settingsBottom)
+    expect(bounds.progressBottom).toBeLessThanOrEqual(bounds.submitTop)
+    expect(bounds.progressHeight).toBeGreaterThan(0)
+    expect(bounds.progressHeight).toBeLessThanOrEqual(8)
+    expect(bounds.progressLeft).toBeCloseTo(bounds.settingsLeft, 0)
+    expect(bounds.progressWidth).toBeCloseTo(bounds.settingsWidth, 0)
+  }
+  await page.setViewportSize({ width: 1440, height: 900 })
   await page.evaluate(() => {
     ;(window as unknown as { __finishOcrJob: () => void }).__finishOcrJob()
   })

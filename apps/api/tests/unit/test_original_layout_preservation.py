@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+import re
 from io import BytesIO
 from pathlib import Path
 from uuid import uuid4
@@ -116,3 +117,36 @@ def test_docker_unified_review_renders_revisions_and_preserves_the_picture(
             gray_pixels += svg[0].get_pixmap(alpha=False).samples.count(bytes([120] * 3))
     assert gray_pixels > 1000
     assert source.path.read_bytes() == content
+
+
+def test_docker_unified_review_maps_spaces_in_word_paragraphs(
+    illustrated_word: Path, tmp_path: Path,
+) -> None:
+    url = os.environ.get("PREVIEW_RENDERER_TEST_URL")
+    if not url:
+        pytest.skip("Set PREVIEW_RENDERER_TEST_URL to exercise the Docker renderer.")
+    word = Document(illustrated_word)
+    word.add_paragraph("Please  confirm the payment.")
+    word.add_paragraph("乙方应在  5 个工作日内提出。")
+    word.save(illustrated_word)
+    content = illustrated_word.read_bytes()
+    text, _ = _parse_docx(str(illustrated_word))
+    job_id = uuid4()
+    document = DocumentModel(
+        document_id=job_id, source_name="spaces.docx", file_type="docx",
+        source_version=f"sha256:{hashlib.sha256(content).hexdigest()}",
+        text=text, blocks=[], parser_name="test", parser_version="1",
+    )
+    storage = JobStorage(tmp_path / "jobs", 25 * 1024 * 1024)
+    source = storage.save_bytes(job_id, "spaces.docx", content)
+    for revision in (text, text.replace("Please  confirm", "Please confirm")):
+        layout = build_review_preview(document, storage, url, revision)
+        runs = list(re.finditer(" {2,}", revision))
+        assert runs
+        for run in runs:
+            mapped = {
+                index for page in layout.pages for glyph in page.glyphs
+                for index in range(max(run.start(), glyph.start), min(run.end(), glyph.end))
+            }
+            assert mapped == set(range(run.start(), run.end()))
+        assert source.path.read_bytes() == content

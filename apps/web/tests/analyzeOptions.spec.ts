@@ -3,11 +3,26 @@ import { describe, expect, it } from 'vitest'
 import {
   AnalyzeOptionsError,
   appendAnalyzeOptions,
+  copyAnalyzeOptions,
+  createDefaultAnalyzeOptions,
   createAnalyzeOptionsSnapshot
 } from '../src/api/analyzeOptions'
 import type { AnalyzeOptions } from '../src/types/verification'
 
 const MAX_OPTIONS_BYTES = 64 * 1024
+
+describe('shared option defaults and copying', () => {
+  it('isolates defaults and preserves all typed flags through a copy', () => {
+    const first = createDefaultAnalyzeOptions()
+    const second = createDefaultAnalyzeOptions()
+    first.glossary.push({ original: 'AI', standard: '人工智能' })
+    const next = copyAnalyzeOptions({ ...first, ocrLanguage: 'ja', enableExtendedRules: true }, { scenario: 'news' })
+    expect(next).toEqual({ ...first, scenario: 'news', ocrLanguage: 'ja', enableExtendedRules: true })
+    next.glossary[0]!.standard = 'changed'
+    expect(first.glossary[0]!.standard).toBe('人工智能')
+    expect(second.glossary).toEqual([])
+  })
+})
 
 function baseOptions(
   overrides: Partial<AnalyzeOptions> = {}

@@ -408,7 +408,7 @@ def build_ocr_layout(
         for box in cell.boxes
     }
     remaining_boxes = tuple(box for box in boxes if box.box_index not in grid_box_indices)
-    lines = _group_lines(
+    lines = group_ocr_lines(
         remaining_boxes, language=language, max_candidate_checks=max_candidate_checks
     )
     inferred_tables, table_line_indices = _detect_tables(
@@ -434,15 +434,27 @@ def build_ocr_layout(
     )
 
 
-def _group_lines(
+@dataclass
+class OcrLineGroupingBudget:
+    maximum: int = DEFAULT_MAX_LAYOUT_CANDIDATE_CHECKS
+    checks: int = 0
+
+    def visit(self) -> None:
+        self.checks += 1
+        if self.checks > self.maximum:
+            raise OcrLayoutError("OCR line grouping candidate limit exceeded.")
+
+
+def group_ocr_lines(
     boxes: tuple[OcrLayoutBox, ...],
     *,
     language: str,
     max_candidate_checks: int,
+    budget: OcrLineGroupingBudget | None = None,
 ) -> tuple[OcrLayoutLine, ...]:
     builders: list[_LineBuilder] = []
     active: list[_LineBuilder] = []
-    checks = 0
+    budget = budget if budget is not None else OcrLineGroupingBudget(max_candidate_checks)
     for box in sorted(boxes, key=_box_order):
         active = [
             line
@@ -451,9 +463,7 @@ def _group_lines(
         ]
         candidates: list[tuple[float, float, float, _LineBuilder]] = []
         for line in active:
-            checks += 1
-            if checks > max_candidate_checks:
-                raise OcrLayoutError("OCR line grouping candidate limit exceeded.")
+            budget.visit()
             overlap = _vertical_overlap_ratio(line.bbox, box.bbox)
             baseline_distance = abs(line.baseline - box.baseline)
             if (

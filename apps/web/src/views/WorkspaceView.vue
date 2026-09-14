@@ -2,6 +2,7 @@
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import { jobsApiKey } from '../api/jobs'
+import { copyAnalyzeOptions, createDefaultAnalyzeOptions } from '../api/analyzeOptions'
 import { verificationApiKey } from '../api/verification'
 import JobProgress from '../components/JobProgress.vue'
 import DocumentViewer from '../components/workspace/DocumentViewer.vue'
@@ -21,6 +22,7 @@ import type { DocumentSearchState } from '../composables/useSearchReplace'
 import { projectDocumentIssues } from '../utils/documentPresentation'
 import { revealWithinPane } from '../utils/revealWithinPane'
 import { useVerificationExecution } from '../composables/useVerificationExecution'
+import { usePendingJob } from '../composables/usePendingJob'
 import {
   bindWorkspaceExportAuthority,
   isWorkspaceExportAuthorityBoundToResult,
@@ -39,7 +41,6 @@ import type {
   DocumentRevision,
   DraftDocumentRevision,
   IssueState,
-  OcrLanguage,
   VerificationIssue,
   VerificationResult
 } from '../types/verification'
@@ -90,12 +91,7 @@ const jobsApi = injectedJobsApi
 const verificationApi = inject(verificationApiKey, null)
 
 const theme = ref<'light' | 'dark'>('light')
-const selectedScenario = ref<AnalyzeOptions['scenario']>('general')
-const enableSecurity = ref(true)
-const enableSensitive = ref(true)
-const enableAdExtreme = ref(false)
-const ocrLanguage = ref<OcrLanguage | undefined>(undefined)
-const enableExtendedRules = ref<boolean | undefined>(undefined)
+const optionsState = ref<AnalyzeOptions>(createDefaultAnalyzeOptions())
 const trackChanges = ref(false)
 const settingsTab = ref<'settings' | 'terms' | 'banned'>('settings')
 const settingsOpen = ref(false)
@@ -123,9 +119,6 @@ const originalPreviewSource = computed(() => {
 })
 const issueStates = verificationWorkspace.issueStates
 const selectedSuggestions = verificationWorkspace.selectedSuggestions
-const canUndoLastBatch = computed(
-  () => verificationWorkspace.canUndoLastBatch.value
-)
 const currentIssueStates = computed(() => issueStates.value)
 const currentSelectedSuggestions = computed(
   () => selectedSuggestions.value
@@ -137,8 +130,8 @@ const selectedLayer = issueNavigation.selectedLayer
 const selectedSeverity = issueNavigation.selectedSeverity
 const selectedIssueId = issueNavigation.selectedIssueId
 const visibleIssues = issueNavigation.visibleIssues
-const glossary = ref<AnalyzeOptions['glossary']>([])
-const bannedWords = ref<string[]>([])
+const glossary = computed({ get: () => optionsState.value.glossary, set: (value) => { optionsState.value = copyAnalyzeOptions(optionsState.value, { glossary: value }) } })
+const bannedWords = computed({ get: () => optionsState.value.bannedWords, set: (value) => { optionsState.value = copyAnalyzeOptions(optionsState.value, { bannedWords: value }) } })
 const isAnalyzing = execution.isActive
 const errorMessage = computed(() => execution.error.value?.message ?? null)
 const toast = ref<string | null>(null)
@@ -149,6 +142,12 @@ const documentSearch = ref<DocumentSearchState | null>(null)
 const isExporting = ref(false)
 const exportError = ref<string | null>(null)
 const fileExportAuthority = ref<WorkspaceExportAuthority | null>(null)
+const pendingJob = usePendingJob(window.sessionStorage)
+const recoveredFile = computed(() => pendingJob.record.value
+  ? { name: pendingJob.record.value.sourceName, size: pendingJob.record.value.sizeBytes }
+  : null)
+let submittedOptions: AnalyzeOptions = createDefaultAnalyzeOptions()
+let savedDocumentInputs: unknown[] = []
 const jobState = computed(() => {
   const job = execution.job.value
   const status = execution.jobStatus.value
@@ -175,18 +174,7 @@ let exportGeneration = 0
 let recheckGeneration = 0
 let disposed = false
 
-const currentOptions = computed<AnalyzeOptions>(() => ({
-  scenario: selectedScenario.value,
-  enableSecurity: enableSecurity.value,
-  enableSensitive: enableSensitive.value,
-  enableAdExtreme: enableAdExtreme.value,
-  ...(ocrLanguage.value === undefined ? {} : { ocrLanguage: ocrLanguage.value }),
-  ...(enableExtendedRules.value === undefined ? {} : {
-    enableExtendedRules: enableExtendedRules.value
-  }),
-  glossary: glossary.value,
-  bannedWords: bannedWords.value
-}))
+const currentOptions = computed(() => optionsState.value)
 
 const acceptedCount = computed(() => verificationWorkspace.summary.value.accepted)
 const rejectedCount = computed(() => verificationWorkspace.summary.value.rejected)
@@ -237,18 +225,6 @@ const recheckedAuthorityRequiresRecheck = computed(() => {
     currentRevisionText.value !== currentResult.text
   )
 })
-const selectedIssueState = computed<IssueState | null>(() => {
-  const issueId = selectedIssueId.value
-  return issueId === null
-    ? null
-    : issueStates.value[issueId] ?? 'pending'
-})
-const reviewActionsDisabled = computed(
-  () =>
-    isExporting.value ||
-    verificationWorkspace.requiresReverification.value ||
-    verificationWorkspace.visibleIssues.value.length === 0
-)
 const workspaceMutationLocked = computed(() => isExporting.value)
 const exportBlockedReason = computed(() => {
   if (verificationWorkspace.hasReplacementConflicts.value) {
@@ -294,6 +270,7 @@ async function handleUpload(file: File) {
   invalidateRecheckOperation()
   fileExportAuthority.value = null
   fileSource.value = file
+  submittedOptions = copyAnalyzeOptions(currentOptions.value)
   await execution.analyzeFile(file, currentOptions.value)
 }
 
@@ -317,6 +294,7 @@ async function runTextAnalysis(submittedText: string) {
   }
   invalidateRecheckOperation()
   fileExportAuthority.value = null
+  pendingJob.clear()
   textInput.value = submittedText
   fileSource.value = null
   await execution.analyzeText(submittedText, currentOptions.value)
@@ -327,35 +305,13 @@ function setIssueState(issueId: string, state: IssueState) {
   saveSession()
 }
 
-function setVisibleIssueStates(issueIds: string[], state: IssueState) {
-  verificationWorkspace.setIssueStates(issueIds, state)
-  saveSession()
-}
-
-function undoIssue(issueId: string) {
-  verificationWorkspace.undoIssue(issueId)
-  saveSession()
-}
-
-function undoBatch() {
-  verificationWorkspace.undoLastBatch()
-  saveSession()
-}
-
 function selectSuggestion(issueId: string, suggestion: string | null) {
   verificationWorkspace.selectSuggestion(issueId, suggestion)
   saveSession()
 }
 
 function applyOptions(options: AnalyzeOptions) {
-  selectedScenario.value = options.scenario
-  enableSecurity.value = options.enableSecurity
-  enableSensitive.value = options.enableSensitive
-  enableAdExtreme.value = options.enableAdExtreme
-  ocrLanguage.value = options.ocrLanguage
-  enableExtendedRules.value = options.enableExtendedRules
-  glossary.value = options.glossary.map((term) => ({ ...term }))
-  bannedWords.value = [...options.bannedWords]
+  optionsState.value = copyAnalyzeOptions(options)
 }
 
 function invalidateSourceNavigation(): void {
@@ -1141,6 +1097,8 @@ function resetWorkspace() {
   exportError.value = null
   fileExportAuthority.value = null
   execution.reset()
+  pendingJob.clear()
+  savedDocumentInputs = []
   verificationWorkspace.clearResult()
   loadedExecutionResult = null
   invalidateSourceNavigation()
@@ -1178,7 +1136,15 @@ function saveSession() {
   if (!result.value) {
     return
   }
-  workspaceSession.save({
+  const inputs = [
+    result.value, verificationWorkspace.currentRevision.value,
+    verificationWorkspace.revisionChain.value, verificationWorkspace.textUndoHistory.value,
+    verificationWorkspace.requiresReverification.value, issueStates.value,
+    selectedSuggestions.value, execution.jobId.value, fileExportAuthority.value
+  ]
+  const save = inputs.every((value, index) => value === savedDocumentInputs[index])
+    ? workspaceSession.saveUi : workspaceSession.save
+  if (save({
     options: currentOptions.value,
     filters: {
       layer: selectedLayer.value,
@@ -1194,7 +1160,35 @@ function saveSession() {
     },
     jobId: execution.jobId.value,
     exportAuthority: fileExportAuthority.value
-  })
+  })) {
+    savedDocumentInputs = inputs
+    const pending = pendingJob.record.value
+    if (
+      save === workspaceSession.save &&
+      !execution.isActive.value &&
+      pending !== null &&
+      (
+        pending.jobId === result.value.document_id ||
+        pending.jobId === fileExportAuthority.value?.jobId
+      )
+    ) {
+      pendingJob.clear()
+    }
+  }
+}
+
+function clearPendingJob() {
+  if (execution.isActive.value) return
+  execution.reset()
+  pendingJob.clear()
+  fileSource.value = null
+}
+
+async function resumePendingJob() {
+  const pending = pendingJob.record.value
+  if (!pending || execution.isActive.value) return
+  submittedOptions = pending.options
+  await execution.resumeJob(pending.jobId)
 }
 
 function restoreSession() {
@@ -1260,10 +1254,24 @@ watch(
   [
     () => verificationWorkspace.currentRevision.value,
     () => issueStates.value,
-    () => selectedSuggestions.value
+    () => selectedSuggestions.value,
+    () => verificationWorkspace.revisionChain.value,
+    () => verificationWorkspace.textUndoHistory.value
   ],
   saveSession,
-  { deep: true }
+  { deep: false }
+)
+
+watch(
+  () => execution.job.value,
+  (job) => {
+    if (!job || disposed) return
+    pendingJob.save({
+      jobId: job.job_id, sourceName: job.source_name, sizeBytes: job.size_bytes,
+      expiresAt: job.expires_at, options: submittedOptions
+    })
+  },
+  { flush: 'sync' }
 )
 
 watch(
@@ -1284,6 +1292,8 @@ watch(
 watch(
   [() => execution.state.value, () => execution.result.value],
   ([executionState, executionResult]) => {
+    if (disposed) return
+    if (executionState === 'expired' || execution.jobStatus.value === 'failed') pendingJob.clear()
     if (executionState === 'submitting') {
       invalidateExportOperation()
       loadedExecutionResult = null
@@ -1314,11 +1324,18 @@ onMounted(() => {
     document.documentElement
   )
   applyTheme()
-  restoreSession()
+  const pending = pendingJob.restore()
+  if (pending) {
+    applyOptions(pending.options)
+    void resumePendingJob()
+  } else restoreSession()
+  window.addEventListener('pagehide', saveSession)
   document.addEventListener('keydown', handleKeyboard)
 })
 
 onBeforeUnmount(() => {
+  saveSession()
+  window.removeEventListener('pagehide', saveSession)
   invalidateRecheckOperation()
   disposed = true
   invalidateExportOperation()
@@ -1406,18 +1423,19 @@ onBeforeUnmount(() => {
       :settings-open="settingsOpen"
       :options="currentOptions"
       :busy="isAnalyzing"
-      :error="errorMessage"
+      :error="jobState?.failureMessage === errorMessage ? null : errorMessage"
+      :recovered-file="recoveredFile"
+      :recoverable="pendingJob.record.value !== null && !isAnalyzing"
       @update:options="applyOptions"
       @open-settings="settingsOpen = true"
       @submit-file="handleUpload"
       @submit-text="runTextAnalysis"
+      @resume-job="resumePendingJob"
+      @clear-job="clearPendingJob"
     >
       <template #progress>
-        <div v-if="isAnalyzing && !jobState" class="loading-card" role="status" aria-live="polite">
-          <div class="spinner"></div>
-          <span>正在检查文本，请稍候…</span>
-        </div>
-        <JobProgress v-if="jobState" :state="jobState" />
+        <p v-if="pendingJob.warning.value" role="status">{{ pendingJob.warning.value }}</p>
+        <JobProgress v-if="isAnalyzing || jobState" :state="jobState" />
       </template>
     </WorkspaceSetup>
 
@@ -1447,20 +1465,11 @@ onBeforeUnmount(() => {
           <span>发现问题 <strong>{{ result.summary.total }}</strong></span>
         </div>
         <ReviewActions
-          :selected-issue-id="selectedIssueId"
-          :selected-issue-state="selectedIssueState"
-          :visible-issue-ids="visibleIssues.map((issue) => issue.issue_id)"
           :summary="verificationWorkspace.summary.value"
           :has-conflicts="verificationWorkspace.hasReplacementConflicts.value"
           :conflict-issue-ids="
             verificationWorkspace.replacementConflictIssueIds.value
           "
-          :can-undo-last-batch="canUndoLastBatch"
-          :disabled="reviewActionsDisabled"
-          @set-issue-state="setIssueState"
-          @undo-issue="undoIssue"
-          @set-visible-state="setVisibleIssueStates"
-          @undo-batch="undoBatch"
         />
       </section>
 
@@ -1602,10 +1611,6 @@ onBeforeUnmount(() => {
 .document-panel, .issues-panel, .search-panel { border: 1px solid var(--border); border-radius: var(--radius-panel); background: var(--surface); overflow: hidden; }
 .document-panel { box-shadow: var(--shadow-paper); }
 input:focus, select:focus { border-color: var(--primary); outline: 3px solid rgba(37, 99, 235, .1); }
-.loading-card { margin-top: 16px; padding: 14px; display: flex; align-items: center; gap: 12px; border-radius: 8px; background: var(--surface-2); color: var(--muted); font-size: 13px; }
-.loading-card p { margin: 3px 0 0; font-size: 12px; }
-.spinner { width: 27px; height: 27px; border: 3px solid #bfdbfe; border-top-color: #2563eb; border-radius: 50%; animation: spin .8s linear infinite; }
-@keyframes spin { to { transform: rotate(360deg); } }
 .review-workspace { isolation: isolate; flex: 1; min-height: 0; width: 100%; padding: 20px 24px; display: flex; flex-direction: column; gap: 12px; max-width: 1680px; margin: auto; }
 .review-workspace > :not(.review-grid) { flex-shrink: 0; }
 .review-summary { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 0 2px 6px; }

@@ -1,0 +1,169 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_VERSION: "0.12.6"
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  frontend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+
+  backend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: apps/api
+    env:
+      APP_ENV: test
+      LLM_API_KEY: ""
+      TEST_DATABASE_URL: postgresql+psycopg://ci:ci@127.0.0.1:5432/text_verification_ci
+      DATABASE_URL: postgresql+psycopg://ci:ci@127.0.0.1:5432/text_verification_ci
+      REDIS_URL: redis://127.0.0.1:6379/0
+      STORAGE_ROOT: ${{ github.workspace }}/var/ci/jobs
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: text_verification_ci
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ci -d text_verification_ci"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: apps/api/uv.lock
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libreoffice-writer fonts-noto-cjk libgl1
+      - run: uv sync --locked --extra dev --extra ocr
+      - run: uv run --no-sync ruff check src tests scripts
+      - run: uv run --no-sync mypy src
+      # Renderer/API/worker tests run below, not as skips in the database gate.
+      - run: >-
+          uv run --no-sync python scripts/ci_pytest.py --gate database
+          tests/unit tests/contract tests/integration tests/golden
+          -k "not docker_renderer and not docker_unified_review"
+          --junitxml=ci-results.xml
+
+  live-services:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      COMPOSE_PROJECT_NAME: text-verification-ci-${{ github.run_id }}-${{ github.run_attempt }}
+      BACKEND_IMAGE: text-verification-backend:ci
+      WEB_IMAGE: text-verification-web:ci
+      LIVE_API_URL: http://127.0.0.1:8080
+      PREVIEW_RENDERER_TEST_URL: http://127.0.0.1:8010
+      LIVE_OCR_RUNTIME: "1"
+      APP_ENV: test
+      LLM_API_KEY: ""
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: apps/api/uv.lock
+      - run: uv sync --project apps/api --locked --extra dev --extra ocr
+      - name: Configure disposable stack without secrets
+        run: |
+          cp .env.example .env
+          printf '\nAPP_ENV=test\nLLM_API_KEY=\n' >> .env
+      - name: Build production targets
+        run: docker compose -f infra/compose.yaml -f infra/compose.ci.yaml build api web
+      - name: Assert production image excludes development tooling
+        run: |
+          docker run --rm --entrypoint python "$BACKEND_IMAGE" -c '
+          import importlib.util
+          from pathlib import Path
+          import cv2, onnxruntime, rapidocr
+          assert all(importlib.util.find_spec(name) is None for name in ("pytest", "mypy", "ruff"))
+          assert not Path("/app/tests").exists()
+          assert not Path("/app/src").exists()
+          '
+      - name: Start disposable stack and wait for container liveness
+        run: >-
+          docker compose -f infra/compose.yaml -f infra/compose.ci.yaml
+          up -d --no-build --wait --wait-timeout 180
+      - name: Wait for dependency readiness after all services have started
+        run: >-
+          timeout 180s curl --fail --silent --show-error --max-time 5
+          --retry 30 --retry-delay 2 --retry-all-errors
+          "$LIVE_API_URL/api/v1/ready"
+      - name: Initialize real OCR assets as the worker user
+        run: |
+          timeout 180s docker compose -f infra/compose.yaml -f infra/compose.ci.yaml exec -T worker python - <<'PY'
+          import numpy as np
+          import pymupdf
+          from text_verification.document_processing.ocr_provider import OcrProvider
+          from text_verification.domain.verification import VerificationOptions
+
+          with pymupdf.open() as document:
+              page = document.new_page(width=600, height=240)
+              page.insert_text((40, 120), "Contact test@example.com for review", fontsize=28)
+              pixmap = page.get_pixmap(matrix=pymupdf.Matrix(2, 2), alpha=False)
+              image = np.frombuffer(pixmap.samples, dtype=np.uint8).reshape(
+                  pixmap.height, pixmap.width, 3
+              )
+              boxes = OcrProvider().recognize(image, VerificationOptions().ocr_language)
+              assert any("test@example.com" in box.text for box in boxes), boxes
+          PY
+      - name: Exercise synthetic upload, real OCR, and LibreOffice rendering
+        working-directory: apps/api
+        run: >-
+          uv run --no-sync python scripts/ci_pytest.py --gate live
+          tests/e2e tests/unit/test_original_layout_preservation.py
+          --junitxml=ci-live-results.xml
+      - name: Stack diagnostics
+        if: failure()
+        run: docker compose -f infra/compose.yaml -f infra/compose.ci.yaml logs --no-color --tail 150
+      - name: Remove disposable containers and volumes
+        if: always()
+        run: docker compose -f infra/compose.yaml -f infra/compose.ci.yaml down --volumes --remove-orphans

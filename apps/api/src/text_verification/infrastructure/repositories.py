@@ -161,7 +161,7 @@ class JobRepository:
                 updated_at=now,
             )
             .returning(JobRow)
-            .execution_options(synchronize_session=False)
+            .execution_options(synchronize_session=False, populate_existing=True)
         ).scalar_one_or_none()
         if row is not None:
             return JobClaimResult(
@@ -245,7 +245,6 @@ class JobRepository:
                 JobRow.status.not_in(status.value for status in TERMINAL_STATUSES),
                 JobRow.expires_at > now,
                 JobRow.rescue_due_at <= now,
-                JobRow.rescue_last_published_at.is_(None),
                 or_(
                     JobRow.lease_owner_token.is_(None),
                     JobRow.lease_expires_at <= now,
@@ -254,9 +253,26 @@ class JobRepository:
             .order_by(JobRow.rescue_due_at, JobRow.updated_at, JobRow.job_id)
             .limit(limit)
             .with_for_update(skip_locked=True)
+            .execution_options(populate_existing=True)
         ).all()
         claims: list[JobRecoveryClaim] = []
         for row in rows:
+            try:
+                job = self._to_job_read(row)
+            except ValueError:
+                self._apply_transition(
+                    row,
+                    JobStatus.FAILED,
+                    row.progress,
+                    "Persisted job metadata is invalid; recovery quarantined.",
+                    changed_at=now,
+                    error_code="invalid_persisted_job",
+                    error_message="Persisted job metadata is invalid.",
+                    error_stage="validation",
+                    error_retryable=False,
+                    clear_lease=True,
+                )
+                continue
             kind = (
                 JobRecoveryKind.INITIAL_DISPATCH
                 if row.lease_owner_token is None
@@ -264,10 +280,13 @@ class JobRepository:
             )
             row.rescue_attempts += 1
             row.rescue_due_at = publication_due_at
+            # Publication is a lease, not proof of consumption. The deadline
+            # bounds retries; the attempt and worker lease fence stale publishers.
+            row.rescue_last_published_at = None
             claims.append(
                 JobRecoveryClaim(
                     kind=kind,
-                    job=self._to_job_read(row),
+                    job=job,
                     attempt=row.rescue_attempts,
                     publication_due_at=publication_due_at,
                 )

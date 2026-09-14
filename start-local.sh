@@ -102,7 +102,8 @@ check_processes() {
 }
 
 start api apps/api/.venv/bin/uvicorn text_verification.main:app \
-  --reload --host 127.0.0.1 --port 8000
+  --reload --reload-dir apps/api/src --timeout-graceful-shutdown 5 \
+  --host 127.0.0.1 --port 8000
 start worker env \
   TEXT_VERIFICATION_WORKER_ROLE=verification \
   TEXT_VERIFICATION_WORKER_QUEUES=celery,verification-v2 \
@@ -119,11 +120,11 @@ start beat apps/api/.venv/bin/celery \
 start web npm --prefix apps/web run dev -- \
   --host 127.0.0.1 --port 5173 --strictPort
 
-printf 'Waiting for API and frontend (up to 60 seconds)...\n'
+printf 'Waiting for API dependencies, verification worker and frontend (up to 60 seconds)...\n'
 deadline=$((SECONDS + 60))
 while true; do
   check_processes
-  if curl --fail --silent --max-time 2 http://127.0.0.1:8000/api/v1/health >/dev/null &&
+  if curl --fail --silent --max-time 5 http://127.0.0.1:8000/api/v1/ready >/dev/null &&
     curl --fail --silent --max-time 2 http://127.0.0.1:5173/ >/dev/null; then
     break
   fi

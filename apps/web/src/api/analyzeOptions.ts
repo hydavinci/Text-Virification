@@ -6,14 +6,38 @@ import type {
 import { stripPythonWhitespace } from './pythonWhitespace'
 import { hasLoneSurrogate } from './unicode'
 
-const SCENARIOS: readonly Scenario[] = [
-  'general',
-  'academic',
-  'business',
-  'legal',
-  'news',
-  'technical'
+export const SCENARIO_OPTIONS: readonly { id: Scenario; name: string }[] = [
+  { id: 'general', name: '通用文档' },
+  { id: 'academic', name: '学术论文' },
+  { id: 'business', name: '商务文档' },
+  { id: 'legal', name: '法律文书' },
+  { id: 'news', name: '新闻稿' },
+  { id: 'technical', name: '技术文档' }
 ]
+export const SCENARIOS: readonly Scenario[] = SCENARIO_OPTIONS.map((option) => option.id)
+export const OCR_LANGUAGES = ['zh', 'en', 'ja'] as const
+export const DEFAULT_OCR_LANGUAGE = 'zh'
+export const DEFAULT_EXTENDED_RULES = false
+
+export function createDefaultAnalyzeOptions(): AnalyzeOptions {
+  return {
+    scenario: 'general',
+    enableSecurity: true,
+    enableSensitive: true,
+    enableAdExtreme: false,
+    glossary: [],
+    bannedWords: []
+  }
+}
+
+export function copyAnalyzeOptions(options: AnalyzeOptions, patch: Partial<AnalyzeOptions> = {}): AnalyzeOptions {
+  const merged = { ...options, ...patch }
+  return {
+    ...merged,
+    glossary: merged.glossary.map((term) => ({ ...term })),
+    bannedWords: [...merged.bannedWords]
+  }
+}
 const MAX_TERMINOLOGY_ITEMS = 500
 const MAX_TERMINOLOGY_CODE_POINTS = 200
 const MAX_OPTIONS_JSON_BYTES = 64 * 1024
@@ -37,7 +61,7 @@ export function createAnalyzeOptionsSnapshot(
     typeof options.enableSensitive !== 'boolean' ||
     typeof options.enableAdExtreme !== 'boolean' ||
     (options.ocrLanguage !== undefined &&
-      !['zh', 'en', 'ja'].includes(options.ocrLanguage)) ||
+      !OCR_LANGUAGES.includes(options.ocrLanguage)) ||
     (options.enableExtendedRules !== undefined &&
       typeof options.enableExtendedRules !== 'boolean') ||
     !Array.isArray(options.glossary) ||
@@ -103,8 +127,8 @@ export function appendAnalyzeOptions(
   body.append('enable_security', String(options.enableSecurity))
   body.append('enable_sensitive', String(options.enableSensitive))
   body.append('enable_ad_extreme', String(options.enableAdExtreme))
-  body.append('ocr_language', options.ocrLanguage ?? 'zh')
-  body.append('enable_extended_rules', String(options.enableExtendedRules ?? false))
+  body.append('ocr_language', options.ocrLanguage ?? DEFAULT_OCR_LANGUAGE)
+  body.append('enable_extended_rules', String(options.enableExtendedRules ?? DEFAULT_EXTENDED_RULES))
   body.append('custom_glossary', JSON.stringify(options.glossary))
   body.append('banned_words', JSON.stringify(options.bannedWords))
 }
@@ -148,9 +172,9 @@ function serializedBackendBytes(
       enable_sensitive: options.enableSensitive,
       enable_ad_extreme: options.enableAdExtreme,
       ...(budget === 'request' || options.ocrLanguage !== undefined
-        ? { ocr_language: options.ocrLanguage ?? 'zh' } : {}),
+        ? { ocr_language: options.ocrLanguage ?? DEFAULT_OCR_LANGUAGE } : {}),
       ...(budget === 'request' || options.enableExtendedRules !== undefined
-        ? { enable_extended_rules: options.enableExtendedRules ?? false } : {}),
+        ? { enable_extended_rules: options.enableExtendedRules ?? DEFAULT_EXTENDED_RULES } : {}),
       custom_glossary: options.glossary,
       banned_words: options.bannedWords
     })

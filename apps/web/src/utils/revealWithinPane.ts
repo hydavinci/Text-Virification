@@ -1,7 +1,8 @@
 export function revealWithinPane(
   target: HTMLElement,
   pane: HTMLElement | null,
-  revealHorizontal = false
+  revealHorizontal = false,
+  verticalAlignment: 'nearest' | 'center' = 'nearest'
 ): void {
   if (!pane || pane.clientHeight === 0) {
     return
@@ -11,7 +12,9 @@ export function revealWithinPane(
   const paneTop = paneBounds.top + pane.clientTop
   const bottom = paneTop + pane.clientHeight
   const top = paneTop
-  if (targetBounds.top < top) {
+  if (verticalAlignment === 'center') {
+    pane.scrollTop += (targetBounds.top + targetBounds.bottom) / 2 - (top + pane.clientHeight / 2)
+  } else if (targetBounds.top < top) {
     pane.scrollTop += targetBounds.top - top
   } else if (targetBounds.bottom > bottom) {
     pane.scrollTop += Math.min(

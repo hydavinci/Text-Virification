@@ -10,6 +10,140 @@ from docx import Document
 from text_verification.application import original_preview
 
 
+@pytest.mark.parametrize(
+    ("source", "rendered"),
+    [
+        ("Alpha  beta", "Alpha  beta"),
+        ("  Alpha", "  Alpha"),
+        ("Alpha  ", "Alpha  "),
+        ("Alpha  beta", "Alpha beta"),
+        ("Alpha  ", "Alpha "),
+        ("Alpha  \n  Beta", "Alpha \n  Beta"),
+        ("Alpha\u00a0\u00a0beta", "Alpha  beta"),
+    ],
+)
+def test_horizontal_whitespace_retains_its_anchored_page_coordinates(
+    source: str, rendered: str,
+) -> None:
+    from text_verification.application.review_layout import render_review_document
+
+    with fitz.open() as pdf:
+        page = pdf.new_page()
+        page.insert_text((30, 100), rendered)
+        content = pdf.tobytes()
+    layout = render_review_document(content, "pdf", source, source)
+    glyphs = layout.pages[0].glyphs
+    assert {index for glyph in glyphs for index in range(glyph.start, glyph.end)} == {
+        index for index, character in enumerate(source) if character != "\n"
+    }
+    assert [glyph.start for glyph in glyphs] == sorted(glyph.start for glyph in glyphs)
+    assert all(glyph.width > 0 and glyph.height > 0 for glyph in glyphs)
+    assert layout.notice is None
+
+
+@pytest.mark.parametrize(
+    ("source", "rendered"),
+    [
+        ("Alpha  ", "Alpha extra"),
+        ("  Alpha", "prefix Alpha"),
+        ("StartingAlpha  EndingBeta", "StartingAlpha EXTRA EndingBeta"),
+    ],
+)
+def test_whitespace_does_not_borrow_coordinates_from_unmatched_text(
+    source: str, rendered: str,
+) -> None:
+    from text_verification.application.review_layout import render_review_document
+
+    with fitz.open() as pdf:
+        pdf.new_page().insert_text((30, 100), rendered)
+        content = pdf.tobytes()
+    layout = render_review_document(content, "pdf", source, source)
+    assert any(page.glyphs for page in layout.pages)
+    assert all(
+        not source[glyph.start:glyph.end].isspace()
+        for page in layout.pages for glyph in page.glyphs
+    )
+
+
+def test_unique_paragraphs_map_when_table_extraction_changes_reading_order() -> None:
+    from text_verification.application.review_layout import render_review_document
+
+    source = "Original content\nPlease  confirm payment.\nTable preserved"
+    rendered = "Original content\nTable preserved\nPlease  confirm payment."
+    with fitz.open() as pdf:
+        pdf.new_page().insert_text((30, 100), rendered)
+        content = pdf.tobytes()
+    layout = render_review_document(content, "pdf", source, source)
+    glyphs = layout.pages[0].glyphs
+    assert {glyph.start for glyph in glyphs} == {
+        index for index, char in enumerate(source) if char != "\n"
+    }
+    table = next(glyph for glyph in glyphs if glyph.start == source.index("Table"))
+    body = next(glyph for glyph in glyphs if glyph.start == source.index("Please"))
+    assert table.y < body.y
+    assert layout.notice is None
+
+
+def test_unique_paragraph_stays_locatable_without_guessing_unmatched_paragraphs() -> None:
+    from text_verification.application.review_layout import render_review_document
+
+    source = "Known exact paragraph\nCompletely unavailable text that must not be guessed"
+    with fitz.open() as pdf:
+        pdf.new_page().insert_text((30, 100), "Known exact paragraph\nOther content")
+        content = pdf.tobytes()
+    layout = render_review_document(content, "pdf", source, source)
+    assert {glyph.start for glyph in layout.pages[0].glyphs} == set(range(21))
+    assert layout.notice
+
+
+@pytest.mark.parametrize("body_changed", [False, True])
+def test_paragraph_fallback_does_not_reuse_body_coordinates_for_a_missing_heading(
+    body_changed: bool,
+) -> None:
+    from text_verification.application.review_layout import render_review_document
+
+    heading = "Preserved heading"
+    body = f"{heading} plus unique body"
+    source = f"{heading}\n{body}\nCompletely unavailable paragraph"
+    rendered_body = body.replace("unique", "revised") if body_changed else body
+    with fitz.open() as pdf:
+        pdf.new_page().insert_text((30, 100), f"{rendered_body}\nOther content")
+        content = pdf.tobytes()
+    layout = render_review_document(content, "pdf", source, source)
+    body_start = len(heading) + 1
+    expected = set() if body_changed else set(range(body_start, body_start + len(body)))
+    assert {glyph.start for glyph in layout.pages[0].glyphs} == expected
+    assert layout.notice
+
+
+def test_raw_order_spaces_on_another_line_are_not_used_as_coordinates() -> None:
+    from text_verification.application.review_layout import render_review_document
+
+    source = "Alpha  beta"
+    with fitz.open() as pdf:
+        page = pdf.new_page()
+        page.insert_text((30, 100), "Alpha")
+        page.insert_text((58.13, 200), "  ")
+        page.insert_text((64.25, 100), "beta")
+        content = pdf.tobytes()
+    layout = render_review_document(content, "pdf", source, source)
+    assert not any(glyph.start in {5, 6} for glyph in layout.pages[0].glyphs)
+
+
+@pytest.mark.parametrize("rotation", [90, 180, 270])
+def test_rotated_whitespace_retains_its_actual_coordinates(rotation: int) -> None:
+    from text_verification.application.review_layout import render_review_document
+
+    source = "Alpha  beta"
+    with fitz.open() as pdf:
+        page = pdf.new_page()
+        page.insert_text((30, 100), source)
+        page.set_rotation(rotation)
+        content = pdf.tobytes()
+    layout = render_review_document(content, "pdf", source, source)
+    assert {glyph.start for glyph in layout.pages[0].glyphs} == set(range(len(source)))
+
+
 def sample_pdf(*, rotated: bool = False) -> bytes:
     with fitz.open() as pdf:
         for word in ("First account", "Second account"):
@@ -31,9 +165,7 @@ def test_layout_maps_repeated_words_to_their_actual_pages() -> None:
     assert layout.pages[0].image.startswith("data:image/svg+xml;base64,")
     for page, word in zip(layout.pages, ("First account", "Second account"), strict=True):
         start = text.index(word)
-        assert {g.start for g in page.glyphs} == {
-            i for i in range(start, start + len(word)) if not text[i].isspace()
-        }
+        assert {g.start for g in page.glyphs} == set(range(start, start + len(word)))
         assert all(0 <= g.x < g.x + g.width <= page.width for g in page.glyphs)
         assert all(0 <= g.y < g.y + g.height <= page.height for g in page.glyphs)
 
@@ -146,7 +278,7 @@ def test_heading_repeated_inside_body_is_not_mistaken_for_an_extra_header() -> N
 
     layout = render_review_document(content, "pdf", text, text)
     assert {glyph.start for page in layout.pages for glyph in page.glyphs} == {
-        index for index, character in enumerate(text) if not character.isspace()
+        index for index, character in enumerate(text) if character != "\n"
     }
     assert layout.notice is None
 

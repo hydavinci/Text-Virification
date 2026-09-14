@@ -9,9 +9,10 @@ x-backend-environment: &backend-environment
 x-backend-service: &backend-service
   build:
     context: ../apps/api
+    target: runtime
     args:
       PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.12-slim}
-  image: text-verification-backend:development
+  image: ${BACKEND_IMAGE:-text-verification-backend:development}
   env_file:
     - ../.env
   environment: *backend-environment
@@ -22,9 +23,10 @@ services:
   renderer:
     build:
       context: ../apps/api
+      target: runtime
       args:
         PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.12-slim}
-    image: text-verification-backend:development
+    image: ${BACKEND_IMAGE:-text-verification-backend:development}
     command:
       ["uvicorn", "text_verification.preview_renderer:app", "--host", "0.0.0.0", "--port", "8000"]
     init: true
@@ -81,9 +83,6 @@ services:
     command: ["uvicorn", "text_verification.main:app", "--host", "0.0.0.0", "--port", "8000"]
     restart: unless-stopped
     networks: [default, rendering]
-    environment:
-      <<: *backend-environment
-      TEST_DATABASE_URL: postgresql+psycopg://text_verification:text_verification@postgres:5432/text_verification
     depends_on:
       postgres:
         condition: service_healthy
@@ -93,6 +92,8 @@ services:
         condition: service_completed_successfully
       renderer:
         condition: service_healthy
+      worker:
+        condition: service_started
     healthcheck:
       test:
         [
@@ -173,7 +174,7 @@ services:
       args:
         NODE_IMAGE: ${NODE_IMAGE:-node:22-slim}
         NGINX_IMAGE: ${NGINX_IMAGE:-nginx:1.27-alpine}
-    image: text-verification-web:development
+    image: ${WEB_IMAGE:-text-verification-web:development}
     restart: unless-stopped
     depends_on:
       api:

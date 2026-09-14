@@ -164,6 +164,49 @@ function uiState() {
 }
 
 describe('useWorkspaceSession', () => {
+  it('keeps valid document recovery when reading the optional UI record fails', () => {
+    const storage = new MemoryStorage()
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(result)
+    const session = useWorkspaceSession(storage, workspace)
+    session.save(uiState())
+    const originalRead = storage.getItem.bind(storage)
+    vi.spyOn(storage, 'getItem').mockImplementation((key) => {
+      if (key === 'text-verification-session-ui') throw new Error('unavailable')
+      return originalRead(key)
+    })
+    const restoredWorkspace = useVerificationWorkspace()
+    const restored = useWorkspaceSession(storage, restoredWorkspace)
+    expect(restored.restore()).not.toBeNull()
+    expect(restoredWorkspace.result.value?.text).toBe(result.text)
+    expect(restored.warning.value).toBeTruthy()
+  })
+  it('applies the size budget to document and UI storage together', () => {
+    const storage = new MemoryStorage()
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(result)
+    useWorkspaceSession(storage, workspace).save(uiState())
+    const bytes = new TextEncoder().encode(storage.getItem('text-verification-session')!).byteLength
+    const session = useWorkspaceSession(storage, workspace, { maxRawBytes: bytes })
+    expect(session.restore()).not.toBeNull()
+    expect(session.saveUi({ ...uiState(), filters: { layer: 'all', severity: 'all' } })).toBe(false)
+    expect(session.warning.value).toContain('大小限制')
+  })
+  it('persists lightweight UI changes without preparing or serializing the document again', () => {
+    const storage = new MemoryStorage()
+    const workspace = useVerificationWorkspace()
+    workspace.loadResult(result)
+    const session = useWorkspaceSession(storage, workspace)
+    expect(session.save(uiState())).toBe(true)
+    const prepare = vi.spyOn(workspace, 'prepareWorkspaceRestore')
+    const writes = vi.spyOn(storage, 'setItem')
+    expect(session.saveUi({ ...uiState(), filters: { layer: 'all', severity: 'all' } })).toBe(true)
+    expect(prepare).not.toHaveBeenCalled()
+    expect(writes.mock.calls.every(([, value]) => !value.includes('"blocks"'))).toBe(true)
+    const restored = useWorkspaceSession(storage, useVerificationWorkspace()).restore()
+    expect(restored?.filters.layer).toBe('all')
+    expect(restored?.jobId).toBe(result.document_id)
+  })
   it('defaults tracking off when restoring a legacy workspace without export preferences', () => {
     const storage = new MemoryStorage()
     storage.setItem('text-verification-session', JSON.stringify({

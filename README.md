@@ -12,7 +12,7 @@
 | 可选检查 | 中英文间距、空格/空行、长句提示、个人信息与凭证、敏感表述、广告极限词 |
 | 自定义设置 | 六种文档场景、自定义术语、禁用词及批量导入 |
 | OCR | 图片和扫描 PDF 的中英文、英文或日文识别；日文仅识别，不提供日文纠错 |
-| 在线审阅 | 查找替换、问题定位、接受/忽略/撤销、批量操作、正文编辑、亮暗主题及会话恢复 |
+| 在线审阅 | 查找替换、问题定位、逐条接受/忽略/撤销、正文编辑、亮暗主题及会话恢复 |
 | 原版式预览 | Word、RTF、PDF 和图片的统一分页视图，使用 SVG 矢量页面展示文字与定位标记 |
 | 导出 | 支持的文档原格式、HTML 检查报告，以及图片/扫描件的可编辑 DOCX 重建稿 |
 
@@ -39,11 +39,15 @@
 | --- | --- |
 | `http://localhost:5173` | 前端页面 |
 | `http://127.0.0.1:8000/docs` | API 文档 |
-| `http://127.0.0.1:8000/api/v1/health` | API 健康检查 |
+| `http://127.0.0.1:8000/api/v1/health` | API 存活检查 |
+| `http://127.0.0.1:8000/api/v1/ready` | 数据库、Redis、消息代理、兼容检查 Worker 和渲染服务的就绪状态 |
 | `http://127.0.0.1:8010` | 仅供本机 API 使用的渲染网关，不是前端页面 |
 
 脚本启动 PostgreSQL、Redis 和 Docker 渲染服务，执行数据库迁移，并管理本机 API、
 检查 Worker、维护 Worker、Beat 和前端进程。缺少渲染镜像时构建，已有镜像时复用。
+所有进程启动后，脚本等待 `/ready` 成功再提示可用；依赖未就绪时返回 503，并列出未就绪项。
+API 热更新只监听 `apps/api/src`，不因测试文件变化而重启；关闭旧连接最多等待 5 秒，
+避免长连接使热更新无限等待。启动参数修改后，需重新运行启动脚本才能生效。
 
 保留启动终端，按 `Ctrl+C` 停止本次启动的应用进程；数据库、Redis 和渲染容器继续运行，
 数据不会被删除。日志位于 `var/local/`，每次启动覆盖：
@@ -58,11 +62,10 @@ tail -f var/local/api.log var/local/worker.log
 
 ### 首次配置（macOS）
 
-准备 Python 3.12、npm 和 Docker Desktop，然后在仓库根目录执行：
+准备 Python 3.12、uv、npm 和 Docker Desktop，然后在仓库根目录执行：
 
 ```bash
-python3.12 -m venv apps/api/.venv
-apps/api/.venv/bin/python -m pip install -e "apps/api[dev]"
+uv sync --project apps/api --locked --extra dev
 npm --prefix apps/web ci
 test -f .env || cp .env.example .env
 mkdir -p var/jobs
@@ -102,8 +105,12 @@ PY
 图片和扫描 PDF 检查还需安装 OCR 可选依赖：
 
 ```bash
-apps/api/.venv/bin/python -m pip install -e "apps/api[dev,ocr]"
+uv sync --project apps/api --locked --extra dev --extra ocr
 ```
+
+后端直接和间接依赖锁定在 `apps/api/uv.lock`，前端使用 `apps/web/package-lock.json`。
+日常安装使用 `--locked` / `npm ci`，不要通过无约束安装绕过锁文件。
+有意调整后端依赖时修改 `pyproject.toml`，执行 `uv lock --project apps/api` 并一起提交锁文件。
 
 首次 OCR 可能下载对应语言的模型，内网环境应提前准备模型及缓存。
 Word/RTF 预览转换由 Docker 内的 LibreOffice 完成，本机无需为预览单独安装 Office。
@@ -139,7 +146,7 @@ docker compose --env-file .env -f infra/compose.yaml down
 
 1. 上传文件或粘贴文本，选择文档场景、检查项、术语和禁用词，再点击“开始检查”。选中文件不会自动提交。
 2. 在三栏工作区审阅结果：左侧查找替换，中间正文，右侧问题列表或检查摘要。手机端通过三个面板入口切换。
-3. 点击问题定位原文，选择建议并接受、忽略或撤销；“编辑正文”用于自由修改。“撤销修改”位于查找替换面板。
+3. 点击问题，将对应高亮定位到正文阅读区域中部（文档首尾受滚动边界限制），不带动整个页面滚动。在问题卡片内选择建议并接受、忽略或撤销；顶部显示待处理、已接受和已忽略计数。“编辑正文”用于自由修改，“撤销修改”位于查找替换面板。
 4. 手工编辑或替换后按提示重新检查。修改检查设置不会清空文档，但需要点击“重新检查”才会应用新设置。
 5. 从顶部导出菜单下载文件或报告。“保留修订”在打开、恢复或新建工作区时默认关闭，需要时手动勾选。
 6. 更换文件前先导出需要保留的结果，再点击左上角“啄木鸟”返回新建检查；该操作会清空当前工作区。
@@ -147,6 +154,13 @@ docker compose --env-file .env -f infra/compose.yaml down
 **设置入口**：上传页在输入卡片内，审阅页在右上角，每页只有一个入口。
 检查过程中可以查看设置，但不能修改。重新检查使用当前修订文字，不重新执行 OCR；
 更换 OCR 语言后需要重新上传文件。
+
+**检查进度**：在检查设置下方、开始检查按钮上方显示细进度条，不再展示任务详情区。
+文件任务使用实际进度；尚未收到任务进度或直接文本检查时使用不定进度条。失败和连接异常仍会提示。
+
+**任务恢复**：文件上传成功并取得任务编号后，同一标签页刷新会重新连接任务，不会重复上传。
+浏览器只保存有界的任务编号、文件信息和设置，不保存上传文件内容；服务端任务过期后需重新选择文件。
+连接等待超时可点击重试连接，停止等待不等于取消后台任务。尚未取得任务编号的上传和直接文本请求不能自动续接。
 
 **查找快捷键**：Ctrl/Cmd+F 聚焦查找框，Enter 定位下一项，Shift+Enter 定位上一项。
 手机端会先切换到查找替换面板。定位只滚动对应阅读区域。
@@ -157,6 +171,9 @@ docker compose --env-file .env -f infra/compose.yaml down
 
 **定位提示**：“部分文字无法精确定位”表示预览文字与页面坐标未完全匹配，
 不代表文件损坏或检查失败，也不表示所有问题都无法定位。
+空格使用页面中实际测量的坐标定位；连续空格被排版合并时，高亮对应的整体区域。
+连字的共享字形和表格/正文提取顺序差异不会直接使整篇定位失效；
+能够唯一匹配的完整段落仍可独立定位。
 正常的标题/正文重复不会仅因重复出现而被误判；真正存在额外重复或无法可靠对齐时，
 仍需结合右侧原文和上下文审阅。
 
@@ -179,16 +196,40 @@ FastAPI
     +-- renderer：LibreOffice 转换、SVG 分页图像及文字坐标
 ```
 
+Worker 使用 `text-verification-worker` 入口：检查角色为 `TEXT_VERIFICATION_WORKER_ROLE=verification`，
+消费 `celery,verification-v2`；维护角色为 `TEXT_VERIFICATION_WORKER_ROLE=maintenance`，
+只消费 `maintenance-v2`，避免维护任务占用检查并发。
+旧版 Worker 命令必须限定 `--queues=celery`，只排空遗留任务，不接入新参数任务队列。
+
 文本检查走同步 `POST /api/v1/analyze`；文件上传走异步 `POST /api/v1/jobs`，
 通过 SSE 获取进度，再读取任务结果。设置以任务参数快照传递，不通过修改全局变量影响其他任务。
+
+浏览器将文档快照与轻量界面偏好分开保存，切换问题、筛选和视图不重复序列化整个文档。
+文件任务的恢复记录独立于完成后的审阅快照；存储不可用、记录无效或过期时明确提示。
 
 分页预览走 `POST /api/v1/jobs/{job_id}/preview/layout`，请求包含源版本
 `source_version` 和当前修订全文 `text`。API 校验源文件身份后，在临时副本上应用修订并渲染；
 预览不覆盖原文件，也不保存审阅决策。
 
+分页结果在每个 API 进程内使用有界缓存：最多 4 份、合计 32 MiB，命中有效期 60 秒。
+缓存键区分任务、源版本和修订内容；即使命中，也重新核对源文件身份，不绕过过期或篡改检查。
+浏览器按可视区域构建问题和搜索定位层，页面图像延迟加载、异步解码；跨页选择仍可直接定位。
+
 渲染服务使用只读根文件系统、受限临时目录、内部网络和单转换并发，不读取 `.env`、
 数据库或任务存储；容器 init 回收 Office 辅助进程。
 本地 API 通过仅绑定 `127.0.0.1:8010` 的网关访问它，完整 Docker 部署由 API 直接访问 renderer。
+
+### 依赖与交付
+
+后端镜像默认构建 `runtime` 目标，保留 OCR、字体和 LibreOffice，但不包含测试目录及
+pytest、Ruff、mypy 等开发工具；需要开发工具时显式使用 Dockerfile 的 `development` 目标。
+仓库级集成检查在完整代码检出目录中运行。
+
+`.github/workflows/ci.yaml` 包含前端单元测试、构建与浏览器流程，以及后端静态检查和真实
+PostgreSQL 隔离模式测试。另一条独立服务流程构建生产镜像，启动临时应用栈，
+预热真实 OCR 模型后运行上传、OCR 和渲染流程。
+`apps/api/scripts/ci_pytest.py` 要求相应服务配置齐全，遇到跳过的测试会让该流程失败，
+不会把缺少数据库或 OCR 环境算作成功。
 
 ### 代码目录
 
@@ -232,8 +273,8 @@ FastAPI
 | 场景、OCR 语言及检查开关 | 前端 `components/workspace/VerificationSettings.vue` |
 | 术语与禁用词编辑 | 前端 `components/workspace/TerminologyEditor.vue`、`composables/useTerminology.ts` |
 | 设置类型 | 前端 `types/verification.ts` 的 `AnalyzeOptions` |
-| 页面默认值、应用设置、重置和恢复 | 前端 `views/WorkspaceView.vue` |
-| 参数校验、快照及请求字段转换 | 前端 `api/analyzeOptions.ts` |
+| 页面状态、应用设置、重置和恢复 | 前端 `views/WorkspaceView.vue` |
+| 共享默认值、场景列表、设置复制、参数校验及请求转换 | 前端 `api/analyzeOptions.ts` |
 | 会话保存与旧版本兼容 | 前端 `composables/useWorkspaceSession.ts` |
 | 后端参数与默认值 | 后端 `domain/verification.py` 的 `VerificationOptions` |
 | 场景及现有检查规则 | 后端 `compatibility/analyzer.py` |
@@ -250,8 +291,9 @@ FastAPI
 | 广告极限词 | `enableAdExtreme` / `enable_ad_extreme` | 关闭 |
 
 注意：主页面的 OCR 和扩展检查初始值允许为 `undefined`，由界面和请求转换采用默认值。
-修改默认行为时，还应同步 `useTerminology.ts` 的默认值合并逻辑、后端接口默认参数和旧会话恢复逻辑，
-不能只修改复选框外观。
+默认值集中在 `api/analyzeOptions.ts` 的 `createDefaultAnalyzeOptions()`、
+`DEFAULT_OCR_LANGUAGE` 和 `DEFAULT_EXTENDED_RULES`，页面与术语编辑复用这些定义。
+修改默认行为时仍需核对后端接口默认参数和旧会话恢复逻辑，不能只修改复选框外观。
 
 ### 修改词库或文档场景
 
@@ -271,8 +313,8 @@ apps/api/src/text_verification/resources/dictionaries/ad_extreme_words.json
 `skip_types` 表示跳过的问题类型；`downgrade_types` 当前会过滤这些类型中 `info` 级别的提示，
 并非统一降低所有问题的严重程度。
 新增场景还需同步后端 `domain/verification.py` 的 `Scenario`，
-以及前端 `types/verification.ts`、`VerificationSettings.vue`、
-`api/analyzeOptions.ts` 的场景列表和 `useVerificationWorkspace.ts` 的 `isScenario()` 校验。
+以及前端 `types/verification.ts`、`api/analyzeOptions.ts` 的 `SCENARIO_OPTIONS`
+和 `useVerificationWorkspace.ts` 的 `isScenario()` 校验；设置组件复用共享场景列表。
 
 ### 新增检查开关：完整操作顺序
 
@@ -283,13 +325,14 @@ apps/api/src/text_verification/resources/dictionaries/ad_extreme_words.json
    为新增检查选择明确且兼容旧任务的默认值，通常默认关闭。后端参数模型拒绝未知字段，
    不能只让前端发送一个新参数。
 2. **增加界面并接通状态。** 在 `VerificationSettings.vue` 增加开关，通过
-   `update:options` 更新。在 `WorkspaceView.vue` 同步初始状态、`currentOptions`、
-   `applyOptions()`、重置和恢复路径；在 `useTerminology.ts` 保留该字段，
-   避免添加术语时丢失其他设置。
+   `update:options` 更新。在 `api/analyzeOptions.ts` 定义兼容默认值；
+   `WorkspaceView.vue` 和 `useTerminology.ts` 通过共享的 `copyAnalyzeOptions()` 保留设置。
+   仍需覆盖初始化、重置、恢复及编辑术语的路径，避免丢失新字段。
 3. **接通请求和会话。** 更新 `api/analyzeOptions.ts` 的
    `createAnalyzeOptionsSnapshot()`、`appendAnalyzeOptions()` 和序列化大小计算，
    将前端 camelCase 字段转换为后端 snake_case 字段。
-   同步 `useWorkspaceSession.ts` 的字段白名单、校验及旧会话兼容，不能因旧会话缺少新字段而直接丢弃会话。
+   同步 `useWorkspaceSession.ts` 的字段白名单、校验及旧会话兼容，并覆盖 `usePendingJob.ts` 的任务恢复。
+   不能因旧会话缺少新字段而直接丢弃会话。
 4. **覆盖所有后端入口。** 更新 `api/routes/compatibility.py` 的同步检查、
    `api/routes/jobs.py` 的文件上传及重新检查参数，并更新
    `compatibility/service.py` 的 `build_verification_options()`。

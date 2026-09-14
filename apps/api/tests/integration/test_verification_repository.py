@@ -557,7 +557,6 @@ def test_upgrade_from_0004_marks_legacy_artifacts_ready(
     storage_key = build_artifact_storage_key(job_id, artifact_id, FileType.TXT)
 
     try:
-        command.downgrade(alembic_config, "0004_finalize_verification_pipeline")
         session = Session(db_engine)
         try:
             _create_job(
@@ -579,6 +578,8 @@ def test_upgrade_from_0004_marks_legacy_artifacts_ready(
             session.commit()
         finally:
             session.close()
+        # Seed dependencies while the schema still matches the current ORM.
+        command.downgrade(alembic_config, "0004_finalize_verification_pipeline")
         with db_engine.begin() as connection:
             connection.execute(
                 text(
@@ -915,6 +916,7 @@ def test_read_export_revision_rejects_tampered_stored_provenance(
         "revision_text_sha256": "0" * 64,
     }
     db_session.flush()
+    JobRepository(db_session).transition(JOB_ID, JobStatus.COMPLETED, 100, "处理完成")
 
     with pytest.raises(InvalidRevisionProvenanceError):
         repository.read_export_revision(JOB_ID, RUN_ID, REVISION_ID)
@@ -941,7 +943,7 @@ def test_read_export_revision_rejects_tampered_stored_provenance(
         (
             JOB_ID,
             {"parent_revision_id": SECOND_REVISION_ID},
-            "parent revision",
+            "[Pp]arent revision",
         ),
     ],
 )

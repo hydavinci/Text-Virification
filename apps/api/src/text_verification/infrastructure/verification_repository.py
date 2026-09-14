@@ -17,6 +17,7 @@ from text_verification.domain.artifacts import (
     ArtifactFinalizationRejection,
     ArtifactLifecycleStatus,
     ArtifactReservation,
+    ArtifactReservationChangedError,
     ArtifactSnapshot,
 )
 from text_verification.domain.documents import DocumentMetadata, FileType, TextBlock
@@ -1527,7 +1528,7 @@ def _assert_artifact_row_matches_reservation(
     reservation: ArtifactReservation,
 ) -> None:
     if not _artifact_row_matches_reservation(row, reservation):
-        raise ValueError(
+        raise ArtifactReservationChangedError(
             f"Export artifact {reservation.export_artifact_id} reservation changed."
         )
 

@@ -234,6 +234,60 @@ def test_artifact_service_reserves_publishes_finalizes_and_commits(
     assert repository.rollback_calls == 0
 
 
+def test_implicit_reservation_retries_superseded_publication_without_bypassing_fence(
+    tmp_path: Path,
+) -> None:
+    request = _request()
+    stale = _scripted_repository(request)
+    fresh = _scripted_repository(request)
+    fresh.reservation = replace(fresh.reservation, reservation_version=1)
+    fresh.ready_snapshot = replace(fresh.ready_snapshot, reservation_version=1)
+    fresh.current_snapshot = replace(fresh.current_snapshot, reservation_version=1)
+    stale.current_snapshot = fresh.current_snapshot
+    service = application.ArtifactPersistenceService(
+        JobStorage(tmp_path, max_upload_bytes=1024),
+        _repository_factory(stale, stale, fresh),
+    )
+
+    result = service.persist(request)
+
+    assert result.path.read_bytes() == request.data
+    assert fresh.current_snapshot.status is application.ArtifactLifecycleStatus.READY
+    assert fresh.current_snapshot.reservation_version == 1
+
+
+def test_explicit_superseded_reservation_is_not_reacquired(tmp_path: Path) -> None:
+    request = _request()
+    repository = _scripted_repository(request)
+    repository.current_snapshot = replace(repository.current_snapshot, reservation_version=1)
+    service = application.ArtifactPersistenceService(
+        JobStorage(tmp_path, max_upload_bytes=1024),
+        _repository_factory(repository),
+    )
+
+    with pytest.raises(application.ArtifactReconciliationRequiredError):
+        service.persist(request, reservation=repository.reservation)
+
+    assert not (tmp_path / request.storage_key).exists()
+
+
+def test_implicit_superseded_reservation_retry_is_bounded(tmp_path: Path) -> None:
+    request = _request()
+    repository = _scripted_repository(request)
+    repository.current_snapshot = replace(repository.current_snapshot, reservation_version=1)
+    service = application.ArtifactPersistenceService(
+        JobStorage(tmp_path, max_upload_bytes=1024),
+        _repository_factory(repository),
+    )
+
+    with pytest.raises(application.ArtifactReconciliationRequiredError):
+        service.persist(request)
+
+    assert repository.commit_calls == 3
+    assert repository.rollback_calls == 3
+    assert not (tmp_path / request.storage_key).exists()
+
+
 @pytest.mark.parametrize(
     "error",
     [

@@ -23,7 +23,23 @@ defineEmits<{
       aria-label="返回新建检查并清空当前工作区"
       @click="$emit('reset')"
     >
-      <span class="brand-mark" aria-hidden="true">啄</span>
+      <svg class="brand-mark" viewBox="0 0 64 64" fill="none" aria-hidden="true" focusable="false">
+        <g transform="translate(2 -10) scale(.3)">
+          <path
+            fill="currentColor"
+            d="M111 59C127 39 146 45 144 62c-1 6-4 11-8 17 21-6 28-15 13-26 22 1 27 21 10 34-26 20-67 12-91 48 2-27 31-40 51-57 18-15 13-32-8-19Z"
+          />
+          <path
+            fill="currentColor"
+            d="M133 108c24-1 33 21 21 52l-6 21 1-15-10 25 4-18c7-29 10-54-10-65Z"
+          />
+          <path
+            class="brand-accent"
+            d="M20 194c24-39 48-64 69-65 36-3 50 25 26 60l-39 50 13-32-13 17 17-32c16-31 6-49-11-45-19 6-43 29-62 47Z"
+          />
+          <ellipse class="brand-accent" cx="111" cy="116" rx="12" ry="5" transform="rotate(-22 111 116)" />
+        </g>
+      </svg>
       <span>
         <strong>啄木鸟</strong>
         <small>中英文字智能检查</small>
@@ -104,16 +120,12 @@ defineEmits<{
   text-align: left;
 }
 .brand-mark {
-  width: 34px;
-  height: 34px;
-  display: grid;
-  place-items: center;
-  border-radius: 10px;
-  color: var(--on-primary);
-  font-weight: 600;
-  background: var(--primary);
-  box-shadow: var(--shadow-small);
+  width: 42px;
+  height: 42px;
+  flex: 0 0 auto;
+  color: var(--text);
 }
+.brand-accent { fill: #f58220; }
 .brand strong,
 .brand small {
   display: block;

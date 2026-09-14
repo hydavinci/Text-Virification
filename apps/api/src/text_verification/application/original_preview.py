@@ -4,12 +4,14 @@ import base64
 import json
 from dataclasses import dataclass
 from email.message import Message
+from hashlib import sha256
 from typing import IO
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from pydantic import ValidationError
 
+from text_verification.application.review_layout_cache import ReviewLayoutCache
 from text_verification.domain.documents import DocumentModel, FileType
 from text_verification.domain.review_layout import (
     MAX_LAYOUT_TEXT,
@@ -22,6 +24,7 @@ MAX_PREVIEW_BYTES = 25 * 1024 * 1024
 PREVIEW_TYPES = frozenset({
     FileType.DOCX, FileType.DOC, FileType.RTF, FileType.PDF, FileType.PNG, FileType.JPG,
 })
+_REVIEW_CACHE = ReviewLayoutCache()
 
 
 class OriginalPreviewError(ValueError):
@@ -99,8 +102,16 @@ def build_review_preview(
         raise OriginalPreviewError("此格式使用文字审阅，不提供分页原版式预览。", 415)
     if len(document.text) > MAX_LAYOUT_TEXT:
         raise OriginalPreviewError("文档超过 20 万字符的版式预览上限。", 413)
+    cache_key = sha256(json.dumps([
+        str(document.document_id), document.source_version, document.file_type.value,
+        renderer_url, document.text, text,
+    ], ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
     resolver = JobOwnedSourcePathResolver(storage, document.document_id, document.file_type)
     with resolver.open_verified_copy(document) as source:
+        # A cache hit must never bypass the current source's identity verification.
+        cached = _REVIEW_CACHE.get(cache_key)
+        if cached is not None:
+            return ReviewLayout.model_validate_json(cached)
         payload = LayoutRenderRequest(
             content=base64.b64encode(source.read_bytes()).decode("ascii"),
             original_text=document.text, text=text,
@@ -110,9 +121,11 @@ def build_review_preview(
         f"review/{document.file_type.value}", renderer_url, "application/json",
     )
     try:
-        return ReviewLayout.model_validate_json(rendered)
+        layout = ReviewLayout.model_validate_json(rendered)
     except ValidationError as error:
         raise OriginalPreviewError("渲染服务返回了无效的页面数据。") from error
+    _REVIEW_CACHE.put(cache_key, rendered)
+    return layout
 
 
 def build_original_preview(

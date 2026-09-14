@@ -153,6 +153,88 @@ function buildResult(
   }
 }
 
+describe('pending job recovery', () => {
+  it.each(['queued', 'checking_chinese'] as const)('resumes %s state and stops a stalled connection after a bounded wait', async (status) => {
+    vi.useFakeTimers()
+    try {
+      const { execution, jobsApi } = createHarness({ job: buildJob({ status, stage: status }) })
+      await execution.resumeJob(buildJob().job_id)
+      expect(execution.jobStatus.value).toBe(status)
+      await vi.advanceTimersByTimeAsync(120_001)
+      expect(execution.state.value).toBe('failed')
+      expect(execution.error.value?.message).toContain('后台任务可能仍在运行')
+      await execution.resumeJob(buildJob().job_id)
+      expect(execution.state.value).toBe('processing')
+      expect(jobsApi.createJob).not.toHaveBeenCalled()
+      execution.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+  it('aborts a timed out lookup and ignores its late completion during retry', async () => {
+    vi.useFakeTimers()
+    try {
+      const deferred = createDeferred<JobRead>()
+      const { execution, jobsApi } = createHarness()
+      vi.mocked(jobsApi.getJob).mockReturnValueOnce(deferred.promise)
+      const stale = execution.resumeJob(buildJob().job_id)
+      const signal = vi.mocked(jobsApi.getJob).mock.calls[0]![1]!
+      await vi.advanceTimersByTimeAsync(120_001)
+      expect(signal.aborted).toBe(true)
+      await execution.resumeJob(buildJob().job_id)
+      deferred.resolve(buildJob({ status: 'failed', stage: 'failed' }))
+      await stale
+      expect(execution.state.value).toBe('processing')
+      execution.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+  it('does not publish a lookup that resolves after disposal', async () => {
+    const deferred = createDeferred<JobRead>()
+    const { execution, jobsApi } = createHarness()
+    vi.mocked(jobsApi.getJob).mockReturnValueOnce(deferred.promise)
+    const pending = execution.resumeJob(buildJob().job_id)
+    execution.dispose()
+    deferred.resolve(buildJob())
+    await pending
+    expect(execution.state.value).toBe('idle')
+    expect(jobsApi.subscribe).not.toHaveBeenCalled()
+  })
+  it('resumes queued jobs without uploading the file again', async () => {
+    const { execution, jobsApi } = createHarness()
+    await execution.resumeJob(buildJob().job_id)
+    expect(execution.state.value).toBe('processing')
+    expect(execution.jobId.value).toBe(buildJob().job_id)
+    expect(jobsApi.createJob).not.toHaveBeenCalled()
+    expect(jobsApi.subscribe).toHaveBeenCalledOnce()
+    execution.dispose()
+  })
+
+  it('fetches completed results on reload without opening another stream', async () => {
+    const { execution, jobsApi } = createHarness({
+      job: buildJob({ status: 'completed', stage: 'completed', progress: 100 })
+    })
+    await execution.resumeJob(buildJob().job_id)
+    await flushPromises()
+    expect(execution.state.value).toBe('completed')
+    expect(jobsApi.subscribe).not.toHaveBeenCalled()
+    expect(jobsApi.createJob).not.toHaveBeenCalled()
+  })
+
+  it('allows retrying a failed recovery and ignores disposed requests', async () => {
+    const { execution, jobsApi } = createHarness()
+    vi.mocked(jobsApi.getJob).mockRejectedValueOnce(new Error('offline'))
+    await execution.resumeJob(buildJob().job_id)
+    expect(execution.state.value).toBe('failed')
+    expect(execution.jobId.value).toBe(buildJob().job_id)
+    await execution.resumeJob(buildJob().job_id)
+    expect(execution.state.value).toBe('processing')
+    execution.dispose()
+    expect(execution.isActive.value).toBe(false)
+  })
+})
+
 function buildIssue(
   confidence: number
 ): VerificationResult['issues'][number] {
@@ -243,6 +325,7 @@ function createHarness(overrides: {
   let onError: ((error: JobSubscriptionError) => void) | null = null
   const close = vi.fn()
   const jobsApi: JobsApi = {
+    getJob: vi.fn().mockResolvedValue(overrides.job ?? buildJob()),
     createJob: vi.fn().mockResolvedValue(overrides.job ?? buildJob()),
     getResult:
       overrides.getResult ??
@@ -320,7 +403,7 @@ describe('useVerificationExecution', () => {
 
     expect(harness.jobsApi.getResult).toHaveBeenCalledTimes(1)
     expect(harness.jobsApi.getResult).toHaveBeenCalledWith(
-      '33333333-3333-4333-8333-333333333333'
+      '33333333-3333-4333-8333-333333333333', expect.any(AbortSignal)
     )
     expect(harness.execution.state.value).toBe('completed')
     expect(harness.execution.result.value?.document_id).toBe(
@@ -681,7 +764,7 @@ describe('useVerificationExecution', () => {
 
     await harness.execution.analyzeFile(file, options)
 
-    expect(harness.jobsApi.createJob).toHaveBeenCalledWith(file, options)
+    expect(harness.jobsApi.createJob).toHaveBeenCalledWith(file, options, expect.any(AbortSignal))
     expect(verificationApi.analyzeFile).not.toHaveBeenCalled()
     expect(harness.execution.state.value).toBe('processing')
   })
@@ -693,6 +776,7 @@ describe('useVerificationExecution', () => {
       throw new Error('Subscription was not established.')
     }
     const jobsApi: JobsApi = {
+      getJob: vi.fn().mockResolvedValue(buildJob()),
       createJob: vi.fn().mockResolvedValue(buildJob()),
       getResult: vi.fn().mockReturnValue(pending.promise),
       subscribe: vi.fn((_jobId, onEvent) => {
@@ -752,7 +836,8 @@ describe('useVerificationExecution', () => {
     expect(harness.jobsApi.createJob).toHaveBeenCalledTimes(1)
     expect(harness.jobsApi.createJob).toHaveBeenCalledWith(
       first,
-      expect.any(Object)
+      expect.any(Object),
+      expect.any(AbortSignal)
     )
   })
 

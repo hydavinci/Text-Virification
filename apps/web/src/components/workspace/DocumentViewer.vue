@@ -330,7 +330,9 @@ async function scrollSelectedSource(issueId: string | null): Promise<void> {
       element.dataset.issueRole === 'source'
   )
   if (control) {
-    revealWithinPane(control, root.value?.closest<HTMLElement>('.document-content') ?? null)
+    revealWithinPane(
+      control, root.value?.closest<HTMLElement>('.document-content') ?? null, false, 'center'
+    )
   }
 }
 

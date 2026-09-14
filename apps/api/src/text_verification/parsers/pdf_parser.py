@@ -11,7 +11,6 @@ from typing import Any, Literal
 from uuid import NAMESPACE_URL, uuid5
 
 import pymupdf
-from pydantic import ValidationError
 
 from text_verification.compatibility.adapters import source_version_for_file
 from text_verification.document_processing.errors import (
@@ -24,9 +23,15 @@ from text_verification.document_processing.layout import (
     OcrLayoutElement,
     build_ocr_layout,
 )
+from text_verification.document_processing.ocr_normalization import (
+    MIN_USABLE_OCR_CONFIDENCE as MIN_USABLE_OCR_CONFIDENCE,
+)
+from text_verification.document_processing.ocr_normalization import (
+    OcrResourceLimitError,
+    normalize_ocr_boxes,
+)
 from text_verification.document_processing.ocr_provider import (
     OcrRecognizer,
-    OcrTextBox,
     SupportedOcrLanguage,
 )
 from text_verification.document_processing.pdf_classifier import classify_page
@@ -63,8 +68,6 @@ _MAX_TABLE_SPATIAL_NODE_VISITS_PER_PAGE = (
     PdfResourceLimits().max_table_spatial_node_visits_per_page
 )
 OCR_RENDER_DPI = 144
-# A 1% floor removes effectively empty signals without discarding low-confidence text.
-MIN_USABLE_OCR_CONFIDENCE = 0.01
 _OCR_RASTER_CHANNELS = 3
 _OCR_DEDUPE_IOU_THRESHOLD = 0.5
 _OCR_DEDUPE_COVERAGE_THRESHOLD = 0.9
@@ -389,75 +392,20 @@ def _normalize_ocr_boxes(
     raster_height: int,
     limits: PdfResourceLimits,
 ) -> tuple[OcrLayoutBox, ...]:
-    if not isinstance(raw_boxes, list):
-        raise OcrOutputError("OCR provider must return a list of OcrTextBox values")
-    if len(raw_boxes) > limits.max_ocr_boxes_per_page:
+    try:
+        usable = normalize_ocr_boxes(
+            raw_boxes,
+            page_number=page_number,
+            page_bbox=page_bbox,
+            raster_width=raster_width,
+            raster_height=raster_height,
+            max_boxes=limits.max_ocr_boxes_per_page,
+            max_text_characters=limits.max_ocr_text_chars_per_page,
+        )
+    except OcrResourceLimitError as error:
         raise PdfResourceLimitError(
-            limit="max_ocr_boxes_per_page",
-            maximum=limits.max_ocr_boxes_per_page,
-            actual=len(raw_boxes),
-        )
-
-    normalized: list[
-        tuple[str, float, tuple[tuple[float, float], ...]]
-    ] = []
-    text_characters = 0
-    page_width = page_bbox[2] - page_bbox[0]
-    page_height = page_bbox[3] - page_bbox[1]
-    for raw_box in raw_boxes:
-        try:
-            box = (
-                raw_box
-                if isinstance(raw_box, OcrTextBox)
-                else OcrTextBox.model_validate(raw_box)
-            )
-        except (ValidationError, TypeError, ValueError) as error:
-            raise OcrOutputError(str(error)) from error
-        text_characters += len(box.text)
-        if text_characters > limits.max_ocr_text_chars_per_page:
-            raise PdfResourceLimitError(
-                limit="max_ocr_text_chars_per_page",
-                maximum=limits.max_ocr_text_chars_per_page,
-                actual=text_characters,
-            )
-        if any(
-            x < 0.0 or x > raster_width or y < 0.0 or y > raster_height
-            for x, y in box.bbox
-        ):
-            raise OcrOutputError("OCR bbox coordinates must be within the rendered page")
-        quad = tuple(
-            (
-                page_bbox[0] + (x / raster_width) * page_width,
-                page_bbox[1] + (y / raster_height) * page_height,
-            )
-            for x, y in box.bbox
-        )
-        normalized.append((box.text, box.confidence, quad))
-
-    normalized.sort(
-        key=lambda item: (
-            min(point[1] for point in item[2]),
-            min(point[0] for point in item[2]),
-            item[0],
-            -item[1],
-            item[2],
-        )
-    )
-    mapped = tuple(
-        OcrLayoutBox(
-            page=page_number,
-            box_index=index,
-            text=text,
-            confidence=confidence,
-            quad=quad,
-        )
-        for index, (text, confidence, quad) in enumerate(normalized)
-    )
-    usable = tuple(
-        box
-        for box in mapped
-        if box.confidence >= MIN_USABLE_OCR_CONFIDENCE
-    )
+            limit=error.limit, maximum=error.maximum, actual=error.actual,
+        ) from error
     return _coalesce_ocr_boxes(usable, limits=limits)
 
 

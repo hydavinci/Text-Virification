@@ -75,3 +75,65 @@ def test_changed_source_cannot_be_previewed(tmp_path: Path) -> None:
     stored.path.write_bytes(b"%PDF-1.7\nchanged")
     with pytest.raises(InvalidUpload):
         build_original_preview(document, storage, "http://unused")
+
+
+def test_review_cache_reuses_revisions_but_always_verifies_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from text_verification.application import original_preview
+
+    data = b"%PDF-1.7\noriginal"
+    document = source_document(FileType.PDF, data)
+    storage = JobStorage(tmp_path, 1024)
+    stored = storage.save_bytes(document.document_id, document.source_name, data)
+    calls: list[bytes] = []
+
+    def render(content: bytes, path: str, renderer_url: str, media_type: str) -> bytes:
+        calls.append(content)
+        return b'{"pages":[],"revision_applied":true,"notice":null}'
+
+    monkeypatch.setattr(original_preview, "_request_renderer", render)
+    first = original_preview.build_review_preview(document, storage, "http://renderer", "")
+    again = original_preview.build_review_preview(document, storage, "http://renderer", "")
+    assert first == again
+    assert first is not again
+    assert len(calls) == 1
+    original_preview.build_review_preview(document, storage, "http://renderer", "revision")
+    assert len(calls) == 2
+    original_preview.build_review_preview(document, storage, "http://renderer", "")
+    assert len(calls) == 2
+    other = source_document(FileType.PDF, data)
+    storage.save_bytes(other.document_id, other.source_name, data)
+    original_preview.build_review_preview(other, storage, "http://renderer", "")
+    assert len(calls) == 3
+    original_preview.build_review_preview(document, storage, "http://different-renderer", "")
+    assert len(calls) == 4
+    stored.path.write_bytes(b"%PDF-1.7\nchanged")
+    with pytest.raises(InvalidUpload):
+        original_preview.build_review_preview(document, storage, "http://renderer", "")
+    assert len(calls) == 4
+
+
+def test_review_cache_does_not_retain_invalid_renderer_response(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from text_verification.application import original_preview
+
+    data = b"%PDF-1.7\noriginal"
+    document = source_document(FileType.PDF, data)
+    storage = JobStorage(tmp_path, 1024)
+    storage.save_bytes(document.document_id, document.source_name, data)
+    responses = iter([b"{}", b'{"pages":[],"revision_applied":true}'])
+
+    def render(content: bytes, path: str, renderer_url: str, media_type: str) -> bytes:
+        return next(responses)
+
+    monkeypatch.setattr(original_preview, "_request_renderer", render)
+    with pytest.raises(original_preview.OriginalPreviewError, match="无效"):
+        original_preview.build_review_preview(document, storage, "http://renderer", "")
+    assert original_preview.build_review_preview(
+        document, storage, "http://renderer", "",
+    ).revision_applied
+    assert original_preview.build_review_preview(
+        document, storage, "http://renderer", "",
+    ).revision_applied

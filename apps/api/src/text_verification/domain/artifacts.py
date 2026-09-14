@@ -19,6 +19,10 @@ class ArtifactFinalizationRejection(StrEnum):
     STALE_REVISION = "stale_revision"
 
 
+class ArtifactReservationChangedError(ValueError):
+    pass
+
+
 @dataclass(frozen=True)
 class ArtifactReservation:
     export_artifact_id: UUID

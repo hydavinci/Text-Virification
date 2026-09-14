@@ -13,6 +13,7 @@ from text_verification.domain.artifacts import (
     ArtifactFinalizationRejection,
     ArtifactLifecycleStatus,
     ArtifactReservation,
+    ArtifactReservationChangedError,
     ArtifactSnapshot,
 )
 from text_verification.domain.documents import FileType
@@ -29,6 +30,10 @@ class ArtifactReconciliationRequiredError(RuntimeError):
     def __init__(self, export_artifact_id: UUID, message: str) -> None:
         self.export_artifact_id = export_artifact_id
         super().__init__(message)
+
+
+class _ArtifactPublicationSupersededError(ArtifactReconciliationRequiredError):
+    pass
 
 
 class ArtifactFinalizationRejectedError(RuntimeError):
@@ -207,6 +212,7 @@ class ArtifactPersistenceService:
     ) -> ArtifactPersistenceResult:
         size_bytes = len(request.data)
         content_sha256 = hashlib.sha256(request.data).hexdigest()
+        prepared_reservation = reservation is not None
         if reservation is None:
             reservation = self._reserve(
                 request,
@@ -221,26 +227,40 @@ class ArtifactPersistenceService:
         ):
             raise ValueError("Prepared artifact reservation does not match the request.")
 
-        with self._publish_reserved(request, reservation) as handle:
-            if (
-                handle.size_bytes != reservation.size_bytes
-                or handle.content_sha256 != reservation.content_sha256
-            ):
-                raise ArtifactReconciliationRequiredError(
-                    request.export_artifact_id,
-                    "Published artifact does not match its pending reservation.",
+        created = False
+        for attempt in range(3):
+            try:
+                with self._publish_reserved(request, reservation) as handle:
+                    created = created or handle.created
+                    if (
+                        handle.size_bytes != reservation.size_bytes
+                        or handle.content_sha256 != reservation.content_sha256
+                    ):
+                        raise ArtifactReconciliationRequiredError(
+                            request.export_artifact_id,
+                            "Published artifact does not match its pending reservation.",
+                        )
+                    snapshot = self._finalize(reservation, handle)
+                    return ArtifactPersistenceResult(
+                        export_artifact_id=snapshot.export_artifact_id,
+                        job_id=snapshot.job_id,
+                        storage_key=snapshot.storage_key,
+                        path=handle.path,
+                        file_type=snapshot.file_type,
+                        size_bytes=snapshot.size_bytes,
+                        content_sha256=reservation.content_sha256,
+                        created=created,
+                    )
+            except (_ArtifactPublicationSupersededError, ArtifactReservationChangedError):
+                if prepared_reservation or attempt == 2:
+                    raise
+                reservation = self._reserve(
+                    request,
+                    size_bytes=size_bytes,
+                    content_sha256=content_sha256,
                 )
-            snapshot = self._finalize(reservation, handle)
-            return ArtifactPersistenceResult(
-                export_artifact_id=snapshot.export_artifact_id,
-                job_id=snapshot.job_id,
-                storage_key=snapshot.storage_key,
-                path=handle.path,
-                file_type=snapshot.file_type,
-                size_bytes=snapshot.size_bytes,
-                content_sha256=reservation.content_sha256,
-                created=handle.created,
-            )
+
+        raise AssertionError("Artifact publication retries must return or raise.")
 
     def _publish_reserved(
         self,
@@ -261,7 +281,7 @@ class ArtifactPersistenceService:
                     ),
                 )
                 if handle is None:
-                    raise ArtifactReconciliationRequiredError(
+                    raise _ArtifactPublicationSupersededError(
                         request.export_artifact_id,
                         "Artifact reservation changed before publication.",
                     )

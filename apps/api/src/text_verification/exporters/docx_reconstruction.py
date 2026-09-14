@@ -344,6 +344,8 @@ def _extract_source_image_regions(
     source_image = _validated_image(source, limits)
     try:
         pixmap: Any = _PYMUPDF.Pixmap(source)
+        if pixmap.colorspace is not None and pixmap.colorspace.n not in (1, 3):
+            pixmap = _PYMUPDF.Pixmap(_PYMUPDF.csRGB, pixmap)
     except (RuntimeError, ValueError) as error:
         raise ExportError("Resolved image source is invalid.") from error
     images: dict[str, _Image] = {}

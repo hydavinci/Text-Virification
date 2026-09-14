@@ -1,9 +1,31 @@
-import { mount } from '@vue/test-utils'
+ import { mount } from '@vue/test-utils'
 import { describe, expect, it, vi } from 'vitest'
 
 import SourceInputPanel from '../src/components/workspace/SourceInputPanel.vue'
 
 describe('SourceInputPanel', () => {
+  it('replaces the large dropzone with accessible compact file actions', async () => {
+    const wrapper = mount(SourceInputPanel)
+    const file = new File(['synthetic'], 'compact.txt', { type: 'text/plain' })
+    const input = wrapper.get('input[type="file"]')
+    Object.defineProperty(input.element, 'files', { value: [file] })
+    await input.trigger('change')
+    expect(wrapper.find('[data-dropzone]').exists()).toBe(false)
+    expect(wrapper.get('[data-selected-file]').text()).toContain('compact.txt')
+    expect(wrapper.get('[data-change-file]').attributes('aria-label')).toBe('更换文件')
+    await wrapper.get('[data-remove-file]').trigger('click')
+    expect(wrapper.find('[data-dropzone]').exists()).toBe(true)
+  })
+  it('shows recovered file metadata and retries without needing file bytes', async () => {
+    const wrapper = mount(SourceInputPanel, {
+      props: { recoveredFile: { name: 'restored.pdf', size: 1024 }, recoverable: true }
+    })
+    expect(wrapper.find('[data-dropzone]').exists()).toBe(false)
+    expect(wrapper.get('[data-selected-file]').text()).toContain('restored.pdf')
+    await wrapper.get('[data-submit-source]').trigger('click')
+    expect(wrapper.emitted('resume-job')).toHaveLength(1)
+    expect(wrapper.emitted('submit-file')).toBeUndefined()
+  })
   it.each(['scan.png', 'scan.jpg', 'scan.JPEG'])(
     'submits image %s through the normal upload workflow',
     async (name) => {
@@ -91,6 +113,7 @@ describe('SourceInputPanel', () => {
         dataTransfer: { files: [file] }
       })
       await wrapper.get('[data-submit-source]').trigger('click')
+      await wrapper.get('[data-remove-file]').trigger('click')
     }
 
     expect(wrapper.emitted('submit-file')?.map(([file]) => file)).toEqual(files)
@@ -182,6 +205,8 @@ describe('SourceInputPanel', () => {
       dataTransfer: { files: [new File(['document'], 'review.txt')] }
     })
     await wrapper.setProps({ busy: true })
+    expect(wrapper.get('[data-selected-file]').text()).toContain('正在检查')
+    expect(wrapper.get('[data-selected-file]').text()).not.toContain('等待开始检查')
     for (const selector of ['[data-mode="text"]', '[data-remove-file]', '[data-submit-source]']) {
       expect(wrapper.get<HTMLButtonElement>(selector).element.disabled).toBe(true)
     }

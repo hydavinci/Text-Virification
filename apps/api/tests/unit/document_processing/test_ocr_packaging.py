@@ -49,10 +49,13 @@ def test_ocr_extra_declares_required_cpu_runtime_dependencies() -> None:
 def test_runtime_image_installs_ocr_extra_and_cv2_runtime_library() -> None:
     dockerfile = (BACKEND_ROOT / "Dockerfile").read_text(encoding="utf-8")
 
-    assert '"text-verification[dev,ocr]"' in dockerfile
-    assert '".[dev,ocr]"' in dockerfile
+    assert "uv sync --locked --no-dev --extra ocr --no-editable" in dockerfile
+    assert "uv sync --locked --no-dev --extra dev --extra ocr --no-editable" in dockerfile
     assert "libgl1" in dockerfile
-    assert dockerfile.count("[dev,ocr]") == 2
+    development, runtime = dockerfile.split("FROM base AS runtime")
+    assert "COPY --chown=app:app tests ./tests" in development
+    assert "COPY --from=builder /opt/venv /opt/venv" in runtime
+    assert "COPY tests" not in runtime
 
 
 def test_missing_ocr_runtime_distribution_helper_reports_absent_distributions(

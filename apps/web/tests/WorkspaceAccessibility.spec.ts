@@ -14,6 +14,25 @@ afterEach(() => {
 })
 
 describe('workspace accessibility surfaces', () => {
+  it.each(['light', 'dark'] as const)(
+    'keeps the illustrated brand decorative and clickable in the %s theme',
+    async (theme) => {
+      const wrapper = mount(WorkspaceHeader, {
+        props: { theme, hasResult: false }
+      })
+      const brand = wrapper.get('[data-reset-workspace]')
+      const mark = brand.get('.brand-mark')
+
+      expect(mark.element.tagName.toLowerCase()).toBe('svg')
+      expect(mark.attributes('aria-hidden')).toBe('true')
+      expect(mark.attributes('focusable')).toBe('false')
+      expect(brand.get('strong').text()).toBe('啄木鸟')
+      await brand.trigger('click')
+      expect(wrapper.emitted('reset')).toHaveLength(1)
+      wrapper.unmount()
+    }
+  )
+
   it('excludes controls disabled by a fieldset from the dialog focus loop', async () => {
     const wrapper = mount(AccessibleDialog, {
       attachTo: document.body,

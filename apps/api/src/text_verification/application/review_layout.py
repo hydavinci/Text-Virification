@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+import re
+from bisect import bisect_left
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -24,6 +26,7 @@ from text_verification.domain.review_layout import (
 
 OfficeConverter = Callable[[bytes, str, str], bytes]
 MAX_MAPPING_WORK = 5_000_000
+_HORIZONTAL_WHITESPACE = re.compile(r"[^\S\r\n\v\f\x1c-\x1e\x85\u2028\u2029]+")
 
 
 @dataclass(frozen=True)
@@ -34,6 +37,7 @@ class _Glyph:
     y: float
     width: float
     height: float
+    line: int = 0
 
 
 def _normalized(text: str) -> tuple[str, list[int]]:
@@ -47,11 +51,168 @@ def _normalized(text: str) -> tuple[str, list[int]]:
     return "".join(characters), offsets
 
 
+def _same_line(first: _Glyph, second: _Glyph) -> bool:
+    return (first.page, first.line) == (second.page, second.line)
+
+
+def _in_anchor_gap(glyph: _Glyph, left: _Glyph, right: _Glyph) -> bool:
+    if glyph.page != left.page or glyph.page != right.page:
+        return False
+    horizontal = abs(left.x + left.width / 2 - right.x - right.width / 2) >= abs(
+        left.y + left.height / 2 - right.y - right.height / 2,
+    )
+    # Swap axes for rotated pages so the measured gap follows the text direction.
+    (start, cross, size, cross_size), first, last = [
+        (item.x, item.y, item.width, item.height) if horizontal
+        else (item.y, item.x, item.height, item.width)
+        for item in (glyph, left, right)
+    ]
+    first, last = sorted((first, last))
+    first_center, last_center = first[1] + first[3] / 2, last[1] + last[3] / 2
+    tolerance = max(first[3], last[3]) * 0.3
+    return (
+        first[0] + first[2] - 0.1 <= start
+        and start + size <= last[0] + 0.1
+        and abs(first_center - last_center) <= tolerance
+        and abs(cross + cross_size / 2 - (first_center + last_center) / 2) <= tolerance
+    )
+
+
+def _whitespace_in_gap(
+    left: _Glyph,
+    right: _Glyph,
+    glyphs: list[_Glyph],
+    by_page: dict[int, list[tuple[float, int]]],
+    budget: int,
+) -> tuple[list[_Glyph], int]:
+    height = max(left.height, right.height)
+    center = (left.y + left.height / 2 + right.y + right.height / 2) / 2
+    gap_start, gap_end = left.x + left.width, right.x
+    if (
+        left.page != right.page or gap_end <= gap_start
+        or abs(left.y + left.height / 2 - right.y - right.height / 2) > height * 0.3
+    ):
+        return [], 0
+    entries = by_page.get(left.page, [])
+    first = bisect_left(entries, (center - height, -1))
+    last = bisect_left(entries, (center + height, -1))
+    candidates: list[_Glyph] = []
+    checks = 0
+    for position in range(first, last):
+        checks += 1
+        if checks > budget:
+            return [], checks
+        glyph = glyphs[entries[position][1]]
+        if (
+            abs(glyph.y + glyph.height / 2 - center) > height * 0.3
+            or glyph.x + glyph.width <= gap_start + 0.1
+            or glyph.x >= gap_end - 0.1
+        ):
+            continue
+        if not glyph.text.isspace() or not _in_anchor_gap(glyph, left, right):
+            return [], checks
+        candidates.append(glyph)
+    return sorted(candidates, key=lambda glyph: glyph.x), checks
+
+
+def _map_whitespace(
+    text: str,
+    glyphs: list[_Glyph],
+    pages: list[LayoutPage],
+    anchors: dict[int, tuple[int, int]],
+) -> None:
+    if not _HORIZONTAL_WHITESPACE.search(text):
+        return
+    trusted: dict[int, tuple[int, int]] = {}
+    for token in re.finditer(r"\S+", text):
+        token_first = anchors.get(token.start())
+        token_last = anchors.get(token.end() - 1)
+        if token_first is None or token_last is None:
+            continue
+        rendered = "".join(glyph.text for glyph in glyphs[token_first[0]:token_last[1] + 1])
+        if _normalized(token.group())[0] != _normalized(rendered)[0]:
+            continue
+        trusted[token.start()] = token_first
+        trusted[token.end() - 1] = token_last
+    by_page: dict[int, list[tuple[float, int]]] = {}
+    for index, glyph in enumerate(glyphs):
+        by_page.setdefault(glyph.page, []).append((glyph.y, index))
+    for entries in by_page.values():
+        entries.sort()
+    candidate_checks = 0
+    for match in _HORIZONTAL_WHITESPACE.finditer(text):
+        start, end = match.span()
+        left = trusted.get(start - 1)
+        right = trusted.get(end)
+        if left is not None and right is not None:
+            first, last = left[1] + 1, right[0]
+        elif left is not None and (end == len(text) or text[end].isspace()):
+            anchor = glyphs[left[1]]
+            first = last = left[1] + 1
+            while (
+                last < len(glyphs)
+                and _same_line(anchor, glyphs[last])
+                and glyphs[last].text.isspace()
+            ):
+                last += 1
+            if last < len(glyphs) and _same_line(anchor, glyphs[last]):
+                continue
+        elif right is not None and (start == 0 or text[start - 1].isspace()):
+            anchor = glyphs[right[0]]
+            first = last = right[0]
+            while (
+                first > 0
+                and _same_line(anchor, glyphs[first - 1])
+                and glyphs[first - 1].text.isspace()
+            ):
+                first -= 1
+            if first > 0 and _same_line(anchor, glyphs[first - 1]):
+                continue
+        else:
+            continue
+        candidates = glyphs[first:last] if first < last else []
+        if left is not None and right is not None and (
+            not candidates or any(
+                not glyph.text.isspace()
+                or not _in_anchor_gap(glyph, glyphs[left[1]], glyphs[right[0]])
+                for glyph in candidates
+            )
+        ):
+            candidates, checks = _whitespace_in_gap(
+                glyphs[left[1]], glyphs[right[0]], glyphs, by_page,
+                MAX_MAPPING_WORK - candidate_checks,
+            )
+            candidate_checks += checks
+            if candidate_checks > MAX_MAPPING_WORK:
+                return
+        if not candidates or any(not glyph.text.isspace() for glyph in candidates):
+            continue
+        exact = normalize("NFKC", match.group()) == normalize(
+            "NFKC", "".join(glyph.text for glyph in candidates),
+        )
+        if not exact and any(not _same_line(candidates[0], glyph) for glyph in candidates):
+            continue
+        for offset, glyph in enumerate(candidates):
+            # Office may collapse a whitespace run; keep its measured region
+            # rather than inventing separate character positions inside it.
+            pages[glyph.page].glyphs.append(LayoutGlyph(
+                start=start + offset if exact else start,
+                end=start + offset + 1 if exact else end,
+                x=glyph.x, y=glyph.y, width=glyph.width, height=glyph.height,
+            ))
+
+
 def _map_glyphs(text: str, glyphs: list[_Glyph], pages: list[LayoutPage]) -> bool:
     source, source_offsets = _normalized(text)
     rendered, rendered_offsets = _normalized("".join(glyph.text for glyph in glyphs))
     if not source:
         return True
+    paragraphs = text.splitlines(keepends=True)
+    identities = [_normalized(paragraph)[0] for paragraph in paragraphs]
+    occurrences = Counter(identity for identity in identities if identity)
+    if len(rendered) * len(occurrences) > MAX_MAPPING_WORK:
+        return False
+    rendered_counts = {identity: rendered.count(identity) for identity in occurrences}
     exact = rendered.find(source)
     if exact >= 0:
         if rendered.find(source, exact + 1) >= 0:
@@ -62,26 +223,37 @@ def _map_glyphs(text: str, glyphs: list[_Glyph], pages: list[LayoutPage]) -> boo
         work = sum(
             count * source_counts[character] for character, count in Counter(rendered).items()
         )
-        if work > MAX_MAPPING_WORK:
-            return False
-        matcher = SequenceMatcher(None, source, rendered, autojunk=False)
-        matches = [
-            (match.a, match.b, match.size)
-            for match in matcher.get_matching_blocks()
-            if match.size >= 8
-        ]
+        matches = []
+        if work <= MAX_MAPPING_WORK:
+            matcher = SequenceMatcher(None, source, rendered, autojunk=False)
+            matches = [
+                (match.a, match.b, match.size)
+                for match in matcher.get_matching_blocks()
+                if match.size >= 8
+            ]
         if sum(size for _, _, size in matches) < 0.8 * len(source):
-            return False
-    paragraphs = text.splitlines(keepends=True)
-    identities = [_normalized(paragraph)[0] for paragraph in paragraphs]
-    occurrences = Counter(identity for identity in identities if identity)
-    if len(rendered) * len(occurrences) > MAX_MAPPING_WORK:
-        return False
+            matches = []
+        paragraph_matches = []
+        unique_in_source = set()
+        if len(source) * len(occurrences) <= MAX_MAPPING_WORK:
+            unique_in_source = {
+                identity for identity in occurrences
+                if len(identity) >= 8 and rendered_counts[identity] == 1
+                and source.count(identity) == 1
+            }
+        normalized_start = 0
+        for identity in identities:
+            if identity in unique_in_source:
+                paragraph_matches.append((normalized_start, rendered.find(identity), len(identity)))
+            normalized_start += len(identity)
+        # Tables may be extracted after paragraphs but rendered in document order.
+        # Prefer unique whole paragraphs, with longer matches owning overlaps.
+        matches = sorted(paragraph_matches, key=lambda match: (-match[2], match[0])) + matches
     # A heading may also occur inside a body paragraph; only additional rendered
     # occurrences can indicate headers completing an otherwise unique body match.
     ambiguous = {
         identity for identity, count in occurrences.items()
-        if (rendered_count := rendered.count(identity)) > count
+        if (rendered_count := rendered_counts[identity]) > count
         and rendered_count > source.count(identity)
     }
     excluded: set[int] = set()
@@ -90,18 +262,35 @@ def _map_glyphs(text: str, glyphs: list[_Glyph], pages: list[LayoutPage]) -> boo
         if identity in ambiguous:
             excluded.update(range(cursor, cursor + len(paragraph)))
         cursor += len(paragraph)
-    mapped: set[int] = set()
+    mapped: dict[int, tuple[int, int]] = {}
+    assigned_source = bytearray(len(source))
+    assigned_rendered = bytearray(len(rendered))
     for source_start, rendered_start, size in matches:
         for offset in range(size):
-            start = source_offsets[source_start + offset]
-            if start in mapped or start in excluded:
+            source_position = source_start + offset
+            rendered_position = rendered_start + offset
+            start = source_offsets[source_position]
+            if (
+                start in excluded
+                or assigned_source[source_position] or assigned_rendered[rendered_position]
+            ):
                 continue
-            glyph = glyphs[rendered_offsets[rendered_start + offset]]
+            assigned_source[source_position] = assigned_rendered[rendered_position] = 1
+            rendered_index = rendered_offsets[rendered_position]
+            if start in mapped:
+                mapped[start] = (
+                    min(mapped[start][0], rendered_index), max(mapped[start][1], rendered_index),
+                )
+                continue
+            glyph = glyphs[rendered_index]
             pages[glyph.page].glyphs.append(LayoutGlyph(
                 start=start, end=start + 1, x=glyph.x, y=glyph.y,
                 width=glyph.width, height=glyph.height,
             ))
-            mapped.add(start)
+            mapped[start] = (rendered_index, rendered_index)
+    _map_whitespace(text, glyphs, pages, mapped)
+    for page in pages:
+        page.glyphs.sort(key=lambda glyph: (glyph.start, glyph.end))
     return len(mapped) == len(set(source_offsets))
 
 
@@ -128,22 +317,37 @@ def _render_pages(content: bytes, file_type: str, text: str, applied: bool) -> R
                 raw = page.get_text(
                     "rawdict", flags=fitz.TEXTFLAGS_RAWDICT & ~fitz.TEXT_PRESERVE_IMAGES,
                 )
+                line_index = 0
                 for block in raw["blocks"]:
                     for line in block.get("lines", []):
                         for span in line["spans"]:
+                            previous_box = None
                             for character in span["chars"]:
-                                box = fitz.Rect(character["bbox"]) * page.rotation_matrix
-                                box &= rectangle
                                 value = character["c"]
+                                raw_box = fitz.Rect(character["bbox"])
+                                if (
+                                    raw_box.width == 0 and raw_box.height > 0
+                                    and not value.isspace() and previous_box is not None
+                                    and abs(raw_box.x0 - previous_box.x1) < 0.01
+                                    and abs(raw_box.y0 - previous_box.y0) < 0.01
+                                    and abs(raw_box.y1 - previous_box.y1) < 0.01
+                                ):
+                                    # A zero-advance ligature continuation shares
+                                    # the preceding character's measured outline.
+                                    raw_box = fitz.Rect(previous_box)
+                                previous_box = fitz.Rect(raw_box) if not raw_box.is_empty else None
+                                box = raw_box * page.rotation_matrix
+                                box &= rectangle
                                 page_text.append(value)
                                 if box.is_empty:
                                     continue
                                 for codepoint in value:
                                     glyphs.append(_Glyph(
                                         codepoint, page_index, box.x0, box.y0,
-                                        box.width, box.height,
+                                        box.width, box.height, line_index,
                                     ))
                         page_text.append("\n")
+                        line_index += 1
                 if len(glyphs) > 2 * MAX_LAYOUT_TEXT:
                     raise OriginalPreviewError("文档文字量超过版式定位上限。", 413)
                 pages.append(LayoutPage(

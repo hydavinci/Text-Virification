@@ -8,10 +8,12 @@ import pytest
 from docx import Document
 
 from text_verification.document_processing.errors import (
+    OcrLayoutError,
+    OcrOutputError,
     OcrProcessingError,
     OcrUnavailableError,
 )
-from text_verification.document_processing.ocr_provider import OcrTextBox
+from text_verification.document_processing.ocr_provider import OcrTextBox, SupportedOcrLanguage
 from text_verification.domain.documents import FileType
 from text_verification.domain.ports import VerificationProgressStage
 from text_verification.exporters.docx_reconstruction import DocxReconstructionExporter
@@ -186,3 +188,101 @@ def test_image_parser_rejects_spoofed_corrupt_and_oversized_images(tmp_path: Pat
     for source in (spoofed, corrupt, oversized):
         with pytest.raises(ParserError):
             parser.parse(source)
+
+
+@pytest.mark.parametrize(
+    ("language", "words", "second_y", "expected"),
+    [
+        ("zh", ("测", "试"), 35, "测试"),
+        ("zh", ("测", "试"), 34, "测试"),
+        ("ja", ("日", "本"), 34, "日本"),
+        ("en", ("hello", "world"), 34, "hello world"),
+    ],
+)
+def test_grid_cell_clusters_rows_before_language_aware_join(
+    tmp_path: Path, language: SupportedOcrLanguage, words: tuple[str, str],
+    second_y: int, expected: str,
+) -> None:
+    with pymupdf.open() as pdf:
+        page = pdf.new_page(width=200, height=160)
+        for x in (20, 90, 160):
+            page.draw_line((x, 20), (x, 120), width=1)
+        for y in (20, 70, 120):
+            page.draw_line((20, y), (160, y), width=1)
+        source = tmp_path / "grid.png"
+        page.get_pixmap().save(source)
+    document = ImageParser(
+        file_type=FileType.PNG,
+        ocr=FakeOcr([
+            _box(words[0], (30, 35, 48, 48)),
+            _box(words[1], (50, second_y, 78, second_y + 13)),
+            _box("X", (100, 85, 130, 98)),
+        ]),
+        ocr_language=language,
+    ).parse(source)
+    assert document.blocks[0].text == expected
+    assert [box["text"] for box in document.blocks[0].source_locator["boxes"]] == list(words)
+    assert all(document.text[b.global_start:b.global_end] == b.text for b in document.blocks)
+    rebuilt = Document(DocxReconstructionExporter().export(document, tmp_path / "grid.docx"))
+    assert [[cell.text for cell in row.cells] for row in rebuilt.tables[0].rows] == [
+        [expected, ""], ["", "X"],
+    ]
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("shift", [0.0, 0.1])
+def test_image_ocr_discards_zero_confidence_and_coalesces_duplicates(
+    tmp_path: Path, reverse: bool, shift: float,
+) -> None:
+    source = _image(tmp_path / "scan.png", FileType.PNG)
+    boxes = [
+        _box("Wrong", (10, 10, 80, 25), confidence=0.5),
+        _box("Correct", (10 + shift, 10, 80 + shift, 25), confidence=0.99),
+        _box("Invisible", (10, 50, 80, 65), confidence=0.0),
+    ]
+    document = ImageParser(
+        file_type=FileType.PNG, ocr=FakeOcr(list(reversed(boxes)) if reverse else boxes),
+    ).parse(source)
+    assert document.text == "Correct"
+    assert len(document.blocks[0].source_locator["boxes"]) == 1
+    assert document.text[document.blocks[0].global_start:document.blocks[0].global_end] == "Correct"
+
+
+@pytest.mark.parametrize(
+    "box",
+    [
+        _box("Outside", (-1, 10, 80, 25)),
+        _box("Outside", (10, 10, 201, 25)),
+        OcrTextBox.model_construct(
+            text="Invalid", confidence=float("nan"),
+            bbox=((10, 10), (80, 10), (80, 25), (10, 25)),
+        ),
+    ],
+)
+def test_image_parser_rejects_invalid_provider_boxes(tmp_path: Path, box: OcrTextBox) -> None:
+    source = _image(tmp_path / "scan.png", FileType.PNG)
+    with pytest.raises(OcrOutputError):
+        ImageParser(file_type=FileType.PNG, ocr=FakeOcr([box])).parse(source)
+
+
+def test_image_parser_bounds_provider_text_characters(tmp_path: Path) -> None:
+    source = _image(tmp_path / "scan.png", FileType.PNG)
+    with pytest.raises(OcrLayoutError, match="max_ocr_text_chars"):
+        ImageParser(
+            file_type=FileType.PNG,
+            ocr=FakeOcr([_box("too much text", (10, 10, 80, 25))]),
+            limits=ImageResourceLimits(max_ocr_text_characters=5),
+        ).parse(source)
+
+
+def test_image_parser_bounds_duplicate_candidate_inspections(tmp_path: Path) -> None:
+    source = _image(tmp_path / "scan.png", FileType.PNG)
+    with pytest.raises(OcrLayoutError, match="max_ocr_duplicate_candidate_inspections"):
+        ImageParser(
+            file_type=FileType.PNG,
+            ocr=FakeOcr([
+                _box("a", (10, 10, 80, 25)),
+                _box("a", (10.1, 10, 80.1, 25)),
+            ]),
+            limits=ImageResourceLimits(max_ocr_candidate_checks=0),
+        ).parse(source)

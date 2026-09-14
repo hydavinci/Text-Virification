@@ -21,12 +21,13 @@ import { createVerificationResultSnapshot } from '../composables/useVerification
 const API_BASE = '/api/v1'
 
 export interface VerificationApi {
-  analyzeFile(file: File, options: AnalyzeOptions): Promise<VerificationResult>
-  analyzeText(text: string, options: AnalyzeOptions): Promise<VerificationResult>
+  analyzeFile(file: File, options: AnalyzeOptions, signal?: AbortSignal): Promise<VerificationResult>
+  analyzeText(text: string, options: AnalyzeOptions, signal?: AbortSignal): Promise<VerificationResult>
   recheckJob(
     jobId: string,
     text: string,
-    options: AnalyzeOptions
+    options: AnalyzeOptions,
+    signal?: AbortSignal
   ): Promise<{ result: VerificationResult; grant: string }>
   exportReport(result: VerificationResult): Promise<void>
   exportOriginal(
@@ -53,7 +54,7 @@ export interface VerificationApi {
 export const verificationApiKey: InjectionKey<VerificationApi> = Symbol('verificationApi')
 
 export function createVerificationApi(fetchImpl: typeof fetch = fetch): VerificationApi {
-  async function analyze(source: { file?: File; text?: string }, options: AnalyzeOptions) {
+  async function analyze(source: { file?: File; text?: string }, options: AnalyzeOptions, signal?: AbortSignal) {
     const body = new FormData()
     const snapshot = createAnalyzeOptionsSnapshot(options)
     if (source.file) {
@@ -64,7 +65,7 @@ export function createVerificationApi(fetchImpl: typeof fetch = fetch): Verifica
     }
     appendAnalyzeOptions(body, snapshot)
 
-    const response = await fetchImpl(`${API_BASE}/analyze`, { method: 'POST', body })
+    const response = await fetchImpl(`${API_BASE}/analyze`, { method: 'POST', body, ...(signal ? { signal } : {}) })
     if (!response.ok) {
       throw await readApiRequestError(response)
     }
@@ -78,16 +79,16 @@ export function createVerificationApi(fetchImpl: typeof fetch = fetch): Verifica
   }
 
   return {
-    analyzeFile: (file, options) => analyze({ file }, options),
-    analyzeText: (text, options) => analyze({ text }, options),
-    recheckJob: async (jobId, text, options) => {
+    analyzeFile: (file, options, signal) => analyze({ file }, options, signal),
+    analyzeText: (text, options, signal) => analyze({ text }, options, signal),
+    recheckJob: async (jobId, text, options, signal) => {
       // Multipart string fields normalize newlines and break exact-text provenance.
       const body = new URLSearchParams()
       body.append('text', text)
       appendAnalyzeOptions(body, createAnalyzeOptionsSnapshot(options))
       const response = await fetchImpl(
         `${API_BASE}/jobs/${jobId}/recheck`,
-        { method: 'POST', body }
+        { method: 'POST', body, ...(signal ? { signal } : {}) }
       )
       if (!response.ok) {
         throw await readApiRequestError(response)

@@ -437,7 +437,7 @@ class ReviewRevisionRow(Base):
     kind: Mapped[str] = mapped_column(String(16))
     text: Mapped[str] = mapped_column(Text)
     verified_provenance: Mapped[dict[str, object] | None] = mapped_column(
-        JSONB,
+        JSONB(none_as_null=True),
         nullable=True,
     )
     provenance_state: Mapped[str] = mapped_column(String(32), nullable=False)

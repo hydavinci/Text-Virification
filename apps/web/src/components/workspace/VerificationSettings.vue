@@ -1,25 +1,14 @@
 <script setup lang="ts">
 import { ref } from 'vue'
+import { copyAnalyzeOptions, DEFAULT_OCR_LANGUAGE, DEFAULT_EXTENDED_RULES, OCR_LANGUAGES, SCENARIO_OPTIONS } from '../../api/analyzeOptions'
 
 import {
   TerminologyImportError,
   validateVerificationOptionsSize
 } from '../../composables/useTerminology'
-import type { AnalyzeOptions, Scenario } from '../../types/verification'
+import type { AnalyzeOptions } from '../../types/verification'
 
-interface ScenarioOption {
-  id: Scenario
-  name: string
-}
-
-const scenarios: ScenarioOption[] = [
-  { id: 'general', name: '通用文档' },
-  { id: 'academic', name: '学术论文' },
-  { id: 'business', name: '商务文档' },
-  { id: 'legal', name: '法律文书' },
-  { id: 'news', name: '新闻稿' },
-  { id: 'technical', name: '技术文档' }
-]
+const scenarios = SCENARIO_OPTIONS
 
 const props = defineProps<{
   options: AnalyzeOptions
@@ -32,12 +21,7 @@ const emit = defineEmits<{
 const errorMessage = ref<string | null>(null)
 
 function updateOptions(patch: Partial<AnalyzeOptions>): void {
-  const next = {
-    ...props.options,
-    ...patch,
-    glossary: props.options.glossary.map((term) => ({ ...term })),
-    bannedWords: [...props.options.bannedWords]
-  }
+  const next = copyAnalyzeOptions(props.options, patch)
 
   try {
     validateVerificationOptionsSize(next)
@@ -61,9 +45,8 @@ function selectScenario(event: Event): void {
 function selectOcrLanguage(event: Event): void {
   if (!(event.target instanceof HTMLSelectElement)) return
   const value = event.target.value
-  if (value === 'zh' || value === 'en' || value === 'ja') {
-    updateOptions({ ocrLanguage: value })
-  }
+  const language = OCR_LANGUAGES.find((language) => language === value)
+  if (language) updateOptions({ ocrLanguage: language })
 }
 </script>
 
@@ -84,7 +67,7 @@ function selectOcrLanguage(event: Event): void {
       <span>中英文间距、空行与长句建议</span>
       <input
         id="enable-extended-rules"
-        :checked="options.enableExtendedRules ?? false"
+        :checked="options.enableExtendedRules ?? DEFAULT_EXTENDED_RULES"
         type="checkbox"
         @change="updateOptions({
           enableExtendedRules: ($event.target as HTMLInputElement).checked
@@ -98,7 +81,7 @@ function selectOcrLanguage(event: Event): void {
       <select
         class="ui-field"
         aria-label="OCR 识别语言"
-        :value="options.ocrLanguage ?? 'zh'"
+        :value="options.ocrLanguage ?? DEFAULT_OCR_LANGUAGE"
         @change="selectOcrLanguage"
       >
         <option value="zh">中英文（默认）</option>

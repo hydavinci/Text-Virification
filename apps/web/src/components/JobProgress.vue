@@ -1,8 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
-
 import {
-  isTerminalJobStatus,
   type JobProgressStage,
   type JobStatus
 } from '../types/jobs'
@@ -17,42 +14,37 @@ interface JobProgressState {
   connectionMessage: string | null
 }
 
-const props = defineProps<{
-  state: JobProgressState
+defineProps<{
+  state: JobProgressState | null
 }>()
-
-const isTerminal = computed(() => isTerminalJobStatus(props.state.status))
 </script>
 
 <template>
-  <section>
-    <h2>Job progress</h2>
-    <dl>
-      <div>
-        <dt>Source</dt>
-        <dd>{{ state.sourceName }}</dd>
-      </div>
-      <div>
-        <dt>Status</dt>
-        <dd>{{ state.status }}</dd>
-      </div>
-      <div>
-        <dt>Stage</dt>
-        <dd data-job-stage>{{ state.stage }}</dd>
-      </div>
-      <div>
-        <dt>Progress</dt>
-        <dd>{{ state.progress }}%</dd>
-      </div>
-    </dl>
-    <progress aria-label="Job progress" :value="state.progress" max="100">{{ state.progress }}%</progress>
-    <p role="status" aria-live="polite">
-      Status: {{ state.status }} · {{ state.progress }}% · {{ state.message }}
-    </p>
-    <p v-if="isTerminal">Terminal state retained: {{ state.status }}</p>
-    <p v-if="state.failureMessage" role="alert">{{ state.failureMessage }}</p>
-    <p v-else-if="state.connectionMessage" role="status" aria-live="polite">
+  <div class="check-progress" data-check-progress>
+    <progress
+      aria-label="检查进度"
+      :aria-valuetext="state ? `${state.progress}% · ${state.message}` : '正在检查，请稍候'"
+      :value="state?.progress"
+      max="100"
+    >{{ state ? `${state.progress}%` : '正在检查' }}</progress>
+    <p v-if="state?.failureMessage" class="failure" role="alert">{{ state.failureMessage }}</p>
+    <p v-else-if="state?.connectionMessage" role="status" aria-live="polite">
       {{ state.connectionMessage }}
     </p>
-  </section>
+  </div>
 </template>
+
+<style scoped>
+.check-progress { margin-top: 14px; }
+progress {
+  display: block;
+  width: 100%;
+  height: 6px;
+  border: 0;
+  border-radius: 999px;
+  overflow: hidden;
+  accent-color: var(--primary);
+}
+p { margin: 8px 0 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.failure { color: var(--danger); }
+</style>

@@ -59,6 +59,13 @@ def test_compose_isolates_container_addresses_and_selects_build_images(
         assert urlsplit(settings["REDIS_URL"]).hostname == "redis", name
         assert settings["STORAGE_ROOT"] == "/var/lib/text-verification/jobs", name
         assert services[name]["build"]["args"]["PYTHON_IMAGE"] == images["PYTHON_IMAGE"]
+        assert services[name]["build"]["target"] == "runtime"
+        assert "TEST_DATABASE_URL" not in settings
+    assert services["renderer"]["build"]["target"] == "runtime"
+    assert "/api/v1/health" in services["api"]["healthcheck"]["test"][-1]
+    assert services["api"]["healthcheck"]["timeout"] == "5s"
+    assert services["api"]["depends_on"]["worker"]["condition"] == "service_started"
+    assert "api" not in services["worker"]["depends_on"]
     assert services["web"]["build"]["args"] == {
         "NODE_IMAGE": images["NODE_IMAGE"],
         "NGINX_IMAGE": images["NGINX_IMAGE"],

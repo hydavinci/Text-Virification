@@ -13,16 +13,22 @@ const props = withDefaults(defineProps<{
   busy?: boolean
   serverError?: string | null
   text?: string
+  recoveredFile?: { name: string; size: number } | null
+  recoverable?: boolean
 }>(), {
   busy: false,
   serverError: null,
-  text: ''
+  text: '',
+  recoveredFile: null,
+  recoverable: false
 })
 
 const emit = defineEmits<{
   'submit-text': [text: string]
   'submit-file': [file: File]
   'update:text': [text: string]
+  'resume-job': []
+  'clear-job': []
 }>()
 
 const mode = ref<'file' | 'text'>('file')
@@ -31,6 +37,7 @@ const validationError = ref<string | null>(null)
 const isDragging = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
 const selectedFile = ref<File | null>(null)
+const displayFile = computed(() => selectedFile.value ?? props.recoveredFile)
 
 const visibleError = computed(
   () => validationError.value ?? props.serverError ?? null
@@ -114,12 +121,15 @@ function selectFile(file: File): void {
     return
   }
   validationError.value = null
+  emit('clear-job')
   selectedFile.value = file
 }
 
 function submitSource(): void {
   if (props.busy) return
-  if (mode.value === 'text') {
+  if (mode.value === 'file' && props.recoverable && props.recoveredFile) {
+    emit('resume-job')
+  } else if (mode.value === 'text') {
     submitText()
   } else if (selectedFile.value) {
     emit('submit-file', selectedFile.value)
@@ -131,6 +141,7 @@ function submitSource(): void {
 function removeFile(): void {
   if (props.busy) return
   selectedFile.value = null
+  emit('clear-job')
   validationError.value = null
 }
 
@@ -174,7 +185,7 @@ function handleDropzoneKeydown(event: KeyboardEvent): void {
     </div>
 
     <div
-      v-if="mode === 'file'"
+      v-if="mode === 'file' && !displayFile"
       class="dropzone"
       :class="{ busy, dragging: isDragging }"
       data-dropzone
@@ -208,11 +219,14 @@ function handleDropzoneKeydown(event: KeyboardEvent): void {
       @change="handleFileChange"
     />
 
-    <div v-if="mode === 'file' && selectedFile" class="selected-file" data-selected-file>
+    <div v-if="mode === 'file' && displayFile" class="selected-file" data-selected-file>
       <div>
-        <strong>{{ selectedFile.name }}</strong>
-        <small>{{ (selectedFile.size / 1024).toFixed(1) }} KB · 等待开始检查</small>
+        <strong>{{ displayFile.name }}</strong>
+        <small>{{ (displayFile.size / 1024).toFixed(1) }} KB · {{ busy ? '正在检查' : recoverable ? '任务连接可恢复，无需重新上传' : '等待开始检查' }}</small>
       </div>
+      <button type="button" data-change-file aria-label="更换文件" :disabled="busy" @click="openFilePicker">
+        更换
+      </button>
       <button type="button" data-remove-file :disabled="busy" @click="removeFile">
         移除
       </button>
@@ -244,7 +258,7 @@ function handleDropzoneKeydown(event: KeyboardEvent): void {
         type="button"
         @click="submitSource"
       >
-        {{ busy ? '正在检查…' : '开始检查' }}
+        {{ busy ? '正在检查…' : mode === 'file' && recoverable && recoveredFile ? '重试连接' : '开始检查' }}
         <span v-if="!busy" aria-hidden="true">→</span>
       </button>
     </div>
@@ -304,7 +318,7 @@ function handleDropzoneKeydown(event: KeyboardEvent): void {
 .dropzone small { margin-top: 8px; font-size: 12px; line-height: 1.7; }
 .choose-file { color: var(--primary); font-size: 13px; }
 .selected-file { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; }
-.selected-file > div { min-width: 0; }
+.selected-file > div { min-width: 0; flex: 1; }
 .selected-file strong { display: block; overflow-wrap: anywhere; font-size: 13px; font-weight: 500; }
 .selected-file small { display: block; color: var(--muted); margin-top: 4px; font-size: 12px; }
 .selected-file button { flex: 0 0 auto; border: 0; padding: 8px; color: var(--muted); background: transparent; cursor: pointer; }

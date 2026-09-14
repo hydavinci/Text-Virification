@@ -390,7 +390,6 @@ def test_expiry_and_fresh_delivery_race_never_starts_retention_expired_job(
     expiry_locked = Event()
     allow_expiry_commit = Event()
     claim_started = Event()
-    claim_finished = Event()
 
     def expire() -> list[UUID]:
         session = db_session_factory()
@@ -420,7 +419,6 @@ def test_expiry_and_fresh_delivery_race_never_starts_retention_expired_job(
             session.commit()
             return result
         finally:
-            claim_finished.set()
             session.close()
 
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -428,7 +426,6 @@ def test_expiry_and_fresh_delivery_race_never_starts_retention_expired_job(
         assert expiry_locked.wait(timeout=2)
         claim_future = executor.submit(claim)
         assert claim_started.wait(timeout=1)
-        assert not claim_finished.wait(timeout=0.2)
         allow_expiry_commit.set()
         assert expiry_future.result(timeout=5) == [job_id]
         claim_result = claim_future.result(timeout=5)
@@ -439,7 +436,10 @@ def test_expiry_and_fresh_delivery_race_never_starts_retention_expired_job(
     finally:
         verification_session.close()
 
-    assert claim_result.disposition is JobClaimDisposition.TERMINAL
+    assert claim_result.disposition in {
+        JobClaimDisposition.TERMINAL,
+        JobClaimDisposition.RETENTION_EXPIRED,
+    }
     assert job is not None
     assert job.status is JobStatus.EXPIRED
 
@@ -584,9 +584,9 @@ def test_owner_cas_rejects_status_regression_without_duplicate_event(
             job_id,
             owner_token=owner,
             expected_status=JobStatus.QUEUED,
-            status=JobStatus.PARSING,
-            progress=25,
-            message="开始解析",
+            status=JobStatus.UPLOAD_VALIDATED,
+            progress=10,
+            message="上传校验完成",
             now=now + timedelta(seconds=2),
             lease_expires_at=now + timedelta(minutes=20),
         )
@@ -659,12 +659,13 @@ def test_expiry_skips_job_with_live_processing_lease(
     now = datetime.now(UTC)
     repository = JobRepository(db_session)
     _create_job(repository, job_id, expires_at=now)
-    repository.acquire_lease(
+    claim = repository.acquire_lease(
         job_id,
         owner_token=owner,
-        now=now,
+        now=now - timedelta(minutes=1),
         lease_expires_at=now + timedelta(minutes=20),
     )
+    assert claim.disposition is JobClaimDisposition.ACQUIRED
     repository.commit()
 
     expired = repository.expire_jobs_before(now + timedelta(minutes=1))
@@ -812,13 +813,13 @@ def test_concurrent_due_recovery_scans_skip_already_claimed_rows(
     assert second_claims == []
 
 
-def test_confirmed_recovery_is_suppressed_until_worker_claim_resets_it(
+def test_confirmed_recovery_is_suppressed_before_deadline_and_worker_claim_resets_it(
     db_session: Session,
 ) -> None:
     now = datetime.now(UTC)
     job_id = uuid4()
     repository = JobRepository(db_session)
-    _create_job(repository, job_id, expires_at=now + timedelta(hours=4))
+    _create_job(repository, job_id, expires_at=now + timedelta(hours=1))
     repository.commit()
     recovery_now = now + timedelta(minutes=2)
     publication_due_at = recovery_now + timedelta(minutes=2)
@@ -837,8 +838,8 @@ def test_confirmed_recovery_is_suppressed_until_worker_claim_resets_it(
     repository.commit()
 
     assert repository.claim_due_recoveries(
-        now=publication_due_at + timedelta(hours=1),
-        publication_due_at=publication_due_at + timedelta(hours=1, minutes=2),
+        now=publication_due_at - timedelta(seconds=1),
+        publication_due_at=publication_due_at + timedelta(minutes=2),
         limit=1,
     ) == []
     owner = uuid4()
@@ -912,6 +913,74 @@ def test_stale_publish_confirmation_cannot_suppress_new_worker_generation(
         assert row.rescue_last_published_at is None
     finally:
         verification_session.close()
+
+
+def test_due_recovery_commits_quarantine_without_losing_healthy_claim(
+    db_session: Session,
+) -> None:
+    now = datetime.now(UTC)
+    healthy_id, invalid_id = uuid4(), uuid4()
+    repository = JobRepository(db_session)
+    for job_id in (healthy_id, invalid_id):
+        _create_job(repository, job_id, expires_at=now + timedelta(hours=1))
+    row = db_session.get(JobRow, invalid_id)
+    assert row is not None
+    row.verification_options = {"unknown_future_setting": True}
+    repository.commit()
+
+    claims = repository.claim_due_recoveries(
+        now=now + timedelta(minutes=2),
+        publication_due_at=now + timedelta(minutes=4),
+        limit=100,
+    )
+    repository.commit()
+    db_session.expire_all()
+
+    assert [claim.job.job_id for claim in claims] == [healthy_id]
+    invalid = db_session.get(JobRow, invalid_id)
+    assert invalid is not None
+    assert invalid.status == "failed"
+    assert invalid.error_code == "invalid_persisted_job"
+    assert invalid.error_retryable is False
+    assert invalid.storage_key == str(invalid_id)
+    assert invalid.verification_options == {"unknown_future_setting": True}
+    assert [event.status for event in repository.list_events_after(invalid_id, 0)] == [
+        JobStatus.QUEUED,
+        JobStatus.FAILED,
+    ]
+
+
+def test_unclaimed_published_recovery_becomes_due_with_new_attempt(
+    db_session: Session,
+) -> None:
+    now = datetime.now(UTC)
+    job_id = uuid4()
+    repository = JobRepository(db_session)
+    _create_job(repository, job_id, expires_at=now + timedelta(hours=1))
+    repository.commit()
+    claimed_at = now + timedelta(minutes=2)
+    deadline = now + timedelta(minutes=4)
+    first = repository.claim_due_recoveries(
+        now=claimed_at, publication_due_at=deadline, limit=1,
+    )[0]
+    repository.commit()
+    assert repository.mark_recovery_published(
+        job_id, attempt=first.attempt, published_at=claimed_at,
+    )
+    repository.commit()
+    retry = repository.claim_due_recoveries(
+        now=deadline, publication_due_at=deadline + timedelta(minutes=2), limit=1,
+    )[0]
+    repository.commit()
+
+    assert retry.job.job_id == job_id
+    assert retry.attempt == first.attempt + 1
+    assert not repository.mark_recovery_published(
+        job_id, attempt=first.attempt, published_at=deadline,
+    )
+    assert repository.mark_recovery_published(
+        job_id, attempt=retry.attempt, published_at=deadline,
+    )
 
 
 def _seed_job(

@@ -23,8 +23,9 @@ import {
 import { createVerificationResultSnapshot } from '../composables/useVerificationWorkspace'
 
 export interface JobsApi {
-  createJob(file: File, options: AnalyzeOptions): Promise<JobRead>
-  getResult(jobId: string): Promise<VerificationResult>
+  createJob(file: File, options: AnalyzeOptions, signal?: AbortSignal): Promise<JobRead>
+  getJob(jobId: string, signal?: AbortSignal): Promise<JobRead>
+  getResult(jobId: string, signal?: AbortSignal): Promise<VerificationResult>
   subscribe(
     jobId: string,
     onEvent: (event: JobProgressEvent) => void,
@@ -71,7 +72,7 @@ export function createJobsApi(
   }
 
   return {
-    async createJob(file, options) {
+    async createJob(file, options, signal) {
       const body = new FormData()
       const snapshot = createAnalyzeOptionsSnapshot(options)
       body.append('file', file, file.name)
@@ -79,7 +80,8 @@ export function createJobsApi(
 
       const response = await dependencies.fetch(`${API_BASE}/jobs`, {
         method: 'POST',
-        body
+        body,
+        ...(signal ? { signal } : {})
       })
 
       if (!response.ok) {
@@ -95,9 +97,28 @@ export function createJobsApi(
       }
       return job
     },
-    async getResult(jobId) {
+    async getJob(jobId, signal) {
       const response = await dependencies.fetch(
-        `${API_BASE}/jobs/${encodeURIComponent(jobId)}/result`
+        `${API_BASE}/jobs/${encodeURIComponent(jobId)}`,
+        ...(signal ? [{ signal }] : [])
+      )
+      if (!response.ok) {
+        const error = await readApiRequestError(response)
+        if (response.status === 410 || response.status === 404) {
+          throw new JobResultExpiredError(error.status, error.code, error.message)
+        }
+        throw error
+      }
+      const job = parseJobRead(await response.json())
+      if (job === null || job.job_id !== jobId) {
+        throw new ApiResponseValidationError('Invalid job response.')
+      }
+      return job
+    },
+    async getResult(jobId, signal) {
+      const response = await dependencies.fetch(
+        `${API_BASE}/jobs/${encodeURIComponent(jobId)}/result`,
+        ...(signal ? [{ signal }] : [])
       )
       if (!response.ok) {
         const error = await readApiRequestError(

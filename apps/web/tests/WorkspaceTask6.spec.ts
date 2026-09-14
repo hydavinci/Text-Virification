@@ -156,6 +156,7 @@ const result: VerificationResult = {
 
 function jobsApi(): JobsApi {
   return {
+    getJob: vi.fn(),
     createJob: vi.fn(),
     getResult: vi.fn(),
     subscribe: vi.fn()
@@ -414,7 +415,8 @@ describe('WorkspaceView Task 6 integration', () => {
     )
     await flushPromises()
 
-    await wrapper.get('[data-action="accept-batch"]').trigger('click')
+    await wrapper.get('[data-issue-role="list"]').trigger('click')
+    await wrapper.get('.issue-actions .accept').trigger('click')
     await wrapper.get('[data-action="export-modified"]').trigger('click')
     await flushPromises()
 
@@ -502,7 +504,8 @@ describe('WorkspaceView Task 6 integration', () => {
     const wrapper = mountWorkspace(verificationApi())
     await flushPromises()
 
-    await wrapper.get('[data-action="accept-batch"]').trigger('click')
+    await wrapper.get('[data-issue-role="list"]').trigger('click')
+    await wrapper.get('.issue-actions .accept').trigger('click')
     await flushPromises()
 
     expect(wrapper.get('[data-session-warning]').attributes('role')).toBe(
@@ -753,7 +756,8 @@ describe('WorkspaceView Task 6 integration', () => {
 
     await wrapper.get('[data-action="recheck"]').trigger('click')
     await flushPromises()
-    await wrapper.get('[data-action="accept-batch"]').trigger('click')
+    await wrapper.get('[data-issue-role="list"]').trigger('click')
+    await wrapper.get('.issue-actions .accept').trigger('click')
     await wrapper.get('[data-action="export-modified"]').trigger('click')
     await flushPromises()
 
@@ -1065,7 +1069,8 @@ describe('WorkspaceView Task 6 integration', () => {
       verificationApi({ persistRevision, exportJob })
     )
     await flushPromises()
-    await wrapper.get('[data-action="accept-batch"]').trigger('click')
+    await wrapper.get('[data-issue-role="list"]').trigger('click')
+    await wrapper.get('.issue-actions .accept').trigger('click')
     await wrapper.get('[data-action="export-modified"]').trigger('click')
     await flushPromises()
 
@@ -1098,7 +1103,7 @@ describe('WorkspaceView Task 6 integration', () => {
     )
     await flushPromises()
     await wrapper.get('[data-issue-role="list"]').trigger('click')
-    await wrapper.get('[data-action="accept-batch"]').trigger('click')
+    await wrapper.get('.issue-actions .accept').trigger('click')
     await wrapper.get('[data-action="export-modified"]').trigger('click')
     await flushPromises()
 
@@ -1229,9 +1234,7 @@ describe('WorkspaceView Task 6 integration', () => {
     await wrapper.get<HTMLInputElement>('[data-track-changes]').setValue(false)
     await flushPromises()
 
-    const saved = JSON.parse(
-      window.sessionStorage.getItem('text-verification-session') ?? '{}'
-    )
+    const saved = useWorkspaceSession(window.sessionStorage, useVerificationWorkspace()).restore()!
     expect(saved.viewMode).toBe('sentence')
     expect(saved.ui).toMatchObject({
       resultTab: 'summary',

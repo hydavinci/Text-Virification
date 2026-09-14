@@ -166,6 +166,31 @@ class FakeEventSource {
 }
 
 describe('createJobsApi', () => {
+  it('looks up a known job with an abort signal and validates its identity', async () => {
+    const jobId = '11111111-1111-4111-8111-111111111111'
+    const job: JobRead = {
+      job_id: jobId, source_name: 'synthetic.txt', file_type: 'txt', size_bytes: 12,
+      status: 'queued', stage: 'queued', progress: 0,
+      error_code: null, error_message: null, error_stage: null, error_retryable: null,
+      created_at: '2026-09-14T00:00:00Z', expires_at: '2026-09-15T00:00:00Z'
+    }
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify(job)))
+    const api = createJobsApi({ fetch })
+    const controller = new AbortController()
+    const snapshot = await api.getJob(jobId, controller.signal)
+    expect(snapshot).toEqual(job)
+    expect(Object.isFrozen(snapshot)).toBe(true)
+    expect(fetch).toHaveBeenCalledWith(`/api/v1/jobs/${jobId}`, { signal: controller.signal })
+    fetch.mockResolvedValue(new Response(JSON.stringify({ ...job, job_id: '22222222-2222-4222-8222-222222222222' })))
+    await expect(api.getJob(jobId)).rejects.toThrow('Invalid job response')
+  })
+
+  it.each([404, 410])('treats an unavailable saved job (%s) as expired', async (status) => {
+    const api = createJobsApi({ fetch: vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ detail: '任务已过期' }), { status }
+    )) })
+    await expect(api.getJob('11111111-1111-4111-8111-111111111111')).rejects.toBeInstanceOf(JobResultExpiredError)
+  })
   it('binds the default browser fetch receiver for job submission', async () => {
     const originalFetch = globalThis.fetch
     const strictFetch = vi.fn(async function (this: unknown) {

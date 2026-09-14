@@ -7,7 +7,6 @@ from uuid import NAMESPACE_URL, uuid5
 
 from text_verification.compatibility.adapters import source_version_for_file
 from text_verification.document_processing.errors import (
-    OcrLayoutError,
     OcrProcessingError,
     OcrUnavailableError,
 )
@@ -21,12 +20,16 @@ from text_verification.document_processing.image_validation import (
     validate_image_file,
 )
 from text_verification.document_processing.layout import (
-    OcrLayoutBox,
     OcrLayoutElement,
     build_ocr_layout,
 )
+from text_verification.document_processing.ocr_normalization import (
+    coalesce_image_ocr_boxes,
+    normalize_ocr_boxes,
+)
 from text_verification.document_processing.ocr_provider import (
     OcrRecognizer,
+    OcrTextBox,
     SupportedOcrLanguage,
 )
 from text_verification.domain.documents import DocumentModel, FileType, TextBlock
@@ -48,6 +51,8 @@ class ImageResourceLimits:
     max_pixels: int = 20_000_000
     max_decoded_bytes: int = 60_000_000
     max_ocr_boxes: int = 5_000
+    max_ocr_text_characters: int = 1_000_000
+    max_ocr_candidate_checks: int = 250_000
 
 
 @dataclass(frozen=True)
@@ -103,27 +108,31 @@ class ImageParser:
         if progress_observer is not None:
             progress_observer(VerificationProgressStage.OCR)
         recognized = self.ocr.recognize(image.content, self.ocr_language)
-        if len(recognized) > self.limits.max_ocr_boxes:
-            raise OcrLayoutError("OCR layout box limit exceeded.")
-        boxes = tuple(
-            OcrLayoutBox(
-                page=1,
-                box_index=index,
-                text=box.text,
-                confidence=box.confidence,
-                quad=box.bbox,
-            )
-            for index, box in enumerate(recognized)
+        boxes = coalesce_image_ocr_boxes(
+            normalize_ocr_boxes(
+                recognized,
+                page_number=1,
+                page_bbox=(0.0, 0.0, float(image.width), float(image.height)),
+                raster_width=image.width,
+                raster_height=image.height,
+                max_boxes=self.limits.max_ocr_boxes,
+                max_text_characters=self.limits.max_ocr_text_characters,
+            ),
+            max_candidate_checks=self.limits.max_ocr_candidate_checks,
         )
         layout = build_ocr_layout(
             boxes,
             language=self.ocr_language,
             max_boxes=self.limits.max_ocr_boxes,
-            grid_tables=detect_grid_tables(image, boxes),
+            max_candidate_checks=self.limits.max_ocr_candidate_checks,
+            grid_tables=detect_grid_tables(
+                image, boxes, language=self.ocr_language,
+                max_candidate_checks=self.limits.max_ocr_candidate_checks,
+            ),
         )
         image_regions = detect_non_text_image_regions(
             image,
-            recognized,
+            [OcrTextBox(text=box.text, confidence=box.confidence, bbox=box.quad) for box in boxes],
             excluded_bboxes=tuple(table.bbox for table in layout.tables),
         )
         blocks, text = _canonical_blocks(layout.elements, image_regions, dpi=image.dpi)

@@ -730,6 +730,31 @@ def test_image_parser_reconstructs_detected_non_text_region_from_verified_source
     assert (crop.width, crop.height) == (90, 90)
 
 
+def test_cmyk_jpeg_regions_export_as_rgb_png(tmp_path: Path) -> None:
+    from PIL import Image
+
+    source = tmp_path / "cmyk.jpg"
+    image = Image.new("CMYK", (240, 180), (0, 0, 0, 0))
+    image.paste((0, 0, 0, 255), (130, 70, 220, 160))
+    image.save(source, quality=100, subsampling=0)
+    parsed = ImageParser(
+        file_type=FileType.JPG,
+        ocr=_FakeOcr([_ocr_box("Heading", (10, 10, 100, 35))]),
+        ocr_language="en",
+    ).parse(source)
+    target = DocxReconstructionExporter(
+        anchored_source_resolver=_StaticAnchoredSourcePathResolver(source)
+    ).export(parsed, tmp_path / "cmyk.docx")
+    rebuilt = Document(target)
+    assert len(rebuilt.inline_shapes) == 1
+    with ZipFile(target) as archive:
+        media = [name for name in archive.namelist() if name.startswith("word/media/")]
+        assert len(media) == 1
+        crop = pymupdf.Pixmap(archive.read(media[0]))
+    assert (crop.width, crop.height, crop.n) == (90, 90, 3)
+    assert max(crop.pixel(40, 40)) < 50
+
+
 def test_exports_horizontally_disjoint_side_note_between_table_rows(
     tmp_path: Path,
 ) -> None:

@@ -5,6 +5,7 @@ import {
   stripPythonWhitespace
 } from '../api/pythonWhitespace'
 import { hasLoneSurrogate } from '../api/unicode'
+import { copyAnalyzeOptions, createDefaultAnalyzeOptions, DEFAULT_OCR_LANGUAGE, DEFAULT_EXTENDED_RULES } from '../api/analyzeOptions'
 import type { AnalyzeOptions, GlossaryTerm } from '../types/verification'
 
 export const MAX_TERMINOLOGY_IMPORT_BYTES = 64 * 1024
@@ -41,13 +42,7 @@ export class TerminologyImportError extends Error {
 }
 
 type TerminologyState = Pick<AnalyzeOptions, 'glossary' | 'bannedWords'> &
-  Partial<
-    Pick<
-      AnalyzeOptions,
-      'scenario' | 'enableSecurity' | 'enableSensitive' | 'enableAdExtreme' |
-      'ocrLanguage' | 'enableExtendedRules'
-    >
-  >
+  Partial<AnalyzeOptions>
 
 export interface ReadTerminologyFileResult {
   content: string
@@ -86,8 +81,8 @@ export function verificationOptionsJsonBytes(options: AnalyzeOptions): number {
       enable_security: options.enableSecurity,
       enable_sensitive: options.enableSensitive,
       enable_ad_extreme: options.enableAdExtreme,
-      ocr_language: options.ocrLanguage ?? 'zh',
-      enable_extended_rules: options.enableExtendedRules ?? false,
+      ocr_language: options.ocrLanguage ?? DEFAULT_OCR_LANGUAGE,
+      enable_extended_rules: options.enableExtendedRules ?? DEFAULT_EXTENDED_RULES,
       custom_glossary: options.glossary.map(({ original, standard }) => ({
         original,
         standard
@@ -582,22 +577,8 @@ export function useTerminology(initial: TerminologyState = {
   glossary: [],
   bannedWords: []
 }) {
-  const initialOptions: AnalyzeOptions = {
-    scenario: initial.scenario ?? 'general',
-    enableSecurity: initial.enableSecurity ?? true,
-    enableSensitive: initial.enableSensitive ?? true,
-    enableAdExtreme: initial.enableAdExtreme ?? false,
-    ocrLanguage: initial.ocrLanguage ?? 'zh',
-    enableExtendedRules: initial.enableExtendedRules ?? false,
-    glossary: initial.glossary.map((term) => ({ ...term })),
-    bannedWords: [...initial.bannedWords]
-  }
-  const scenario = ref(initialOptions.scenario)
-  const enableSecurity = ref(initialOptions.enableSecurity)
-  const enableSensitive = ref(initialOptions.enableSensitive)
-  const enableAdExtreme = ref(initialOptions.enableAdExtreme)
-  const ocrLanguage = ref(initialOptions.ocrLanguage)
-  const enableExtendedRules = ref(initialOptions.enableExtendedRules)
+  const initialOptions = copyAnalyzeOptions(createDefaultAnalyzeOptions(), initial)
+  const optionState = ref(initialOptions)
   const glossary = ref<GlossaryTerm[]>([])
   const bannedWords = ref<string[]>([])
 
@@ -605,16 +586,10 @@ export function useTerminology(initial: TerminologyState = {
     nextGlossary: readonly GlossaryTerm[],
     nextBannedWords: readonly string[]
   ): AnalyzeOptions {
-    return {
-      scenario: scenario.value,
-      enableSecurity: enableSecurity.value,
-      enableSensitive: enableSensitive.value,
-      enableAdExtreme: enableAdExtreme.value,
-      ocrLanguage: ocrLanguage.value,
-      enableExtendedRules: enableExtendedRules.value,
-      glossary: nextGlossary.map((term) => ({ ...term })),
+    return copyAnalyzeOptions(optionState.value, {
+      glossary: [...nextGlossary],
       bannedWords: [...nextBannedWords]
-    }
+    })
   }
 
   function setOptions(options: AnalyzeOptions): void {
@@ -625,12 +600,7 @@ export function useTerminology(initial: TerminologyState = {
       glossary: nextGlossary,
       bannedWords: nextBannedWords
     })
-    scenario.value = options.scenario
-    enableSecurity.value = options.enableSecurity
-    enableSensitive.value = options.enableSensitive
-    enableAdExtreme.value = options.enableAdExtreme
-    ocrLanguage.value = options.ocrLanguage ?? 'zh'
-    enableExtendedRules.value = options.enableExtendedRules ?? false
+    optionState.value = copyAnalyzeOptions(options)
     glossary.value = nextGlossary
     bannedWords.value = nextBannedWords
   }

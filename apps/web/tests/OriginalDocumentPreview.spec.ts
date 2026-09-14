@@ -1,5 +1,5 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { fetchReviewLayout, type ReviewLayout } from '../src/api/originalPreview'
 import OriginalDocumentPreview from '../src/components/workspace/OriginalDocumentPreview.vue'
@@ -27,8 +27,73 @@ function layout(text = '帐号测试'): ReviewLayout {
 }
 
 beforeEach(() => vi.mocked(fetchReviewLayout).mockReset())
+afterEach(() => vi.unstubAllGlobals())
 
 describe('unified original document review', () => {
+  it('locates whitespace-only issues when rendering coalesces the space run', async () => {
+    const rendered = layout('甲  乙')
+    const page = rendered.pages[0]
+    page.glyphs = [
+      page.glyphs[0],
+      { ...page.glyphs[1], start: 1, end: 3 },
+      page.glyphs[3]
+    ]
+    vi.mocked(fetchReviewLayout).mockResolvedValue(rendered)
+    const wrapper = mount(OriginalDocumentPreview, {
+      props: {
+        ...props, text: '甲  乙',
+        issues: [{ ...issue, start: 1, end: 3, original: '  ', message: '存在连续多个空格' }]
+      }
+    })
+    await flushPromises()
+    expect(wrapper.find('[data-location-warning]').exists()).toBe(false)
+    const mark = wrapper.get<HTMLButtonElement>('.layout-issue.selected')
+    expect(parseFloat(mark.element.style.left)).toBeCloseTo(7)
+    expect(parseFloat(mark.element.style.width)).toBeCloseTo(2)
+    await mark.trigger('click')
+    expect(wrapper.emitted('select-issue')).toEqual([['issue']])
+    wrapper.unmount()
+  })
+
+  it('defers offscreen marks while keeping selected-page navigation available', async () => {
+    const visibility: Array<(visible: boolean) => void> = []
+    vi.stubGlobal('IntersectionObserver', class {
+      constructor(callback: (entries: Array<{ isIntersecting: boolean }>) => void) {
+        visibility.push((visible) => callback([{ isIntersecting: visible }]))
+      }
+      observe() {}
+      disconnect() {}
+    })
+    const rendered = layout()
+    rendered.pages.push({
+      ...layout('正文').pages[0],
+      glyphs: layout('正文').pages[0].glyphs.map((glyph) => ({
+        ...glyph, start: glyph.start + 4, end: glyph.end + 4
+      }))
+    })
+    const second = { ...issue, issue_id: 'second', start: 4, end: 6, original: '正文' }
+    vi.mocked(fetchReviewLayout).mockResolvedValue(rendered)
+    const wrapper = mount(OriginalDocumentPreview, {
+      props: { ...props, issues: [issue, second] }
+    })
+    await flushPromises()
+    expect(wrapper.findAll('.layout-page')).toHaveLength(2)
+    expect(wrapper.find('[data-issue-id="second"]').exists()).toBe(false)
+    expect(wrapper.get('.layout-page:nth-child(2) img').attributes('loading')).toBe('lazy')
+    await wrapper.setProps({ selectedIssueId: 'second' })
+    expect(wrapper.get('[data-issue-id="second"]').attributes('aria-current')).toBe('true')
+    expect(wrapper.find('[data-location-warning]').exists()).toBe(false)
+    await wrapper.setProps({ selectedIssueId: null })
+    expect(wrapper.find('[data-issue-id="second"]').exists()).toBe(false)
+    visibility[1](true)
+    await flushPromises()
+    expect(wrapper.find('[data-issue-id="second"]').exists()).toBe(true)
+    visibility[1](false)
+    await wrapper.setProps({ searchMatches: [{ start: 4, end: 6 }], activeSearchMatchIndex: 0 })
+    expect(wrapper.get('[data-search-match="0"]').classes()).toContain('active')
+    wrapper.unmount()
+  })
+
   it('supports reducing and restoring the page scale without changing issue coordinates', async () => {
     vi.mocked(fetchReviewLayout).mockResolvedValue(layout())
     const wrapper = mount(OriginalDocumentPreview, { props })
