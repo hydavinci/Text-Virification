@@ -15,6 +15,7 @@ from text_verification.domain.dictionaries import (
     SensitiveRulesEntries,
 )
 from text_verification.infrastructure.dictionary_loader import DictionaryLoader
+from text_verification.compatibility.text_context import TextContext, term_pattern
 from text_verification.domain.ports import (
     VerificationProgressObserver,
     VerificationProgressStage,
@@ -50,6 +51,7 @@ class Issue:
     layer: str = ''    # 检查层级：character/vocabulary/sentence/format/discourse/security
     review: str = ''   # 云端语义复核结论：false_positive/real/uncertain/no_verdict
     review_reason: str = ''  # 复核理由
+    confidence: float | None = None  # 规则启发式分数，不代表统计校准后的概率
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -196,7 +198,7 @@ TERM_EQUIVALENCES = [
     ['腾讯', 'Tencent', '腾讯公司'],
     ['字节跳动', 'ByteDance'],
     ['亚马逊', 'Amazon'],
-    ['脸书', 'Facebook', 'Meta'],
+    ['脸书', 'Facebook'],
     ['特斯拉', 'Tesla'],
     ['华为', 'Huawei', '华为公司'],
     ['阿里巴巴', 'Alibaba', '阿里'],
@@ -213,9 +215,9 @@ TERM_EQUIVALENCES = [
     ['应用程序', 'APP', 'App'],
     ['操作系统', 'OS'],
     ['数据库', 'Database'],
-    ['云计算', 'Cloud Computing', '云服务'],
+    ['云计算', 'Cloud Computing'],
     # 机构 / 医学
-    ['新冠病毒', 'COVID-19', '新冠肺炎', 'COVID'],
+    ['新冠肺炎', 'COVID-19', 'COVID'],
     ['世界卫生组织', 'WHO'],
     ['联合国', 'UN'],
     ['国际货币基金组织', 'IMF'],
@@ -374,6 +376,7 @@ CHINESE_TYPOS = {
 
 # 英文常见拼写错误（错误 -> 正确）
 ENGLISH_MISSPELLINGS = {
+    'teh': 'the',
     'recieve': 'receive', 'occured': 'occurred', 'seperate': 'separate',
     'definately': 'definitely', 'neccessary': 'necessary', 'occassion': 'occasion',
     'accomodate': 'accommodate', 'arguement': 'argument', 'beleive': 'believe',
@@ -405,7 +408,7 @@ ENGLISH_MISSPELLINGS = {
     'completly': 'completely', 'controled': 'controlled', 'convenient': None,
     'criticised': None, 'defendent': 'defendant', 'definatly': 'definitely',
     'dependant': None, 'desination': 'destination', 'dissapoint': 'disappoint',
-    'dissappear': 'disappear', 'dissaster': 'disaster', 'dose': 'does',
+    'dissappear': 'disappear', 'dissaster': 'disaster', 'dose': None,
     'doubtfull': 'doubtful', 'drinkable': None, 'eigth': 'eighth',
     'embarras': 'embarrass', 'enviromental': 'environmental', 'exagerate': 'exaggerate',
     'excellant': 'excellent', 'expresso': 'espresso', 'extreme': None,
@@ -922,6 +925,7 @@ class TextAnalyzer:
         self._dictionary_versions: dict[str, str] = {}
         self._max_issues = max_issues
         self._issue_budget: _IssueBudget | None = None
+        self._context: TextContext | None = None
 
     @property
     def dictionary_versions(self) -> dict[str, str]:
@@ -939,10 +943,11 @@ class TextAnalyzer:
         self._cn_typo_map = {k: v for k, v in cn_items}
 
         # 英文拼写错误（使用 re.ASCII 使 \b 在中文字符旁也能正确匹配）
-        en_items = [(k, v) for k, v in ENGLISH_MISSPELLINGS.items() if v is not None]
+        en_items = [(k, v) for k, v in ENGLISH_MISSPELLINGS.items()
+                    if v is not None and k.lower() != v.lower()]
         en_items.sort(key=lambda x: len(x[0]), reverse=True)
         self._en_typo_pattern = re.compile(
-            r'(?<![a-zA-Z])(' + '|'.join(re.escape(k) for k, _ in en_items) + r')(?![a-zA-Z])',
+            r'(?<![a-zA-Z0-9_])(' + '|'.join(re.escape(k) for k, _ in en_items) + r')(?![a-zA-Z0-9_])',
             re.IGNORECASE
         )
         self._en_typo_map = {k.lower(): v for k, v in en_items}
@@ -956,7 +961,9 @@ class TextAnalyzer:
                 progress_observer: VerificationProgressObserver | None = None,
                 enable_extended_rules: bool = False) -> List[Issue]:
         previous_budget = self._issue_budget
+        previous_context = self._context
         self._issue_budget = _IssueBudget(self._max_issues)
+        self._context = TextContext.build(text)
         try:
             return self._analyze(
                 text,
@@ -971,6 +978,7 @@ class TextAnalyzer:
             )
         finally:
             self._issue_budget = previous_budget
+            self._context = previous_context
 
     def _analyze(self, text: str, scenario: str = 'general',
                  custom_glossary: List[Dict] = None,
@@ -1043,10 +1051,12 @@ class TextAnalyzer:
         if progress_observer is not None:
             progress_observer(VerificationProgressStage.CHECKING_ENGLISH)
         english_spelling_issues = self._check_english_spelling(text)
+        extended_english_issues = self._check_extended_english(text) if enable_extended_rules else []
 
         issues: List[Issue] = [
             *chinese_typo_issues,
             *english_spelling_issues,
+            *extended_english_issues,
             *variant_issues,
             *width_issues,
             *missing_char_issues,
@@ -1073,6 +1083,34 @@ class TextAnalyzer:
         for issue in issues:
             if not issue.layer:
                 issue.layer = TYPE_TO_LAYER.get(issue.type, 'discourse')
+            if issue.confidence is None:
+                issue.confidence = {
+                    'cn_typo': 0.95, 'en_spelling': 0.95, 'custom_glossary': 1.0,
+                    'banned_word': 1.0, 'irregular_char': 0.95,
+                    'mixed_punct': 0.85, 'half_in_cn_context': 0.85,
+                    'multi_space': 0.9, 'redundant_de': 0.75,
+                }.get(issue.rule_id, 0.7)
+
+        context = self._context or TextContext.build(text)
+        issues = [
+            issue for issue in issues
+            if issue.layer == 'security' or issue.type in {'banned_word', 'custom_term'}
+            or not context.is_protected(issue.position, issue.end_position)
+        ]
+        # The user's standard forms are authoritative for lexical checks, not for
+        # independent compliance constraints.
+        standard_ranges = [
+            match.span()
+            for item in custom_glossary or []
+            if item.get('standard', '').strip()
+            for match in term_pattern(item['standard'].strip()).finditer(text)
+        ]
+        issues = [
+            issue for issue in issues
+            if issue.type not in {'typo', 'variant_char', 'term_consistency'}
+            or not any(start <= issue.position and issue.end_position <= end
+                       for start, end in standard_ranges)
+        ]
 
         # 场景过滤：跳过该场景不需要的检查类型
         if skip_types:
@@ -1082,11 +1120,12 @@ class TextAnalyzer:
         if downgrade_types:
             issues = [i for i in issues if not (i.type in downgrade_types and i.severity == 'info')]
 
-        # 去重（同一位置同一类型的问题只保留一个）
+        # 同一位置的不同建议必须保留；只有相同修改意图才能合并。
         seen = set()
         unique_issues = []
         for issue in issues:
-            key = (issue.type, issue.position, issue.end_position, issue.original)
+            key = (issue.type, issue.rule_id, issue.position, issue.end_position,
+                   issue.original, issue.suggestion)
             if key not in seen:
                 seen.add(key)
                 unique_issues.append(issue)
@@ -1101,17 +1140,29 @@ class TextAnalyzer:
         }
         span_best = {}
         for issue in unique_issues:
-            skey = (issue.position, issue.end_position, issue.original)
+            family = (
+                'format' if issue.type in _type_priority else
+                'lexical' if issue.type in {'typo', 'variant_char'} else issue.type
+            )
+            skey = (issue.position, issue.end_position, issue.original,
+                    family, issue.suggestion)
             if skey not in span_best:
                 span_best[skey] = issue
             else:
                 exist = span_best[skey]
                 if _type_priority.get(issue.type, 9) < _type_priority.get(exist.type, 9):
+                    if issue.rule_id != exist.rule_id:
+                        issue.description += f'（同时命中规则：{exist.rule_id}）'
                     span_best[skey] = issue
+                elif issue.rule_id != exist.rule_id:
+                    exist.description += f'（同时命中规则：{issue.rule_id}）'
         deduped = list(span_best.values())
 
         # 按位置排序
-        deduped.sort(key=lambda x: (x.position, x.end_position))
+        deduped.sort(key=lambda x: (
+            x.position, x.end_position,
+            {'custom_term': 0, 'banned_word': 1}.get(x.type, 2),
+        ))
         return deduped
 
     def _issue_list(self) -> list[Issue]:
@@ -1143,16 +1194,18 @@ class TextAnalyzer:
             word = match.group()
             if word in self._cn_typo_map:
                 correct, desc = self._cn_typo_map[word]
+                stylistic = word in {'涉及到', '付诸于', '凯旋归来', '免费赠送', '互相厮打'}
                 issues.append(Issue(
-                    type='typo',
-                    severity='error',
+                    type='expression' if stylistic else 'typo',
+                    severity='info' if stylistic else 'error',
                     original=word,
                     suggestion=correct,
                     position=match.start(),
                     end_position=match.end(),
                     context=self._get_context(text, match.start(), match.end()),
                     description=f'疑似错别字：{desc}，建议改为「{correct}」',
-                    rule_id='cn_typo'
+                    rule_id='cn_redundancy' if stylistic else 'cn_typo',
+                    confidence=0.65 if stylistic else 0.95,
                 ))
         return issues
 
@@ -1164,7 +1217,9 @@ class TextAnalyzer:
             correct = self._en_typo_map.get(word.lower())
             if correct:
                 # 保持原大小写
-                if word[0].isupper():
+                if word.isupper():
+                    correct = correct.upper()
+                elif word[0].isupper():
                     correct = correct[0].upper() + correct[1:]
                 issues.append(Issue(
                     type='typo',
@@ -1244,6 +1299,34 @@ class TextAnalyzer:
 
         return issues
 
+    def _check_extended_english(self, text: str) -> List[Issue]:
+        from itertools import chain
+        from text_verification.compatibility.english_checks import (
+            grammar_findings, spelling_findings,
+        )
+
+        context = self._context or TextContext.build(text)
+        issues = self._issue_list()
+        for finding in chain(
+            spelling_findings(text, context, set(ENGLISH_MISSPELLINGS)),
+            grammar_findings(text, context),
+        ):
+            grammar = finding.rule_id == 'en_subject_agreement'
+            issues.append(Issue(
+                type='grammar' if grammar else 'typo',
+                severity='warning' if finding.suggestion is not None else 'info',
+                original=text[finding.start:finding.end],
+                suggestion=finding.suggestion,
+                position=finding.start, end_position=finding.end,
+                context=self._get_context(text, finding.start, finding.end),
+                description=('主语与谓语形式可能不一致，请结合上下文确认'
+                             if grammar else '词典未收录此写法，请核对拼写或将专业词加入术语表'),
+                rule_id=finding.rule_id,
+                alternatives=list(finding.alternatives) or None,
+                confidence=finding.confidence,
+            ))
+        return issues
+
     def _build_delim_skip_mask(self, text: str) -> List[bool]:
         """构建"跳过掩码"：位于成对分隔符（书名号/括号/引号等）内部的位置为 True。
 
@@ -1255,8 +1338,11 @@ class TextAnalyzer:
         open_to_close = dict(zip(openers, closers))
         close_set = set(closers)
         mask = [False] * len(text)
+        technical = self._build_technical_skip_mask(text)
         stack = []
         for i, ch in enumerate(text):
+            if technical[i]:
+                continue
             if ch in open_to_close:
                 stack.append(ch)
             elif ch in close_set:
@@ -1271,35 +1357,9 @@ class TextAnalyzer:
         标准引用行（如 IEC/EN 60601-1 | Medical...）、型号/版本列表、URL/邮箱等
         属于英文/技术排版，其内部半角标点与空格（含对齐空格）不应按中文规则检查。
         """
-        mask = [False] * len(text)
-
-        # 1. 标准/规范引用行：IEC/EN 60601-1 | ... 或 ISO 9001: ... 等
-        std_ref = re.compile(
-            r'^[ \t]*[A-Z]{2,}(?:/[A-Z]{2,})?\s*\d+(?:[-–—]\d+)*\s*[|:][ \t]*[A-Za-z]',
-            re.MULTILINE
-        )
-        # 2. 型号/版本/日期列表行：含 | 且以字母数字/斜杠/连字符/点号开头
-        model_line = re.compile(
-            r'^[ \t]*[A-Za-z0-9]+(?:[-_/][A-Za-z0-9]+)+.*\|',
-            re.MULTILINE
-        )
-        # 3. URL / 邮箱
-        url_email = re.compile(r'https?://\S+|www\.\S+|\S+@\S+\.\S+')
-
-        for pattern in (std_ref, model_line):
-            for m in pattern.finditer(text):
-                line_start = text.rfind('\n', 0, m.start()) + 1
-                line_end = text.find('\n', m.end())
-                if line_end == -1:
-                    line_end = len(text)
-                for i in range(line_start, line_end):
-                    mask[i] = True
-
-        for m in url_email.finditer(text):
-            for i in range(m.start(), m.end()):
-                mask[i] = True
-
-        return mask
+        if self._context is not None and self._context.text == text:
+            return self._context.technical
+        return TextContext.build(text).technical
 
     def _check_spacing(self, text: str) -> List[Issue]:
         """空格和格式问题检测"""
@@ -1527,6 +1587,7 @@ class TextAnalyzer:
     def _check_brackets_quotes(self, text: str) -> List[Issue]:
         """括号和引号配对检测（按段落/行局部检查，降低误报）"""
         issues = self._issue_list()
+        context = self._context or TextContext.build(text)
 
         # 开括号到闭括号的映射（区分半角/全角）
         half_open_to_close = {'(': ')', '[': ']', '<': '>'}
@@ -1568,6 +1629,8 @@ class TextAnalyzer:
             stack_limit = self._remaining_issue_capacity()
             stack = []  # 元素: (normalized_open_char, absolute_position, original_char)
             for i, ch in enumerate(scope_text):
+                if context.technical[base_offset + i]:
+                    continue
                 norm = normalize.get(ch, ch)
                 if norm in open_chars:
                     if stack_limit is not None and len(stack) >= stack_limit:
@@ -1614,12 +1677,12 @@ class TextAnalyzer:
 
         # 引号配对：每个未配对字符都保留精确的 Unicode 位置。
         for open_q, close_q in [('"', '"'), ('「', '」'), ('『', '』')]:
-            total_open = text.count(open_q)
-            total_close = text.count(close_q)
+            total_open = sum(ch == open_q and not context.technical[i] for i, ch in enumerate(text))
+            total_close = sum(ch == close_q and not context.technical[i] for i, ch in enumerate(text))
             if open_q == close_q:
                 pending: int | None = None
                 for position, character in enumerate(text):
-                    if character != open_q:
+                    if character != open_q or context.technical[position]:
                         continue
                     if pending is None:
                         pending = position
@@ -1640,6 +1703,8 @@ class TextAnalyzer:
             else:
                 openings: List[int] = []
                 for position, character in enumerate(text):
+                    if context.technical[position]:
+                        continue
                     if character == open_q:
                         opening_limit = self._remaining_issue_capacity()
                         if opening_limit is not None and len(openings) >= opening_limit:
@@ -2094,6 +2159,10 @@ class TextAnalyzer:
         ]
         for pattern, replacements, desc in missing_subject_rules:
             for match in re.finditer(pattern, text):
+                sentence_start = max(text.rfind(ch, 0, match.start())
+                                     for ch in '。！？\n') + 1
+                if text[sentence_start:match.start()].strip():
+                    continue
                 issues.append(self._make_expression_issue(
                     text, match, replacements, desc, 'missing_subject'))
 
@@ -2121,6 +2190,13 @@ class TextAnalyzer:
         ]
         for pattern, replacements, desc in de_di_patterns:
             for match in re.finditer(pattern, text):
+                following = text[match.start() + 3:]
+                if re.match(
+                    r'(?:工作|研究|学习|生活|思想|态度|方法|作风|行为|行动|努力|'
+                    r'人|学生|老师|员工|孩子|同学|同事|精神|表现|建议|意见)',
+                    following,
+                ):
+                    continue
                 issues.append(self._make_expression_issue(
                     text, match, replacements, desc, 'de_vs_di'))
 
@@ -2182,7 +2258,7 @@ class TextAnalyzer:
         issues = self._issue_list()
 
         # "的"字冗余检测
-        sentence_pattern = re.compile(r'[^。！？\n]+[。！？]')
+        sentence_pattern = re.compile(r'[^。！？\n]+(?:[。！？]|$)', re.MULTILINE)
         for match in sentence_pattern.finditer(text):
             sentence = match.group()
             if sentence.count('的') < 2:
@@ -2387,7 +2463,7 @@ class TextAnalyzer:
                 continue
             # 用正则查找所有出现位置（注意转义特殊字符）
             try:
-                pattern = re.compile(re.escape(original))
+                pattern = term_pattern(original)
             except re.error:
                 continue
             for match in pattern.finditer(text):
@@ -2543,14 +2619,14 @@ class TextAnalyzer:
         for pattern in (mixed_a2c, mixed_c2a):
             for match in pattern.finditer(text):
                 seg = match.group()
-                if seg in seen:
+                if match.span() in seen:
                     continue
-                seen.add(seg)
+                seen.add(match.span())
                 issues.append(Issue(
                     type='number_format',
                     severity='info',
                     original=seg,
-                    suggestion='（建议统一为单一数字写法，避免同一数量重复表达）',
+                    suggestion=None,
                     position=match.start(),
                     end_position=match.end(),
                     context=self._get_context(text, match.start(), match.end()),
@@ -2582,7 +2658,7 @@ class TextAnalyzer:
                     type='number_format',
                     severity='info',
                     original=anchor.group(),
-                    suggestion='（建议统一全文日期格式，避免阿拉伯数字与中文数字日期混用）',
+                    suggestion=None,
                     position=anchor.start(),
                     end_position=anchor.end(),
                     context=self._get_context(text, anchor.start(), anchor.end()),
@@ -2592,30 +2668,49 @@ class TextAnalyzer:
 
         # 3. 编号连续性检测（如 1. 2. 4. 缺少 3.）
         # 检测形如 "1." "2." "3." 的编号序列
-        numbering_pattern = re.compile(r'^[\s]*(\d+)[\.\、）)]', re.MULTILINE)
-        numbers = [int(m.group(1)) for m in numbering_pattern.finditer(text)]
-        if len(numbers) >= 3:
-            # 检查是否有缺失
-            sorted_nums = sorted(set(numbers))
-            for i in range(1, len(sorted_nums)):
-                if sorted_nums[i] != sorted_nums[i - 1] + 1 and sorted_nums[i] - sorted_nums[i - 1] > 1:
-                    missing = sorted_nums[i - 1] + 1
-                    # 找到缺失后的第一个编号位置
-                    missing_pattern = re.compile(rf'^[\s]*{sorted_nums[i]}[\.\、）)]', re.MULTILINE)
-                    m = missing_pattern.search(text)
-                    if m:
-                        issues.append(Issue(
-                            type='number_format',
-                            severity='warning',
-                            original=f'{sorted_nums[i - 1]}→{sorted_nums[i]}',
-                            suggestion=f'编号可能不连续，缺少「{missing}」',
-                            position=m.start(),
-                            end_position=m.end(),
-                            context=self._get_context(text, m.start(), m.end()),
-                            description=f'编号从「{sorted_nums[i - 1]}」跳到「{sorted_nums[i]}」，可能缺少「{missing}」，请检查是否遗漏',
-                            rule_id='numbering_gap'
-                        ))
-                    break  # 只报告第一处缺失
+        numbering_pattern = re.compile(r'^([ \t]*)(\d{1,9})([.、）)])(?!\d)')
+        levels = {}
+        offset = 0
+        for line in text.splitlines(keepends=True):
+            match = numbering_pattern.match(line)
+            if match is None:
+                if not line.strip() or not line[:1].isspace():
+                    levels.clear()
+                offset += len(line)
+                continue
+            depth = len(match.group(1).expandtabs(4))
+            for nested in [level for level in levels if level > depth]:
+                del levels[nested]
+            number = int(match.group(2))
+            marker = match.group(3)
+            previous = levels.get(depth)
+            if previous is not None and previous[1] == marker:
+                old, _, seen_numbers = previous
+                rule_id = (
+                    'numbering_duplicate' if number in seen_numbers else
+                    'numbering_order' if number < old else
+                    'numbering_gap' if number > old + 1 else None
+                )
+                if rule_id:
+                    start, end = offset + match.start(2), offset + match.end()
+                    reason = {
+                        'numbering_duplicate': f'编号「{number}」在当前列表中重复',
+                        'numbering_order': f'编号从「{old}」回退到「{number}」',
+                        'numbering_gap': f'编号从「{old}」跳到「{number}」，可能缺少「{old + 1}」',
+                    }[rule_id]
+                    issues.append(Issue(
+                        type='number_format', severity='warning',
+                        original=text[start:end], suggestion=None,
+                        position=start, end_position=end,
+                        context=self._get_context(text, start, end),
+                        description=reason + '，请核对当前列表',
+                        rule_id=rule_id,
+                    ))
+                seen_numbers.add(number)
+            else:
+                seen_numbers = {number}
+            levels[depth] = (number, marker, seen_numbers)
+            offset += len(line)
 
         return issues
 
@@ -2634,85 +2729,43 @@ class TextAnalyzer:
         for group in TERM_EQUIVALENCES:
             # 找出文中实际出现的写法及其所有出现区间（最长优先匹配，避免「Apple」误命中「Apple公司」）
             forms_sorted = sorted(set(group), key=len, reverse=True)
-            prefix_forms = set()
-            for f in group:
-                for g in group:
-                    if len(g) > len(f) and g.startswith(f):
-                        prefix_forms.add(f)
             present = {}  # form -> [(start, end), ...]
-            i, n = 0, len(text)
-            while i < n:
-                matched = None
-                for f in forms_sorted:
-                    flen = len(f)
-                    if i + flen > n:
-                        continue
-                    seg = text[i:i + flen]
-                    if re.search(r'[A-Za-z]', f):
-                        if seg.lower() != f.lower():
-                            continue
-                        before = text[i - 1] if i > 0 else ''
-                        after = text[i + flen] if i + flen < n else ''
-                        # 必须是完整词块：前后不能是 ASCII 字母或数字
-                        # （避免 AI 误入 MAIL、COVID 误入 covid19；中文前后不算字母）
-                        if ('a' <= before.lower() <= 'z') or before.isdigit():
-                            continue
-                        if ('a' <= after.lower() <= 'z') or after.isdigit():
-                            continue
-                        # 若该写法是其它更长写法的词干前缀（如 Apple 是 Apple公司 的前缀），
-                        # 其后紧接中文时视为更长写法的一部分，不单独计
-                        if f in prefix_forms and ('\u4e00' <= after <= '\u9fa5'):
-                            continue
-                    else:
-                        if seg != f:
-                            continue
-                    matched = f
-                    break
-                if matched:
-                    present.setdefault(matched, []).append((i, i + len(matched)))
-                    i += len(matched)
-                else:
-                    i += 1
+            pattern = re.compile('|'.join(term_pattern(f).pattern for f in forms_sorted),
+                                 re.IGNORECASE)
+            normalized_forms = {f.lower(): f for f in forms_sorted}
+            for match in pattern.finditer(text):
+                if self._context and self._context.is_protected(*match.span()):
+                    continue
+                form = normalized_forms[match.group().lower()]
+                present.setdefault(form, []).append(match.span())
             forms_present = set(present.keys())
             if len(forms_present) < 2:
                 continue
             # 仅当两种写法紧邻且中间仅用括号/引号/标点分隔（如「苹果公司（Apple公司）」）
             # 才视为释义/定义，不报；普通相邻（如「人工智能是AI…」）仍报。
-            sep_chars = set('（）()[]{}""\'\'、·—～,，。；:：')
-            is_definition = False
-            flist = list(present.items())
-            for a in range(len(flist)):
-                for b in range(a + 1, len(flist)):
-                    for s1 in flist[a][1]:
-                        for s2 in flist[b][1]:
-                            lo, hi = (s1, s2) if s1[0] <= s2[0] else (s2, s1)
-                            gap = text[lo[1]:hi[0]]
-                            if 0 <= len(gap) <= 2 and (gap == '' or all(c in sep_chars for c in gap)):
-                                is_definition = True
-                                break
-                        if is_definition:
-                            break
-                    if is_definition:
-                        break
-                if is_definition:
-                    break
-            if is_definition:
-                continue
             canonical = group[0]
-            anchor_form = next((f for f in forms_present if f != canonical), list(forms_present)[0])
-            anchor_pos = min(s[0] for s in present[anchor_form])
+            allowed_forms = {canonical}
+            occurrences = sorted((start, end, form)
+                                 for form, spans in present.items()
+                                 for start, end in spans)
+            for left, right in zip(occurrences, occurrences[1:]):
+                gap = text[left[1]:right[0]].strip()
+                closing = {'(': ')', '（': '）'}.get(gap)
+                if (closing and text[right[1]:].lstrip().startswith(closing)
+                        and canonical in {left[2], right[2]}):
+                    allowed_forms.update((left[2], right[2]))
             variants = ' / '.join(sorted(forms_present))
-            issues.append(Issue(
-                type='term_consistency',
-                severity='warning',
-                original=anchor_form,
-                suggestion=canonical,
-                position=anchor_pos,
-                end_position=anchor_pos + len(anchor_form),
-                context=self._get_context(text, anchor_pos, anchor_pos + len(anchor_form)),
-                description=f'文档中「{variants}」指代同一内容但写法不统一，建议统一为「{canonical}」',
-                rule_id='term_equivalence'
-            ))
+            for start, end, form in occurrences:
+                if form in allowed_forms:
+                    continue
+                issues.append(Issue(
+                    type='term_consistency', severity='warning',
+                    original=text[start:end], suggestion=canonical,
+                    position=start, end_position=end,
+                    context=self._get_context(text, start, end),
+                    description=f'文档中「{variants}」存在不同写法，请核对是否统一为「{canonical}」',
+                    rule_id='term_equivalence', confidence=0.7,
+                ))
 
         # ---------- (B) 同文异写（仅大小写/空格/连字符差异，且为缩写/代号类） ----------
         TERM_STOPWORDS = {'a', 'an', 'the', 'us', 'is', 'in', 'on', 'at', 'of', 'to', 'be', 'by', 'for',
@@ -2734,12 +2787,18 @@ class TextAnalyzer:
 
         token_pat = re.compile(r'[A-Za-z][A-Za-z0-9]*(?:[.\-][A-Za-z0-9]+)*')
         norm_map = {}  # norm -> {surface: count}
-        for tok in token_pat.findall(text):
+        tokens = []
+        for match in token_pat.finditer(text):
+            if self._context and self._context.is_protected(*match.span()):
+                continue
+            tok = match.group()
             norm = re.sub(r'[\s\-]', '', tok).lower()
             if len(norm) < 2 or norm in TERM_STOPWORDS:
                 continue
             norm_map.setdefault(norm, {})
             norm_map[norm][tok] = norm_map[norm].get(tok, 0) + 1
+            tokens.append((norm, tok, match.start(), match.end()))
+        canonical_forms = {}
         for norm, surfaces in norm_map.items():
             distinct = list(surfaces.keys())
             if len(distinct) < 2:
@@ -2748,19 +2807,20 @@ class TextAnalyzer:
             if not any(_is_term_like(s) for s in distinct):
                 continue
             canonical = max(distinct, key=lambda s: surfaces[s])  # 出现次数最多者为规范
-            anchor_form = next((s for s in distinct if s != canonical), distinct[0])
-            m = re.search(r'(?<![A-Za-z])' + re.escape(anchor_form) + r'(?![A-Za-z])', text) \
-                or re.search(re.escape(anchor_form), text)
-            pos = m.start() if m else 0
-            variants = ' / '.join(sorted(distinct))
+            canonical_forms[norm] = canonical
+        for norm, surface, start, end in tokens:
+            canonical = canonical_forms.get(norm)
+            if canonical is None or surface == canonical:
+                continue
+            variants = ' / '.join(sorted(norm_map[norm]))
             issues.append(Issue(
                 type='term_consistency',
                 severity='warning',
-                original=anchor_form,
+                original=surface,
                 suggestion=canonical,
-                position=pos,
-                end_position=pos + len(anchor_form),
-                context=self._get_context(text, pos, pos + len(anchor_form)),
+                position=start,
+                end_position=end,
+                context=self._get_context(text, start, end),
                 description=f'文档中「{variants}」为同一术语的异写（仅大小写/空格/连字符不同），建议统一为「{canonical}」',
                 rule_id='term_variant'
             ))

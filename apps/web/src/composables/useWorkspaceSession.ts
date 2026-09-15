@@ -975,7 +975,8 @@ function preparedOptions(value: unknown): AnalyzeOptions | null {
     !hasExactKeys(value, [
       ...OPTION_KEYS,
       ...('ocrLanguage' in value ? ['ocrLanguage'] : []),
-      ...('enableExtendedRules' in value ? ['enableExtendedRules'] : [])
+      ...('enableExtendedRules' in value ? ['enableExtendedRules'] : []),
+      ...('enableSemanticDiscovery' in value ? ['enableSemanticDiscovery'] : [])
     ]) ||
     !Array.isArray(value.glossary) ||
     !Array.isArray(value.bannedWords)
@@ -990,7 +991,8 @@ function preparedOptions(value: unknown): AnalyzeOptions | null {
     return OPTION_KEYS.every(
       (key) => JSON.stringify(value[key]) === JSON.stringify(snapshot[key])
     ) && value.ocrLanguage === snapshot.ocrLanguage &&
-      value.enableExtendedRules === snapshot.enableExtendedRules
+      value.enableExtendedRules === snapshot.enableExtendedRules &&
+      value.enableSemanticDiscovery === snapshot.enableSemanticDiscovery
       ? snapshot
       : null
   } catch {

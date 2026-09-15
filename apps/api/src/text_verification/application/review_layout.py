@@ -7,14 +7,18 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
+from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unicodedata import normalize
 
 import fitz  # type: ignore[import-untyped]
+from docx import Document
 
 from text_verification.application.original_preview import OriginalPreviewError
+from text_verification.compatibility.docx_traversal import iter_docx_paragraphs
 from text_verification.compatibility.exporters import ExportError, export_original
+from text_verification.compatibility.parser import strip_html
 from text_verification.domain.review_layout import (
     MAX_LAYOUT_BYTES,
     MAX_LAYOUT_PAGES,
@@ -400,7 +404,40 @@ def _map_glyphs(text: str, glyphs: list[_Glyph], pages: list[LayoutPage]) -> boo
     return len(mapped) == len(set(source_offsets))
 
 
-def _render_pages(content: bytes, file_type: str, text: str, applied: bool) -> ReviewLayout:
+def _map_docx_stories(
+    stories: list[str], glyphs: list[_Glyph], pages: list[LayoutPage],
+) -> bool:
+    """Require independent story evidence, never concatenated body/header/footer order."""
+    if len(stories) * len(glyphs) > MAX_MAPPING_WORK:
+        return False
+    owners: dict[tuple[int, float, float, float, float], set[int]] = {}
+    offset = 0
+    complete = True
+    for story_index, text in enumerate(stories):
+        story_pages = [page.model_copy(update={"glyphs": []}) for page in pages]
+        complete = _map_glyphs(text, glyphs, story_pages) and complete
+        for page_index, story_page in enumerate(story_pages):
+            for glyph in story_page.glyphs:
+                location = (page_index, glyph.x, glyph.y, glyph.width, glyph.height)
+                owners.setdefault(location, set()).add(story_index)
+                pages[page_index].glyphs.append(glyph.model_copy(update={
+                    "start": glyph.start + offset, "end": glyph.end + offset,
+                }))
+        offset += len(text) + 1
+    for page_index, page in enumerate(pages):
+        unique = [
+            glyph for glyph in page.glyphs
+            if len(owners[(page_index, glyph.x, glyph.y, glyph.width, glyph.height)]) == 1
+        ]
+        complete = len(unique) == len(page.glyphs) and complete
+        page.glyphs = unique
+    return complete
+
+
+def _render_pages(
+    content: bytes, file_type: str, text: str, applied: bool,
+    source_stories: list[str] | None = None,
+) -> ReviewLayout:
     pages: list[LayoutPage] = []
     glyphs: list[_Glyph] = []
     image_bytes = 0
@@ -463,7 +500,10 @@ def _render_pages(content: bytes, file_type: str, text: str, applied: bool) -> R
                 ))
     except (fitz.FileDataError, fitz.EmptyFileError, RuntimeError) as error:
         raise OriginalPreviewError("文档页面无法渲染，原文件未修改。") from error
-    complete_mapping = _map_glyphs(text, glyphs, pages)
+    complete_mapping = (
+        _map_glyphs(text, glyphs, pages) if source_stories is None
+        else _map_docx_stories(source_stories, glyphs, pages)
+    )
     notice = None
     if not applied:
         notice = "此文件的文字位于图片或扫描图像中，修订保留在右侧；原始图像不变。"
@@ -473,6 +513,15 @@ def _render_pages(content: bytes, file_type: str, text: str, applied: bool) -> R
     if len(layout.model_dump_json().encode("utf-8")) > MAX_LAYOUT_BYTES:
         raise OriginalPreviewError("分页预览超过 25 MiB 上限。", 413)
     return layout
+
+
+def _docx_source_stories(content: bytes) -> list[str]:
+    stories: dict[str, list[str]] = {}
+    for paragraph in iter_docx_paragraphs(Document(BytesIO(content))):
+        text = strip_html(paragraph.text).strip()
+        if text:
+            stories.setdefault(str(paragraph.part.partname), []).append(text)
+    return ["\n".join(paragraphs) for paragraphs in stories.values()]
 
 
 def render_review_document(
@@ -486,10 +535,11 @@ def render_review_document(
     if max(len(original_text), len(text)) > MAX_LAYOUT_TEXT:
         raise OriginalPreviewError("文档文字量超过版式预览上限。", 413)
     applied = True
+    source_stories: list[str] | None = None
     if file_type in {"docx", "doc", "rtf"}:
         if convert is None:
             raise OriginalPreviewError("文档渲染服务未配置。", 503)
-        if text != original_text:
+        if text != original_text or file_type in {"docx", "doc"}:
             if file_type == "doc":
                 content = convert(content, file_type, "docx")
                 file_type = "docx"
@@ -503,8 +553,10 @@ def render_review_document(
                     ).content
                 except ExportError as error:
                     raise OriginalPreviewError(
-                        "这次修订无法安全应用到原版式；修订仍保留，请调整修改范围。"
+                        "原文顺序或修订无法安全映射到原版式；请重新分析或手动修改原文件。"
                     ) from error
+        if file_type == "docx":
+            source_stories = _docx_source_stories(content)
         content = convert(content, file_type, "pdf")
         file_type = "pdf"
     elif file_type == "pdf" and text != original_text:
@@ -531,4 +583,4 @@ def render_review_document(
         applied = text == original_text
     elif file_type != "pdf":
         raise OriginalPreviewError("此文件不支持分页版式预览。", 415)
-    return _render_pages(content, file_type, text, applied)
+    return _render_pages(content, file_type, text, applied, source_stories)

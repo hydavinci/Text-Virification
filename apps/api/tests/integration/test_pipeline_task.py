@@ -1434,6 +1434,7 @@ def test_pipeline_runner_uses_persisted_nondefault_verification_options(
 
     options = VerificationOptions(
         scenario="legal",
+        enable_semantic_discovery=True,
         enable_security=False,
         enable_sensitive=False,
         enable_ad_extreme=True,
@@ -1471,6 +1472,7 @@ def test_retry_reload_reuses_persisted_nondefault_verification_options(
 
     options = VerificationOptions(
         scenario="legal",
+        enable_semantic_discovery=True,
         enable_security=False,
         enable_sensitive=False,
         custom_glossary=({"original": "colour", "standard": "color"},),

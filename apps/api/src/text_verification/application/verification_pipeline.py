@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
 from text_verification.application.errors import ReviewerError, VerificationError
@@ -53,6 +53,13 @@ class IssueReviewer(Protocol):
         self,
         document: DocumentModel,
         issues: tuple[Issue, ...],
+    ) -> tuple[tuple[Issue, ...], ReviewMetadata | None]: ...
+
+
+@runtime_checkable
+class ContextualIssueReviewer(Protocol):
+    def review_with_context(
+        self, document: DocumentModel, issues: tuple[Issue, ...], context: CheckContext,
     ) -> tuple[tuple[Issue, ...], ReviewMetadata | None]: ...
 
 
@@ -108,7 +115,7 @@ class VerificationPipeline:
             context,
             progress_observer=progress_observer,
         )
-        issues, review_metadata = self._review(document, check_result.issues)
+        issues, review_metadata = self._review(document, check_result.issues, context)
 
         analysis_mode = VerificationAnalysisMode.LOCAL_ONLY
         degradation_reasons: tuple[str, ...] = (
@@ -127,6 +134,12 @@ class VerificationPipeline:
                 degradation_reasons = (*degradation_reasons, "llm_review_failed")
             elif review_metadata.get("performed"):
                 analysis_mode = VerificationAnalysisMode.LOCAL_PLUS_LLM
+            discovery = review_metadata.get("semantic_discovery")
+            if isinstance(discovery, dict):
+                if discovery.get("degraded"):
+                    degradation_reasons = (*degradation_reasons, "semantic_discovery_failed")
+                if discovery.get("performed"):
+                    analysis_mode = VerificationAnalysisMode.LOCAL_PLUS_LLM
 
         return VerificationResult(
             verification_run_id=context.verification_run_id,
@@ -313,11 +326,15 @@ class VerificationPipeline:
         self,
         document: DocumentModel,
         issues: tuple[Issue, ...],
+        context: CheckContext,
     ) -> tuple[tuple[Issue, ...], ReviewMetadata | None]:
         if self._reviewer is None:
             return issues, None
         try:
-            reviewed, metadata = self._reviewer.review(document, issues)
+            if isinstance(self._reviewer, ContextualIssueReviewer):
+                reviewed, metadata = self._reviewer.review_with_context(document, issues, context)
+            else:
+                reviewed, metadata = self._reviewer.review(document, issues)
             validate_issue_count(reviewed)
             return reviewed, metadata
         except ReviewerError as error:

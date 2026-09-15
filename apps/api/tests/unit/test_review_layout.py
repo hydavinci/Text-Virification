@@ -341,7 +341,7 @@ def test_word_preview_applies_revisions_without_touching_the_source(tmp_path: Pa
     path = tmp_path / "original.docx"
     document.save(path)
     source = path.read_bytes()
-    text = "First account\nSecond account"
+    text = "First account\nSecond account\nHeader preserved"
 
     def convert(content: bytes, file_type: str, target_type: str) -> bytes:
         assert (file_type, target_type) == ("docx", "pdf")

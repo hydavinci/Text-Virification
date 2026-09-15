@@ -216,6 +216,7 @@ def test_analyze_route_uses_injected_pipeline(
             "text": "检查文本",
             "ocr_language": "ja",
             "enable_extended_rules": "true",
+            "enable_semantic_discovery": "true",
         },
     )
 
@@ -229,6 +230,7 @@ def test_analyze_route_uses_injected_pipeline(
     assert pipeline.commands[0].options == VerificationOptions(
         ocr_language="ja",
         enable_extended_rules=True,
+        enable_semantic_discovery=True,
     )
     assert pipeline.commands[0].execution_mode is VerificationExecutionMode.SYNCHRONOUS
 

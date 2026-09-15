@@ -116,6 +116,7 @@ describe('createVerificationApi', () => {
 
     const result = await api.analyzeText('这是测试。', {
       scenario: 'technical',
+      enableSemanticDiscovery: true,
       enableSecurity: true,
       enableSensitive: false,
       enableAdExtreme: true,
@@ -142,6 +143,7 @@ describe('createVerificationApi', () => {
     expect(body.get('scenario')).toBe('technical')
     expect(body.get('enable_sensitive')).toBe('false')
     expect(body.get('enable_ad_extreme')).toBe('true')
+    expect(body.get('enable_semantic_discovery')).toBe('true')
     expect(body.get('custom_glossary')).toBe('[{"original":"AI","standard":"人工智能"}]')
     expect(body.get('banned_words')).toBe('["最好"]')
   })
@@ -162,6 +164,7 @@ describe('createVerificationApi', () => {
 
     await api.analyzeFile(file, {
       scenario: 'general',
+      enableSemanticDiscovery: true,
       enableSecurity: true,
       enableSensitive: true,
       enableAdExtreme: false,
@@ -171,6 +174,7 @@ describe('createVerificationApi', () => {
 
     const body = fetchMock.mock.calls[0]?.[1]?.body as FormData
     expect((body.get('file') as File).name).toBe('source.docx')
+    expect(body.get('enable_semantic_discovery')).toBe('true')
   })
 
   it('preserves nullable legacy suggestions', async () => {
@@ -278,6 +282,7 @@ describe('createVerificationApi', () => {
       rechecked.text,
       {
         scenario: 'technical',
+        enableSemanticDiscovery: true,
         enableSecurity: true,
         enableSensitive: false,
         enableAdExtreme: true,
@@ -300,6 +305,7 @@ describe('createVerificationApi', () => {
     )
     const body = fetchMock.mock.calls[0]?.[1]?.body as URLSearchParams
     expect(body.get('text')).toBe(rechecked.text)
+    expect(body.get('enable_semantic_discovery')).toBe('true')
   })
 
   it('persists a draft revision without sending a client revision number', async () => {

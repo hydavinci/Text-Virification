@@ -83,6 +83,7 @@ export function verificationOptionsJsonBytes(options: AnalyzeOptions): number {
       enable_ad_extreme: options.enableAdExtreme,
       ocr_language: options.ocrLanguage ?? DEFAULT_OCR_LANGUAGE,
       enable_extended_rules: options.enableExtendedRules ?? DEFAULT_EXTENDED_RULES,
+      enable_semantic_discovery: options.enableSemanticDiscovery ?? false,
       custom_glossary: options.glossary.map(({ original, standard }) => ({
         original,
         standard

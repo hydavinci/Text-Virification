@@ -42,6 +42,12 @@ class Settings(BaseSettings):
     llm_context_radius: int = Field(default=50, ge=0, le=2_000)
     llm_timeout: float = Field(default=60.0, gt=0, le=300)
     llm_json_mode: bool = False
+    llm_semantic_discovery_allowed: bool = False
+    llm_semantic_max_chunks: int = Field(default=6, ge=1, le=20)
+    llm_semantic_chunk_chars: int = Field(default=800, ge=100, le=2_000)
+    llm_semantic_context_chars: int = Field(default=100, ge=0, le=300)
+    llm_semantic_max_findings: int = Field(default=24, ge=1, le=100)
+    llm_semantic_max_tokens: int = Field(default=3_000, ge=100, le=8_000)
     recheck_grant_secret: SecretStr = SecretStr("")
     recheck_grant_ttl_seconds: int = Field(default=900, ge=60, le=86_400)
 

@@ -140,6 +140,7 @@ def _parse_txt(file_path: str) -> str:
 def _parse_docx(file_path: str) -> Tuple[str, PageMap]:
     """解析 Word (.docx) 文件，追踪段落号，并清理混入的 HTML 代码"""
     from docx import Document
+    from text_verification.compatibility.docx_traversal import iter_docx_paragraphs
     _validate_converted_docx(Path(file_path))
     doc = Document(file_path)
     paragraphs = []
@@ -149,32 +150,13 @@ def _parse_docx(file_path: str) -> Tuple[str, PageMap]:
     parsed_elements = 0
     parsed_text_chars = 0
 
-    document_paragraphs = []
-    seen_paragraphs = set()
-
-    def append_paragraph(para) -> None:
-        nonlocal parsed_elements, parsed_text_chars
-        element_id = id(para._element)
-        if element_id in seen_paragraphs:
-            return
+    for para in iter_docx_paragraphs(doc):
         parsed_elements += 1
         if parsed_elements > MAX_DOC_PARSED_ELEMENTS:
             raise ValueError('DOCX parsed element limit exceeded')
         parsed_text_chars += len(para.text)
         if parsed_text_chars > MAX_DOC_PARSED_TEXT_CHARS:
             raise ValueError('DOCX parsed text size limit exceeded')
-        document_paragraphs.append(para)
-        seen_paragraphs.add(element_id)
-
-    for para in doc.paragraphs:
-        append_paragraph(para)
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for para in cell.paragraphs:
-                    append_paragraph(para)
-
-    for para in document_paragraphs:
         text = _strip_html(para.text).strip()
         if text:
             para_num += 1

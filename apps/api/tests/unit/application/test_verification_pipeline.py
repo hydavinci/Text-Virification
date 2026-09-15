@@ -402,6 +402,7 @@ def test_successful_canonical_llm_review_preserves_issue_ownership(
         settings: Settings,
         text: str,
         issues: list[Any],
+        context: CheckContext | None = None,
     ) -> tuple[list[Any], dict[str, Any]]:
         del settings
         assert text == "甲乙丙丁"
@@ -447,7 +448,7 @@ def test_successful_canonical_llm_review_preserves_issue_ownership(
     assert result.issues[0].verification_run_id == result.verification_run_id
     assert verification_run_ids == [result.verification_run_id]
     assert result.issues[0].severity is IssueSeverity.INFO
-    assert result.issues[0].confidence == 0.6
+    assert result.issues[0].confidence == 0.8
     assert result.issues[0].start == 2
     assert result.issues[0].end == 4
     assert result.issues[0].block_start == 2
@@ -456,6 +457,61 @@ def test_successful_canonical_llm_review_preserves_issue_ownership(
     assert result.summary.total == 1
     assert result.summary.by_severity == {"info": 1}
     assert removed_issue_id not in {issue.issue_id for issue in result.issues}
+
+
+def test_opted_in_pipeline_discovers_new_findings_without_local_candidates(monkeypatch) -> None:
+    import json
+    from types import SimpleNamespace
+
+    calls = []
+
+    class Client:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=self)
+
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(choices=[SimpleNamespace(
+                finish_reason="stop", message=SimpleNamespace(content=json.dumps({
+                    "reviewed_chunk_ids": [0],
+                    "findings": [{
+                        "chunk_id": 0, "original": "He go", "suggestions": ["He goes"],
+                        "type": "grammar", "confidence": 0.8, "reason": "Verb agreement.",
+                    }],
+                })),
+            )])
+
+    monkeypatch.setattr(llm_review, "OpenAI", Client)
+    pipeline = build_default_verification_pipeline(Settings(
+        _env_file=None, llm_api_key="test-only", llm_semantic_discovery_allowed=True,
+    ))
+    result = pipeline.run(VerificationCommand(
+        document_id=uuid4(), source_path=None, direct_text="He go home.",
+        source_name="input.txt", file_type=FileType.TXT,
+        options=VerificationOptions(
+            enable_semantic_discovery=True, enable_security=False, enable_sensitive=False,
+        ),
+        execution_mode=VerificationExecutionMode.SYNCHRONOUS,
+    ))
+    semantic = [issue for issue in result.issues if issue.source == "llm_semantic"]
+    assert len(semantic) == 1
+    assert semantic[0].verification_run_id == result.verification_run_id
+    assert semantic[0].document_id == result.document_id
+    assert result.analysis_mode is VerificationAnalysisMode.LOCAL_PLUS_LLM
+    assert result.summary.llm_review["semantic_discovery"]["added"] == 1
+
+
+def test_requested_but_unconfigured_discovery_is_visible_degradation() -> None:
+    pipeline = build_default_verification_pipeline(Settings(_env_file=None, llm_api_key=""))
+    result = pipeline.run(VerificationCommand(
+        document_id=uuid4(), source_path=None, direct_text="帐号测试",
+        source_name="input.txt", file_type=FileType.TXT,
+        options=VerificationOptions(enable_semantic_discovery=True),
+        execution_mode=VerificationExecutionMode.SYNCHRONOUS,
+    ))
+    assert result.issues
+    assert result.degradation.is_degraded
+    assert "semantic_discovery_failed" in result.degradation.reasons
 
 
 def test_default_reviewer_prompt_programming_value_error_remains_visible(
@@ -467,7 +523,9 @@ def test_default_reviewer_prompt_programming_value_error_remains_visible(
         verification_run_ids=[],
     )
 
-    def fail_prompt(candidates: list[dict[str, object]]) -> tuple[str, str]:
+    def fail_prompt(
+        candidates: list[dict[str, object]], context: CheckContext | None = None,
+    ) -> tuple[str, str]:
         del candidates
         raise ValueError("prompt programming defect")
 

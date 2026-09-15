@@ -47,6 +47,7 @@ function backendPayloadBytes(options: AnalyzeOptions): number {
       enable_ad_extreme: options.enableAdExtreme,
       ocr_language: options.ocrLanguage ?? 'zh',
       enable_extended_rules: options.enableExtendedRules ?? false,
+      enable_semantic_discovery: options.enableSemanticDiscovery ?? false,
       custom_glossary: options.glossary,
       banned_words: options.bannedWords
     })
@@ -76,6 +77,24 @@ function optionsWithSerializedBytes(target: number): AnalyzeOptions {
 }
 
 describe('createAnalyzeOptionsSnapshot', () => {
+  it('keeps semantic discovery default-off and propagates explicit opt-in', () => {
+    const defaults = new FormData()
+    appendAnalyzeOptions(defaults, createDefaultAnalyzeOptions())
+    expect(defaults.get('enable_semantic_discovery')).toBe('false')
+    const enabled = createAnalyzeOptionsSnapshot({
+      ...baseOptions(), enableSemanticDiscovery: true
+    })
+    const body = new URLSearchParams()
+    appendAnalyzeOptions(body, enabled)
+    expect(body.get('enable_semantic_discovery')).toBe('true')
+    expect(copyAnalyzeOptions(enabled).enableSemanticDiscovery).toBe(true)
+    expect(() => createAnalyzeOptionsSnapshot({
+      ...baseOptions(),
+      // @ts-expect-error Untrusted saved values must be rejected.
+      enableSemanticDiscovery: 'true'
+    })).toThrow(AnalyzeOptionsError)
+  })
+
   it('serializes optional extended rules without enabling them for old options', () => {
     const enabled = { ...baseOptions(), enableExtendedRules: true }
     const body = new FormData()

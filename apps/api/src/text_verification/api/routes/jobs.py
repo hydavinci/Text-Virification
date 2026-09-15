@@ -146,6 +146,7 @@ class JobRecheckRequest(BaseModel):
     scenario: Scenario = Scenario.GENERAL
     ocr_language: Literal["zh", "en", "ja"] = "zh"
     enable_extended_rules: bool = False
+    enable_semantic_discovery: bool = False
     enable_security: bool = True
     enable_sensitive: bool = True
     enable_ad_extreme: bool = False
@@ -236,6 +237,7 @@ async def recheck_job_text(
             scenario=payload.scenario,
             ocr_language=payload.ocr_language,
             enable_extended_rules=payload.enable_extended_rules,
+            enable_semantic_discovery=payload.enable_semantic_discovery,
             custom_glossary=parse_glossary(payload.custom_glossary),
             banned_words=parse_banned_words(payload.banned_words),
             enable_security=payload.enable_security,
@@ -454,6 +456,7 @@ def create_job(
     scenario: Annotated[Scenario, Form()] = Scenario.GENERAL,
     ocr_language: Annotated[Literal["zh", "en", "ja"], Form()] = "zh",
     enable_extended_rules: Annotated[bool, Form()] = False,
+    enable_semantic_discovery: Annotated[bool, Form()] = False,
     enable_security: Annotated[bool, Form()] = True,
     enable_sensitive: Annotated[bool, Form()] = True,
     enable_ad_extreme: Annotated[bool, Form()] = False,
@@ -471,6 +474,7 @@ def create_job(
             scenario=scenario,
             ocr_language=ocr_language,
             enable_extended_rules=enable_extended_rules,
+            enable_semantic_discovery=enable_semantic_discovery,
             custom_glossary=parse_glossary(custom_glossary),
             banned_words=parse_banned_words(banned_words),
             enable_security=enable_security,

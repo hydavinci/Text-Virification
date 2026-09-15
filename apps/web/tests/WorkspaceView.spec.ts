@@ -227,6 +227,33 @@ function canonicalWorkspace(wrapper: ReturnType<typeof mount>) {
 }
 
 describe('WorkspaceView', () => {
+  it('shows semantic coverage and visible degradation without discarding local issues', async () => {
+    const payload = buildWorkspaceResult([buildWorkspaceIssue()])
+    payload.degradation = { is_degraded: true, reasons: ['semantic_discovery_failed'] }
+    payload.summary.llm_review = { semantic_discovery: {
+      enabled: true, performed: true, degraded: true, sampled_chunks: 3, total_chunks: 20,
+      truncated: true, reason: '部分语义建议未通过来源校验。',
+      confidence_kind: 'heuristic_not_probability'
+    } }
+    const wrapper = mount(WorkspaceView, {
+      global: { provide: {
+        [jobsApiKey as symbol]: { createJob: vi.fn(), subscribe: vi.fn(() => vi.fn()) },
+        [verificationApiKey as symbol]: {
+          analyzeFile: vi.fn(), analyzeText: vi.fn().mockResolvedValue(payload),
+          exportReport: vi.fn(), exportOriginal: vi.fn()
+        }
+      } }
+    })
+    wrapper.getComponent(SourceInputPanel).vm.$emit('submit-text', payload.text)
+    await flushPromises()
+    expect(wrapper.get('[data-semantic-status]').text()).toContain('3 / 20')
+    expect(wrapper.get('[data-semantic-status]').text()).toContain('非全文')
+    expect(wrapper.get('[data-semantic-status]').text()).toContain('启发式')
+    expect(wrapper.get('[data-analysis-degradation]').text()).toContain('本地')
+    expect(wrapper.get('[data-count="pending"]').text()).toBe('1')
+    wrapper.unmount()
+  })
+
   it('reviews individual issues and updates counts without a top action menu', async () => {
     const payload = buildWorkspaceResult([buildWorkspaceIssue()])
     const wrapper = mount(WorkspaceView, {

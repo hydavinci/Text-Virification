@@ -269,6 +269,7 @@ describe('createJobsApi', () => {
     const file = new File(['body'], `sample.${fileType}`, { type: 'text/plain' })
     const options: AnalyzeOptions = {
       scenario: 'technical',
+      enableSemanticDiscovery: true,
       enableSecurity: false,
       enableSensitive: true,
       enableAdExtreme: false,
@@ -293,6 +294,7 @@ describe('createJobsApi', () => {
     expect(body.get('enable_security')).toBe('false')
     expect(body.get('enable_sensitive')).toBe('true')
     expect(body.get('enable_ad_extreme')).toBe('false')
+    expect(body.get('enable_semantic_discovery')).toBe('true')
     expect(body.get('custom_glossary')).toBe(
       '[{"original":"保留空字符串","standard":""},{"original":"AI","standard":"人工智能"}]'
     )

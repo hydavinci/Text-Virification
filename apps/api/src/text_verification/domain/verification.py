@@ -100,6 +100,7 @@ class VerificationOptions(BaseModel):
     scenario: Scenario = Scenario.GENERAL
     ocr_language: Literal["zh", "en", "ja"] = "zh"
     enable_extended_rules: bool = False
+    enable_semantic_discovery: bool = False
     enable_security: bool = True
     enable_sensitive: bool = True
     enable_ad_extreme: bool = False

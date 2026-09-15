@@ -78,6 +78,7 @@ def test_job_bound_recheck_returns_fresh_result_and_opaque_grant(
             "scenario": "general",
             "ocr_language": "en",
             "enable_extended_rules": "true",
+            "enable_semantic_discovery": "true",
             "enable_security": "true",
             "enable_sensitive": "false",
             "enable_ad_extreme": "true",
@@ -96,6 +97,7 @@ def test_job_bound_recheck_returns_fresh_result_and_opaque_grant(
     assert calls[0][0:2] == (JOB_ID, "重新检查文本")
     assert calls[0][2].ocr_language == "en"
     assert calls[0][2].enable_extended_rules is True
+    assert calls[0][2].enable_semantic_discovery is True
 
 
 def test_recheck_accepts_multipart_text_above_framework_default_when_configured(

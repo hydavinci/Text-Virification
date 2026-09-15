@@ -277,12 +277,15 @@ describe('useWorkspaceSession', () => {
     original.acceptIssue(issue.issue_id)
     const session = useWorkspaceSession(storage, original)
     expect(session.save({
-      ...uiState(), options: { ...options, ocrLanguage: 'ja', enableExtendedRules: true }
+      ...uiState(), options: {
+        ...options, ocrLanguage: 'ja', enableExtendedRules: true, enableSemanticDiscovery: true
+      }
     })).toBe(true)
     const reloaded = useVerificationWorkspace()
     const restored = useWorkspaceSession(storage, reloaded).restore()
     expect(restored?.options.ocrLanguage).toBe('ja')
     expect(restored?.options.enableExtendedRules).toBe(true)
+    expect(restored?.options.enableSemanticDiscovery).toBe(true)
     expect(reloaded.result.value?.file_type).toBe('png')
     expect(reloaded.issueStates.value[issue.issue_id]).toBe('accepted')
   })

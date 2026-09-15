@@ -110,6 +110,18 @@ const execution = useVerificationExecution({
   fileExecutionMode: 'jobs'
 })
 const result = computed(() => verificationWorkspace.result.value)
+const semanticStatus = computed(() => {
+  const metadata = result.value?.summary.llm_review?.semantic_discovery
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata) || !metadata.enabled) {
+    return null
+  }
+  return {
+    sampled: typeof metadata.sampled_chunks === 'number' ? metadata.sampled_chunks : 0,
+    total: typeof metadata.total_chunks === 'number' ? metadata.total_chunks : 0,
+    reason: typeof metadata.reason === 'string' ? metadata.reason : '',
+    truncated: metadata.truncated === true
+  }
+})
 const documentReveal = ref(0)
 const documentNavigationTarget = ref<'issue' | 'search'>('issue')
 const originalPreviewSource = computed(() => {
@@ -1472,6 +1484,20 @@ onBeforeUnmount(() => {
           "
         />
       </section>
+      <p
+        v-if="result.degradation.is_degraded"
+        class="execution-warning"
+        data-analysis-degradation
+        role="status"
+      >
+        部分检查已降级，本地检查结果仍保留，请人工核实。
+      </p>
+      <p v-if="semanticStatus" class="execution-warning" data-semantic-status role="status">
+        语义发现：抽样 {{ semanticStatus.sampled }} / {{ semanticStatus.total }} 个片段
+        <span v-if="semanticStatus.truncated">（非全文覆盖）</span>；
+        置信度为启发式估计，非校准概率；建议需人工确认。
+        {{ semanticStatus.reason }}
+      </p>
 
       <div class="mobile-view-switch" aria-label="审阅视图">
         <button type="button" :aria-pressed="reviewPane === 'document'" @click="reviewPane = 'document'">文档</button>

@@ -9,8 +9,10 @@ from math import isfinite
 from pathlib import Path
 from uuid import uuid4
 
+from text_verification.compatibility.docx_traversal import iter_docx_paragraphs
 from text_verification.compatibility.parser import (
     _convert_doc_to_docx,
+    _parse_docx,
     decode_rtf_with_spans,
     strip_html,
 )
@@ -105,7 +107,7 @@ def export_original(
     )
     if extension == "docx":
         content = (
-            _export_docx_edits(source_path, edits, track_changes)
+            _export_docx_edits(source_path, edits, track_changes, original_text)
             if edits is not None
             else _export_docx(source_path, cleaned_replacements, track_changes)
         )
@@ -114,7 +116,7 @@ def export_original(
         converted_path = Path(_convert_doc_to_docx(str(source_path), str(source_path.parent)))
         try:
             content = (
-                _export_docx_edits(converted_path, edits, track_changes)
+                _export_docx_edits(converted_path, edits, track_changes, original_text)
                 if edits is not None
                 else _export_docx(converted_path, cleaned_replacements, track_changes)
             )
@@ -296,6 +298,11 @@ def _pdf_source_line_identity(
 
 
 def _document_text_paragraphs(document: object) -> list[object]:
+    return list(iter_docx_paragraphs(document))
+
+
+def _legacy_document_text_paragraphs(document: object) -> list[object]:
+    # Used only to detect indistinguishable old offsets, never to apply edits.
     paragraphs = list(document.paragraphs)  # type: ignore[attr-defined]
     seen = {id(paragraph._element) for paragraph in paragraphs}
     for table in document.tables:  # type: ignore[attr-defined]
@@ -317,7 +324,7 @@ def _paragraph_edit_groups(
     offset = 0
     for paragraph in _document_text_paragraphs(document):
         raw_text = "".join(run.text for run in paragraph.runs)  # type: ignore[attr-defined]
-        text = strip_html(raw_text).strip()
+        text = strip_html(paragraph.text).strip()
         if not text:
             continue
         left_trim = len(raw_text) - len(raw_text.lstrip())
@@ -335,6 +342,14 @@ def _paragraph_edit_groups(
                 else block_start <= edit.start and edit.end <= block_end
             )
             if contained:
+                raw_text = "".join(run.text for run in paragraph.runs)
+                if (
+                    raw_text != paragraph.text
+                    or strip_html(raw_text).strip() != raw_text.strip()
+                ):
+                    raise ExportError(
+                        "This Word paragraph's extracted text cannot be mapped safely to runs."
+                    )
                 local_edits.append(
                     TextEdit(
                         edit.start - block_start + left_trim,
@@ -372,11 +387,58 @@ def _run_has_non_text_content(run: object) -> bool:
     return any(child.tag not in allowed for child in run._element)  # type: ignore[attr-defined]
 
 
-def _export_docx_edits(source_path: Path, edits: list[TextEdit], track_changes: bool) -> bytes:
+def _export_docx_edits(
+    source_path: Path,
+    edits: list[TextEdit],
+    track_changes: bool,
+    original_text: str | None = None,
+) -> bytes:
     from docx import Document
 
+    try:
+        source_text, _ = _parse_docx(str(source_path))
+    except ValueError as error:
+        raise ExportError(str(error)) from error
+    if original_text is not None and source_text != original_text:
+        raise ExportError(
+            "Word source text or extraction order has changed; reanalyze the source document."
+        )
     document = Document(source_path)
+    canonical = [
+        paragraph for paragraph in _document_text_paragraphs(document)
+        if strip_html(paragraph.text).strip()
+    ]
+    legacy = [
+        paragraph for paragraph in _legacy_document_text_paragraphs(document)
+        if strip_html(paragraph.text).strip()
+    ]
+    if (
+        "\n".join(strip_html(paragraph.text).strip() for paragraph in legacy) == source_text
+        and [paragraph._element for paragraph in legacy]
+        != [paragraph._element for paragraph in canonical]
+    ):
+        raise ExportError(
+            "Word source order is ambiguous with legacy extraction; edit this document manually."
+        )
+    if not edits:
+        return source_path.read_bytes()
     groups = _paragraph_edit_groups(document, edits)
+    revised_paragraphs = {
+        paragraph._element: strip_html(
+            _apply_text_edits(paragraph.text, local_edits, False)
+        ).strip()
+        for paragraph, local_edits in groups
+    }
+    revised_texts = [
+        revised_paragraphs.get(paragraph._element, strip_html(paragraph.text).strip())
+        for paragraph in canonical
+    ]
+    if "\n".join(text for text in revised_texts if text) != _apply_text_edits(
+        source_text, edits, False,
+    ):
+        raise ExportError(
+            "This revision changes Word paragraph extraction; edit the original document manually."
+        )
     if track_changes:
         for paragraph, local_edits in groups:
             _apply_docx_tracked_edits(paragraph, local_edits)
@@ -527,22 +589,7 @@ def _export_docx(
 
 
 def _paragraph_collections(document: object) -> list[object]:
-    collections: list[object] = [document.paragraphs]  # type: ignore[attr-defined]
-    for table in document.tables:  # type: ignore[attr-defined]
-        for row in table.rows:
-            for cell in row.cells:
-                collections.append(cell.paragraphs)
-    for section in document.sections:  # type: ignore[attr-defined]
-        for header_footer in (
-            section.header,
-            section.first_page_header,
-            section.even_page_header,
-            section.footer,
-            section.first_page_footer,
-            section.even_page_footer,
-        ):
-            collections.append(header_footer.paragraphs)
-    return collections
+    return [_document_text_paragraphs(document)]
 
 
 def _export_docx_inplace(

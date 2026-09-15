@@ -76,6 +76,7 @@ const enabledChecks = computed(() => [
               <span v-if="options.glossary.length"> · {{ options.glossary.length }} 个术语</span>
               <span v-if="options.bannedWords.length"> · {{ options.bannedWords.length }} 个禁用词</span>
               <span v-if="options.enableExtendedRules"> · 扩展检查</span>
+              <span v-if="options.enableSemanticDiscovery"> · 云端语义发现</span>
               <span v-if="options.ocrLanguage === 'en'"> · 英文 OCR</span>
               <span v-if="options.ocrLanguage === 'ja'"> · 日文 OCR</span>
             </p>

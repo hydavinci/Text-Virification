@@ -62,9 +62,27 @@ function selectOcrLanguage(event: Event): void {
     </label>
 
     <template v-if="!compact">
+    <h2>可选语义检查</h2>
+    <label class="switch" for="enable-semantic-discovery">
+      <span>发现规则未覆盖的语法与语义问题</span>
+      <input
+        id="enable-semantic-discovery"
+        :checked="options.enableSemanticDiscovery ?? false"
+        type="checkbox"
+        aria-describedby="semantic-discovery-note"
+        @change="updateOptions({
+          enableSemanticDiscovery: ($event.target as HTMLInputElement).checked
+        })"
+      />
+    </label>
+    <p id="semantic-discovery-note" class="ocr-note">
+      默认关闭；启用后将抽样的局部片段及相关术语发送至服务端配置并允许的模型服务，
+      可能增加费用和等待时间。不是全文覆盖或合规检查；建议仅供人工确认，不自动修改正文。
+      敏感文档请勿启用。服务不可用时保留本地结果并显示降级提示。
+    </p>
     <h2>扩展检查</h2>
     <label class="switch" for="enable-extended-rules">
-      <span>中英文间距、空行与长句建议</span>
+      <span>中英文间距、空行、长句及英文拼写与语法建议</span>
       <input
         id="enable-extended-rules"
         :checked="options.enableExtendedRules ?? DEFAULT_EXTENDED_RULES"
@@ -74,7 +92,7 @@ function selectOcrLanguage(event: Event): void {
         })"
       />
     </label>
-    <p class="ocr-note">默认关闭；长句建议仍按文档场景筛选，仅提示人工调整，不自动改写正文。</p>
+    <p class="ocr-note">默认关闭；开启后增加英文词典拼写与保守语法检查。长句建议仍按文档场景筛选，仅提示人工调整，不自动改写正文。</p>
     <h2>图片与扫描 PDF</h2>
     <label class="scenario-field">
       <span>OCR 识别语言</span>

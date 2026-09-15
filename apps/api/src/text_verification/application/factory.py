@@ -10,18 +10,19 @@ from text_verification.application.verification_pipeline import (
 )
 from text_verification.checkers.compatibility_checker import CompatibilityChecker
 from text_verification.checkers.registry import CheckerRegistry
-from text_verification.compatibility.adapters import confidence_for_severity
 from text_verification.compatibility.analyzer import Issue as LegacyIssue
 from text_verification.compatibility.llm_review import (
     is_llm_review_configured,
     review_issues,
 )
+from text_verification.compatibility.semantic_discovery import discover_issues
 from text_verification.config import Settings, get_settings
 from text_verification.document_processing.ocr_provider import OcrProvider
 from text_verification.domain.documents import DocumentModel, ExportFormat, FileType
 from text_verification.domain.issues import Issue, IssueSeverity
 from text_verification.domain.ports import (
     AnchoredSourcePathResolver,
+    CheckContext,
     Parser,
     SourcePathResolver,
 )
@@ -45,6 +46,7 @@ class CompatibilityIssueReviewer:
         self,
         document: DocumentModel,
         issues: tuple[Issue, ...],
+        context: CheckContext | None = None,
     ) -> tuple[tuple[Issue, ...], ReviewMetadata | None]:
         if not is_llm_review_configured(self.settings):
             return issues, None
@@ -54,7 +56,11 @@ class CompatibilityIssueReviewer:
             id(legacy_issue): issue
             for legacy_issue, issue in zip(legacy_issues, issues, strict=True)
         }
-        reviewed, metadata = review_issues(self.settings, document.text, legacy_issues)
+        reviewed, metadata = (
+            review_issues(self.settings, document.text, legacy_issues, context)
+            if context is not None
+            else review_issues(self.settings, document.text, legacy_issues)
+        )
         if metadata.get("failed"):
             failure_code = str(metadata.get("failure_code") or "llm_review_failed")
             retryable = metadata.get("retryable")
@@ -72,6 +78,18 @@ class CompatibilityIssueReviewer:
                 for legacy_issue in reviewed
             ),
             dict(metadata),
+        )
+
+    def review_with_context(
+        self, document: DocumentModel, issues: tuple[Issue, ...], context: CheckContext,
+    ) -> tuple[tuple[Issue, ...], ReviewMetadata | None]:
+        reviewed, metadata = self.review(document, issues, context)
+        if not context.enable_semantic_discovery:
+            return reviewed, metadata
+        discovered, discovery_metadata = discover_issues(self.settings, document, context, issues)
+        return (
+            (*reviewed, *discovered),
+            {**(metadata or {}), "semantic_discovery": discovery_metadata},
         )
 
 
@@ -127,7 +145,7 @@ def build_default_exporter_registry(
 
 
 def _to_legacy_issue(issue: Issue) -> LegacyIssue:
-    return LegacyIssue(
+    legacy = LegacyIssue(
         type=issue.type,
         severity=issue.severity.value,
         original=issue.original,
@@ -142,15 +160,20 @@ def _to_legacy_issue(issue: Issue) -> LegacyIssue:
         review=issue.review or "",
         review_reason=issue.review_reason or "",
     )
+    legacy.confidence = issue.confidence
+    return legacy
 
 
 def _apply_legacy_review(issue: Issue, reviewed: LegacyIssue) -> Issue:
     severity = IssueSeverity(reviewed.severity)
+    confidence = getattr(reviewed, "confidence", None)
     updates: dict[str, Any] = {
         "severity": severity,
-        "confidence": confidence_for_severity(severity),
+        "confidence": confidence if confidence is not None else issue.confidence,
         "description": reviewed.description,
         "review": reviewed.review or None,
         "review_reason": reviewed.review_reason or None,
     }
+    if reviewed.review == "uncertain":
+        updates["auto_fixable"] = False
     return issue.model_copy(update=updates)

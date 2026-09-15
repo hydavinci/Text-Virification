@@ -122,6 +122,7 @@ def legacy_issue_to_domain(
         (
             f"{document.source_version}:{legacy_issue.rule_id}:{start}:"
             f"{end}:{legacy_issue.original}"
+            + (f":{legacy_issue.suggestion!r}" if legacy_issue.rule_id == "custom_glossary" else "")
         ),
     )
 
@@ -147,8 +148,19 @@ def legacy_issue_to_domain(
         rule_version=_LEGACY_RULE_VERSION,
         source=_LEGACY_SOURCE,
         source_version=_LEGACY_SOURCE_VERSION,
-        confidence=confidence_for_severity(severity),
-        auto_fixable=bool(legacy_issue.suggestion),
+        confidence=(
+            legacy_issue.confidence if legacy_issue.confidence is not None
+            else 0.7
+        ),
+        auto_fixable=(
+            legacy_issue.suggestion is not None
+            and legacy_issue.suggestion != document.text[start:end]
+            and legacy_issue.rule_id not in {
+                "mixed_num_format", "mixed_date_format", "numbering_gap",
+                "numbering_order", "numbering_duplicate", "missing_conjunction_pair",
+                "banned_word",
+            }
+        ),
         context=legacy_issue.context,
         review=legacy_issue.review or None,
         review_reason=legacy_issue.review_reason or None,

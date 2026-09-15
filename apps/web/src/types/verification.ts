@@ -258,6 +258,7 @@ export interface AnalyzeOptions {
   enableAdExtreme: boolean
   ocrLanguage?: OcrLanguage
   enableExtendedRules?: boolean
+  enableSemanticDiscovery?: boolean
   glossary: GlossaryTerm[]
   bannedWords: string[]
 }

@@ -2,6 +2,7 @@ import { mount } from '@vue/test-utils'
 import { describe, expect, it } from 'vitest'
 
 import VerificationSettings from '../src/components/workspace/VerificationSettings.vue'
+import PrivacyDialog from '../src/components/workspace/PrivacyDialog.vue'
 import type { AnalyzeOptions } from '../src/types/verification'
 
 function verificationOptionsBytes(options: AnalyzeOptions): number {
@@ -13,6 +14,7 @@ function verificationOptionsBytes(options: AnalyzeOptions): number {
       enable_ad_extreme: options.enableAdExtreme,
       ocr_language: options.ocrLanguage ?? 'zh',
       enable_extended_rules: options.enableExtendedRules ?? false,
+      enable_semantic_discovery: options.enableSemanticDiscovery ?? false,
       custom_glossary: options.glossary,
       banned_words: options.bannedWords
     })
@@ -60,10 +62,33 @@ function buildOptions(): AnalyzeOptions {
 }
 
 describe('VerificationSettings', () => {
-  it('offers extended formatting rules as an opt-in setting', async () => {
+  it('discloses discovery excerpts beyond rule hits in the privacy dialog', () => {
+    const wrapper = mount(PrivacyDialog, { props: { open: true } })
+    expect(wrapper.text()).toContain('隐私说明')
+    expect(wrapper.text()).toContain('抽样')
+    expect(wrapper.text()).toContain('费用')
+    wrapper.unmount()
+  })
+
+  it('makes semantic discovery an explicit informed opt-in', async () => {
+    const options = buildOptions()
+    const wrapper = mount(VerificationSettings, { props: { options } })
+    expect(wrapper.get('#enable-semantic-discovery').element).toHaveProperty('checked', false)
+    expect(wrapper.text()).toContain('局部片段')
+    expect(wrapper.text()).toContain('费用')
+    expect(wrapper.text()).toContain('不自动')
+    await wrapper.get('#enable-semantic-discovery').setValue(true)
+    expect(wrapper.emitted('update:options')?.[0]).toEqual([
+      { ...options, enableSemanticDiscovery: true }
+    ])
+  })
+
+  it('offers English spelling and grammar with extended formatting as an opt-in', async () => {
     const options = buildOptions()
     const wrapper = mount(VerificationSettings, { props: { options } })
     expect(wrapper.get('#enable-extended-rules').element).toHaveProperty('checked', false)
+    expect(wrapper.get('label[for="enable-extended-rules"]').text()).toContain('英文拼写与语法')
+    expect(wrapper.text()).toContain('英文词典拼写与保守语法检查')
     await wrapper.get('#enable-extended-rules').setValue(true)
     expect(wrapper.emitted('update:options')?.[0]).toEqual([
       { ...options, enableExtendedRules: true }

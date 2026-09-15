@@ -80,11 +80,13 @@ def build_verification_options(
     enable_sensitive: bool,
     enable_ad_extreme: bool,
     enable_extended_rules: bool = False,
+    enable_semantic_discovery: bool = False,
 ) -> VerificationOptions:
     return VerificationOptions(
         scenario=scenario,
         ocr_language=ocr_language,
         enable_extended_rules=enable_extended_rules,
+        enable_semantic_discovery=enable_semantic_discovery,
         custom_glossary=custom_glossary,
         banned_words=banned_words,
         enable_security=enable_security,
