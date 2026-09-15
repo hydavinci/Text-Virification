@@ -52,14 +52,13 @@ const enabledChecks = computed(() => [
       >
         <template #settings>
           <div class="setup-options">
-            <div class="options-row">
-              <fieldset class="scenario-control" :disabled="busy">
-                <VerificationSettings
-                  compact
-                  :options="options"
-                  @update:options="emit('update:options', $event)"
-                />
-              </fieldset>
+            <VerificationSettings
+              compact
+              :options="options"
+              :disabled="busy"
+              @update:options="emit('update:options', $event)"
+            >
+              <template #scenario-actions>
               <button
                 class="settings-trigger ui-button ui-button--quiet"
                 type="button"
@@ -70,7 +69,8 @@ const enabledChecks = computed(() => [
               >
                 检查设置 <span aria-hidden="true">↗</span>
               </button>
-            </div>
+              </template>
+            </VerificationSettings>
             <p class="options-summary">
               {{ enabledChecks ? `已启用：${enabledChecks}检查` : '合规检查未启用' }}
               <span v-if="options.glossary.length"> · {{ options.glossary.length }} 个术语</span>
@@ -98,14 +98,11 @@ h1 { margin: 10px 0 8px; font-size: clamp(25px, 3vw, 32px); line-height: 1.35; f
 .setup-heading p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.8; }
 .input-card { padding: 20px; border: 1px solid var(--border); border-radius: 18px; background: var(--surface); box-shadow: var(--shadow-paper); }
 .setup-options { min-width: 0; margin: 16px 0 0; padding: 14px 0 0; border: 0; border-top: 1px solid var(--border); }
-.options-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.scenario-control { min-width: 0; margin: 0; padding: 0; border: 0; }
 .settings-trigger { white-space: nowrap; }
 .options-summary { margin: 12px 0 0; color: var(--muted); font-size: 12px; line-height: 1.8; }
 .privacy-note { margin: 20px 0 0; color: var(--muted); text-align: center; font-size: 12px; line-height: 1.9; }
 @media (max-width: 600px) {
   .setup { padding: 32px 16px 24px; }
   .input-card { padding: 18px; }
-  .options-row { flex-wrap: wrap; }
 }
 </style>

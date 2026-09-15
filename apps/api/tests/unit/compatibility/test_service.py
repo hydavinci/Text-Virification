@@ -35,7 +35,7 @@ def test_disabled_llm_is_local_only_without_degradation() -> None:
 def test_successful_llm_review_reports_local_plus_llm(
     monkeypatch,
 ) -> None:
-    def successful_review(settings, text, issues):
+    def successful_review(settings, text, issues, context):
         del settings, text
         return issues, {
             "enabled": True,
@@ -57,7 +57,7 @@ def test_successful_llm_review_reports_local_plus_llm(
 def test_failed_configured_llm_falls_back_and_marks_degradation(
     monkeypatch,
 ) -> None:
-    def failed_review(settings, text, issues):
+    def failed_review(settings, text, issues, context):
         del settings, text
         return issues, {
             "enabled": True,

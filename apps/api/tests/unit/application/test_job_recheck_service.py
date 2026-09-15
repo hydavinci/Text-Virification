@@ -95,7 +95,10 @@ class Pipeline:
         return self.fresh
 
 
-def test_job_recheck_issues_grant_bound_to_original_and_fresh_results() -> None:
+@pytest.mark.parametrize("file_type", list(FileType))
+def test_job_recheck_issues_grant_bound_to_original_and_fresh_results(
+    file_type: FileType,
+) -> None:
     original = result(
         document_id=JOB_ID,
         run_id=ORIGINAL_RUN_ID,
@@ -110,6 +113,7 @@ def test_job_recheck_issues_grant_bound_to_original_and_fresh_results() -> None:
         text="重新检查文本",
         mode=VerificationExecutionMode.SYNCHRONOUS,
     )
+    original = original.model_copy(update={"file_type": file_type})
     repository = Repository(original)
     pipeline = Pipeline(fresh)
     grants = RecheckProvenanceGrantService(
@@ -148,6 +152,7 @@ def test_job_recheck_issues_grant_bound_to_original_and_fresh_results() -> None:
     )
     assert repository.rollback_calls == 1
     assert len(pipeline.commands) == 1
+    assert pipeline.commands[0].file_type is file_type
 
 
 def test_job_recheck_fails_closed_without_server_secret() -> None:

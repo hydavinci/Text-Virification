@@ -69,9 +69,11 @@ class CheckContext:
 class CheckResult:
     issues: tuple[Issue, ...]
     dictionary_versions: Mapping[str, str] = field(default_factory=dict)
+    degradation_reasons: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "issues", tuple(self.issues))
+        object.__setattr__(self, "degradation_reasons", tuple(self.degradation_reasons))
         object.__setattr__(
             self,
             "dictionary_versions",

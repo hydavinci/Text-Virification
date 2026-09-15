@@ -1,9 +1,11 @@
-import { mount } from '@vue/test-utils'
-import { describe, expect, it } from 'vitest'
+import { flushPromises, mount } from '@vue/test-utils'
+import { describe, expect, it, vi } from 'vitest'
 
 import VerificationSettings from '../src/components/workspace/VerificationSettings.vue'
 import PrivacyDialog from '../src/components/workspace/PrivacyDialog.vue'
 import type { AnalyzeOptions } from '../src/types/verification'
+import { scenarioCatalogKey } from '../src/api/scenarioCatalog'
+import { scenarioCatalogFixture } from './fixtures/scenarioCatalog'
 
 function verificationOptionsBytes(options: AnalyzeOptions): number {
   return new TextEncoder().encode(
@@ -62,6 +64,66 @@ function buildOptions(): AnalyzeOptions {
 }
 
 describe('VerificationSettings', () => {
+  it('shows the rule package name without its internal version', async () => {
+    const wrapper = mount(VerificationSettings, {
+      props: { options: buildOptions() },
+      global: { provide: { [scenarioCatalogKey as symbol]: async () => scenarioCatalogFixture() } }
+    })
+    await flushPromises()
+    expect(wrapper.get('.scenario-rules > p strong').text()).toBe('通用文档规则包')
+    wrapper.unmount()
+  })
+
+  it('omits the redundant setup caption while keeping the selector accessible', async () => {
+    const wrapper = mount(VerificationSettings, {
+      props: { options: buildOptions(), compact: true },
+      global: { provide: { [scenarioCatalogKey as symbol]: async () => scenarioCatalogFixture() } }
+    })
+    await flushPromises()
+    expect(wrapper.find('.scenario-header .scenario-field > span').exists()).toBe(false)
+    expect(wrapper.get('select[aria-label="文档场景"]').element).toHaveProperty('value', 'general')
+    await wrapper.setProps({ compact: false })
+    expect(wrapper.get('.scenario-header .scenario-field > span').text()).toBe('文档场景')
+    wrapper.unmount()
+  })
+
+  it('shows only the selected server rule package, including compact setup', async () => {
+    const options = { ...buildOptions(), scenario: 'academic' as const }
+    const wrapper = mount(VerificationSettings, {
+      props: { options, compact: true },
+      global: { provide: { [scenarioCatalogKey as symbol]: async () => scenarioCatalogFixture() } }
+    })
+    await flushPromises()
+    const checklist = wrapper.get('[aria-label="场景规则"]')
+    expect(checklist.text()).toContain('学术论文专用检查')
+    expect(checklist.text()).toContain('完整文本')
+    expect(checklist.text()).not.toContain('商务文档专用检查')
+    expect(checklist.text()).not.toContain('扩展英文检查')
+    await wrapper.setProps({ options: { ...options, scenario: 'business', enableExtendedRules: true } })
+    expect(checklist.text()).toContain('商务文档专用检查')
+    expect(checklist.text()).not.toContain('学术论文专用检查')
+    expect(checklist.text()).toContain('扩展英文检查')
+    expect(wrapper.emitted('update:options')).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('shows a failed catalog explicitly and can retry without changing options', async () => {
+    const load = vi.fn().mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValueOnce(scenarioCatalogFixture())
+    const wrapper = mount(VerificationSettings, {
+      props: { options: buildOptions() },
+      global: { provide: { [scenarioCatalogKey as symbol]: load } }
+    })
+    await flushPromises()
+    expect(wrapper.text()).toContain('规则清单加载失败')
+    await wrapper.get('[aria-label="重试加载规则清单"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('通用文档的独立规则')
+    expect(wrapper.text()).not.toContain('规则清单加载失败')
+    expect(wrapper.emitted('update:options')).toBeUndefined()
+    wrapper.unmount()
+  })
+
   it('discloses discovery excerpts beyond rule hits in the privacy dialog', () => {
     const wrapper = mount(PrivacyDialog, { props: { open: true } })
     expect(wrapper.text()).toContain('隐私说明')

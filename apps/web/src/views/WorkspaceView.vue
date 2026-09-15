@@ -110,6 +110,16 @@ const execution = useVerificationExecution({
   fileExecutionMode: 'jobs'
 })
 const result = computed(() => verificationWorkspace.result.value)
+const skippedRuleNames = computed(() => {
+  const prefix = 'scenario_rule_skipped:'
+  return (result.value?.degradation.reasons ?? [])
+    .filter((reason) => reason.startsWith(prefix))
+    .map((reason) => {
+      const detail = reason.slice(prefix.length)
+      const separator = detail.indexOf(':')
+      return separator >= 0 ? detail.slice(separator + 1) : detail
+    })
+})
 const semanticStatus = computed(() => {
   const metadata = result.value?.summary.llm_review?.semantic_discovery
   if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata) || !metadata.enabled) {
@@ -447,7 +457,8 @@ async function recheck() {
     await execution.analyzeText(
       textInput.value,
       currentOptions.value,
-      transform
+      transform,
+      source.file_type === 'txt' ? undefined : source.file_type
     )
   } else {
     await execution.recheckJob(
@@ -1491,6 +1502,9 @@ onBeforeUnmount(() => {
         role="status"
       >
         部分检查已降级，本地检查结果仍保留，请人工核实。
+        <span v-if="skippedRuleNames.length" data-skipped-rules>
+          未检查：{{ skippedRuleNames.join('、') }}。提取文本可能不完整，不能据此判断原文缺少相关内容。
+        </span>
       </p>
       <p v-if="semanticStatus" class="execution-warning" data-semantic-status role="status">
         语义发现：抽样 {{ semanticStatus.sampled }} / {{ semanticStatus.total }} 个片段

@@ -4,6 +4,18 @@ import re
 from array import array
 from dataclasses import dataclass
 
+CLAUSE_HEADING_PATTERN = re.compile(
+    r"^[ \t]*第[ \t]*([0-9零一二三四五六七八九十百]+)[ \t]*条"
+    r"(?:[ \t]+|[：:][ \t]*|(?=\r?$))",
+    re.MULTILINE,
+)
+ABBREVIATION_DEFINITION_PATTERN = re.compile(
+    r"^[ \t]*(?:缩写|Abbreviation)[ \t]+(?P<abbr>[A-Z]{2,10})[ \t]*[:：][ \t]*"
+    r"(?P<meaning>[A-Za-z\u4e00-\u9fff][A-Za-z\u4e00-\u9fff \t\-]{1,119}?)"
+    r"[ \t\r]*$",
+    re.MULTILINE,
+)
+
 _TECHNICAL = re.compile(
     r"^[ \t]*```[^\n]*\n[\s\S]*?(?:^[ \t]*```[^\n]*(?:\n|$)|\Z)"
     r"|^[ \t]*~~~[^\n]*\n[\s\S]*?(?:^[ \t]*~~~[^\n]*(?:\n|$)|\Z)"

@@ -90,6 +90,14 @@ def _build_prompt(candidates: List[Dict], context: CheckContext | None = None) -
         "\"reason\": \"简短理由，20字以内\"}。"
         "不要输出任何额外文字，不要使用 Markdown 代码块标记。"
     )
+    from text_verification.scenarios.registry import get_profile
+
+    profile = get_profile(context.scenario.value if context else "general")
+    system += (
+        "\n当前规则包的语义审阅策略：" + profile.semantic_guidance
+        + "\n只能依据所提供片段，不得据此推断全文缺少引用、附件、定义或其他结构。"
+        "不得作出法律效力或合规判断。专业规则可能依赖远处证据，证据不足时使用 uncertain。"
+    )
     user = json.dumps({
         "scenario": context.scenario.value if context else "general",
         "untrusted_candidates": candidates,

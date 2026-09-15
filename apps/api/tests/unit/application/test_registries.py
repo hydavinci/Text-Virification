@@ -56,6 +56,7 @@ class FakeChecker:
     layer: str
     issues: tuple[Issue, ...]
     dictionary_versions: dict[str, str] = field(default_factory=dict)
+    degradation_reasons: tuple[str, ...] = ()
     version: str = "1"
     supported_languages: set[str] = field(default_factory=lambda: {"zh"})
 
@@ -64,6 +65,7 @@ class FakeChecker:
         return CheckResult(
             issues=self.issues,
             dictionary_versions=self.dictionary_versions,
+            degradation_reasons=self.degradation_reasons,
         )
 
 
@@ -235,6 +237,15 @@ def test_checker_registry_collects_immutable_dictionary_versions() -> None:
     }
     with pytest.raises(TypeError):
         result.dictionary_versions["new_dict"] = "v3"  # type: ignore[index]
+
+
+def test_checker_registry_preserves_and_deduplicates_coverage_reasons() -> None:
+    registry = CheckerRegistry([
+        FakeChecker("first", "character", (), degradation_reasons=("partial",)),
+        FakeChecker("second", "discourse", (), degradation_reasons=("partial", "skipped")),
+    ])
+    result = registry.run(_document(), CheckContext())
+    assert result.degradation_reasons == ("partial", "skipped")
 
 
 def test_check_context_from_options_normalizes_checker_inputs() -> None:

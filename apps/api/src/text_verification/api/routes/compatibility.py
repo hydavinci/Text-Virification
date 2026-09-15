@@ -92,6 +92,7 @@ def analyze_content(
     settings: Annotated[Settings, Depends(get_settings)],
     pipeline: Annotated[VerificationPipeline, Depends(get_verification_pipeline)],
     text: Annotated[str | None, Form()] = None,
+    source_file_type: Annotated[FileType, Form()] = FileType.TXT,
     file: Annotated[UploadFile | None, File()] = None,
     scenario: Annotated[Scenario, Form()] = Scenario.GENERAL,
     ocr_language: Annotated[Literal["zh", "en", "ja"], Form()] = "zh",
@@ -131,7 +132,7 @@ def analyze_content(
             source_path=None,
             direct_text=text,
             source_name="直接输入文本",
-            file_type=FileType.TXT,
+            file_type=source_file_type,
             options=options,
             execution_mode=VerificationExecutionMode.SYNCHRONOUS,
         )

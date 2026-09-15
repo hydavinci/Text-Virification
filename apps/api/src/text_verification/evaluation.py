@@ -8,8 +8,13 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
+from text_verification.compatibility.adapters import text_to_document_model
 from text_verification.compatibility.analyzer import TextAnalyzer
+from text_verification.domain.documents import FileType
+from text_verification.domain.issues import MAX_VERIFICATION_ISSUES
+from text_verification.domain.ports import CheckContext
 from text_verification.domain.verification import VerificationOptions
+from text_verification.scenarios.checker import check_scenario
 
 
 class ExpectedFinding(BaseModel):
@@ -76,6 +81,11 @@ def evaluate(cases: list[QualityCase]) -> dict[str, object]:
             custom_glossary=[term.model_dump() for term in options.custom_glossary],
             banned_words=list(options.banned_words),
         )
+        predictions.extend(check_scenario(
+            text_to_document_model(text=case.text, source_name=case.name, file_type=FileType.TXT),
+            CheckContext.from_options(options),
+            max_issues=MAX_VERIFICATION_ISSUES - len(predictions),
+        ))
         remaining = list(case.expected)
         counts = {
             "cases": 1, "characters": len(case.text), "true_positives": 0,

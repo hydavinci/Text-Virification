@@ -16,7 +16,6 @@ from text_verification.application.verification_pipeline import (
     VerificationPipeline,
 )
 from text_verification.compatibility.service import direct_text_document_id
-from text_verification.domain.documents import FileType
 from text_verification.domain.text_edits import (
     MAX_REVISION_TEXT_CODEPOINTS,
     TextDiffLimitError,
@@ -117,7 +116,7 @@ class JobRecheckService:
                 source_path=None,
                 direct_text=text,
                 source_name="直接输入文本",
-                file_type=FileType.TXT,
+                file_type=original.file_type,
                 options=options,
                 execution_mode=VerificationExecutionMode.SYNCHRONOUS,
             )

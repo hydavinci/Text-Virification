@@ -227,6 +227,46 @@ function canonicalWorkspace(wrapper: ReturnType<typeof mount>) {
 }
 
 describe('WorkspaceView', () => {
+  it('names checks skipped for incomplete extraction and retains the notice after restore', async () => {
+    const payload = buildWorkspaceResult([], '样本文本。', {
+      scenario: 'academic',
+      file_type: 'docx',
+      degradation: {
+        is_degraded: true,
+        reasons: [
+          'scenario_rule_skipped:scenario.academic.citation_reference:明确引文编号与文末参考文献对应',
+          'scenario_rule_skipped:scenario.academic.caption_reference:明确本文图表引用与题注对应'
+        ]
+      }
+    })
+    const analyzeText = vi.fn().mockResolvedValue(payload)
+    const global = { provide: {
+      [jobsApiKey as symbol]: { createJob: vi.fn(), subscribe: vi.fn(() => vi.fn()) },
+      [verificationApiKey as symbol]: {
+        analyzeFile: vi.fn(), analyzeText,
+        exportReport: vi.fn(), exportOriginal: vi.fn()
+      }
+    } }
+    const wrapper = mount(WorkspaceView, { global })
+    wrapper.getComponent(SourceInputPanel).vm.$emit('submit-text', payload.text)
+    await flushPromises()
+    const notice = wrapper.get('[data-skipped-rules]')
+    expect(notice.text()).toContain('未检查')
+    expect(notice.text()).toContain('明确引文编号与文末参考文献对应')
+    expect(notice.text()).toContain('明确本文图表引用与题注对应')
+    expect(notice.text()).toContain('提取')
+    expect(notice.text()).not.toContain('scenario_rule_skipped')
+    wrapper.unmount()
+    const restored = mount(WorkspaceView, { global })
+    await flushPromises()
+    expect(restored.get('[data-skipped-rules]').text()).toContain('明确本文图表引用与题注对应')
+    await restored.get('[data-action="recheck"]').trigger('click')
+    await flushPromises()
+    expect(analyzeText.mock.lastCall?.[3]).toBe('docx')
+    expect(restored.get('[data-skipped-rules]').text()).toContain('未检查')
+    restored.unmount()
+  })
+
   it('shows semantic coverage and visible degradation without discarding local issues', async () => {
     const payload = buildWorkspaceResult([buildWorkspaceIssue()])
     payload.degradation = { is_degraded: true, reasons: ['semantic_discovery_failed'] }

@@ -54,7 +54,7 @@
   ],
   "colloquial_expr": [
     {
-      "name": "business scenario filters colloquial wording",
+      "name": "business package does not impose generic colloquial replacements",
       "text": "咱们处理",
       "options": {
         "scenario": "business"
@@ -62,30 +62,43 @@
       "expected": []
     },
     {
-      "name": "representative discourse rule",
+      "name": "general package preserves ordinary speech",
       "text": "咱们处理",
+      "options": {
+        "scenario": "general"
+      },
+      "expected": [],
+      "expected_summary": {
+        "total": 0
+      }
+    }
+  ],
+  "repeat_word_cn": [
+    {
+      "name": "representative discourse rule",
+      "text": "我们我们处理",
       "options": {
         "scenario": "general"
       },
       "expected": [
         {
-          "type": "colloquial",
-          "severity": "info",
-          "original": "咱们",
+          "type": "repetition",
+          "severity": "warning",
+          "original": "我们我们",
           "position": 0,
-          "end_position": 2
+          "end_position": 4
         }
       ],
       "expected_summary": {
         "total": 1,
         "by_type": {
-          "口语化": 1
+          "重复词语": 1
         },
         "by_severity": {
-          "建议": 1
+          "警告": 1
         },
         "by_rule": {
-          "colloquial_expr": 1
+          "repeat_word_cn": 1
         },
         "by_layer": {
           "语篇/语体层": 1

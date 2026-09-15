@@ -123,6 +123,7 @@ class VerificationPipeline:
             if ocr_requirement is not None and ocr_requirement.mode == "partial"
             else ()
         )
+        degradation_reasons = (*degradation_reasons, *check_result.degradation_reasons)
         if review_metadata is not None:
             if review_metadata.get("failed"):
                 issues = check_result.issues

@@ -23,6 +23,7 @@ import {
 } from '../types/jobs'
 import type {
   AnalyzeOptions,
+  FileType,
   VerificationResult
 } from '../types/verification'
 
@@ -190,7 +191,8 @@ export function useVerificationExecution({
   async function analyzeText(
     text: string,
     options: AnalyzeOptions,
-    transformResult: VerificationResultTransform = identityResult
+    transformResult: VerificationResultTransform = identityResult,
+    sourceFileType?: FileType
   ): Promise<void> {
     const generation = beginRequest()
     if (generation === null) {
@@ -208,7 +210,9 @@ export function useVerificationExecution({
       const snapshot = createAnalyzeOptionsSnapshot(options)
       await runDirect(
         generation,
-        () => verificationApi.analyzeText(text, snapshot, controller?.signal),
+        () => sourceFileType === undefined
+          ? verificationApi.analyzeText(text, snapshot, controller?.signal)
+          : verificationApi.analyzeText(text, snapshot, controller?.signal, sourceFileType),
         transformResult
       )
     } catch (caught) {

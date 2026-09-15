@@ -15,6 +15,7 @@ from text_verification.domain.issues import (
     IssueSeverity,
 )
 from text_verification.domain.verification import LEGACY_SUMMARY_LABELS, VerificationResult
+from text_verification.scenarios.registry import get_profile
 
 _LEGACY_SOURCE = "compatibility.analyzer"
 _LEGACY_SOURCE_VERSION = "1"
@@ -126,6 +127,10 @@ def legacy_issue_to_domain(
         ),
     )
 
+    profile = (
+        get_profile(legacy_issue.rule_id.split(".")[1])
+        if legacy_issue.rule_id.startswith("scenario.") else None
+    )
     return Issue(
         issue_id=issue_id,
         document_id=document.document_id,
@@ -145,9 +150,9 @@ def legacy_issue_to_domain(
         message=legacy_issue.description,
         description=legacy_issue.description,
         rule_id=legacy_issue.rule_id,
-        rule_version=_LEGACY_RULE_VERSION,
-        source=_LEGACY_SOURCE,
-        source_version=_LEGACY_SOURCE_VERSION,
+        rule_version=profile.version if profile else _LEGACY_RULE_VERSION,
+        source=f"scenario.{profile.id}" if profile else _LEGACY_SOURCE,
+        source_version=profile.version if profile else _LEGACY_SOURCE_VERSION,
         confidence=(
             legacy_issue.confidence if legacy_issue.confidence is not None
             else 0.7

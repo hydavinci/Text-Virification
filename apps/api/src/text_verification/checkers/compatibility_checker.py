@@ -7,12 +7,14 @@ from text_verification.compatibility.adapters import legacy_issues_to_domain
 from text_verification.compatibility.analyzer import Issue as LegacyIssue
 from text_verification.compatibility.analyzer import TextAnalyzer
 from text_verification.domain.documents import DocumentModel
+from text_verification.domain.issues import MAX_VERIFICATION_ISSUES
 from text_verification.domain.ports import (
     CheckContext,
     CheckResult,
     VerificationProgressObserver,
 )
 from text_verification.infrastructure.dictionary_loader import DictionaryLoader
+from text_verification.scenarios.checker import check_scenario, skipped_scenario_reasons
 
 
 class LegacyAnalyzer(Protocol):
@@ -95,7 +97,12 @@ class CompatibilityChecker:
                 enable_ad_extreme=context.enable_ad_extreme,
                 progress_observer=progress_observer,
             )
+        issues = [
+            *issues,
+            *check_scenario(document, context, max_issues=MAX_VERIFICATION_ISSUES - len(issues)),
+        ]
         return CheckResult(
             issues=legacy_issues_to_domain(issues, document, context.verification_run_id),
             dictionary_versions=analyzer.dictionary_versions,
+            degradation_reasons=skipped_scenario_reasons(document, context),
         )

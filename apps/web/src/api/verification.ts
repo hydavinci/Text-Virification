@@ -3,6 +3,7 @@ import type {
   DraftDocumentRevision,
   ExportArtifactReference,
   ExportReplacement,
+  FileType,
   PersistedDocumentRevision,
   RecheckProvenance,
   VerificationResult
@@ -22,7 +23,9 @@ const API_BASE = '/api/v1'
 
 export interface VerificationApi {
   analyzeFile(file: File, options: AnalyzeOptions, signal?: AbortSignal): Promise<VerificationResult>
-  analyzeText(text: string, options: AnalyzeOptions, signal?: AbortSignal): Promise<VerificationResult>
+  analyzeText(
+    text: string, options: AnalyzeOptions, signal?: AbortSignal, sourceFileType?: FileType
+  ): Promise<VerificationResult>
   recheckJob(
     jobId: string,
     text: string,
@@ -54,7 +57,11 @@ export interface VerificationApi {
 export const verificationApiKey: InjectionKey<VerificationApi> = Symbol('verificationApi')
 
 export function createVerificationApi(fetchImpl: typeof fetch = fetch): VerificationApi {
-  async function analyze(source: { file?: File; text?: string }, options: AnalyzeOptions, signal?: AbortSignal) {
+  async function analyze(
+    source: { file?: File; text?: string; sourceFileType?: FileType },
+    options: AnalyzeOptions,
+    signal?: AbortSignal
+  ) {
     const body = new FormData()
     const snapshot = createAnalyzeOptionsSnapshot(options)
     if (source.file) {
@@ -62,6 +69,9 @@ export function createVerificationApi(fetchImpl: typeof fetch = fetch): Verifica
     }
     if (source.text) {
       body.append('text', source.text)
+    }
+    if (source.sourceFileType) {
+      body.append('source_file_type', source.sourceFileType)
     }
     appendAnalyzeOptions(body, snapshot)
 
@@ -80,7 +90,8 @@ export function createVerificationApi(fetchImpl: typeof fetch = fetch): Verifica
 
   return {
     analyzeFile: (file, options, signal) => analyze({ file }, options, signal),
-    analyzeText: (text, options, signal) => analyze({ text }, options, signal),
+    analyzeText: (text, options, signal, sourceFileType) =>
+      analyze({ text, sourceFileType }, options, signal),
     recheckJob: async (jobId, text, options, signal) => {
       // Multipart string fields normalize newlines and break exact-text provenance.
       const body = new URLSearchParams()

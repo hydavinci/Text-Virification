@@ -88,6 +88,14 @@ def test_source_anchored_semantic_findings_are_manual_and_heuristic(monkeypatch)
     assert calls[0]["response_format"] == {"type": "json_object"}
 
 
+def test_discovery_uses_the_selected_package_policy_in_system_instructions(monkeypatch) -> None:
+    _, _, calls = _discover(monkeypatch, "正常文本。", {"findings": []})
+    system = calls[0]["messages"][0]["content"]
+    assert "通用文档" in system
+    assert "保留日常口吻" in system
+    assert "NOT a compliance" in system
+
+
 @pytest.mark.parametrize("updates", [
     {"original": "not present"},
     {"type": "banned_word"},

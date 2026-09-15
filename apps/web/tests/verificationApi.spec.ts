@@ -177,6 +177,21 @@ describe('createVerificationApi', () => {
     expect(body.get('enable_semantic_discovery')).toBe('true')
   })
 
+  it('preserves the extraction origin when rechecking file text', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => resultPayload
+    })
+    const api = createVerificationApi(fetchMock as typeof fetch)
+    await api.analyzeText('这是测试。', {
+      scenario: 'academic', enableSecurity: false, enableSensitive: false,
+      enableAdExtreme: false, glossary: [], bannedWords: []
+    }, undefined, 'docx')
+    const body = fetchMock.mock.calls[0]?.[1]?.body as FormData
+    expect(body.get('source_file_type')).toBe('docx')
+    expect(body.get('text')).toBe('这是测试。')
+  })
+
   it('preserves nullable legacy suggestions', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,

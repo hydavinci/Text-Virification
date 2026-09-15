@@ -63,6 +63,7 @@ class CheckerRegistry:
 
         issues_with_order: list[tuple[int, int, int, Issue]] = []
         dictionary_versions: dict[str, str] = {}
+        degradation_reasons: list[str] = []
         for checker_index, checker in enumerate(self._checkers):
             if progress_observer is None:
                 result = checker.check(document, context)
@@ -73,6 +74,7 @@ class CheckerRegistry:
                     progress_observer=progress_observer,
                 )
             dictionary_versions.update(result.dictionary_versions)
+            degradation_reasons.extend(result.degradation_reasons)
             for issue_index, issue in enumerate(result.issues):
                 if len(issues_with_order) >= self._max_issues:
                     raise IssueLimitExceededError(
@@ -90,4 +92,5 @@ class CheckerRegistry:
         return CheckResult(
             issues=tuple(issue for _, _, _, issue in issues_with_order),
             dictionary_versions=dictionary_versions,
+            degradation_reasons=tuple(dict.fromkeys(degradation_reasons)),
         )

@@ -7,6 +7,7 @@
 
 import re
 import datetime
+from bisect import bisect_right
 from dataclasses import dataclass, asdict
 from typing import List, Dict, Optional, Tuple
 
@@ -15,7 +16,10 @@ from text_verification.domain.dictionaries import (
     SensitiveRulesEntries,
 )
 from text_verification.infrastructure.dictionary_loader import DictionaryLoader
-from text_verification.compatibility.text_context import TextContext, term_pattern
+from text_verification.compatibility.text_context import (
+    ABBREVIATION_DEFINITION_PATTERN, CLAUSE_HEADING_PATTERN, TextContext, term_pattern,
+)
+from text_verification.scenarios.registry import get_profile
 from text_verification.domain.ports import (
     VerificationProgressObserver,
     VerificationProgressStage,
@@ -227,50 +231,6 @@ TERM_EQUIVALENCES = [
     ['美国', 'USA', 'United States', '美利坚合众国'],
     ['英国', 'UK', 'United Kingdom'],
 ]
-
-
-# ============================================================
-# 检查场景配置
-# 每个场景定义：skip_types=跳过的检查类型，downgrade_types=降权(info→不报告)的检查类型
-# ============================================================
-SCENARIO_CONFIG = {
-    'general': {
-        'name': '通用文档',
-        'description': '五层全面检查，适用于日常各类文本',
-        'skip_types': set(),
-        'downgrade_types': set(),
-    },
-    'academic': {
-        'name': '学术论文',
-        'description': '侧重术语规范、引号格式、数字规范、标点符号',
-        'skip_types': {'colloquial'},            # 学术论文本身偏正式，口语化检查无意义
-        'downgrade_types': {'repetition', 'style'},
-    },
-    'business': {
-        'name': '商务文档',
-        'description': '侧重错别字、全半角、标点、数字格式',
-        'skip_types': {'colloquial'},            # 商务文档偏正式
-        'downgrade_types': {'style'},
-    },
-    'legal': {
-        'name': '法律文书',
-        'description': '侧重严谨性、逻辑、术语一致性、标点规范',
-        'skip_types': {'colloquial', 'style'},   # 法律文书有固定格式和语体
-        'downgrade_types': {'repetition'},
-    },
-    'news': {
-        'name': '新闻稿',
-        'description': '侧重错别字、标点规范、口语化、时效术语',
-        'skip_types': set(),                     # 新闻稿全部检查，包括口语化
-        'downgrade_types': set(),
-    },
-    'technical': {
-        'name': '技术文档',
-        'description': '侧重术语一致性、全半角、数字格式、标点规范',
-        'skip_types': {'colloquial', 'idiom_misuse'},  # 技术文档不检查成语和口语化
-        'downgrade_types': {'style'},
-    },
-}
 
 
 # ============================================================
@@ -989,30 +949,34 @@ class TextAnalyzer:
                  progress_observer: VerificationProgressObserver | None = None,
                  enable_extended_rules: bool = False) -> List[Issue]:
         """分析文本，返回所有检测到的问题。
-        scenario 控制不同文档类型的检查侧重。
+        scenario 选择独立规则包声明的基础检查；专业检查由 ScenarioChecker 执行。
         custom_glossary 为自定义术语表，每项 {'original': str, 'standard': str}。
         banned_words 为禁用词列表。
         enable_security 控制是否执行合规/安全层（PII）扫描；默认开启。
         enable_sensitive 控制是否执行敏感内容（涉政/民族宗教/领土规范表述）检查；默认开启。
         enable_ad_extreme 控制是否执行广告法极限词（营销材料）检查；默认关闭，需用户显式开启。
         """
+        profile = get_profile(scenario)
         if not text or not text.strip():
             return []
+        enabled_checks = set(profile.base_checks)
+        if enable_extended_rules:
+            enabled_checks.update(profile.extended_checks)
 
-        # 获取场景配置，未知场景回退到通用
-        cfg = SCENARIO_CONFIG.get(scenario, SCENARIO_CONFIG['general'])
-        skip_types = cfg['skip_types']
-        downgrade_types = cfg['downgrade_types']
+        def run_check(name: str) -> List[Issue]:
+            if name not in enabled_checks:
+                return []
+            return getattr(self, f'_check_{name}')(text)
 
         self._dictionary_versions = {}
 
         if progress_observer is not None:
             progress_observer(VerificationProgressStage.CHECKING_FORMAT)
-        punctuation_issues = self._check_punctuation(text)
-        bracket_issues = self._check_brackets_quotes(text)
-        spacing_issues = self._check_extra_spaces(text)
-        extended_spacing_issues = self._check_spacing(text) if enable_extended_rules else []
-        number_issues = self._check_number_format(text)
+        punctuation_issues = run_check('punctuation')
+        bracket_issues = run_check('brackets_quotes')
+        spacing_issues = run_check('extra_spaces')
+        extended_spacing_issues = run_check('spacing')
+        number_issues = run_check('number_format')
 
         if progress_observer is not None:
             progress_observer(VerificationProgressStage.CHECKING_SENSITIVE)
@@ -1033,25 +997,24 @@ class TextAnalyzer:
 
         if progress_observer is not None:
             progress_observer(VerificationProgressStage.CHECKING_CHINESE)
-        chinese_typo_issues = self._check_chinese_typos(text)
-        variant_issues = self._check_variant_chars(text)
-        width_issues = self._check_half_full_width(text)
-        missing_char_issues = self._check_missing_chars(text)
-        idiom_issues = self._check_idiom_misuse(text)
-        term_issues = self._check_term_consistency(text)
+        chinese_typo_issues = run_check('chinese_typos')
+        variant_issues = run_check('variant_chars')
+        width_issues = run_check('half_full_width')
+        missing_char_issues = run_check('missing_chars')
+        idiom_issues = run_check('idiom_misuse')
+        term_issues = run_check('term_consistency')
         glossary_issues = (
             self._check_custom_glossary(text, custom_glossary) if custom_glossary else []
         )
-        expression_issues = self._check_expression_issues(text)
-        grammar_issues = self._check_grammar_patterns(text)
-        repetition_issues = self._check_repeated_words(text)
-        colloquial_issues = self._check_colloquial(text)
-        long_sentence_issues = self._check_long_sentences(text) if enable_extended_rules else []
+        expression_issues = run_check('expression_issues')
+        grammar_issues = run_check('grammar_patterns')
+        repetition_issues = run_check('repeated_words')
+        long_sentence_issues = run_check('long_sentences')
 
         if progress_observer is not None:
             progress_observer(VerificationProgressStage.CHECKING_ENGLISH)
-        english_spelling_issues = self._check_english_spelling(text)
-        extended_english_issues = self._check_extended_english(text) if enable_extended_rules else []
+        english_spelling_issues = run_check('english_spelling')
+        extended_english_issues = run_check('extended_english')
 
         issues: List[Issue] = [
             *chinese_typo_issues,
@@ -1071,7 +1034,6 @@ class TextAnalyzer:
             *extended_spacing_issues,
             *number_issues,
             *repetition_issues,
-            *colloquial_issues,
             *long_sentence_issues,
             *banned_word_issues,
             *pii_issues,
@@ -1111,14 +1073,6 @@ class TextAnalyzer:
             or not any(start <= issue.position and issue.end_position <= end
                        for start, end in standard_ranges)
         ]
-
-        # 场景过滤：跳过该场景不需要的检查类型
-        if skip_types:
-            issues = [i for i in issues if i.type not in skip_types]
-
-        # 场景降权：将该场景次要的检查类型从 info 降级为不报告
-        if downgrade_types:
-            issues = [i for i in issues if not (i.type in downgrade_types and i.severity == 'info')]
 
         # 同一位置的不同建议必须保留；只有相同修改意图才能合并。
         seen = set()
@@ -1747,6 +1701,12 @@ class TextAnalyzer:
         issues = self._issue_list()
         skip = self._build_delim_skip_mask(text)
         tech = self._build_technical_skip_mask(text)
+        headings = [match.span() for match in CLAUSE_HEADING_PATTERN.finditer(text)]
+        heading_starts = [start for start, _ in headings]
+
+        def heading_spacing(start: int, end: int) -> bool:
+            index = bisect_right(heading_starts, start) - 1
+            return index >= 0 and end <= headings[index][1]
 
         # 分词式排版判定：若自由文本普遍以"空格"分隔中文词（如"我们 今天 去 公园"、
         # "本 公 司 成 立"，常见于宣传文案/字幕/OCR 稿），则空格是有意排版，
@@ -1779,6 +1739,8 @@ class TextAnalyzer:
                 continue
             if segmented_style:
                 continue
+            if heading_spacing(*match.span(2)):
+                continue
             issues.append(Issue(
                 type='spacing',
                 severity='error',
@@ -1797,6 +1759,8 @@ class TextAnalyzer:
             if skip[match.start()]:
                 continue
             if tech[match.start()]:
+                continue
+            if heading_spacing(*match.span()):
                 continue
             issues.append(Issue(
                 type='spacing',
@@ -2120,27 +2084,23 @@ class TextAnalyzer:
                     text, match, replacements, desc, 'collocation_error'))
 
         # ============================================================
-        # 4. 不合逻辑：双重否定导致表意相反
-        # 方案1：删去否定词（保持原意）；方案2：改动词（反转句意）
+        # 4. 否定关系依赖语境，不能据关键词删掉否定词。
         # ============================================================
-        illogic_rules = [
-            (r'防止([^\n，。！？]{1,20})不再',
-             [r'防止\1', r'确保\1不再'],
-             '不合逻辑：「防止…不再」双重否定导致表意相反'),
-            (r'避免([^\n，。！？]{1,20})不再',
-             [r'避免\1', r'确保\1不再'],
-             '不合逻辑：「避免…不再」双重否定导致表意相反'),
-            (r'阻止([^\n，。！？]{1,20})不再',
-             [r'阻止\1', r'确保\1不再'],
-             '不合逻辑：「阻止…不再」双重否定导致表意相反'),
-            (r'切忌不要([^\n，。！？]{1,15})',
-             [r'切忌\1', r'切勿\1'],
-             '不合逻辑：「切忌」已含否定义，与「不要」构成双重否定'),
-        ]
-        for pattern, replacements, desc in illogic_rules:
+        illogic_rules = (
+            r'(?:防止|避免|阻止)(?:(?:类似|此类|这类|上述|重大|严重)(?:的)?)?'
+            r'(?:事故|错误|故障|问题|悲剧)不再(?:发生|出现|重演)',
+            r'切忌不要[^\n，。！？]{1,30}',
+        )
+        for pattern in illogic_rules:
             for match in re.finditer(pattern, text):
-                issues.append(self._make_expression_issue(
-                    text, match, replacements, desc, 'illogic_double_neg', severity='error'))
+                issues.append(Issue(
+                    type='expression', severity='warning',
+                    original=match.group(), suggestion=None,
+                    position=match.start(), end_position=match.end(),
+                    context=self._get_context(text, match.start(), match.end()),
+                    description='此处否定关系可能有歧义，请结合完整语义人工核对；不自动删改否定词。',
+                    rule_id='illogic_double_neg', confidence=0.65,
+                ))
 
         # ============================================================
         # 5. 成分残缺：通过…使… 导致主语缺失
@@ -2724,6 +2684,11 @@ class TextAnalyzer:
             COVID-19/covid19、V2/v2，归一化后相同但表面写法不一致，提示统一。
         """
         issues = self._issue_list()
+        defined_abbreviations = {
+            match['abbr'].casefold()
+            for match in ABBREVIATION_DEFINITION_PATTERN.finditer(text)
+            if not self._context or not self._context.is_protected(*match.span())
+        }
 
         # ---------- (A) 内置等价词表 ----------
         for group in TERM_EQUIVALENCES:
@@ -2744,7 +2709,10 @@ class TextAnalyzer:
             # 仅当两种写法紧邻且中间仅用括号/引号/标点分隔（如「苹果公司（Apple公司）」）
             # 才视为释义/定义，不报；普通相邻（如「人工智能是AI…」）仍报。
             canonical = group[0]
-            allowed_forms = {canonical}
+            allowed_forms = {
+                canonical,
+                *(form for form in forms_present if form.casefold() in defined_abbreviations),
+            }
             occurrences = sorted((start, end, form)
                                  for form, spans in present.items()
                                  for start, end in spans)

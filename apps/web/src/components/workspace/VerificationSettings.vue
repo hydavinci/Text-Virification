@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, inject, onBeforeUnmount, onMounted, ref } from 'vue'
 import { copyAnalyzeOptions, DEFAULT_OCR_LANGUAGE, DEFAULT_EXTENDED_RULES, OCR_LANGUAGES, SCENARIO_OPTIONS } from '../../api/analyzeOptions'
+import { fetchScenarioCatalog, scenarioCatalogKey, type ScenarioProfile } from '../../api/scenarioCatalog'
 
 import {
   TerminologyImportError,
@@ -13,12 +14,38 @@ const scenarios = SCENARIO_OPTIONS
 const props = defineProps<{
   options: AnalyzeOptions
   compact?: boolean
+  disabled?: boolean
 }>()
 
 const emit = defineEmits<{
   'update:options': [options: AnalyzeOptions]
 }>()
 const errorMessage = ref<string | null>(null)
+const profiles = ref<ScenarioProfile[]>([])
+const catalogLoading = ref(true)
+const catalogError = ref(false)
+const selectedProfile = computed(() => profiles.value.find((profile) => profile.id === props.options.scenario))
+const loadCatalog = inject(scenarioCatalogKey, (signal) => fetchScenarioCatalog(fetch, signal))
+let catalogController: AbortController | undefined
+
+async function refreshCatalog(): Promise<void> {
+  catalogController?.abort()
+  const controller = new AbortController()
+  catalogController = controller
+  catalogLoading.value = true
+  catalogError.value = false
+  try {
+    const result = await loadCatalog(controller.signal)
+    if (!controller.signal.aborted) profiles.value = result
+  } catch {
+    if (!controller.signal.aborted) catalogError.value = true
+  } finally {
+    if (!controller.signal.aborted) catalogLoading.value = false
+  }
+}
+
+onMounted(refreshCatalog)
+onBeforeUnmount(() => catalogController?.abort())
 
 function updateOptions(patch: Partial<AnalyzeOptions>): void {
   const next = copyAnalyzeOptions(props.options, patch)
@@ -52,14 +79,54 @@ function selectOcrLanguage(event: Event): void {
 
 <template>
   <section class="settings-body" :class="{ compact }" aria-label="检查设置">
-    <label class="scenario-field">
-      <span>文档场景</span>
-      <select class="ui-field" aria-label="文档场景" :value="options.scenario" @change="selectScenario">
-        <option v-for="scenario in scenarios" :key="scenario.id" :value="scenario.id" :data-scenario="scenario.id">
-          {{ scenario.name }}
-        </option>
-      </select>
-    </label>
+    <div class="scenario-header">
+      <label class="scenario-field">
+        <span v-if="!compact">文档场景</span>
+        <select class="ui-field" aria-label="文档场景" :disabled="disabled" :value="options.scenario" @change="selectScenario">
+          <option v-for="scenario in scenarios" :key="scenario.id" :value="scenario.id" :data-scenario="scenario.id">
+            {{ scenario.name }}
+          </option>
+        </select>
+      </label>
+      <slot name="scenario-actions" />
+    </div>
+
+    <section class="scenario-rules" aria-label="场景规则" :aria-busy="catalogLoading">
+      <p v-if="catalogLoading" role="status">正在读取服务端规则清单…</p>
+      <p v-else-if="catalogError" role="status">
+        规则清单加载失败，暂时无法确认规则包内容；场景选择和检查设置仍保留。
+        <button type="button" aria-label="重试加载规则清单" :disabled="disabled" @click="refreshCatalog">重试</button>
+      </p>
+      <template v-else-if="selectedProfile">
+        <p><strong>{{ selectedProfile.name }}规则包</strong></p>
+        <p>{{ selectedProfile.description }}</p>
+        <p v-if="compact && selectedProfile.rules.length" class="rule-highlights">
+          {{ selectedProfile.rules.map((rule) => rule.name).join(' · ') }}
+        </p>
+        <details class="rule-details" :open="!compact">
+          <summary>规则详情 · {{ selectedProfile.base_checks.length }} 项基础检查<span v-if="selectedProfile.rules.length">、{{ selectedProfile.rules.length }} 项专业检查</span></summary>
+        <ul v-if="selectedProfile.rules.length" class="specialist-rules">
+          <li v-for="rule in selectedProfile.rules" :key="rule.id">
+            <strong>{{ rule.name }}</strong>
+            <span>{{ rule.description }}</span>
+            <span v-if="rule.requires_complete_structure">需完整文本（TXT/Markdown 或完整粘贴内容）；DOCX、PDF、OCR 等提取结果跳过此项。</span>
+          </li>
+        </ul>
+        <details>
+          <summary>本包基础检查（{{ selectedProfile.base_checks.length }}项）</summary>
+          <p>{{ selectedProfile.base_checks.map((check) => check.name).join('、') }}</p>
+        </details>
+        <p v-if="options.enableExtendedRules">
+          已启用扩展检查：{{ selectedProfile.extended_checks.map((check) => check.name).join('、') }}
+        </p>
+        <details>
+          <summary>本包语义复核重点</summary>
+          <p>{{ selectedProfile.semantic_guidance }}</p>
+        </details>
+        <p>专业建议仅供人工确认；自定义术语、禁用词和显式开启的安全检查不随场景切换取消。</p>
+        </details>
+      </template>
+    </section>
 
     <template v-if="!compact">
     <h2>可选语义检查</h2>
@@ -92,7 +159,7 @@ function selectOcrLanguage(event: Event): void {
         })"
       />
     </label>
-    <p class="ocr-note">默认关闭；开启后增加英文词典拼写与保守语法检查。长句建议仍按文档场景筛选，仅提示人工调整，不自动改写正文。</p>
+    <p class="ocr-note">默认关闭；开启后增加英文词典拼写与保守语法检查。仅执行当前规则包声明的扩展检查；长句建议仅供人工调整，不自动改写正文。</p>
     <h2>图片与扫描 PDF</h2>
     <label class="scenario-field">
       <span>OCR 识别语言</span>
@@ -152,6 +219,18 @@ function selectOcrLanguage(event: Event): void {
   padding: 0 0 20px;
 }
 .settings-body.compact { padding: 0; }
+.scenario-header { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
+.scenario-header .scenario-field { justify-content: flex-start; }
+.scenario-rules { margin-top: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; font-size: 12px; line-height: 1.7; color: var(--muted); }
+.scenario-rules p { margin: 6px 0; }
+.scenario-rules > p:first-child { margin-top: 0; }
+.rule-details { margin-top: 6px; }
+.rule-highlights { color: var(--text); }
+.scenario-rules strong { color: var(--text); }
+.scenario-rules summary { cursor: pointer; }
+.specialist-rules { padding-left: 18px; margin: 8px 0; }
+.specialist-rules li { margin: 8px 0; }
+.specialist-rules span { display: block; }
 .ocr-note { color: var(--muted); font-size: 12px; line-height: 1.7; }
 .scenario-field { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; font-size: 13px; color: var(--text); }
 .scenario-field select { min-width: 120px; max-width: 100%; }

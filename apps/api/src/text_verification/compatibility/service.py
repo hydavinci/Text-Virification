@@ -13,7 +13,7 @@ from text_verification.compatibility.adapters import (
     source_version_for_file,
     text_to_document_model,
 )
-from text_verification.compatibility.analyzer import SCENARIO_CONFIG, TextAnalyzer
+from text_verification.compatibility.analyzer import TextAnalyzer
 from text_verification.compatibility.llm_review import (
     is_llm_review_configured,
     review_issues,
@@ -27,6 +27,8 @@ from text_verification.domain.capabilities import (
     default_capability_manifest,
 )
 from text_verification.domain.documents import DocumentModel, FileType
+from text_verification.domain.issues import MAX_VERIFICATION_ISSUES
+from text_verification.domain.ports import CheckContext
 from text_verification.domain.verification import (
     VerificationAnalysisMode,
     VerificationDegradation,
@@ -38,6 +40,8 @@ from text_verification.domain.verification import (
 )
 from text_verification.infrastructure.dictionary_loader import DictionaryLoader
 from text_verification.parsers.pdf_parser import PdfParser
+from text_verification.scenarios.checker import check_scenario, skipped_scenario_reasons
+from text_verification.scenarios.registry import scenario_catalog
 
 _DICTIONARY_LOADER = DictionaryLoader()
 _GLOSSARY_ADAPTER = TypeAdapter(list[GlossaryTerm])
@@ -135,12 +139,24 @@ def analyze(
         enable_sensitive=enable_sensitive,
         enable_ad_extreme=enable_ad_extreme,
     )
+    context = CheckContext(
+        scenario=scenario,
+        custom_glossary=tuple(custom_glossary),
+        banned_words=tuple(banned_words),
+        enable_security=enable_security,
+        enable_sensitive=enable_sensitive,
+        enable_ad_extreme=enable_ad_extreme,
+        verification_run_id=verification_run_id,
+    )
+    issues.extend(check_scenario(
+        document, context, max_issues=MAX_VERIFICATION_ISSUES - len(issues),
+    ))
 
-    degradation_reasons: list[str] = []
+    degradation_reasons = list(skipped_scenario_reasons(document, context))
     review_stats: dict[str, Any] | None = None
     analysis_mode = VerificationAnalysisMode.LOCAL_ONLY
     if is_llm_review_configured(settings):
-        issues, review_stats = review_issues(settings, text, issues)
+        issues, review_stats = review_issues(settings, text, issues, context)
         if review_stats.get("failed"):
             degradation_reasons.append("llm_review_failed")
         elif review_stats.get("performed"):
@@ -220,15 +236,8 @@ def parse_uploaded_file(path: Path, extension: str) -> str:
     return text
 
 
-def scenarios() -> list[dict[str, str]]:
-    return [
-        {
-            "id": scenario.value,
-            "name": str(SCENARIO_CONFIG[scenario.value]["name"]),
-            "description": str(SCENARIO_CONFIG[scenario.value]["description"]),
-        }
-        for scenario in Scenario
-    ]
+def scenarios() -> list[dict[str, object]]:
+    return scenario_catalog()
 
 
 def formats() -> list[dict[str, str]]:

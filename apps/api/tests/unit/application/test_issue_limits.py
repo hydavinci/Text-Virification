@@ -46,7 +46,9 @@ class RecordingChecker:
 
     def check(self, document, context, *, progress_observer=None):
         del document, context, progress_observer
-        return SimpleNamespace(issues=self.issues, dictionary_versions={})
+        return SimpleNamespace(
+            issues=self.issues, dictionary_versions={}, degradation_reasons=(),
+        )
 
 
 def test_checker_aggregation_accepts_exact_limit_and_stops_at_one_over() -> None:
