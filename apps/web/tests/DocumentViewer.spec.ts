@@ -466,6 +466,7 @@ describe('DocumentViewer', () => {
     expect(indexBuilds).toBe(buildsAfterMount)
   })
 
+  // rangeReads bounds algorithmic work; shared CI runners need longer to render the full fixture.
   it('segments many non-overlapping issues with a bounded interval sweep', () => {
     const issueCount = 1_000
     const text = '错对'.repeat(issueCount)
@@ -516,7 +517,8 @@ describe('DocumentViewer', () => {
       issueCount
     )
     expect(rangeReads).toBeLessThan(100_000)
-  })
+    wrapper.unmount()
+  }, 15_000)
 
   it('renders an empty source exactly once without source markers', () => {
     const result = buildResult('', [])
