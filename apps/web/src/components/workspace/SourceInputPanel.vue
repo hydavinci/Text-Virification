@@ -275,7 +275,7 @@ function handleDropzoneKeydown(event: KeyboardEvent): void {
   cursor: not-allowed;
 }
 .dropzone {
-  min-height: 220px;
+  min-height: 200px;
   padding: 24px;
   display: flex;
   flex-direction: column;
@@ -285,7 +285,7 @@ function handleDropzoneKeydown(event: KeyboardEvent): void {
   border: 1px dashed var(--border-strong);
   border-radius: var(--radius-panel);
   color: var(--muted);
-  background: color-mix(in srgb, var(--primary-soft) 35%, var(--surface));
+  background: var(--surface);
   text-align: center;
   cursor: pointer;
   transition: border-color .15s;
@@ -301,18 +301,17 @@ function handleDropzoneKeydown(event: KeyboardEvent): void {
   border-color: var(--primary);
   color: var(--primary);
 }
+.dropzone:focus-visible { outline: none; }
 .dropzone.busy {
   opacity: .6;
   cursor: wait;
 }
 .upload-icon {
-  width: 52px;
-  height: 52px;
-  padding: 12px;
-  border-radius: 14px;
-  background: var(--primary-soft);
+  width: 40px;
+  height: 40px;
+  padding: 8px;
   margin-bottom: 4px;
-  color: var(--primary);
+  color: var(--muted);
 }
 .dropzone strong { color: var(--text); font-size: 16px; font-weight: 500; }
 .dropzone small { margin-top: 8px; font-size: 12px; line-height: 1.7; }
@@ -344,7 +343,6 @@ function handleDropzoneKeydown(event: KeyboardEvent): void {
 }
 .text-mode textarea:focus {
   border-color: var(--primary);
-  outline: 3px solid rgba(37, 99, 235, .1);
 }
 .text-footer {
   margin-top: 12px;

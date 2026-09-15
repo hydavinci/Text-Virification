@@ -48,7 +48,7 @@ watch(
 
 <template>
   <section class="search-replace-panel" aria-label="查找和替换">
-    <label>
+    <label class="query-field">
       <span>查找</span>
       <input
         class="ui-field"
@@ -60,7 +60,7 @@ watch(
         @keydown.enter="navigateSearch"
       />
     </label>
-    <label>
+    <label class="replacement-field">
       <span>替换为</span>
       <input
         class="ui-field"
@@ -145,12 +145,12 @@ watch(
 
 <style scoped>
 .search-replace-panel {
-  padding: 16px 12px;
+  padding: 8px 12px;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   align-items: end;
-  gap: 14px;
-  background: var(--surface);
+  gap: 6px 12px;
+  background: transparent;
 }
 
 label {
@@ -168,6 +168,12 @@ input:not([type]) {
   width: 100%;
 }
 
+.query-field,
+.replacement-field {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+}
+
 .case-sensitive {
   display: flex;
   align-items: center;
@@ -182,23 +188,44 @@ input:not([type]) {
   align-self: center;
   color: var(--muted);
   font-size: 12px;
-  padding: 8px 10px;
-  border-radius: var(--radius-control);
-  background: var(--surface-2);
+  padding: 0;
   font-variant-numeric: tabular-nums;
 }
 
 .actions {
   grid-column: 1 / -1;
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }
 
 .undo-text-edit {
   grid-column: 1 / -1;
+  justify-self: start;
 }
 
-.actions button { padding-inline: 4px; }
+.actions button { padding-inline: 8px; white-space: nowrap; }
+
+@container document-search (min-width: 600px) {
+  .search-replace-panel {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+    grid-template-areas: "query replacement actions" "case status undo";
+  }
+  .query-field { grid-area: query; }
+  .replacement-field { grid-area: replacement; }
+  .case-sensitive { grid-area: case; }
+  .status { grid-area: status; }
+  .actions { grid-area: actions; flex-wrap: nowrap; }
+  .undo-text-edit { grid-area: undo; justify-self: end; }
+}
+
+@container document-search (min-width: 900px) {
+  .search-replace-panel {
+    grid-template-columns: minmax(120px, 1fr) minmax(120px, 1fr) auto auto auto auto;
+    grid-template-areas: "query replacement case status actions undo";
+    gap: 8px;
+  }
+  .case-sensitive, .status { white-space: nowrap; }
+}
 </style>

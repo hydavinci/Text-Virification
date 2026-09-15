@@ -33,9 +33,8 @@ const enabledChecks = computed(() => [
 <template>
   <main class="setup">
     <header class="setup-heading">
-      <span class="product-label">文档预检工作区</span>
       <h1>让每一次交付，更准确。</h1>
-      <p>上传文档或粘贴文本，检查错别字、表达与合规问题。</p>
+      <p>上传文件或粘贴文本，逐项审阅文字与表达。</p>
     </header>
     <section class="input-card">
       <SourceInputPanel
@@ -67,7 +66,7 @@ const enabledChecks = computed(() => [
                 :aria-expanded="settingsOpen"
                 @click="emit('open-settings')"
               >
-                检查设置 <span aria-hidden="true">↗</span>
+                检查设置
               </button>
               </template>
             </VerificationSettings>
@@ -90,19 +89,17 @@ const enabledChecks = computed(() => [
 </template>
 
 <style scoped>
-.setup { max-width: 800px; margin: 0 auto; padding: 24px 24px 20px; }
-.setup-heading { margin-bottom: 18px; text-align: center; }
-.product-label { display: inline-flex; align-items: center; gap: 8px; padding: 5px 12px; border-radius: 20px; background: var(--primary-soft); font-size: 12px; font-weight: 500; letter-spacing: .08em; color: var(--primary); }
-.product-label::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-h1 { margin: 10px 0 8px; font-size: clamp(25px, 3vw, 32px); line-height: 1.35; font-weight: 600; letter-spacing: -.035em; }
+.setup { max-width: 800px; margin: 0 auto; padding: 48px 24px 24px; }
+.setup-heading { margin-bottom: 24px; }
+h1 { margin: 0 0 8px; font-size: clamp(24px, 3vw, 28px); line-height: 1.4; font-weight: 600; letter-spacing: -.025em; }
 .setup-heading p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.8; }
-.input-card { padding: 20px; border: 1px solid var(--border); border-radius: 18px; background: var(--surface); box-shadow: var(--shadow-paper); }
+.input-card { padding: 24px; border: 1px solid var(--border); border-radius: var(--radius-panel); background: var(--surface); }
 .setup-options { min-width: 0; margin: 16px 0 0; padding: 14px 0 0; border: 0; border-top: 1px solid var(--border); }
 .settings-trigger { white-space: nowrap; }
 .options-summary { margin: 12px 0 0; color: var(--muted); font-size: 12px; line-height: 1.8; }
 .privacy-note { margin: 20px 0 0; color: var(--muted); text-align: center; font-size: 12px; line-height: 1.9; }
 @media (max-width: 600px) {
   .setup { padding: 32px 16px 24px; }
-  .input-card { padding: 18px; }
+  .input-card { padding: 16px; }
 }
 </style>

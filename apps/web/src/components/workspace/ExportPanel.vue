@@ -45,7 +45,7 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', dismissOutside
 <template>
   <div ref="panel" class="export-panel" aria-label="导出操作" @focusout="dismissOnBlur">
     <button
-      class="btn ghost ui-button"
+      class="btn ui-button ui-button--quiet"
       type="button"
       data-action="recheck"
       :disabled="recheckDisabled || busy"
@@ -56,7 +56,7 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', dismissOutside
     <div class="export-disclosure">
       <button
         ref="trigger"
-        class="btn primary ui-button ui-button--primary"
+        class="btn ui-button ui-button--quiet"
         type="button"
         data-toggle-export
         :aria-expanded="expanded"
@@ -145,7 +145,7 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', dismissOutside
 }
 .export-panel { flex-wrap: wrap; font-size: 12px; }
 .export-disclosure { position: relative; }
-.export-options { position: absolute; right: 0; top: calc(100% + 8px); z-index: 30; width: 220px; padding: 8px; display: flex; flex-direction: column; gap: 4px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow); }
+.export-options { position: absolute; right: 0; top: calc(100% + 2px); z-index: 30; width: 220px; padding: 8px; display: flex; flex-direction: column; gap: 4px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
 .export-options .btn { justify-content: flex-start; border: 0; padding: 11px; box-shadow: none; }
 .export-options .btn:hover:not(:disabled) { background: var(--surface-2); }
 .export-options .switch { padding: 12px 8px 8px; border-top: 1px solid var(--border); }

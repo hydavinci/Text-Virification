@@ -2,6 +2,7 @@
 defineProps<{
   theme: 'light' | 'dark'
   hasResult: boolean
+  documentName?: string
   settingsOpen?: boolean
 }>()
 
@@ -15,7 +16,8 @@ defineEmits<{
 </script>
 
 <template>
-  <header class="topbar">
+  <header class="topbar" :class="{ 'is-reviewing': hasResult }">
+    <div class="brand-area">
     <button
       class="brand"
       type="button"
@@ -45,10 +47,14 @@ defineEmits<{
         <small>中英文字智能检查</small>
       </span>
     </button>
+    <span v-if="hasResult && documentName" class="header-document" :title="documentName">
+      {{ documentName }}
+    </span>
+    </div>
     <div class="top-actions">
       <button
         v-if="hasResult"
-        class="settings-btn ui-button"
+        class="settings-btn ui-button ui-button--quiet"
         type="button"
         data-open-settings
         aria-haspopup="dialog"
@@ -119,6 +125,11 @@ defineEmits<{
   cursor: pointer;
   text-align: left;
 }
+.brand-area { display: flex; flex: 1; min-width: 0; align-items: center; gap: 24px; }
+.topbar.is-reviewing { min-height: 48px; padding: 4px 12px; }
+.is-reviewing .brand-mark { width: 32px; height: 32px; }
+.is-reviewing .brand small { display: none; }
+.header-document { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 500; color: var(--text); }
 .brand-mark {
   width: 42px;
   height: 42px;
@@ -175,7 +186,8 @@ defineEmits<{
     grid-template-columns: minmax(0, 1fr) auto auto;
     gap: 8px;
   }
-  .brand { grid-column: 1; grid-row: 1; justify-self: start; }
+  .brand-area { grid-column: 1; grid-row: 1; flex-direction: column; align-items: flex-start; gap: 4px; }
+  .header-document { max-width: 100%; font-size: 12px; }
   .top-actions { display: contents; }
   .utility-actions { grid-column: 2 / -1; grid-row: 1; justify-self: end; border: 0; padding: 0; }
   .settings-btn { grid-column: 1; grid-row: 2; justify-self: end; }
@@ -188,5 +200,12 @@ defineEmits<{
   .brand small {
     display: none;
   }
+}
+@media (max-width: 760px) and (max-height: 600px) {
+  .topbar { padding-block: 6px; gap: 6px; }
+  .brand-area { flex-direction: row; align-items: center; gap: 8px; }
+  .brand-mark { width: 28px; height: 28px; }
+  .brand small { display: none; }
+  .header-document { flex: 1; }
 }
 </style>

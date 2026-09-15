@@ -18,9 +18,9 @@ import WorkspaceHeader from '../components/workspace/WorkspaceHeader.vue'
 import WorkspaceSettingsDialog from '../components/workspace/WorkspaceSettingsDialog.vue'
 import WorkspaceSetup from '../components/workspace/WorkspaceSetup.vue'
 import { useIssueNavigation } from '../composables/useIssueNavigation'
+import { useReviewPaneResize } from '../composables/useReviewPaneResize'
 import type { DocumentSearchState } from '../composables/useSearchReplace'
 import { projectDocumentIssues } from '../utils/documentPresentation'
-import { revealWithinPane } from '../utils/revealWithinPane'
 import { useVerificationExecution } from '../composables/useVerificationExecution'
 import { usePendingJob } from '../composables/usePendingJob'
 import {
@@ -96,7 +96,11 @@ const trackChanges = ref(false)
 const settingsTab = ref<'settings' | 'terms' | 'banned'>('settings')
 const settingsOpen = ref(false)
 const resultTab = ref<'issues' | 'summary'>('issues')
-const reviewPane = ref<'document' | 'issues' | 'search'>('document')
+const reviewPane = ref<'document' | 'issues'>('document')
+const paneResize = useReviewPaneResize()
+const { grid: reviewGrid, width: issuesWidth, maxWidth: maxIssuesWidth, isResizing } = paneResize
+const searchOpen = ref(false)
+const searchToggle = ref<HTMLButtonElement | null>(null)
 const textInput = ref('')
 const fileSource = ref<File | null>(null)
 const verificationWorkspace = useVerificationWorkspace()
@@ -223,7 +227,7 @@ const displayIssues = computed(() => {
   )
 })
 const activeDocumentSearch = computed(() =>
-  documentSearch.value?.text === currentRevisionText.value
+  searchOpen.value && documentSearch.value?.text === currentRevisionText.value
     ? documentSearch.value : null
 )
 function updateDocumentSearch(state: DocumentSearchState): void {
@@ -1250,26 +1254,37 @@ function effectiveSuggestion(issue: VerificationIssue): string | null {
     : issue.suggestion
 }
 
+async function openDocumentSearch(): Promise<void> {
+  reviewPane.value = 'document'
+  searchOpen.value = true
+  documentNavigationTarget.value = 'search'
+  await nextTick()
+  sidebarSearch.value?.querySelector<HTMLInputElement>('[data-search-input]')?.focus()
+}
+
+async function closeDocumentSearch(): Promise<void> {
+  searchOpen.value = false
+  await nextTick()
+  searchToggle.value?.focus({ preventScroll: true })
+}
+
 async function handleKeyboard(event: KeyboardEvent) {
-  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'f' && result.value) {
-    event.preventDefault()
-    if (
-      typeof window.matchMedia === 'function' &&
-      window.matchMedia('(max-width: 760px)').matches
-    ) {
-      reviewPane.value = 'search'
-    }
-    await nextTick()
-    const input = sidebarSearch.value?.querySelector<HTMLInputElement>('[data-search-input]')
-    if (input) {
-      revealWithinPane(input, sidebarSearch.value?.closest<HTMLElement>('.search-panel') ?? null)
-      input.focus({ preventScroll: true })
+  if (event.defaultPrevented || event.isComposing) return
+  if (settingsOpen.value || showHelp.value || showPrivacy.value) {
+    if (event.key === 'Escape') {
+      showHelp.value = false
+      showPrivacy.value = false
     }
     return
   }
-  if (event.key === 'Escape') {
-    showHelp.value = false
-    showPrivacy.value = false
+  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'f' && result.value) {
+    event.preventDefault()
+    await openDocumentSearch()
+    return
+  }
+  if (event.key === 'Escape' && searchOpen.value) {
+    event.preventDefault()
+    await closeDocumentSearch()
   }
 }
 
@@ -1336,6 +1351,7 @@ watch(
     invalidateSourceNavigation()
     resultTab.value = 'issues'
     documentSearch.value = null
+    searchOpen.value = false
     reviewPane.value = 'document'
     saveSession()
   }
@@ -1375,6 +1391,7 @@ onBeforeUnmount(() => {
     <WorkspaceHeader
       :theme="theme"
       :has-result="result !== null"
+      :document-name="result?.filename"
       :settings-open="settingsOpen"
       @reset="resetWorkspace"
       @open-settings="settingsOpen = true"
@@ -1472,18 +1489,9 @@ onBeforeUnmount(() => {
       >
         {{ errorMessage }}
       </p>
-      <p
-        v-if="execution.jobStatus.value === 'partial'"
-        class="execution-warning"
-        data-execution-warning
-        role="status"
-        aria-live="polite"
-      >
-        {{ execution.message.value }}
-      </p>
+      <div class="review-overview">
       <section class="review-summary" aria-label="检查概况">
         <div class="document-identity">
-          <strong :title="result.filename">{{ result.filename }}</strong>
           <span>{{ result.stats.primary_count.toLocaleString() }} {{ result.stats.primary_label }}</span>
           <span>发现问题 <strong>{{ result.summary.total }}</strong></span>
         </div>
@@ -1495,45 +1503,62 @@ onBeforeUnmount(() => {
           "
         />
       </section>
+      <section
+        class="verification-status"
+        data-verification-status
+        aria-label="检查状态"
+        :class="{ limited: result.degradation.is_degraded || execution.jobStatus.value === 'partial' }"
+      >
+      <p v-if="execution.jobStatus.value === 'partial'" data-execution-warning role="status">
+        {{ execution.message.value }}
+      </p>
+      <details
+        v-if="result.degradation.is_degraded || semanticStatus"
+        :key="result.verification_run_id"
+      >
+        <summary>
+          <span role="status">
+            {{ result.degradation.is_degraded ? '检查范围受限' : '检查范围' }}
+            <span v-if="skippedRuleNames.length"> · 未检查 {{ skippedRuleNames.length }} 项</span>
+            <span v-if="semanticStatus"> · 语义抽样 {{ semanticStatus.sampled }} / {{ semanticStatus.total }}</span>
+          </span>
+          <span class="status-detail-label">查看详情</span>
+        </summary>
+        <div class="status-details">
       <p
         v-if="result.degradation.is_degraded"
-        class="execution-warning"
         data-analysis-degradation
-        role="status"
       >
         部分检查已降级，本地检查结果仍保留，请人工核实。
         <span v-if="skippedRuleNames.length" data-skipped-rules>
           未检查：{{ skippedRuleNames.join('、') }}。提取文本可能不完整，不能据此判断原文缺少相关内容。
         </span>
       </p>
-      <p v-if="semanticStatus" class="execution-warning" data-semantic-status role="status">
+      <p v-if="semanticStatus" data-semantic-status>
         语义发现：抽样 {{ semanticStatus.sampled }} / {{ semanticStatus.total }} 个片段
         <span v-if="semanticStatus.truncated">（非全文覆盖）</span>；
         置信度为启发式估计，非校准概率；建议需人工确认。
         {{ semanticStatus.reason }}
       </p>
+        </div>
+      </details>
+      <p v-else-if="execution.jobStatus.value !== 'partial'">
+        {{ result.analysis_mode === 'local_only' ? '本地检查' : '本地检查与语义复核' }} · 建议需人工确认
+      </p>
+      </section>
+      </div>
 
       <div class="mobile-view-switch" aria-label="审阅视图">
         <button type="button" :aria-pressed="reviewPane === 'document'" @click="reviewPane = 'document'">文档</button>
         <button type="button" :aria-pressed="reviewPane === 'issues'" @click="reviewPane = 'issues'">问题 {{ visibleIssues.length }}</button>
-        <button type="button" :aria-pressed="reviewPane === 'search'" @click="reviewPane = 'search'">查找替换</button>
       </div>
-      <div class="review-grid" :data-review-pane="reviewPane">
-        <aside class="search-panel" aria-label="查找替换工具">
-          <header class="tools-header"><h2>查找替换</h2></header>
-          <div ref="sidebarSearch" class="sidebar-search">
-            <SearchReplacePanel
-              :key="result.verification_run_id"
-              :text="currentRevisionText"
-              :disabled="workspaceMutationLocked"
-              :can-undo="verificationWorkspace.canUndoTextEdit.value && !isAnalyzing"
-              @replace-text="saveSearchReplacement"
-              @search-change="updateDocumentSearch"
-              @undo-text-edit="undoTextEdit"
-            />
-          </div>
-        </aside>
-
+      <div
+        ref="reviewGrid"
+        class="review-grid"
+        :class="{ 'is-resizing': isResizing }"
+        :style="{ '--issues-width': `${issuesWidth}px` }"
+        :data-review-pane="reviewPane"
+      >
         <section class="document-panel">
           <EditPreview
             :text="currentRevisionText"
@@ -1541,7 +1566,39 @@ onBeforeUnmount(() => {
             :disabled="workspaceMutationLocked"
             @save="saveFreeEdit"
           >
-            <template #default="{ showIssueMarkers }">
+            <template #tools>
+              <button
+                ref="searchToggle"
+                type="button"
+                class="ui-button ui-button--quiet"
+                data-action="toggle-search-replace"
+                :aria-expanded="searchOpen"
+                aria-controls="document-search"
+                aria-keyshortcuts="Control+f Meta+f"
+                @click="searchOpen ? closeDocumentSearch() : openDocumentSearch()"
+              >查找替换</button>
+            </template>
+            <template #search>
+              <div
+                v-show="searchOpen"
+                id="document-search"
+                ref="sidebarSearch"
+                class="search-panel"
+                role="region"
+                aria-label="查找替换工具"
+              >
+                <SearchReplacePanel
+                  :key="result.verification_run_id"
+                  :text="currentRevisionText"
+                  :disabled="workspaceMutationLocked"
+                  :can-undo="verificationWorkspace.canUndoTextEdit.value && !isAnalyzing"
+                  @replace-text="saveSearchReplacement"
+                  @search-change="updateDocumentSearch"
+                  @undo-text-edit="undoTextEdit"
+                />
+              </div>
+            </template>
+            <template #default="{ showIssueMarkers, toolbarTarget }">
               <OriginalDocumentPreview
                 v-if="originalPreviewSource"
                 :job-id="originalPreviewSource.jobId"
@@ -1554,6 +1611,7 @@ onBeforeUnmount(() => {
                 :navigation-target="documentNavigationTarget"
                 :search-matches="activeDocumentSearch?.matches"
                 :active-search-match-index="activeDocumentSearch?.activeMatchIndex"
+                :toolbar-target="toolbarTarget"
                 @select-issue="selectReviewIssue"
               />
               <DocumentViewer
@@ -1574,7 +1632,27 @@ onBeforeUnmount(() => {
           </EditPreview>
         </section>
 
-        <aside class="issues-panel">
+        <div
+          class="pane-divider"
+          role="separator"
+          tabindex="0"
+          aria-label="调整问题列表宽度"
+          aria-orientation="vertical"
+          aria-controls="review-issues"
+          :aria-valuemin="paneResize.minWidth"
+          :aria-valuemax="maxIssuesWidth"
+          :aria-valuenow="issuesWidth"
+          :aria-valuetext="`${issuesWidth} 像素`"
+          title="拖动或按左右方向键调整宽度，双击或按 Enter 恢复默认"
+          @pointerdown="paneResize.start"
+          @pointermove="paneResize.move"
+          @pointerup="paneResize.stop"
+          @pointercancel="paneResize.stop"
+          @lostpointercapture="paneResize.stop"
+          @dblclick="paneResize.reset"
+          @keydown="paneResize.onKeydown"
+        />
+        <aside id="review-issues" class="issues-panel">
           <header class="issues-header">
             <div class="side-tabs compact-tabs ui-tabs">
               <button :class="{ active: resultTab === 'issues' }" @click="resultTab = 'issues'">问题列表</button>
@@ -1648,16 +1726,29 @@ onBeforeUnmount(() => {
 .shell { min-height: 100vh; }
 .shell.is-reviewing { height: 100dvh; min-height: 0; display: flex; flex-direction: column; }
 .shell.is-reviewing > :deep(.topbar) { flex-shrink: 0; }
-.document-panel, .issues-panel, .search-panel { border: 1px solid var(--border); border-radius: var(--radius-panel); background: var(--surface); overflow: hidden; }
-.document-panel { box-shadow: var(--shadow-paper); }
-input:focus, select:focus { border-color: var(--primary); outline: 3px solid rgba(37, 99, 235, .1); }
-.review-workspace { isolation: isolate; flex: 1; min-height: 0; width: 100%; padding: 20px 24px; display: flex; flex-direction: column; gap: 12px; max-width: 1680px; margin: auto; }
+.document-panel, .issues-panel { border: 1px solid var(--border); border-radius: var(--radius-panel); background: var(--surface); overflow: hidden; }
+.review-workspace { isolation: isolate; flex: 1; min-height: 0; width: 100%; padding: 8px 12px 12px; display: flex; flex-direction: column; gap: 8px; }
 .review-workspace > :not(.review-grid) { flex-shrink: 0; }
-.review-summary { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 0 2px 6px; }
+.review-overview { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px 24px; }
+.review-overview:has(details[open]),
+.review-overview:has([data-execution-warning]),
+.review-overview:has(.conflict) { grid-template-columns: minmax(0, 1fr); }
+.review-overview .verification-status { max-width: 480px; min-width: 0; }
+.review-overview:has(details[open]) .verification-status,
+.review-overview:has([data-execution-warning]) .verification-status { max-width: none; }
+.review-summary { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-width: 0; }
 .document-identity { min-width: 0; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .document-identity > strong { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 16px; font-weight: 600; }
 .document-identity > span { flex: 0 0 auto; font-size: 12px; color: var(--muted); }
-.document-identity > span:last-child { padding: 3px 9px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
+.document-identity > span:last-child { padding-left: 10px; border-left: 1px solid var(--border); }
+.verification-status { color: var(--muted); font-size: 12px; line-height: 1.7; }
+.verification-status p { margin: 0; }
+.verification-status.limited { color: var(--warning); }
+.verification-status summary { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; cursor: pointer; padding: 4px 0; }
+.status-detail-label { flex-shrink: 0; text-decoration: underline; text-underline-offset: 3px; }
+.status-details { max-height: 160px; overflow: auto; margin-top: 8px; padding: 12px 16px; border-left: 2px solid var(--border-strong); background: var(--surface); color: var(--muted); overflow-wrap: anywhere; }
+.status-details p + p { margin-top: 8px; }
+.verification-status [data-execution-warning] { padding: 8px 12px; border-left: 2px solid var(--warning); background: var(--warning-soft); }
 .execution-warning,
 .execution-error {
   margin: 0;
@@ -1706,20 +1797,20 @@ input:focus, select:focus { border-color: var(--primary); outline: 3px solid rgb
   white-space: nowrap;
   border: 0;
 }
-.sidebar-search { flex-shrink: 0; }
 .issues-panel { overflow: auto; }
 .issues-panel :deep(.issue-list-shell) { min-height: 220px; }
 .issues-panel > .issues-header { flex-shrink: 0; }
-.review-grid { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(220px, 260px) minmax(0, 1fr) minmax(300px, 336px); grid-template-areas: "search document issues"; gap: 16px; }
-.document-panel, .issues-panel, .search-panel { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.review-grid { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(360px, 1fr) 12px minmax(260px, min(var(--issues-width), calc(100% - 372px))); grid-template-areas: "document divider issues"; }
+.pane-divider { grid-area: divider; position: relative; cursor: col-resize; touch-action: none; border-radius: 4px; }
+.pane-divider::after { content: ""; position: absolute; inset: 12px 6px 12px 5px; border-radius: 2px; background: var(--border); }
+.pane-divider:hover::after, .pane-divider:focus-visible::after, .is-resizing .pane-divider::after { background: var(--primary); }
+.pane-divider:focus-visible { outline: none; }
+.review-grid.is-resizing, .review-grid.is-resizing :deep(*) { cursor: col-resize; user-select: none; }
+.document-panel, .issues-panel { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .document-panel { grid-area: document; }
 .issues-panel { grid-area: issues; }
-.search-panel { grid-area: search; overflow: auto; }
-.tools-header { flex-shrink: 0; min-height: 58px; padding: 10px 16px; display: flex; align-items: center; border-bottom: 1px solid var(--border); }
-.tools-header h2 { margin: 0; font-size: 14px; font-weight: 600; }
-.search-panel :deep(.search-replace-panel) { grid-template-columns: minmax(0, 1fr); }
-.search-panel :deep(.actions) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.issues-header { min-height: 58px; padding: 8px 12px; gap: 6px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border); }
+.search-panel { container: document-search / inline-size; flex: 0 1 auto; min-height: 0; max-height: 45%; overflow: auto; border-bottom: 1px solid var(--border); background: var(--surface-2); }
+.issues-header { min-height: 44px; padding: 6px 8px; gap: 6px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border); }
 .document-content, .document-editor { flex: 1; min-height: 0; margin: 0; padding: 24px 28px; overflow: auto; white-space: pre-wrap; color: var(--text); background: var(--surface); font: 15px/2 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .document-content:not(.preview) { padding: 0; }
 .document-content.preview { color: #075985; }
@@ -1743,7 +1834,7 @@ input:focus, select:focus { border-color: var(--primary); outline: 3px solid rgb
   line-height: 1.7;
   font-size: 12px;
 }
-.compact-tabs { padding: 3px; }
+.compact-tabs { padding: 0; border: 0; background: transparent; }
 .compact-tabs button { padding: 6px; white-space: nowrap; }
 .issues-header > span { color: var(--muted); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .summary-panel { min-height: 160px; padding: 16px; overflow: auto; }
@@ -1751,11 +1842,12 @@ input:focus, select:focus { border-color: var(--primary); outline: 3px solid rgb
 .summary-row { padding: 10px 0; display: flex; justify-content: space-between; border-bottom: 1px solid var(--border); font-size: 13px; }
 .toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); z-index: 40; padding: 11px 18px; border-radius: 10px; color: white; background: #172033; box-shadow: var(--shadow); }
 .mobile-view-switch { display: none; }
-@media (min-width: 761px) and (max-width: 1199px) {
-  .review-grid { grid-template-columns: minmax(160px, 180px) minmax(0, 1fr) minmax(200px, 240px); gap: 12px; }
+@media (max-width: 1000px) {
+  .review-overview { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .review-overview .verification-status { max-width: none; }
 }
 @media (max-width: 760px) {
-  .review-workspace { padding: 16px 12px; }
+  .review-workspace { padding: 8px; }
   .review-summary { align-items: flex-start; flex-direction: column; gap: 10px; }
   .document-identity { width: 100%; flex-wrap: wrap; }
   .document-identity > strong { max-width: 100%; }
@@ -1763,12 +1855,15 @@ input:focus, select:focus { border-color: var(--primary); outline: 3px solid rgb
   .mobile-view-switch button { flex: 1; border: 0; border-radius: 6px; padding: 10px; background: transparent; cursor: pointer; font-size: 13px; }
   .mobile-view-switch button[aria-pressed='true'] { background: var(--surface); color: var(--primary); box-shadow: var(--shadow-small); }
   .review-grid { grid-template-columns: minmax(0, 1fr); grid-template-areas: none; }
-  .document-panel, .issues-panel, .search-panel { grid-area: auto; }
+  .document-panel, .issues-panel { grid-area: auto; }
   .review-grid[data-review-pane='document'] > :not(.document-panel),
-  .review-grid[data-review-pane='issues'] > :not(.issues-panel),
-  .review-grid[data-review-pane='search'] > :not(.search-panel) { display: none; }
+  .review-grid[data-review-pane='issues'] > :not(.issues-panel) { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
+}
+@media (max-width: 760px) and (max-height: 600px) {
+  .review-workspace { padding-block: 8px; gap: 8px; }
+  .review-summary { gap: 4px; padding-bottom: 0; }
 }
 </style>

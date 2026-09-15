@@ -8,6 +8,7 @@ import type { DocumentIssue } from '../../utils/documentPresentation'
 import { layoutRectangles } from '../../utils/layoutPresentation'
 import { revealWithinPane } from '../../utils/revealWithinPane'
 import ReviewLayoutPage from './ReviewLayoutPage.vue'
+import { vSelectMenu } from '../../directives/selectMenu'
 
 const props = withDefaults(defineProps<{
   jobId: string
@@ -20,6 +21,7 @@ const props = withDefaults(defineProps<{
   navigationTarget?: 'issue' | 'search'
   searchMatches?: readonly SearchMatch[]
   activeSearchMatchIndex?: number
+  toolbarTarget?: HTMLElement | null
 }>(), { searchMatches: () => [], activeSearchMatchIndex: -1, navigationTarget: 'issue' })
 const emit = defineEmits<{ 'select-issue': [issueId: string] }>()
 const layout = ref<ReviewLayout | null>(null)
@@ -107,12 +109,13 @@ onBeforeUnmount(() => {
 
 <template>
   <section ref="root" class="original-preview" aria-label="文档版式审阅" :aria-busy="loading">
-    <div class="layout-toolbar">
+    <Teleport :to="toolbarTarget || 'body'" :disabled="!toolbarTarget">
+    <div class="layout-toolbar" :class="{ 'is-inline': toolbarTarget }">
       <span>{{ pages.length ? `${pages.length} 页` : '文档版式' }}</span>
       <span v-if="loading" role="status">正在更新文档版式…</span>
       <span v-else-if="layout?.revision_applied && !error" role="status">已显示当前修订</span>
       <label>缩放
-        <select class="ui-field" v-model.number="zoom" aria-label="文档缩放">
+        <select v-select-menu class="ui-field" v-model.number="zoom" aria-label="文档缩放">
           <option value="fit">适合宽度</option>
           <option :value="25">25%</option>
           <option :value="50">50%</option>
@@ -124,6 +127,7 @@ onBeforeUnmount(() => {
         </select>
       </label>
     </div>
+    </Teleport>
     <p v-if="layout?.notice && !loading && !error" class="preview-note" role="status">{{ layout.notice }}</p>
     <p v-if="missingLocation" class="preview-note" data-location-warning role="status">
       此问题无法精确定位到原版式，请结合右侧原文和上下文处理。
@@ -146,14 +150,12 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .original-preview { display: flex; flex-direction: column; height: 100%; min-height: 0; white-space: normal; }
-.layout-toolbar { display: flex; flex-shrink: 0; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 8px 16px; font-size: 12px; border-bottom: 1px solid var(--border); color: var(--muted); background: var(--surface); }
+.layout-toolbar { display: flex; flex-shrink: 0; flex-wrap: wrap; align-items: center; gap: 4px 12px; padding: 4px 12px; font-size: 12px; border-bottom: 1px solid var(--border); color: var(--muted); background: var(--surface); }
 .layout-toolbar label { margin-left: auto; white-space: nowrap; }
 .layout-toolbar select { margin-left: 6px; min-height: 32px; padding-block: 6px; }
+.layout-toolbar.is-inline { padding: 0; border: 0; gap: 4px 8px; background: transparent; }
 .preview-note, .preview-state { flex-shrink: 0; margin: 0; padding: 8px 12px; font-size: 12px; line-height: 1.6; color: var(--muted); border-bottom: 1px solid var(--border); }
 .preview-state { color: var(--danger); background: var(--danger-soft); }
-.layout-scroll { flex: 1; min-height: 0; overflow: auto; background: var(--canvas); padding: 24px; }
+.layout-scroll { flex: 1; min-height: 0; overflow: auto; background: var(--canvas); padding: 8px; }
 .layout-pages { display: flex; flex-direction: column; align-items: center; gap: 38px; margin-inline: auto; padding-bottom: 28px; }
-@media (max-width: 760px) {
-  .layout-scroll { padding: 12px; }
-}
 </style>

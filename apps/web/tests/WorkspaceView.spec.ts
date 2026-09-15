@@ -227,6 +227,42 @@ function canonicalWorkspace(wrapper: ReturnType<typeof mount>) {
 }
 
 describe('WorkspaceView', () => {
+  it('opens document search on demand, preserves its query and returns focus on Escape', async () => {
+    const payload = buildWorkspaceResult([], '查找这份文档。')
+    const wrapper = mount(WorkspaceView, {
+      attachTo: document.body,
+      global: { provide: {
+        [jobsApiKey as symbol]: { createJob: vi.fn(), subscribe: vi.fn(() => vi.fn()) },
+        [verificationApiKey as symbol]: {
+          analyzeText: vi.fn().mockResolvedValue(payload),
+          analyzeFile: vi.fn(), exportReport: vi.fn(), exportOriginal: vi.fn()
+        }
+      } }
+    })
+    wrapper.getComponent(SourceInputPanel).vm.$emit('submit-text', payload.text)
+    await flushPromises()
+    expect(wrapper.get('[data-search-input]').isVisible()).toBe(false)
+    const toggle = wrapper.get('[data-action="toggle-search-replace"]')
+    await toggle.trigger('click')
+    await flushPromises()
+    const search = wrapper.get<HTMLInputElement>('[data-search-input]')
+    expect(search.isVisible()).toBe(true)
+    expect(document.activeElement).toBe(search.element)
+    await search.setValue('文档')
+    expect(wrapper.get('.active-search-match').text()).toBe('文档')
+    await search.trigger('keydown', { key: 'Escape' })
+    await flushPromises()
+    expect(search.isVisible()).toBe(false)
+    expect(document.activeElement).toBe(toggle.element)
+    expect(wrapper.find('.active-search-match').exists()).toBe(false)
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true }))
+    await flushPromises()
+    expect(search.element.value).toBe('文档')
+    expect(document.activeElement).toBe(search.element)
+    expect(wrapper.get('.active-search-match').text()).toBe('文档')
+    wrapper.unmount()
+  })
+
   it('names checks skipped for incomplete extraction and retains the notice after restore', async () => {
     const payload = buildWorkspaceResult([], '样本文本。', {
       scenario: 'academic',
@@ -286,6 +322,9 @@ describe('WorkspaceView', () => {
     })
     wrapper.getComponent(SourceInputPanel).vm.$emit('submit-text', payload.text)
     await flushPromises()
+    const status = wrapper.get('[data-verification-status]')
+    expect(status.get('summary').text()).toContain('检查范围受限')
+    expect(status.get('details').attributes('open')).toBeUndefined()
     expect(wrapper.get('[data-semantic-status]').text()).toContain('3 / 20')
     expect(wrapper.get('[data-semantic-status]').text()).toContain('非全文')
     expect(wrapper.get('[data-semantic-status]').text()).toContain('启发式')
@@ -490,6 +529,7 @@ describe('WorkspaceView', () => {
     const toggle = wrapper.get<HTMLInputElement>('input[aria-label="显示问题标记"]')
     expect(toggle.element.checked).toBe(true)
     expect(wrapper.find('[data-issue-role="source"]').exists()).toBe(true)
+    await wrapper.get('[data-action="toggle-search-replace"]').trigger('click')
     await wrapper.get('[data-search-input]').setValue('丁')
     await toggle.setValue(false)
 
@@ -556,6 +596,7 @@ describe('WorkspaceView', () => {
     expect(wrapper.find('.search-panel [data-action="undo-text-edit"]').exists()).toBe(true)
     const undo = wrapper.get<HTMLButtonElement>('[data-action="undo-text-edit"]')
     expect(undo.element.disabled).toBe(true)
+    await wrapper.get('[data-action="toggle-search-replace"]').trigger('click')
     await wrapper.get('[data-search-input]').setValue('aa')
     await wrapper.get('[data-replacement-input]').setValue('X')
     await wrapper.get('[data-action="replace-all"]').trigger('click')
@@ -594,18 +635,23 @@ describe('WorkspaceView', () => {
     })
     wrapper.getComponent(SourceInputPanel).vm.$emit('submit-text', payload.text)
     await flushPromises()
-    expect(wrapper.find('.review-grid > .search-panel [data-search-input]').exists()).toBe(true)
+    expect(wrapper.find('.document-panel .search-panel [data-search-input]').exists()).toBe(true)
     expect(wrapper.find('.issues-panel [data-search-input]').exists()).toBe(false)
     expect(wrapper.find('.review-grid > .issues-panel .issue-list').exists()).toBe(true)
-    expect(wrapper.find('[data-action="toggle-search-replace"]').exists()).toBe(false)
+    expect(wrapper.find('[data-action="toggle-search-replace"]').exists()).toBe(true)
     expect(wrapper.find('.review-toolbar').exists()).toBe(false)
     expect(wrapper.findAll('button').some((button) => /^(段落|紧凑)视图$/.test(button.text()))).toBe(false)
     const workspace = canonicalWorkspace(wrapper)
     wrapper.getComponent(IssueList).vm.$emit('update:suggestion', first.issue_id, '😀新增\n内容')
     wrapper.getComponent(IssueList).vm.$emit('set-state', first.issue_id, 'accepted')
     await flushPromises()
+    expect(wrapper.get(`[data-issue-role="list"][data-issue-id="${first.issue_id}"]`).text())
+      .toContain('😀新增')
+    await wrapper.get(`[data-issue-role="list"][data-issue-id="${first.issue_id}"]`).trigger('click')
+    expect(wrapper.get('.rule-source').text()).toContain(first.rule_id)
     expect(wrapper.get('[data-source-text]').element.textContent).toBe('😀新增\n内容丁')
     expect(workspace.result.value?.text).toBe('甲乙丙丁')
+    await wrapper.get('[data-action="toggle-search-replace"]').trigger('click')
     await wrapper.get('[data-search-input]').setValue('丁')
     expect(wrapper.get('.active-search-match').text()).toBe('丁')
     wrapper.getComponent(IssueList).vm.$emit('update:selected-layer', 'format')
@@ -631,6 +677,10 @@ describe('WorkspaceView', () => {
   })
 
   beforeEach(() => {
+    vi.stubGlobal('ResizeObserver', class {
+      observe() {}
+      disconnect() {}
+    })
     sessionStorage.clear()
   })
 
@@ -1519,6 +1569,7 @@ describe('WorkspaceView', () => {
       .vm.$emit('submit-text', 'Aa😀aa')
     await flushPromises()
     wrapper.getComponent(DocumentViewer).vm.$emit('select-issue', issue.issue_id)
+    await wrapper.get('[data-action="toggle-search-replace"]').trigger('click')
     const search = wrapper.getComponent(SearchReplacePanel)
     await search.get('[data-search-input]').setValue('aa')
     await search.get('[data-replacement-input]').setValue('X')

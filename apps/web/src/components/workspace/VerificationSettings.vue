@@ -8,6 +8,7 @@ import {
   validateVerificationOptionsSize
 } from '../../composables/useTerminology'
 import type { AnalyzeOptions } from '../../types/verification'
+import { vSelectMenu } from '../../directives/selectMenu'
 
 const scenarios = SCENARIO_OPTIONS
 
@@ -82,7 +83,7 @@ function selectOcrLanguage(event: Event): void {
     <div class="scenario-header">
       <label class="scenario-field">
         <span v-if="!compact">文档场景</span>
-        <select class="ui-field" aria-label="文档场景" :disabled="disabled" :value="options.scenario" @change="selectScenario">
+        <select v-select-menu class="ui-field" aria-label="文档场景" :disabled="disabled" :value="options.scenario" @change="selectScenario">
           <option v-for="scenario in scenarios" :key="scenario.id" :value="scenario.id" :data-scenario="scenario.id">
             {{ scenario.name }}
           </option>
@@ -98,13 +99,10 @@ function selectOcrLanguage(event: Event): void {
         <button type="button" aria-label="重试加载规则清单" :disabled="disabled" @click="refreshCatalog">重试</button>
       </p>
       <template v-else-if="selectedProfile">
-        <p><strong>{{ selectedProfile.name }}规则包</strong></p>
-        <p>{{ selectedProfile.description }}</p>
-        <p v-if="compact && selectedProfile.rules.length" class="rule-highlights">
-          {{ selectedProfile.rules.map((rule) => rule.name).join(' · ') }}
-        </p>
+        <p v-if="!compact"><strong>{{ selectedProfile.name }}规则包</strong></p>
         <details class="rule-details" :open="!compact">
-          <summary>规则详情 · {{ selectedProfile.base_checks.length }} 项基础检查<span v-if="selectedProfile.rules.length">、{{ selectedProfile.rules.length }} 项专业检查</span></summary>
+          <summary><span v-if="compact">{{ selectedProfile.name }}规则包 · </span><span v-else>规则详情 · </span>{{ selectedProfile.base_checks.length }} 项基础检查<span v-if="selectedProfile.rules.length">、{{ selectedProfile.rules.length }} 项专业检查</span></summary>
+        <p>{{ selectedProfile.description }}</p>
         <ul v-if="selectedProfile.rules.length" class="specialist-rules">
           <li v-for="rule in selectedProfile.rules" :key="rule.id">
             <strong>{{ rule.name }}</strong>
@@ -164,6 +162,7 @@ function selectOcrLanguage(event: Event): void {
     <label class="scenario-field">
       <span>OCR 识别语言</span>
       <select
+        v-select-menu
         class="ui-field"
         aria-label="OCR 识别语言"
         :value="options.ocrLanguage ?? DEFAULT_OCR_LANGUAGE"
@@ -222,10 +221,12 @@ function selectOcrLanguage(event: Event): void {
 .scenario-header { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
 .scenario-header .scenario-field { justify-content: flex-start; }
 .scenario-rules { margin-top: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; font-size: 12px; line-height: 1.7; color: var(--muted); }
+.compact .scenario-rules { margin-top: 8px; padding: 0; border: 0; border-radius: 0; }
+.compact .rule-details { margin: 0; }
+.compact .rule-details > summary { padding: 4px 0; }
 .scenario-rules p { margin: 6px 0; }
 .scenario-rules > p:first-child { margin-top: 0; }
 .rule-details { margin-top: 6px; }
-.rule-highlights { color: var(--text); }
 .scenario-rules strong { color: var(--text); }
 .scenario-rules summary { cursor: pointer; }
 .specialist-rules { padding-left: 18px; margin: 8px 0; }

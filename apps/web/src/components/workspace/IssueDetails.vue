@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 
 import type { VerificationIssue } from '../../types/verification'
+import { vSelectMenu } from '../../directives/selectMenu'
 
 const props = defineProps<{
   issue: VerificationIssue
@@ -92,6 +93,7 @@ function updateSuggestion(event: Event): void {
     <label v-if="alternatives.length" class="suggestion-picker">
       <span>选择修改建议</span>
       <select
+        v-select-menu
         class="ui-field"
         :value="
           selectableSuggestions.findIndex(
@@ -133,6 +135,10 @@ function updateSuggestion(event: Event): void {
     <p v-if="issue.review_reason" class="review-note">
       语义复核：{{ issue.review_reason }}
     </p>
+    <details class="rule-source">
+      <summary>规则来源</summary>
+      <p>{{ issue.source }} · {{ issue.rule_id }}</p>
+    </details>
   </div>
 </template>
 
@@ -214,4 +220,6 @@ blockquote {
 .review-note {
   color: var(--primary);
 }
+.rule-source { margin-top: 12px; color: var(--muted); font-size: 12px; }
+.rule-source summary { cursor: pointer; }
 </style>

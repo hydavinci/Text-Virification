@@ -19,6 +19,7 @@ const conflicted = ref(false)
 const status = ref('')
 const editor = ref<HTMLTextAreaElement | null>(null)
 const startButton = ref<HTMLButtonElement | null>(null)
+const previewToolbar = ref<HTMLElement | null>(null)
 
 async function startEdit(): Promise<void> {
   if (props.disabled) {
@@ -89,9 +90,11 @@ watch(
   <div class="edit-preview">
     <div class="edit-actions" aria-label="文档编辑和显示">
       <strong class="document-title">{{ title ?? '当前文档' }}</strong>
+      <div ref="previewToolbar" class="preview-tools" />
+      <slot name="tools" />
       <button
         v-if="!editing"
-        class="ui-button"
+        class="ui-button ui-button--quiet"
         ref="startButton"
         type="button"
         data-action="start-edit"
@@ -126,7 +129,7 @@ watch(
           aria-label="显示问题标记"
           :disabled="disabled"
         />
-        显示问题标记
+        <span class="marker-label">显示问题标记</span>
       </label>
       <span
         data-edit-status
@@ -138,6 +141,7 @@ watch(
       </span>
     </div>
 
+    <slot name="search" />
     <textarea
       v-if="editing"
       ref="editor"
@@ -148,7 +152,7 @@ watch(
       aria-label="编辑文档内容"
     />
     <div v-else class="document-content">
-      <slot :show-issue-markers="showIssueMarkers" />
+      <slot :show-issue-markers="showIssueMarkers" :toolbar-target="previewToolbar" />
     </div>
   </div>
 </template>
@@ -162,8 +166,8 @@ watch(
 }
 
 .edit-actions {
-  min-height: 58px;
-  padding: 10px 16px;
+  min-height: 44px;
+  padding: 4px 12px;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -177,6 +181,8 @@ watch(
   font-size: 14px;
   font-weight: 600;
 }
+.preview-tools { min-width: 0; }
+.preview-tools:empty { display: none; }
 
 .marker-toggle {
   display: inline-flex;
@@ -186,6 +192,7 @@ watch(
   font-size: 12px;
   cursor: pointer;
   color: var(--muted);
+  white-space: nowrap;
 }
 
 .marker-toggle input {
@@ -229,4 +236,8 @@ watch(
   overflow: hidden;
 }
 
+@media (max-width: 760px) and (max-height: 600px) {
+  .edit-actions { padding: 8px 12px; gap: 8px; }
+  .edit-actions .ui-button { padding-inline: 6px; }
+}
 </style>

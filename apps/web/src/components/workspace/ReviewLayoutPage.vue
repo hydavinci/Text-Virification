@@ -81,7 +81,7 @@ onBeforeUnmount(() => observer?.disconnect())
 .layout-issue.error { background: #ef444426; border-color: #ef4444; }
 .layout-issue.accepted { background: #10b98126; border-color: #10b981; }
 .layout-issue.rejected { background: #64748b18; border-color: #94a3b8; }
-.layout-issue.selected, .layout-issue:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; z-index: 2; }
-.layout-search { pointer-events: none; background: #facc1555; outline: 1px solid #eab308; }
-.layout-search.active { background: #fb923c66; outline: 2px solid #ea580c; }
+.layout-issue.selected, .layout-issue:focus-visible { outline: 1px solid #2563eb; outline-offset: -1px; z-index: 2; }
+.layout-search { pointer-events: none; background: #facc1555; outline: 1px solid #eab308; outline-offset: -1px; }
+.layout-search.active { background: #fb923c66; outline-color: #ea580c; }
 </style>

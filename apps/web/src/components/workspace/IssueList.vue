@@ -2,6 +2,7 @@
 import { nextTick, ref, watch } from 'vue'
 
 import IssueDetails from './IssueDetails.vue'
+import { vSelectMenu } from '../../directives/selectMenu'
 import { revealWithinPane } from '../../utils/revealWithinPane'
 import type {
   IssueState,
@@ -51,6 +52,14 @@ const root = ref<HTMLElement | null>(null)
 
 function activateIssue(issueId: string): void {
   emit('select-issue', issueId)
+}
+
+function summarySuggestion(issue: VerificationIssue): string {
+  const selected = props.selectedSuggestions[issue.issue_id]
+  const suggestion = selected === undefined ? issue.suggestion : selected
+  if (suggestion === null) return '需人工核对'
+  if (suggestion === '') return '（删除）'
+  return suggestion.trim() ? suggestion : '（空白字符）'
 }
 
 async function scrollSelectedIssue(issueId: string | null): Promise<void> {
@@ -111,6 +120,7 @@ watch(
       <label>
         <span>检查层级</span>
         <select
+          v-select-menu
           class="ui-field"
           :value="selectedLayer"
           aria-label="检查层级"
@@ -130,6 +140,7 @@ watch(
       <label>
         <span>问题级别</span>
         <select
+          v-select-menu
           class="ui-field"
           :value="selectedSeverity"
           aria-label="问题级别"
@@ -177,7 +188,10 @@ watch(
             <span v-else-if="issueStates[issue.issue_id] === 'rejected'">已忽略</span>
           </span>
           <span class="issue-message">{{ issue.message }}</span>
-          <span v-if="selectedIssueId !== issue.issue_id" class="issue-original">{{ issue.original }}</span>
+          <span v-if="selectedIssueId !== issue.issue_id" class="issue-original">
+            {{ issue.original.trim() ? issue.original : '（空白字符）' }}
+            <span aria-hidden="true"> → </span>{{ summarySuggestion(issue) }}
+          </span>
         </button>
 
         <IssueDetails
@@ -256,22 +270,24 @@ watch(
 .issue-list {
   flex: 1;
   min-height: 0;
-  padding: 12px;
+  padding: 0;
   overflow: auto;
 }
 
 .issue-card {
-  margin-bottom: 10px;
-  padding: 14px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
+  margin: 0;
+  padding: 16px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-left: 1px solid transparent;
+  border-radius: 0;
   background: var(--surface);
-  transition: border-color .15s, box-shadow .15s;
+  transition: background-color .15s;
 }
-.issue-card:hover { border-color: var(--border-strong); }
+.issue-card:hover { background: var(--surface-2); }
 
 .issue-card.accepted {
-  background: var(--success-soft);
+  color: var(--muted);
 }
 
 .issue-card.rejected {
@@ -279,9 +295,8 @@ watch(
 }
 
 .issue-card.selected {
-  border-color: var(--primary);
-  background: var(--surface);
-  box-shadow: var(--shadow-small);
+  border-left-color: var(--primary);
+  background: var(--primary-soft);
 }
 
 .issue-select {
@@ -299,17 +314,15 @@ watch(
 }
 
 .issue-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; color: var(--muted); font-size: 12px; }
-.severity { margin-left: auto; padding: 2px 7px; border-radius: 5px; font-size: 12px; }
-.error .severity { color: var(--danger); background: var(--danger-soft); }
-.warning .severity { color: var(--warning); background: var(--warning-soft); }
-.info .severity { color: var(--primary); background: var(--primary-soft); }
+.severity { margin-left: auto; font-size: 12px; }
+.error .severity { color: var(--danger); }
+.warning .severity { color: var(--warning); }
+.info .severity { color: var(--muted); }
 .issue-message { color: var(--text); font-size: 14px; font-weight: 500; line-height: 1.65; overflow-wrap: anywhere; }
 .issue-original { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--muted); }
 
 .issue-select:focus-visible {
   border-radius: 7px;
-  outline: 2px solid var(--primary);
-  outline-offset: 3px;
 }
 
 .issue-actions {
@@ -325,8 +338,6 @@ watch(
 .empty-state {
   margin: 12px 0;
   padding: 32px 14px;
-  border: 1px dashed var(--border-strong);
-  border-radius: 10px;
   color: var(--muted);
   font-size: 13px;
   line-height: 1.8;

@@ -527,8 +527,8 @@ watch(
 }
 
 .source-segment:focus-visible {
-  outline: 2px solid #2563eb;
-  outline-offset: 1px;
+  outline: 1px solid #2563eb;
+  outline-offset: -1px;
 }
 
 .source-segment.overlapping {
@@ -539,8 +539,8 @@ watch(
 .source-segment.selected {
   color: #1e3a8a;
   background: #bfdbfe;
-  outline: 2px solid #2563eb;
-  outline-offset: 1px;
+  outline: 1px solid #2563eb;
+  outline-offset: -1px;
 }
 
 .source-segment.accepted {
@@ -563,8 +563,8 @@ watch(
 .source-segment.active-search-match {
   color: #431407;
   background: #fdba74;
-  outline: 2px solid #ea580c;
-  outline-offset: 1px;
+  outline: 1px solid #ea580c;
+  outline-offset: -1px;
   border-radius: 2px;
 }
 

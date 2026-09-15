@@ -1,5 +1,6 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, type Locator } from '@playwright/test'
 import scannedResult from './fixtures/scanned-result'
+import { scenarioCatalogFixture } from '../fixtures/scenarioCatalog'
 
 const documentId = '11111111-1111-4111-8111-111111111111'
 const runId = '22222222-2222-4222-8222-222222222222'
@@ -29,15 +30,112 @@ function reviewLayout(text: string) {
 }
 
 test.beforeEach(async ({ page }) => {
+  await page.route('**/api/v1/scenarios', (route) =>
+    route.fulfill({ json: { scenarios: scenarioCatalogFixture() } }))
   await page.route('**/api/v1/jobs/*/preview/layout', async (route) => {
     await route.fulfill({ json: reviewLayout(route.request().postDataJSON().text) })
   })
 })
 
+test('selection menus open below their controls and preserve keyboard selection', async ({ page }) => {
+  await page.goto('/')
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('让每一次交付，更准确。')
+  const scenario = page.getByRole('combobox', { name: '文档场景', exact: true })
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 900 })
+    await scenario.click()
+    const menu = page.getByRole('listbox')
+    await expect(menu).toBeVisible()
+    const anchor = (await scenario.boundingBox())!
+    const bounds = (await menu.boundingBox())!
+    expect(bounds.y).toBeGreaterThanOrEqual(anchor.y + anchor.height)
+    expect(bounds.x).toBeGreaterThanOrEqual(0)
+    expect(bounds.x + bounds.width).toBeLessThanOrEqual(width)
+    expect(bounds.width).toBeCloseTo(anchor.width, 0)
+    await menu.getByRole('option', { name: '学术论文' }).click()
+    await expect(scenario).toHaveValue('academic')
+    await expect(menu).toHaveCount(0)
+    await scenario.press('ArrowDown')
+    await expect(menu).toBeVisible()
+    await scenario.press('End')
+    await scenario.press('Escape')
+    await expect(scenario).toHaveValue('academic')
+    await scenario.press('ArrowDown')
+    await scenario.press('Home')
+    await scenario.press('Enter')
+    await expect(scenario).toHaveValue('general')
+    await scenario.press('ArrowDown')
+    await scenario.press('ArrowDown')
+    await scenario.press('Tab')
+    await expect(scenario).toHaveValue('academic')
+    await expect(menu).toHaveCount(0)
+    await expect(scenario.locator('option[aria-hidden]')).toHaveCount(0)
+  }
+  await page.locator('[data-open-settings]').click()
+  const dialog = page.getByRole('dialog', { name: '检查设置', exact: true })
+  const language = dialog.getByRole('combobox', { name: 'OCR 识别语言' })
+  await language.click()
+  await expect(dialog.getByRole('listbox')).toBeVisible()
+  await language.press('Escape')
+  await expect(dialog).toBeVisible()
+  await expect(language).toBeFocused()
+  await language.click()
+  await dialog.getByRole('option', { name: '日文' }).click()
+  await expect(language).toHaveValue('ja')
+  await language.click()
+  await dialog.getByRole('heading', { name: '检查设置', exact: true }).click()
+  await expect(page.getByRole('listbox')).toHaveCount(0)
+})
+
+test('focus uses existing borders or thin inside indicators across setup and settings', async ({ page }) => {
+  await page.goto('/')
+  await page.keyboard.press('Tab')
+  const primary = await page.locator('[data-submit-source]').evaluate((element) =>
+    getComputedStyle(element).backgroundColor
+  )
+  async function expectBorderFocus(control: Locator) {
+    await control.hover()
+    await control.focus()
+    await expect(control).toHaveCSS('outline-style', 'none')
+    await expect(control).toHaveCSS('border-color', primary)
+    await expect(control).toHaveCSS('border-width', '1px')
+  }
+  await expectBorderFocus(page.locator('.dropzone'))
+  await expectBorderFocus(page.locator('[data-open-settings]'))
+  await page.locator('[data-open-settings]').click()
+  const dialog = page.getByRole('dialog', { name: '检查设置', exact: true })
+  await expectBorderFocus(dialog.getByLabel('文档场景'))
+  const checkbox = dialog.getByLabel('个人信息与凭证扫描')
+  await checkbox.focus()
+  await expect(checkbox).toHaveCSS('outline-width', '1px')
+  await expect(checkbox).toHaveCSS('outline-offset', '-1px')
+  const terms = dialog.getByRole('button', { name: /^术语 / })
+  await terms.focus()
+  await expect(terms).toHaveCSS('outline-width', '1px')
+  await expect(terms).toHaveCSS('outline-offset', '-1px')
+  await terms.click()
+  await expectBorderFocus(dialog.getByLabel('原文写法'))
+  await expectBorderFocus(dialog.getByLabel('规范写法'))
+  await expectBorderFocus(dialog.locator('[data-action="import"]'))
+  await dialog.getByRole('button', { name: /^禁用词 / }).click()
+  await expectBorderFocus(dialog.getByLabel('输入禁用词'))
+  await page.keyboard.press('Escape')
+  await page.getByRole('button', { name: '粘贴文本' }).click()
+  await expectBorderFocus(page.getByLabel('待检查文本'))
+  await page.getByLabel('待检查文本').fill('测试文字')
+  const submit = page.locator('[data-submit-source]')
+  await page.keyboard.press('Tab')
+  await submit.focus()
+  await expect(submit).toHaveCSS('outline-width', '1px')
+  await expect(submit).toHaveCSS('outline-offset', '-3px')
+  await expect(submit).toHaveCSS('outline-color',
+    await submit.evaluate((element) => getComputedStyle(element).color))
+})
+
 test('setup supporting text stays readable and settings controls fit on a narrow screen', async ({ page }, testInfo) => {
   await page.goto('/')
   await page.screenshot({ path: testInfo.outputPath('setup-desktop.png') })
-  for (const selector of ['.product-label', '.options-summary', '.privacy-note', '.dropzone small']) {
+  for (const selector of ['.setup-heading p', '.options-summary', '.privacy-note', '.dropzone small']) {
     expect(await page.locator(selector).evaluate((element) =>
       parseFloat(getComputedStyle(element).fontSize)
     ), selector).toBeGreaterThanOrEqual(12)
@@ -68,17 +166,51 @@ test('review controls have readable labels and contrasting primary actions in bo
   await page.getByLabel('待检查文本').fill(text)
   await page.locator('[data-submit-source]').click()
   await page.locator('[data-issue-role="list"]').click()
+  await expect(page.locator('.marker-label')).toHaveText('显示问题标记')
+  await expect(page.locator('.marker-label')).toHaveCSS('white-space', 'nowrap')
+  await expect(page.getByLabel('查找内容', { exact: true })).not.toBeVisible()
+  const documentBox = (await page.locator('.document-panel').boundingBox())!
+  const issuesBox = (await page.locator('.issues-panel').boundingBox())!
+  expect(documentBox.width).toBeGreaterThan(issuesBox.width * 2)
+  expect(issuesBox.width).toBeGreaterThanOrEqual(320)
+  expect(issuesBox.width).toBeLessThanOrEqual(360)
+  const readingHeight = (await page.locator('.edit-preview > .document-content').boundingBox())!.height
+  await page.locator('[data-action="toggle-search-replace"]').click()
+  const searchPanel = page.locator('.search-panel')
+  expect((await searchPanel.boundingBox())!.height).toBeLessThanOrEqual(100)
+  expect(readingHeight - (await page.locator('.edit-preview > .document-content').boundingBox())!.height)
+    .toBeLessThanOrEqual(100)
+  expect(await searchPanel.evaluate((element) => element.scrollHeight <= element.clientHeight)).toBe(true)
   await page.getByLabel('查找内容', { exact: true }).fill('文档')
   for (const theme of ['light', 'dark']) {
     if (theme === 'dark') await page.locator('[data-toggle-theme]').click()
+    for (const selector of ['[data-search-input]', '[data-replacement-input]']) {
+      const field = page.locator(selector)
+      await field.hover()
+      await field.focus()
+      await expect(field).toHaveCSS('outline-style', 'none')
+      await expect(field).toHaveCSS('box-shadow', 'none')
+      await expect(field).toHaveCSS('border-width', '1px')
+      const primary = await page.locator('[data-action="replace-all"]').evaluate((element) =>
+        getComputedStyle(element).backgroundColor
+      )
+      await expect(field).toHaveCSS('border-color', primary)
+    }
     await page.screenshot({ path: testInfo.outputPath(`review-${theme}.png`) })
     const selectedCard = page.locator('.issue-card.selected')
     await expect(selectedCard).not.toHaveCSS('box-shadow', /inset/)
     const borders = await selectedCard.evaluate((element) => {
       const style = getComputedStyle(element)
-      return [style.borderTop, style.borderRight, style.borderBottom, style.borderLeft]
+      return { left: parseFloat(style.borderLeftWidth), right: parseFloat(style.borderRightWidth) }
     })
-    expect(new Set(borders).size).toBe(1)
+    expect(borders.left).toBeGreaterThan(borders.right)
+    expect(borders.left).toBe(1)
+    await page.keyboard.press('Tab')
+    await selectedCard.locator('.issue-select').focus()
+    await expect(selectedCard.locator('.issue-select')).toHaveCSS('outline-width', '1px')
+    await expect(selectedCard.locator('.issue-select')).toHaveCSS('outline-offset', '-1px')
+    await expect(page.locator('.source-segment.selected').first()).toHaveCSS('outline-width', '1px')
+    await expect(page.locator('.source-segment.selected').first()).toHaveCSS('outline-offset', '-1px')
     for (const selector of [
       '.search-replace-panel label', '.filters label', '.issue-meta', '.severity', '.issue-details blockquote'
     ]) {
@@ -112,7 +244,39 @@ test('review controls have readable labels and contrasting primary actions in bo
     })
     expect(contrast.ratio, `${theme}: ${JSON.stringify(contrast)}`).toBeGreaterThanOrEqual(4.5)
   }
+  await page.setViewportSize({ width: 1024, height: 900 })
+  expect((await searchPanel.boundingBox())!.height).toBeLessThanOrEqual(100)
+  expect(await searchPanel.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const divider = page.getByRole('separator', { name: '调整问题列表宽度' })
+  await divider.focus()
+  await page.keyboard.press('ArrowLeft')
+  expect((await page.locator('.issues-panel').boundingBox())!.width).toBe(336)
+  await page.keyboard.press('ArrowRight')
+  expect((await page.locator('.issues-panel').boundingBox())!.width).toBe(320)
+  const handle = (await divider.boundingBox())!
+  await page.mouse.move(handle.x + handle.width / 2, handle.y + 100)
+  await page.mouse.down()
+  await page.mouse.move(handle.x + handle.width / 2 - 120, handle.y + 100, { steps: 8 })
+  await page.mouse.up()
+  expect((await page.locator('.issues-panel').boundingBox())!.width).toBe(440)
+  await expect(page.locator('.review-grid')).not.toHaveClass(/is-resizing/)
+  await divider.focus()
+  await page.keyboard.press('Home')
+  expect((await page.locator('.issues-panel').boundingBox())!.width).toBe(260)
+  await page.keyboard.press('ArrowRight')
+  expect((await page.locator('.issues-panel').boundingBox())!.width).toBe(260)
+  await page.keyboard.press('Enter')
+  expect((await page.locator('.issues-panel').boundingBox())!.width).toBe(320)
+  await page.keyboard.press('End')
+  expect((await page.locator('.issues-panel').boundingBox())!.width).toBe(640)
+  await page.setViewportSize({ width: 844, height: 900 })
+  expect((await page.locator('.document-panel').boundingBox())!.width).toBeGreaterThanOrEqual(360)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await divider.dblclick()
+  expect((await page.locator('.issues-panel').boundingBox())!.width).toBe(320)
   await page.setViewportSize({ width: 390, height: 844 })
+  await expect(page.locator('.pane-divider')).not.toBeVisible()
   await page.getByRole('button', { name: /^问题 1$/ }).click()
   await page.screenshot({ path: testInfo.outputPath('review-mobile-dark.png') })
   const utilityRows = await page.locator('.topbar .icon-btn').evaluateAll((buttons) =>
@@ -137,6 +301,49 @@ test('review controls have readable labels and contrasting primary actions in bo
     await expect(opener).toBeFocused()
   }
   await page.screenshot({ path: testInfo.outputPath('review-mobile-edited.png') })
+})
+
+test('coverage limits stay visible while details collapse and recheck failures preserve the document', async ({ page }) => {
+  const text = '帐号测试'
+  let failed = false
+  await page.route('**/api/v1/analyze', (route) => failed
+    ? route.fulfill({ status: 503, json: { detail: '检查服务暂时不可用' } })
+    : route.fulfill({ json: {
+      success: true, filename: '研究文档.txt', source_name: '研究文档.txt', file_type: 'txt',
+      text, blocks: [block(text)], parser_name: 'compatibility-flat-text', parser_version: '1',
+      stats: stats(text), issues: [issue(text)], summary: {
+        ...summary(), llm_review: { semantic_discovery: {
+          enabled: true, sampled_chunks: 3, total_chunks: 20, truncated: true, reason: ''
+        } }
+      },
+      file_id: null, file_ext: null, document_id: documentId, verification_run_id: runId,
+      source_version: sourceVersion, execution_mode: 'synchronous', analysis_mode: 'local_only',
+      dictionary_versions: {}, scenario: 'academic',
+      degradation: { is_degraded: true, reasons: [
+        'scenario_rule_skipped:scenario.academic.citation_reference:引文与参考文献对应'
+      ] }
+    } }))
+  await page.setViewportSize({ width: 320, height: 900 })
+  await page.goto('/')
+  await page.getByRole('button', { name: '粘贴文本' }).click()
+  await page.getByLabel('待检查文本').fill(text)
+  await page.locator('[data-submit-source]').click()
+  const status = page.locator('[data-verification-status]')
+  await expect(status.locator('summary')).toContainText('检查范围受限')
+  await expect(status.locator('summary')).toContainText('未检查 1 项')
+  await expect(status.locator('summary')).toContainText('3 / 20')
+  await expect(page.locator('[data-skipped-rules]')).not.toBeVisible()
+  await status.locator('summary').click()
+  await expect(page.locator('[data-skipped-rules]')).toBeVisible()
+  await expect(page.locator('[data-semantic-status]')).toContainText('非全文覆盖')
+  expect((await page.locator('.review-grid').boundingBox())!.height).toBeGreaterThan(150)
+  await status.locator('summary').click()
+  failed = true
+  await page.getByRole('button', { name: '重新检查', exact: true }).click()
+  await expect(page.locator('[data-review-execution-error]')).toBeVisible()
+  await expect(page.locator('[data-source-text]')).toHaveText(text)
+  await expect(status.locator('summary')).toContainText('检查范围受限')
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320)
 })
 
 test('minimal setup preserves advanced options and remains usable at desktop and mobile widths', async ({ page }) => {
@@ -232,12 +439,14 @@ test('review settings stay accessible on desktop and mobile and apply only on re
   await page.locator('[data-submit-source]').click()
   await expect(page.locator('.review-grid')).toBeVisible()
   await expect(page.locator('.review-summary button, .review-summary summary')).toHaveCount(0)
-  await expect(page.locator('.review-grid > .search-panel [data-search-input]')).toHaveCount(1)
+  await expect(page.locator('.document-panel .search-panel [data-search-input]')).toHaveCount(1)
   await expect(page.locator('.issues-panel [data-search-input]')).toHaveCount(0)
   const opener = page.locator('.topbar [data-open-settings]')
   const dialog = page.getByRole('dialog', { name: '检查设置', exact: true })
   for (const width of [1440, 390, 320]) {
     await page.setViewportSize({ width, height: 900 })
+    await page.locator('.header-document').click()
+    await expect(opener).toHaveCSS('border-color', 'rgba(0, 0, 0, 0)')
     const buttonStyles = await page.locator(
       '.topbar [data-open-settings], .topbar [data-action="recheck"], .topbar [data-toggle-export]'
     ).evaluateAll((buttons) => buttons.map((button) => {
@@ -248,6 +457,10 @@ test('review settings stay accessible on desktop and mobile and apply only on re
         lineHeight: style.lineHeight,
         padding: style.padding,
         borderRadius: style.borderRadius,
+        borderColor: style.borderColor,
+        background: style.backgroundColor,
+        color: style.color,
+        boxShadow: style.boxShadow,
         height: button.getBoundingClientRect().height
       }
     }))
@@ -337,7 +550,8 @@ test('unified layout locates an already-selected restored issue without changing
   }
   const fitWidth = (await page.locator('.layout-page').first().boundingBox())!.width
   for (const scale of [25, 50, 75, 100]) {
-    await page.getByLabel('文档缩放').selectOption(String(scale))
+    await page.getByRole('combobox', { name: '文档缩放' }).click()
+    await page.getByRole('listbox').getByRole('option', { name: `${scale}%`, exact: true }).click()
     await expect.poll(async () =>
       (await page.locator('.layout-page').first().boundingBox())!.width / fitWidth
     ).toBeCloseTo(scale / 100, 2)
@@ -417,17 +631,15 @@ for (const [width, height] of [
     await expect(page.getByText('长文档.txt', { exact: true })).toHaveCount(1)
     if (width > 760) {
       const panels = await page.locator('.review-grid').evaluate((element) =>
-        ['.search-panel', '.document-panel', '.issues-panel'].map((selector) => {
+        ['.document-panel', '.issues-panel'].map((selector) => {
           const box = element.querySelector(selector)!.getBoundingClientRect()
           return { x: box.x, right: box.right, y: box.y, height: box.height, width: box.width }
         })
       )
       expect(panels[0].right).toBeLessThan(panels[1].x)
-      expect(panels[1].right).toBeLessThan(panels[2].x)
-      expect(panels[1].width).toBeGreaterThan(panels[0].width)
-      expect(panels[1].width).toBeGreaterThan(panels[2].width)
-      expect(panels[1].y).toBe(panels[2].y)
-      expect(panels[1].height).toBe(panels[2].height)
+      expect(panels[0].width).toBeGreaterThan(panels[1].width)
+      expect(panels[0].y).toBe(panels[1].y)
+      expect(panels[0].height).toBe(panels[1].height)
     }
     await expect(page.locator('.edit-actions').getByText('当前文档', { exact: true })).toBeVisible()
     await expect(page.getByRole('button', { name: '编辑正文', exact: true })).toBeVisible()
@@ -474,7 +686,7 @@ for (const [width, height] of [
       }
     })
     const search = page.locator('.search-panel [data-search-input]')
-    await expect(page.locator('[data-action="toggle-search-replace"]')).toHaveCount(0)
+    await expect(page.locator('[data-action="toggle-search-replace"]')).toHaveCount(1)
     await expect(page.getByRole('button', { name: /^(段落|紧凑)视图$/ })).toHaveCount(0)
     await page.keyboard.press('Control+f')
     await expect(search).toBeFocused()
@@ -489,7 +701,8 @@ for (const [width, height] of [
     const beforeSearch = await reviewLayout()
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width)
     await page.keyboard.press('Escape')
-    await expect(search).toBeVisible()
+    await expect(search).not.toBeVisible()
+    await expect(page.locator('[data-action="toggle-search-replace"]')).toBeFocused()
     expect(await reviewLayout()).toEqual(beforeSearch)
     await page.keyboard.press('Meta+f')
     await expect(search).toBeFocused()
@@ -503,6 +716,12 @@ for (const [width, height] of [
     if (width <= 760) {
       await page.getByRole('button', { name: '文档', exact: true }).click()
     }
+    const paneHeights = await page.evaluate(() => Object.fromEntries(
+      ['.topbar', '.review-workspace', '.review-grid', '.edit-actions', '.search-panel', '.document-content']
+        .map((selector) => [selector, document.querySelector(selector)?.getBoundingClientRect().height])
+    ))
+    expect(await content.evaluate((element) => element.clientHeight), JSON.stringify(paneHeights))
+      .toBeGreaterThan(24)
     await expect(page.locator('.source-segment.highlighted.selected')).toBeInViewport()
     expect(await content.evaluate((element) => element.scrollTop)).toBeGreaterThan(0)
     expect(await page.evaluate(() => window.scrollY)).toBe(pageScrollBeforeNavigation)
@@ -1033,10 +1252,27 @@ test(`${sourceType} job persists its revision before ${exportFormat} export${und
   expect(jobSubmissions).toBe(0)
   await page.locator('[data-submit-source]').click()
   await expect(
-    page.locator('.review-summary').getByTitle(`sample.${sourceType}`, { exact: true })
+    page.locator('.topbar').getByTitle(`sample.${sourceType}`, { exact: true })
   ).toBeVisible()
   await expect(page.locator('[data-original-layout], [data-text-review]')).toHaveCount(0)
   await expect(page.locator('.layout-page img')).toBeVisible()
+  if (sourceType === 'docx' && !undoBeforeExport) {
+    for (const [width, height] of [[2000, 925], [1440, 900]]) {
+      await page.setViewportSize({ width, height })
+      const documentPane = (await page.locator('.document-panel').boundingBox())!
+      expect(documentPane.x).toBeLessThanOrEqual(16)
+      expect(documentPane.width).toBeGreaterThanOrEqual(width * .75)
+      const viewport = page.getByRole('region', { name: '文档版式审阅' }).locator('.layout-scroll')
+      await expect(page.locator('.edit-actions').getByLabel('文档缩放')).toBeVisible()
+      expect((await viewport.boundingBox())!.height).toBeGreaterThanOrEqual(height * .83)
+      await page.locator('[data-action="toggle-search-replace"]').click()
+      expect((await viewport.boundingBox())!.y).toBeLessThanOrEqual(190)
+      expect((await viewport.boundingBox())!.height).toBeGreaterThanOrEqual(height * .78)
+      expect((await viewport.boundingBox())!.y + (await viewport.boundingBox())!.height)
+        .toBeLessThanOrEqual(height)
+      await page.locator('[data-action="toggle-search-replace"]').click()
+    }
+  }
   await page.locator('[data-issue-role="list"]').first().click()
   await expect(page.locator('.layout-issue.selected')).toBeVisible()
   await page.locator('.issue-actions').getByRole('button', { name: '接受', exact: true }).click()
@@ -1046,6 +1282,7 @@ test(`${sourceType} job persists its revision before ${exportFormat} export${und
   expect(previewTexts).toEqual(['帐号测试', '账号测试'])
 
   if (undoBeforeExport) {
+    await page.locator('[data-action="toggle-search-replace"]').click()
     await page.getByLabel('查找内容').fill('账号')
     await page.getByLabel('替换内容').fill('临时😀')
     await page.getByRole('button', { name: '替换当前', exact: true }).click()
@@ -1174,7 +1411,7 @@ test('job recheck preserves exact multiline text and retained authority across r
   await page.goto('/')
   await page.locator('input[type="file"]').setInputFiles('tests/e2e/fixtures/sample.docx')
   await page.locator('[data-submit-source]').click()
-  await expect(page.locator('.review-summary').getByTitle('多段.docx')).toBeVisible()
+  await expect(page.locator('.topbar').getByTitle('多段.docx')).toBeVisible()
   await page.getByRole('button', { name: '重新检查', exact: true }).click()
   await expect.poll(() => received.length).toBe(1)
   expect(received[0]).toBe(text)
@@ -1189,7 +1426,7 @@ test('job recheck preserves exact multiline text and retained authority across r
     recheckGrant: 'server-issued-recheck-grant'
   })
   await page.reload()
-  await expect(page.locator('.review-summary').getByTitle('多段.docx')).toBeVisible()
+  await expect(page.locator('.topbar').getByTitle('多段.docx')).toBeVisible()
   expect((await saved()).workspace.result.text).toBe(text)
   await page.getByRole('button', { name: '重新检查', exact: true }).click()
   await expect.poll(() => received.length).toBe(2)
@@ -1396,7 +1633,7 @@ test('scanned PDF exposes OCR progress, canonical result, and reconstruction exp
   await page.evaluate(() => {
     ;(window as unknown as { __finishOcrJob: () => void }).__finishOcrJob()
   })
-  await expect(page.locator('.document-identity > strong')).toHaveText(
+  await expect(page.locator('.header-document')).toHaveText(
     'scanned-page.pdf'
   )
   await expect(page.locator('.layout-page img').first()).toBeVisible()

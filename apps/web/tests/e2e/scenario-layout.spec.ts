@@ -24,7 +24,8 @@ test('groups scenario controls above a compact full-width rule summary', async (
   const optionsBox = (await page.locator('.setup-options').boundingBox())!
   expect(Math.abs(selectBox.x - optionsBox.x)).toBeLessThan(2)
   expect(Math.abs(summaryBox.width - optionsBox.width)).toBeLessThan(2)
-  expect(summaryBox.height).toBeLessThan(130)
+  expect(summaryBox.height).toBeLessThan(54)
+  await expect(rules).toHaveCSS('border-top-width', '0px')
   await expect(rules.locator('.rule-details')).not.toHaveAttribute('open', '')
   await rules.locator('.rule-details > summary').click()
   await expect(rules.locator('.rule-details')).toHaveAttribute('open', '')
@@ -41,7 +42,7 @@ test('keeps compact scenario controls and rule details usable on narrow screens'
     const rules = page.getByRole('region', { name: '场景规则' })
     await expect(rules).toContainText('通用文档规则包')
     await page.getByLabel('文档场景', { exact: true }).selectOption('academic')
-    await expect(rules).toContainText('学术论文专用检查')
+    await expect(rules).toContainText('学术论文规则包')
     await rules.locator('.rule-details > summary').click()
     await expect(rules.getByText(/需完整文本/)).toBeVisible()
     expect(await page.locator('.input-card').evaluate((element) =>

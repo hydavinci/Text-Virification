@@ -264,8 +264,9 @@ function seedSession(
   ).toBe(true)
 }
 
-function mountWorkspace(api: VerificationApi) {
+function mountWorkspace(api: VerificationApi, attachTo?: HTMLElement) {
   return mount(WorkspaceView, {
+    attachTo,
     global: {
       provide: {
         [jobsApiKey as symbol]: jobsApi(),
@@ -277,6 +278,10 @@ function mountWorkspace(api: VerificationApi) {
 
 describe('WorkspaceView Task 6 integration', () => {
   beforeEach(() => {
+    vi.stubGlobal('ResizeObserver', class {
+      observe() {}
+      disconnect() {}
+    })
     Object.defineProperty(window, 'sessionStorage', {
       configurable: true,
       value: browserSessionStorage
@@ -308,15 +313,17 @@ describe('WorkspaceView Task 6 integration', () => {
     }
   )
 
-  it('restores legacy compact file sessions into unified review with sidebar search visible', async () => {
+  it('restores legacy compact file sessions with search available on demand', async () => {
     seedSession()
-    const wrapper = mountWorkspace(verificationApi())
+    const wrapper = mountWorkspace(verificationApi(), document.body)
     await flushPromises()
 
     expect(wrapper.find('.original-preview .layout-page').exists()).toBe(true)
     expect(wrapper.find('[data-original-layout], [data-text-review]').exists()).toBe(false)
-    expect(wrapper.find('.review-grid > .search-panel [data-search-input]').exists()).toBe(true)
-    expect(wrapper.find('[data-action="toggle-search-replace"]').exists()).toBe(false)
+    expect(wrapper.get('.document-panel [data-search-input]').isVisible()).toBe(false)
+    await wrapper.get('[data-action="toggle-search-replace"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.document-panel [data-search-input]').isVisible()).toBe(true)
     wrapper.unmount()
   })
 

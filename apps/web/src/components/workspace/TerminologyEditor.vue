@@ -328,16 +328,9 @@ function downloadExample(): void {
   min-width: 0;
   flex: 1;
 }
-.term-form input:focus {
-  border-color: var(--primary);
-  outline: 3px solid rgba(37, 99, 235, .1);
-}
 .import-btn {
   display: inline-block;
   margin: 12px 0;
-}
-.import-btn:focus-visible {
-  outline: 3px solid rgba(37, 99, 235, .14);
 }
 .link-btn {
   margin-left: 8px;
