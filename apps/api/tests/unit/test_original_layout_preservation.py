@@ -12,6 +12,8 @@ from zipfile import ZipFile
 import fitz
 import pytest
 from docx import Document
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 from docx.shared import Inches
 
 from text_verification.application.original_preview import build_review_preview, render_office
@@ -150,3 +152,43 @@ def test_docker_unified_review_maps_spaces_in_word_paragraphs(
             }
             assert mapped == set(range(run.start(), run.end()))
         assert source.path.read_bytes() == content
+
+
+def test_docker_unified_review_maps_short_table_fields_and_a_checkbox(tmp_path: Path) -> None:
+    url = os.environ.get("PREVIEW_RENDERER_TEST_URL")
+    if not url:
+        pytest.skip("Set PREVIEW_RENDERER_TEST_URL to exercise the Docker renderer.")
+    word = Document()
+    word.add_paragraph("Title")
+    word.add_paragraph("The agreement with Acme Company preserves the original body paragraph.")
+    table = word.add_table(rows=4, cols=2)
+    for row, values in zip(table.rows, [
+        ("Vendor", "Acme Company"), ("Fee", "7380"), ("Total", "7380"), ("Level", ""),
+    ], strict=True):
+        for cell, value in zip(row.cells, values, strict=True):
+            cell.text = value
+    paragraph = table.cell(3, 1).paragraphs[0]
+    symbol = OxmlElement("w:sym")
+    symbol.set(qn("w:font"), "Wingdings 2")
+    symbol.set(qn("w:char"), "F052")
+    paragraph.add_run()._r.append(symbol)
+    paragraph.add_run("Pro")
+    path = tmp_path / "short-fields.docx"
+    word.save(path)
+    content = path.read_bytes()
+    text, _ = _parse_docx(str(path))
+    job_id = uuid4()
+    document = DocumentModel(
+        document_id=job_id, source_name=path.name, file_type="docx",
+        source_version=f"sha256:{hashlib.sha256(content).hexdigest()}",
+        text=text, blocks=[], parser_name="test", parser_version="1",
+    )
+    storage = JobStorage(tmp_path / "jobs", 25 * 1024 * 1024)
+    storage.save_bytes(job_id, path.name, content)
+
+    for revision in (text, text.replace("Pro", "Basic")):
+        layout = build_review_preview(document, storage, url, revision)
+        covered = {i for page in layout.pages for g in page.glyphs for i in range(g.start, g.end)}
+        assert {i for i, char in enumerate(revision) if not char.isspace()} <= covered
+        assert layout.notice is None
+    assert path.read_bytes() == content

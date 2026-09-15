@@ -27,6 +27,9 @@ from text_verification.domain.review_layout import (
 OfficeConverter = Callable[[bytes, str, str], bytes]
 MAX_MAPPING_WORK = 5_000_000
 _HORIZONTAL_WHITESPACE = re.compile(r"[^\S\r\n\v\f\x1c-\x1e\x85\u2028\u2029]+")
+_SYMBOL_FONTS = frozenset({
+    "OpenSymbol", "Wingdings", "Wingdings2", "Wingdings3", "Webdings", "ZapfDingbats",
+})
 
 
 @dataclass(frozen=True)
@@ -38,6 +41,7 @@ class _Glyph:
     width: float
     height: float
     line: int = 0
+    symbol: bool = False
 
 
 def _normalized(text: str) -> tuple[str, list[int]]:
@@ -212,6 +216,26 @@ def _map_whitespace(
             ))
 
 
+def _unclaimed_occurrences(
+    text: str, value: str, assigned: bytearray, budget: int,
+) -> tuple[list[int], int]:
+    matches: list[int] = []
+    work = len(text)
+    if work > budget:
+        return [], work
+    start = text.find(value)
+    while start >= 0:
+        work += len(value)
+        if work > budget:
+            return [], work
+        if assigned.find(b"\x01", start, start + len(value)) == -1:
+            matches.append(start)
+            if len(matches) == 2:
+                break
+        start = text.find(value, start + 1)
+    return matches, work
+
+
 def _map_glyphs(text: str, glyphs: list[_Glyph], pages: list[LayoutPage]) -> bool:
     source, source_offsets = _normalized(text)
     rendered, rendered_offsets = _normalized("".join(glyph.text for glyph in glyphs))
@@ -275,17 +299,20 @@ def _map_glyphs(text: str, glyphs: list[_Glyph], pages: list[LayoutPage]) -> boo
     mapped: dict[int, tuple[int, int]] = {}
     assigned_source = bytearray(len(source))
     assigned_rendered = bytearray(len(rendered))
-    for source_start, rendered_start, size in matches:
+    source_to_rendered: dict[int, int] = {}
+
+    def assign(source_start: int, rendered_start: int, size: int, *, exclude: bool = False) -> None:
         for offset in range(size):
             source_position = source_start + offset
             rendered_position = rendered_start + offset
             start = source_offsets[source_position]
             if (
-                start in excluded
+                (exclude and start in excluded)
                 or assigned_source[source_position] or assigned_rendered[rendered_position]
             ):
                 continue
             assigned_source[source_position] = assigned_rendered[rendered_position] = 1
+            source_to_rendered[source_position] = rendered_position
             rendered_index = rendered_offsets[rendered_position]
             if start in mapped:
                 mapped[start] = (
@@ -298,6 +325,75 @@ def _map_glyphs(text: str, glyphs: list[_Glyph], pages: list[LayoutPage]) -> boo
                 width=glyph.width, height=glyph.height,
             ))
             mapped[start] = (rendered_index, rendered_index)
+
+    for source_start, rendered_start, size in matches:
+        assign(source_start, rendered_start, size, exclude=True)
+
+    if len(source) * len(occurrences) <= MAX_MAPPING_WORK:
+        boundaries = {0, len(rendered)}
+        starts = {0}
+        for index in range(1, len(rendered_offsets)):
+            if not _same_line(
+                glyphs[rendered_offsets[index - 1]], glyphs[rendered_offsets[index]],
+            ):
+                boundaries.add(index)
+                starts.add(index)
+        # Checkbox/list markers can be rendered from symbol fonts even when
+        # Word's extracted paragraph text does not contain the marker.
+        for start in tuple(starts):
+            index = start
+            while (
+                index < len(rendered_offsets)
+                and (index == start or index not in boundaries)
+                and glyphs[rendered_offsets[index]].symbol
+            ):
+                index += 1
+            starts.add(index)
+
+        remaining: list[tuple[int, str]] = []
+        cursor = 0
+        for identity in identities:
+            if identity and not any(assigned_source[cursor:cursor + len(identity)]):
+                remaining.append((cursor, identity))
+            cursor += len(identity)
+
+        # Longer paragraphs claim their embedded short words first. A short
+        # match must then be unique on both sides and span complete PDF lines.
+        budget = MAX_MAPPING_WORK
+        for start, identity in sorted(remaining, key=lambda item: -len(item[1])):
+            candidates, work = _unclaimed_occurrences(source, identity, assigned_source, budget)
+            budget -= work
+            if budget < 0:
+                break
+            if candidates != [start]:
+                continue
+            candidates, work = _unclaimed_occurrences(rendered, identity, assigned_rendered, budget)
+            budget -= work
+            if budget < 0:
+                break
+            if len(candidates) == 1:
+                candidate = candidates[0]
+                if candidate in starts and candidate + len(identity) in boundaries:
+                    assign(start, candidate, len(identity))
+
+        # Repeated table values require both neighboring source characters to
+        # already agree on the exact interval, without extra rendered copies.
+        for start, identity in remaining:
+            budget -= len(source)
+            if budget < 0:
+                break
+            end = start + len(identity)
+            if any(assigned_source[start:end]):
+                continue
+            left, right = source_to_rendered.get(start - 1), source_to_rendered.get(end)
+            if (
+                left is not None and right is not None
+                and right == left + len(identity) + 1
+                and left + 1 in starts and right in boundaries
+                and rendered[left + 1:right] == identity
+                and rendered_counts[identity] == source.count(identity)
+            ):
+                assign(start, left + 1, len(identity))
     _map_whitespace(text, glyphs, pages, mapped)
     for page in pages:
         page.glyphs.sort(key=lambda glyph: (glyph.start, glyph.end))
@@ -355,6 +451,7 @@ def _render_pages(content: bytes, file_type: str, text: str, applied: bool) -> R
                                     glyphs.append(_Glyph(
                                         codepoint, page_index, box.x0, box.y0,
                                         box.width, box.height, line_index,
+                                        span["font"].split("+")[-1] in _SYMBOL_FONTS,
                                     ))
                         page_text.append("\n")
                         line_index += 1

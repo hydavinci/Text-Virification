@@ -10,6 +10,97 @@ from docx import Document
 from text_verification.application import original_preview
 
 
+def test_short_table_fields_and_repeated_values_map_by_lines_and_neighboring_labels() -> None:
+    from text_verification.application.review_layout import render_review_document
+
+    body = "The agreement with Acme Company preserves the original long body paragraph."
+    source = f"Title\n{body}\nAcme Company\nFee\n7380\nOther\nTotal\n7380\nEnd"
+    rendered = f"Title\nAcme Company\nTotal\n7380\nEnd\nFee\n7380\nOther\n{body}"
+    with fitz.open() as pdf:
+        pdf.new_page().insert_text((30, 100), rendered)
+        content = pdf.tobytes()
+
+    layout = render_review_document(content, "pdf", source, source)
+
+    mapped = {g.start: g for page in layout.pages for g in page.glyphs}
+    assert set(mapped) == {i for i, char in enumerate(source) if char != "\n"}
+    assert mapped[source.index("7380")].y > mapped[source.rindex("7380")].y
+    assert mapped[source.rindex("Acme Company")].y < mapped[source.index("The agreement")].y
+    assert layout.notice is None
+
+
+def test_short_wrapped_field_matches_only_complete_rendered_lines() -> None:
+    from text_verification.application.review_layout import render_review_document
+
+    body = "The original body paragraph remains fully available."
+    source = f"{body}\nTotal:"
+    with fitz.open() as pdf:
+        pdf.new_page().insert_text((30, 100), f"To\ntal:\n{body}")
+        content = pdf.tobytes()
+
+    layout = render_review_document(content, "pdf", source, source)
+
+    assert {g.start for page in layout.pages for g in page.glyphs} == {
+        i for i, char in enumerate(source) if char != "\n"
+    }
+    assert layout.notice is None
+
+
+@pytest.mark.parametrize("marker_font", ["zapfdingbats", "helv"])
+def test_short_field_can_omit_a_symbol_font_marker_but_not_regular_text(
+    marker_font: str,
+) -> None:
+    from text_verification.application.review_layout import render_review_document
+
+    body = "The original body paragraph remains fully available."
+    source = f"{body}\nPro"
+    with fitz.open() as pdf:
+        page = pdf.new_page()
+        page.insert_text((30, 100), "R", fontname=marker_font)
+        page.insert_text((40, 100), "Pro")
+        page.insert_text((30, 150), body)
+        content = pdf.tobytes()
+
+    layout = render_review_document(content, "pdf", source, source)
+
+    marks = [g for page in layout.pages for g in page.glyphs if g.start >= source.index("Pro")]
+    if marker_font == "zapfdingbats":
+        assert {g.start for g in marks} == set(range(source.index("Pro"), len(source)))
+        assert all(g.x >= 40 for g in marks)
+        assert layout.notice is None
+    else:
+        assert not marks
+        assert layout.notice
+
+
+@pytest.mark.parametrize(
+    ("source", "rendered", "unmapped"),
+    [
+        ("Fee\nCompletely unavailable source paragraph", "ServiceFee\nOther content", "Fee"),
+        ("Heading\nHeading plus missing body", "Heading\nplus different body", "Heading"),
+        ("Fee\nKnown original long body", "Fee\nFee\nKnown original long body", "Fee"),
+        (
+            "Fee\n7380\nCompletely unavailable middle text\nTotal\n7380",
+            "Total\n7380\nUnrelated middle text\nFee\n7380", "7380",
+        ),
+    ],
+)
+def test_short_field_fallback_keeps_unresolved_ambiguity_explicit(
+    source: str, rendered: str, unmapped: str,
+) -> None:
+    from text_verification.application.review_layout import render_review_document
+
+    with fitz.open() as pdf:
+        pdf.new_page().insert_text((30, 100), rendered)
+        content = pdf.tobytes()
+    layout = render_review_document(content, "pdf", source, source)
+    start = source.index(unmapped)
+    assert not any(
+        g.start < start + len(unmapped) and g.end > start for p in layout.pages for g in p.glyphs
+    )
+    assert layout.notice
+
+
 def test_overprinted_mixed_font_spaces_map_to_the_measured_anchor_gap() -> None:
     from text_verification.application.review_layout import _Glyph, _map_glyphs
     from text_verification.domain.review_layout import LayoutPage
