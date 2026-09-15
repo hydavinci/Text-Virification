@@ -87,6 +87,40 @@ test('selection menus open below their controls and preserve keyboard selection'
   await expect(page.getByRole('listbox')).toHaveCount(0)
 })
 
+test('dropdown remains open after scrolling its control away from the viewport edge', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 600 })
+  await page.goto('/')
+  await page.locator('[data-open-settings]').click()
+  const dialog = page.getByRole('dialog', { name: '检查设置', exact: true })
+  const language = dialog.getByRole('combobox', { name: 'OCR 识别语言' })
+  await language.scrollIntoViewIfNeeded()
+  await dialog.evaluate((element) => {
+    const control = element.querySelector('[aria-label="OCR 识别语言"]')!
+    element.scrollTop += control.getBoundingClientRect().bottom - (window.innerHeight - 52)
+  })
+  const beforeScroll = await dialog.evaluate((element) => element.scrollTop)
+  const before = (await language.boundingBox())!
+  expect(600 - before.y - before.height).toBeLessThan(120)
+  await language.click()
+  await expect.poll(() => dialog.evaluate((element) => element.scrollTop)).toBeGreaterThan(beforeScroll)
+  const menu = dialog.getByRole('listbox')
+  await expect(menu).toBeVisible()
+  const anchor = (await language.boundingBox())!
+  expect((await menu.boundingBox())!.y).toBeCloseTo(anchor.y + anchor.height + 2, 0)
+  await dialog.evaluate((element) => { element.scrollTop -= 16 })
+  await expect.poll(async () => {
+    const control = (await language.boundingBox())!
+    return Math.abs((await menu.boundingBox())!.y - control.y - control.height - 2)
+  }).toBeLessThan(1)
+  await language.press('Escape')
+  await expect(menu).toHaveCount(0)
+  await expect(dialog).toBeVisible()
+  await expect(language).toHaveValue('zh')
+  await expect(language).toBeFocused()
+  await language.press('Escape')
+  await expect(dialog).toHaveCount(0)
+})
+
 test('focus uses existing borders or thin inside indicators across setup and settings', async ({ page }) => {
   await page.goto('/')
   await page.keyboard.press('Tab')

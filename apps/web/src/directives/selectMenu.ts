@@ -47,7 +47,7 @@ function attach(select: HTMLSelectElement): SelectMenu {
     select.removeAttribute('aria-controls')
     select.removeAttribute('aria-activedescendant')
     document.removeEventListener('pointerdown', dismissOutside, true)
-    window.removeEventListener('scroll', dismissOnScroll, true)
+    window.removeEventListener('scroll', repositionOnScroll, true)
     window.removeEventListener('resize', close)
   }
 
@@ -78,11 +78,7 @@ function attach(select: HTMLSelectElement): SelectMenu {
     activate(available.includes(active) ? active : (available[0] ?? -1))
   }
 
-  function show(): void {
-    if (select.matches(':disabled') || !enabled().length) return
-    if (window.innerHeight - select.getBoundingClientRect().bottom < 120) {
-      select.scrollIntoView({ block: 'center', inline: 'nearest' })
-    }
+  function position(): void {
     const bounds = select.getBoundingClientRect()
     const width = Math.min(bounds.width, window.innerWidth - 16)
     Object.assign(menu.style, {
@@ -91,6 +87,14 @@ function attach(select: HTMLSelectElement): SelectMenu {
       width: `${width}px`,
       maxHeight: `${Math.max(0, Math.min(240, window.innerHeight - bounds.bottom - 8))}px`
     })
+  }
+
+  function show(): void {
+    if (select.matches(':disabled') || !enabled().length) return
+    if (window.innerHeight - select.getBoundingClientRect().bottom < 120) {
+      select.scrollIntoView({ block: 'center', inline: 'nearest' })
+    }
+    position()
     menu.setAttribute('aria-label',
       select.getAttribute('aria-label') || select.labels?.[0]?.textContent?.trim() || '选择选项')
     open = true
@@ -103,7 +107,7 @@ function attach(select: HTMLSelectElement): SelectMenu {
     select.setAttribute('aria-controls', menu.id)
     activate(active, true)
     document.addEventListener('pointerdown', dismissOutside, true)
-    window.addEventListener('scroll', dismissOnScroll, true)
+    window.addEventListener('scroll', repositionOnScroll, true)
     window.addEventListener('resize', close)
   }
 
@@ -122,8 +126,11 @@ function attach(select: HTMLSelectElement): SelectMenu {
     if (event.target instanceof Node && event.target !== select && !menu.contains(event.target)) close()
   }
 
-  function dismissOnScroll(event: Event): void {
-    if (!(event.target instanceof Node) || !menu.contains(event.target)) close()
+  function repositionOnScroll(event: Event): void {
+    if (event.target instanceof Node && menu.contains(event.target)) return
+    const bounds = select.getBoundingClientRect()
+    if (bounds.bottom <= 0 || bounds.top >= window.innerHeight) close()
+    else position()
   }
 
   function pointerDown(event: PointerEvent): void {
