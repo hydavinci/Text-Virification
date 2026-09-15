@@ -45,11 +45,24 @@ const selectableSuggestions = computed<readonly (string | null)[]>(() => {
   return values
 })
 
+function visibleText(text: string): string {
+  if (!/^\s+$/u.test(text)) return text
+  const names: Record<string, string> = {
+    ' ': '空格', '\t': '制表符', '\n': '换行', '\r': '回车',
+    '\u00a0': '不换行空格', '\u3000': '全角空格'
+  }
+  return (text.match(/(\r\n|[\s])\1*/gu) ?? []).map((run) => {
+    const character = run.startsWith('\r\n') ? '\r\n' : run[0]
+    const name = character === '\r\n' ? '换行' : names[character] ?? '空白字符'
+    return `${run.length / character.length} 个${name}`
+  }).join(' + ')
+}
+
 function suggestionLabel(suggestion: string | null): string {
   if (suggestion === null) {
     return '无自动建议'
   }
-  return suggestion === '' ? '（删除）' : suggestion
+  return suggestion === '' ? '（删除）' : visibleText(suggestion)
 }
 
 function updateSuggestion(event: Event): void {
@@ -71,7 +84,7 @@ function updateSuggestion(event: Event): void {
 <template>
   <div class="issue-details">
     <div class="diff">
-      <del data-original>{{ issue.original || '（空）' }}</del>
+      <del data-original>{{ visibleText(issue.original) || '（空）' }}</del>
       <span aria-hidden="true">→</span>
       <span data-suggestion>{{ suggestionLabel(effectiveSuggestion) }}</span>
     </div>

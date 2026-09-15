@@ -10,6 +10,44 @@ from docx import Document
 from text_verification.application import original_preview
 
 
+def test_overprinted_mixed_font_spaces_map_to_the_measured_anchor_gap() -> None:
+    from text_verification.application.review_layout import _Glyph, _map_glyphs
+    from text_verification.domain.review_layout import LayoutPage
+
+    source = "A  5   B"
+    # Office underlines can overprint spaces and split one visual line into
+    # several raw text lines; the numeric run also has different font metrics.
+    glyphs = [
+        _Glyph("A", 0, 247.600006, 453.370789, 10.5, 15.203979, 30),
+        _Glyph(" ", 0, 258.100006, 453.370789, 2.35199, 15.203979, 30),
+        _Glyph(" ", 0, 260.451996, 453.370789, 2.35199, 15.203979, 30),
+        _Glyph(" ", 0, 258.0, 453.370789, 2.35199, 15.203979, 30),
+        _Glyph(" ", 0, 260.35199, 453.370789, 2.35199, 15.203979, 30),
+        _Glyph("5", 0, 262.799988, 455.806793, 6.678009, 12.211487, 30),
+        _Glyph(" ", 0, 269.446503, 455.806793, 3.328491, 12.211487, 30),
+        _Glyph(" ", 0, 272.785492, 455.806793, 3.328491, 12.211487, 30),
+        _Glyph(" ", 0, 276.124481, 455.806793, 3.328491, 12.211487, 30),
+        _Glyph(" ", 0, 262.700012, 453.370789, 2.35199, 15.203979, 31),
+        _Glyph(" ", 0, 276.990509, 453.370789, 2.35199, 15.203979, 32),
+        _Glyph("B", 0, 279.450012, 453.370789, 10.5, 15.203979, 32),
+    ]
+    page = LayoutPage(width=600, height=800, image="data:image/svg+xml;base64,", text=source)
+
+    assert _map_glyphs(source, glyphs, [page])
+
+    for start, end, left, right in [
+        (1, 3, 258.100006, 262.799988),
+        (4, 7, 269.477997, 279.450012),
+    ]:
+        spaces = [glyph for glyph in page.glyphs if glyph.start < end and glyph.end > start]
+        assert {offset for glyph in spaces for offset in range(glyph.start, glyph.end)} == (
+            set(range(start, end))
+        )
+        assert all(left - 0.0001 <= glyph.x < glyph.x + glyph.width <= right + 0.0001
+                   for glyph in spaces)
+        assert all(453 <= glyph.y <= 456 for glyph in spaces)
+
+
 @pytest.mark.parametrize(
     ("source", "rendered"),
     [

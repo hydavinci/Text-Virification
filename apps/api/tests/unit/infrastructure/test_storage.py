@@ -319,8 +319,10 @@ def test_repair_quarantine_cleanup_is_bound_to_its_unique_inode_descriptor(
     assert second.quarantine.path.read_bytes() == b"second corrupt"
 
 
+@pytest.mark.parametrize("replacement", ["recreated", "same_inode"])
 def test_old_quarantine_owner_does_not_delete_replacement_at_its_token_path(
     tmp_path: Path,
+    replacement: str,
 ) -> None:
     storage = JobStorage(tmp_path / "storage", max_upload_bytes=1024)
     job_id = uuid4()
@@ -350,11 +352,14 @@ def test_old_quarantine_owner_does_not_delete_replacement_at_its_token_path(
     assert preparation is not None
     assert preparation.quarantine is not None
     quarantine = preparation.quarantine
-    quarantine.path.unlink()
-    quarantine.path.write_bytes(b"new owner")
+    before = quarantine.path.stat()
+    if replacement == "recreated":
+        quarantine.path.unlink()
+    quarantine.path.write_bytes(b"changed")
+    os.utime(quarantine.path, ns=(before.st_atime_ns, before.st_mtime_ns))
 
     assert storage.delete_artifact_repair_quarantine(quarantine) is False
-    assert quarantine.path.read_bytes() == b"new owner"
+    assert quarantine.path.read_bytes() == b"changed"
 
 
 def test_repair_quarantine_is_discovered_as_exact_canonical_artifact_candidate(

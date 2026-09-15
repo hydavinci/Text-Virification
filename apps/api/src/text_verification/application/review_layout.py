@@ -5,7 +5,7 @@ import re
 from bisect import bisect_left
 from collections import Counter
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -109,9 +109,16 @@ def _whitespace_in_gap(
             or glyph.x >= gap_end - 0.1
         ):
             continue
-        if not glyph.text.isspace() or not _in_anchor_gap(glyph, left, right):
+        if not glyph.text.isspace():
             return [], checks
-        candidates.append(glyph)
+        # Underlined Office runs can overprint spaces with slightly different
+        # font advances. Keep only the measured part between trusted anchors.
+        start = max(glyph.x, gap_start)
+        end = min(glyph.x + glyph.width, gap_end)
+        candidate = replace(glyph, x=start, width=end - start)
+        if not _in_anchor_gap(candidate, left, right):
+            return [], checks
+        candidates.append(candidate)
     return sorted(candidates, key=lambda glyph: glyph.x), checks
 
 
@@ -190,7 +197,10 @@ def _map_whitespace(
         exact = normalize("NFKC", match.group()) == normalize(
             "NFKC", "".join(glyph.text for glyph in candidates),
         )
-        if not exact and any(not _same_line(candidates[0], glyph) for glyph in candidates):
+        if (
+            not exact and (left is None or right is None)
+            and any(not _same_line(candidates[0], glyph) for glyph in candidates)
+        ):
             continue
         for offset, glyph in enumerate(candidates):
             # Office may collapse a whitespace run; keep its measured region

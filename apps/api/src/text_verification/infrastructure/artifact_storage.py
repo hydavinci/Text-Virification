@@ -63,8 +63,15 @@ class ArtifactRepairQuarantine:
     file_type: FileType
     token: UUID
     path: Path
-    device: int
-    inode: int
+    signature: _FileSignature
+
+    @property
+    def device(self) -> int:
+        return self.signature.device
+
+    @property
+    def inode(self) -> int:
+        return self.signature.inode
 
 
 @dataclass(frozen=True)
@@ -530,9 +537,9 @@ class ArtifactStorage:
                 src_dir_fd=parent_fd,
                 dst_dir_fd=parent_fd,
             )
-            if _quarantine_inode(parent_fd, quarantine_name) != (
-                file_signature.device,
-                file_signature.inode,
+            signature = _quarantine_signature(parent_fd, quarantine_name)
+            if signature is None or signature != _file_signature(
+                os.fstat(file_fd)
             ):
                 raise InvalidUpload("Artifact repair quarantine changed unexpectedly.")
             return ArtifactRepairPreparation(
@@ -545,10 +552,7 @@ class ArtifactStorage:
                     file_type=resolved_file_type,
                     relative_path=relative_path,
                     token=token,
-                    inode=(
-                        file_signature.device,
-                        file_signature.inode,
-                    ),
+                    signature=signature,
                 ),
             )
         finally:
@@ -592,6 +596,7 @@ class ArtifactStorage:
                 parent_fd,
                 quarantine_name,
                 (quarantine.device, quarantine.inode),
+                expected_signature=quarantine.signature,
             )
         finally:
             for descriptor in reversed(directory_fds):
@@ -667,7 +672,7 @@ class ArtifactStorage:
         relative_path: PurePosixPath,
         expected_inode: tuple[int, int] | None,
     ) -> ArtifactRepairQuarantine | None:
-        candidates: list[tuple[str, tuple[int, int]]] = []
+        candidates: list[tuple[str, _FileSignature]] = []
         for candidate_name in os.listdir(parent_fd):
             token = _repair_quarantine_token(
                 relative_path.name,
@@ -677,18 +682,18 @@ class ArtifactStorage:
                 relative_path.name
             ):
                 continue
-            inode = _quarantine_inode(parent_fd, candidate_name)
-            if inode is None or (
+            signature = _quarantine_signature(parent_fd, candidate_name)
+            if signature is None or (
                 expected_inode is not None
-                and inode != expected_inode
+                and (signature.device, signature.inode) != expected_inode
             ):
                 continue
-            candidates.append((candidate_name, inode))
+            candidates.append((candidate_name, signature))
         if not candidates:
             return None
         if len(candidates) != 1:
             raise InvalidUpload("Artifact repair quarantine ownership is ambiguous.")
-        candidate_name, inode = candidates[0]
+        candidate_name, signature = candidates[0]
         token = uuid4()
         quarantine_name = _repair_quarantine_name(
             relative_path.name,
@@ -703,7 +708,12 @@ class ArtifactStorage:
             )
         except FileNotFoundError:
             return None
-        if _quarantine_inode(parent_fd, quarantine_name) != inode:
+        renamed = _quarantine_signature(parent_fd, quarantine_name)
+        if renamed is None or (
+            renamed.device, renamed.inode, renamed.size_bytes, renamed.modified_ns
+        ) != (
+            signature.device, signature.inode, signature.size_bytes, signature.modified_ns
+        ):
             raise InvalidUpload("Artifact repair quarantine changed unexpectedly.")
         return _repair_quarantine_descriptor(
             self._root,
@@ -713,7 +723,7 @@ class ArtifactStorage:
             file_type=file_type,
             relative_path=relative_path,
             token=token,
-            inode=inode,
+            signature=renamed,
         )
 
     def delete_owned(self, job_id: UUID, storage_key: str) -> bool:
@@ -1073,6 +1083,8 @@ def _unlink_named_inode(
     parent_fd: int,
     leaf_name: str,
     expected_inode: tuple[int, int],
+    *,
+    expected_signature: _FileSignature | None = None,
 ) -> bool:
     try:
         named = os.stat(
@@ -1083,6 +1095,8 @@ def _unlink_named_inode(
     except FileNotFoundError:
         return False
     if (named.st_dev, named.st_ino) != expected_inode:
+        return False
+    if expected_signature is not None and _file_signature(named) != expected_signature:
         return False
     try:
         os.unlink(leaf_name, dir_fd=parent_fd)
@@ -1124,7 +1138,7 @@ def _repair_quarantine_descriptor(
     file_type: FileType,
     relative_path: PurePosixPath,
     token: UUID,
-    inode: tuple[int, int],
+    signature: _FileSignature,
 ) -> ArtifactRepairQuarantine:
     return ArtifactRepairQuarantine(
         job_id=job_id,
@@ -1136,15 +1150,14 @@ def _repair_quarantine_descriptor(
             *relative_path.parts[:-1],
             _repair_quarantine_name(relative_path.name, token),
         ),
-        device=inode[0],
-        inode=inode[1],
+        signature=signature,
     )
 
 
-def _quarantine_inode(
+def _quarantine_signature(
     parent_fd: int,
     quarantine_name: str,
-) -> tuple[int, int] | None:
+) -> _FileSignature | None:
     try:
         quarantine = os.stat(
             quarantine_name,
@@ -1157,4 +1170,4 @@ def _quarantine_inode(
         raise InvalidUpload(
             "Artifact repair quarantine must be an unlinked regular file."
         )
-    return quarantine.st_dev, quarantine.st_ino
+    return _file_signature(quarantine)

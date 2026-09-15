@@ -1,4 +1,16 @@
 services:
-  renderer:
+  renderer-gateway:
+    image: ${NGINX_IMAGE:-nginx:1.27-alpine}
     ports:
-      - "127.0.0.1:8010:8000"
+      - "127.0.0.1:8010:8080"
+    volumes:
+      - ./renderer-nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      renderer:
+        condition: service_healthy
+    networks: [default, rendering]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 12

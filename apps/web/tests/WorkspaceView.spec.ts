@@ -1133,8 +1133,14 @@ describe('WorkspaceView', () => {
     await selectFile(wrapper, exactLimit)
     await flushPromises()
 
-    expect(createJob).toHaveBeenCalledWith(exactLimit, expect.any(Object), expect.any(AbortSignal))
+    expect(createJob).toHaveBeenCalledTimes(1)
+    const [uploadedFile, options, signal] = createJob.mock.calls[0]
+    expect(uploadedFile).toBe(exactLimit)
+    expect(uploadedFile.size).toBe(25 * 1024 * 1024)
+    expect(options).toEqual(expect.any(Object))
+    expect(signal).toBeInstanceOf(AbortSignal)
     expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+    wrapper.unmount()
   })
 
   it('rejects unsupported extensions before upload', async () => {

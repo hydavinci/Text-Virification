@@ -47,6 +47,38 @@ function buildIssue(
   }
 }
 
+describe('whitespace issue details', () => {
+  it.each([
+    ['  ', ' ', '2 个空格', '1 个空格'],
+    ['   ', '', '3 个空格', '（删除）'],
+    ['\t\t', '\t', '2 个制表符', '1 个制表符'],
+    ['\n\n', '\n', '2 个换行', '1 个换行'],
+    ['\u00a0\u00a0', '\u00a0', '2 个不换行空格', '1 个不换行空格'],
+    ['\u3000\u3000', '\u3000', '2 个全角空格', '1 个全角空格']
+  ])('makes invisible replacement %j → %j readable', (original, suggestion, before, after) => {
+    const wrapper = mount(IssueDetails, {
+      props: { issue: buildIssue('spaces', 0, original.length, { original, suggestion }) }
+    })
+    expect(wrapper.get('[data-original]').text()).toBe(before)
+    expect(wrapper.get('[data-suggestion]').text()).toBe(after)
+    wrapper.unmount()
+  })
+
+  it('emits the original whitespace value when selecting a readable alternative', async () => {
+    const wrapper = mount(IssueDetails, {
+      props: {
+        issue: buildIssue('spaces', 0, 3, {
+          original: '   ', suggestion: ' ', alternatives: ['  ']
+        })
+      }
+    })
+    expect(wrapper.get('option[value="1"]').text()).toBe('2 个空格')
+    await wrapper.get('select').setValue('1')
+    expect(wrapper.emitted('update:suggestion')).toEqual([['  ']])
+    wrapper.unmount()
+  })
+})
+
 describe('useIssueNavigation', () => {
   let scrollIntoView: ReturnType<typeof vi.fn>
 

@@ -6,6 +6,8 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
+from docx.opc.constants import RELATIONSHIP_TYPE as RT
+
 DETERMINISTIC_DOCX_TIME = datetime(2000, 1, 1, tzinfo=UTC)
 DETERMINISTIC_DOCX_ZIP_TIME = (2000, 1, 1, 0, 0, 0)
 DETERMINISTIC_DOCX_REVISION_DATE = "2000-01-01T00:00:00Z"
@@ -38,6 +40,17 @@ def save_deterministic_docx(
     title: str | None = None,
     error_factory: Callable[[str], Exception] = ValueError,
 ) -> bytes:
+    relationships = document.part.package.rels
+    for relationship in tuple(relationships.values()):
+        # LibreOffice's legacy-DOC conversion uses an alternate relationship
+        # type; python-docx otherwise creates a second docProps/core.xml part.
+        if not relationship.is_external and relationship.reltype == (
+            "http://schemas.openxmlformats.org/officedocument/2006/"
+            "relationships/metadata/core-properties"
+        ):
+            relationships.add_relationship(
+                RT.CORE_PROPERTIES, relationship.target_part, relationship.rId,
+            )
     if title is not None:
         document.core_properties.title = title
     document.core_properties.created = DETERMINISTIC_DOCX_TIME
