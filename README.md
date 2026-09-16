@@ -1,5 +1,15 @@
 # Text Verification · 啄木鸟
 
+中英文文档预检与人工审阅工作区，支持本地规则检查、可选模型辅助、原版式定位及修订导出。
+
+## 导航
+
+- [项目说明与使用边界](#项目说明)
+- [本地启动](#本地调试一条命令启动) · [首次配置](#首次配置macos) · [Docker 部署](#完整-docker-启动)
+- [页面操作](#页面操作) · [常见问题](#常见问题)
+- [项目架构](#项目架构) · [开发检查](#开发检查)
+- [扩展检查设置](#扩展检查设置) · [检测效果评估](#检测效果评估)
+
 ## 项目说明
 
 面向企业内网的中英文文档预检工具，提供文件上传、文字检查、在线审阅和结果导出。
@@ -62,7 +72,16 @@ tail -f var/local/api.log var/local/worker.log
 
 ### 首次配置（macOS）
 
-准备 Python 3.12、uv、npm 和 Docker Desktop，然后在仓库根目录执行：
+准备以下环境，版本以仓库配置为准：
+
+| 工具 | 要求 |
+| --- | --- |
+| Python | 3.12；后端声明 `>=3.12,<3.13` |
+| uv | 0.12.6；`apps/api/pyproject.toml` 中固定的版本 |
+| Node.js / npm | 与 CI 和前端镜像一致使用 Node.js 22，使用 npm 安装前端依赖 |
+| Docker Desktop | 已启动，且 `docker compose` 可用；提供 PostgreSQL、Redis 和文档渲染服务 |
+
+在仓库根目录执行：
 
 ```bash
 uv sync --project apps/api --locked --extra dev
@@ -100,7 +119,9 @@ elif len(secret.encode("utf-8")) < 32:
 PY
 ```
 
-`.env` 已被 Git 忽略，不要提交密钥。修改后端环境配置后需重启 API；只刷新浏览器不会生效。
+`.env` 已被 Git 忽略，不要提交密钥。修改后端环境配置后需重启 API 和相关 Worker；
+本地模式可停止并重新运行 `./start-local.sh`，只刷新浏览器不会生效。
+直接文本检查由 API 执行，文件检查由 Worker 执行，避免只重启其中一方造成配置不一致。
 
 图片和扫描 PDF 检查还需安装 OCR 可选依赖：
 
@@ -142,17 +163,42 @@ docker compose --env-file .env -f infra/compose.yaml down
 `-f infra/compose.local-services.yaml`，放在 `down` 之前。
 **不要添加 `-v` 或 `--volumes`，否则会删除数据库和上传任务数据。**
 
+### 常见问题
+
+先区分“进程存活”和“依赖就绪”：`/api/v1/health` 成功不代表文件检查已经可用，
+应同时查看 `/api/v1/ready` 的响应。以下命令用于本地模式，不会修改配置或任务数据：
+
+```bash
+curl --silent --show-error http://127.0.0.1:8000/api/v1/ready
+docker compose --env-file .env -f infra/compose.yaml -f infra/compose.local-services.yaml ps
+tail -n 80 var/local/api.log var/local/worker.log var/local/maintenance-worker.log
+```
+
+| 现象 | 排查与处理 |
+| --- | --- |
+| `uv sync` 拒绝当前 uv 版本 | 使用项目要求的 uv 0.12.6，不修改锁文件或删除版本约束来绕过 |
+| 启动提示端口占用或已有 Docker 应用 | 确认采用本地还是完整 Docker 模式，停止冲突服务后再启动；不要并行运行两套 Worker / Beat |
+| `/health` 正常但 `/ready` 返回 503 | 根据响应中的未就绪项检查数据库、Redis / 消息代理、兼容检查 Worker 和 renderer；结合对应日志定位原因 |
+| 本地能检查粘贴文本，但文件任务未完成 | 检查 `var/local/worker.log`，确认检查 Worker 正常运行，并与 API 使用一致的数据库、存储和检查配置 |
+| 图片或扫描 PDF 的 OCR 不可用 | 确认本机 API 环境已安装 `ocr` 可选依赖并准备所选语言的模型缓存；安装后重启本地应用进程 |
+| 原版式预览不可用 | 检查 `renderer`、`renderer-gateway` 状态及日志，本地 `PREVIEW_RENDERER_URL` 应为 `http://127.0.0.1:8010` |
+| 修改规则后文件检查仍用旧行为 | 检查 Worker 不会热重载，停止并重新运行本地启动脚本；Docker 模式重新构建并部署对应服务 |
+| 刷新后任务或源文件已过期 | 浏览器恢复记录不能延长服务端保留期，需重新选择原文件上传；需要保留的结果应及时导出 |
+
+任务部分完成、语义调用失败或规则因提取范围受限而跳过时，以界面中的降级及“未检查”说明为准，
+不能将这些情况解释为文档没有问题。
+
 ### 页面操作
 
 1. 上传文件或粘贴文本，选择文档场景、检查项、术语和禁用词，再点击“开始检查”。选中文件不会自动提交。
 2. 在双栏工作区审阅结果：正文占主要区域，右侧为问题列表或检查摘要。拖动两栏间的分隔线调整宽度，双击恢复默认；分隔线聚焦后也可用左右方向键调整、Enter 恢复。查找替换从正文工具栏按需展开，宽面板使用单行、中等面板使用两行紧凑布局，窄面板自动换行；手机端在文档与问题之间切换。
 3. 点击问题，将对应高亮定位到正文阅读区域中部（文档首尾受滚动边界限制），不带动整个页面滚动。在问题卡片内选择建议并接受、忽略或撤销；顶部显示待处理、已接受和已忽略计数。“编辑正文”用于自由修改，“撤销修改”位于查找替换面板。
 4. 手工编辑或替换后按提示重新检查。修改检查设置不会清空文档，但需要点击“重新检查”才会应用新设置。
+5. 从顶部导出菜单下载文件或报告。“保留修订”在打开、恢复或新建工作区时默认关闭，需要时手动勾选。
+6. 更换文件前先导出需要保留的结果，再点击左上角“啄木鸟”返回新建检查；该操作会清空当前工作区。
 
 输入框和选择框聚焦时仅改变原有细边框的颜色，不叠加外围光圈；无边框控件保留内侧细线，便于键盘操作时识别焦点。
 所有选择菜单贴着选择框下方向下展开，随容器滚动保持对齐，不遮盖当前字段；可使用方向键浏览、Enter 确认、Escape 取消本次选择。菜单展开时，Escape 仅关闭菜单，不关闭设置弹窗。
-5. 从顶部导出菜单下载文件或报告。“保留修订”在打开、恢复或新建工作区时默认关闭，需要时手动勾选。
-6. 更换文件前先导出需要保留的结果，再点击左上角“啄木鸟”返回新建检查；该操作会清空当前工作区。
 
 纯空白修改以“3 个空格 → 1 个空格”等可读形式展示，接受建议时仍使用原始字符。
 原版式中带下划线或混合字体产生的重叠空格，使用可靠相邻文字之间的实际空白区域定位；
@@ -347,6 +393,39 @@ CI 通过同时连接默认网络与渲染网络的网关访问 `127.0.0.1:8010`
 架构背景见 [平台架构设计](docs/architecture/document-verification-platform.md)；
 目录约定见 [仓库组织说明](docs/architecture/repository-layout-and-documentation.md)。
 `docs/development/` 和 `docs/superpowers/` 保留历史实施记录，具体运行行为以当前代码为准。
+
+## 开发检查
+
+完成首次依赖安装后，可在仓库根目录运行以下常用检查。前端 `test` 是一次性运行，
+`build` 同时执行 Vue / TypeScript 类型检查和生产构建：
+
+```bash
+npm --prefix apps/web test
+npm --prefix apps/web run build
+(
+  cd apps/api
+  .venv/bin/ruff check src tests scripts
+  .venv/bin/mypy src
+)
+```
+
+浏览器流程使用 Playwright Chromium；首次运行前准备浏览器：
+
+```bash
+(
+  cd apps/web
+  npx playwright install chromium
+  npm run test:e2e
+)
+```
+
+Playwright 配置会自动构建并启动 `http://127.0.0.1:4173` 的预览服务，不复用已有服务；
+运行前确保该端口空闲。浏览器流程不替代真实 API、数据库、OCR 和渲染服务的集成验证。
+
+后端测试按范围运行，检查规则修改可先使用下文的[针对性命令](#验证与让修改生效)；
+检测质量评估见[检测效果评估](#检测效果评估)。
+数据库集成测试要求独立的 `TEST_DATABASE_URL`，真实服务测试还需要相应的 API、OCR 和 renderer 环境。
+完整服务准备和分组命令见 `.github/workflows/ci.yaml`；不要把因缺少依赖而跳过的测试算作验证通过。
 
 ## 扩展检查设置
 
