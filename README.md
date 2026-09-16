@@ -262,9 +262,10 @@ FastAPI
     +-- renderer：分页预览与坐标
 ```
 
-检查 Worker 使用 `text-verification-worker` 入口，角色为 `verification`，消费 `celery,verification-v2`；
-维护角色为 `maintenance`，只消费 `maintenance-v2`，避免维护任务占用检查并发。
-同一环境仅运行一个 Beat；旧版 Worker 只能用 `--queues=celery` 排空遗留任务。
+Worker 使用 `text-verification-worker` 入口：检查角色为 `TEXT_VERIFICATION_WORKER_ROLE=verification`，
+消费 `celery,verification-v2`；维护角色为 `TEXT_VERIFICATION_WORKER_ROLE=maintenance`，
+只消费 `maintenance-v2`，避免维护任务占用检查并发。同一环境仅运行一个 Beat。
+旧版 Worker 命令必须限定 `--queues=celery`，只排空遗留任务，不接入新参数任务队列。
 renderer 位于内部网络，使用只读根文件系统、受限临时目录和单转换并发，不读取 `.env`、数据库或任务存储。
 本地 API 通过仅绑定 `127.0.0.1:8010` 的网关访问它，完整 Docker 模式由 API 直接访问。
 
