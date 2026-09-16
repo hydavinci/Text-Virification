@@ -21,3 +21,5 @@ apps/web/dist/
 apps/web/playwright-report/
 apps/web/test-results/
 apps/web/*.tsbuildinfo
+# Added by code-review-graph
+.code-review-graph/
